@@ -28,6 +28,42 @@ _registered_props = []   # (bpy type, property name) registered from the MSFS 20
 _registered_classes = []
 
 
+EXPORT_ONLY_ITEMS = (
+    ("ALL", "All Targets", "Exported for every simulator"),
+    (TARGET_MSFS2024, "MSFS 2024 Only", "Only exported for Microsoft Flight Simulator 2024"),
+    (TARGET_MSFS2020, "MSFS 2020 Only", "Only exported for Microsoft Flight Simulator 2020"),
+)
+
+
+def keep_for_export(obj, target: str) -> bool:
+    """
+    Whether an object belongs in a glTF export for `target`.
+
+    One file can carry both representations of the same thing (e.g. legacy gizmo empties for MSFS 2020
+    and geometry nodes gizmos for MSFS 2024, see "Prepare for MSFS 2024"): each export skips the other's.
+    """
+    only = getattr(obj, "msfs_fss_export_only", "ALL")
+    if only != "ALL" and only != target:
+        return False
+    if target == TARGET_MSFS2020:
+        from .blender import msfs_gizmo
+        if msfs_gizmo.is_valid_gizmo_obj(obj):
+            return False
+    elif obj.type == "EMPTY" and getattr(obj, "msfs_gizmo_type", "NONE") != "NONE":
+        return False  # MSFS 2020 collision gizmo empty
+    return True
+
+
+def filter_export_tree(vtree, target: str):
+    """Khronos gather_tree_filter_tag_hook: untag nodes that do not belong in this target's export."""
+    for vnode in vtree.nodes.values():
+        obj = vnode.blender_object
+        if obj is None or vnode.blender_bone is not None or vnode.keep_tag is not True:
+            continue
+        if not keep_for_export(obj, target):
+            vnode.keep_tag = False
+
+
 def get_export_target(scene) -> str:
     if not hasattr(scene, "msfs_fss_export_target"):
         return TARGET_MSFS2024
@@ -122,6 +158,13 @@ def register_target():
         items=TARGET_ITEMS,
         default=TARGET_MSFS2024,
     )
+    bpy.types.Object.msfs_fss_export_only = bpy.props.EnumProperty(
+        name="Export For",
+        description="Simulators this object is exported for",
+        items=EXPORT_ONLY_ITEMS,
+        default="ALL",
+    )
+    _registered_props.append((bpy.types.Object, "msfs_fss_export_only"))
 
     for cls in settings.CLASSES + (gizmo.MSFS2020CollisionGizmo, gizmo.MSFS2020CollisionGizmoGroup):
         bpy.utils.register_class(cls)
@@ -143,10 +186,34 @@ def register_target():
     khronos_patches.register()
     if _on_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_on_load_post)
+    _register_gltf_export_ui()
+
+
+def _draw_gltf_export(context, layout):
+    """Export target in the File > Export > glTF 2.0 dialog."""
+    from .ui.target_panels import draw_export_target
+    header, body = layout.panel("MSFS_FSS_PT_gltf_export_target", default_closed=False)
+    header.label(text="Microsoft Flight Simulator (FSS)")
+    if body:
+        body.use_property_split = True
+        draw_export_target(body, context.scene)
+
+
+def _register_gltf_export_ui():
+    if bpy.app.version >= (4, 2, 0):
+        from io_scene_gltf2 import exporter_extension_layout_draw
+        exporter_extension_layout_draw["Microsoft Flight Simulator (FSS)"] = _draw_gltf_export
+
+
+def _unregister_gltf_export_ui():
+    if bpy.app.version >= (4, 2, 0):
+        from io_scene_gltf2 import exporter_extension_layout_draw
+        exporter_extension_layout_draw.pop("Microsoft Flight Simulator (FSS)", None)
 
 
 def unregister_target():
     _gizmo, khronos_patches, _settings = _vendored_modules()
+    _unregister_gltf_export_ui()
     if _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
     khronos_patches.unregister()
