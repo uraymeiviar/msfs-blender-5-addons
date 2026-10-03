@@ -37,6 +37,23 @@ settings, legacy gizmos or lights, materials with an MSFS 2020 preview node tree
 file is loaded. Nothing is converted automatically: legacy gizmos and node trees stay as they are, so one file
 can be exported for both simulators.
 
+UI: the target is in the 3D View sidebar (*Microsoft Flight Simulator 2024 Tools > Export Target*) and in the
+*File > Export > glTF 2.0* dialog. While a scene targets MSFS 2020, *MSFS 2020 Object Parameters* (legacy
+collision gizmo, light flash settings) and *MSFS 2020 Material Parameters* (MSFS 2020-only material values)
+panels appear in the Properties editor.
+
+### One file, both simulators
+
+- **Export For** (`Object.msfs_fss_export_only`: All / MSFS 2024 Only / MSFS 2020 Only) limits an object to
+  one simulator. Independently, MSFS 2020 exports skip MSFS 2024 geometry nodes gizmos and MSFS 2024 exports
+  skip legacy gizmo empties.
+- **Prepare for MSFS 2024** (Export Target panel) adds an MSFS 2024 collision gizmo next to every legacy gizmo
+  empty and an MSFS 2024 street light next to every legacy light (Asobo's light mapping), marks the originals
+  MSFS 2020 Only and the new objects MSFS 2024 Only. Nothing is removed; the MSFS 2020 export is unchanged.
+- Materials: an MSFS 2020 export reads the standard glTF fields from the MSFS 2020 preview node tree. Materials
+  carrying the MSFS 2024 tree get the tree the MSFS 2020 add-on builds from the same properties for the
+  duration of the export; afterwards every user is remapped to an untouched copy of the material.
+
 FSS production script arguments on Blender 5.2 (versus `scripts/export-blend-to-gltf.py` on Blender 3.6):
 
 ```python
@@ -84,11 +101,14 @@ python tests/run_tests.py --sim 2020 --ref-repo H:/git-repos/msfs2020-blender-5.
 ## Status
 
 - MSFS 2024: identical to the MSFS 2024 fork on every harness case.
-- MSFS 2020: `assets/visual/cockpit/Cockpit.blend` (E195) exports identically to the MSFS 2020 fork; versus the
-  FSS production Blender 3.6 export only legacy normals and the Asobo 3.3.2 `alphaMode` addition differ.
-- Open:
-  - MSFS 2020 export of materials that use the MSFS 2024 preview node tree (created in this add-on): Khronos
-    reads the standard PBR fields from the node tree, which differs from the MSFS 2020 tree.
-  - "Prepare for MSFS 2024" operator (add 2024 gizmos and light settings next to the 2020 data).
-  - UI for the export target and the MSFS 2020-only properties.
-  - Legacy normals migration tool (pre-4.1 Auto Smooth semantics).
+- MSFS 2020: identical to the MSFS 2020 fork on every harness case (including materials authored with the MSFS
+  2024 node tree); `assets/visual/cockpit/Cockpit.blend` (E195) exports identically to the MSFS 2020 fork, and
+  versus the FSS production Blender 3.6 export only legacy normals and the Asobo 3.3.2 `alphaMode` addition
+  differ.
+- Known issues:
+  - Some material properties mean different things per simulator; the most visible is `msfs_emissive_scale`
+    (MSFS 2024 exports color x scale with default 1000, MSFS 2020 uses it as a 1.0-based strength). Choosing a
+    material type in this add-on writes the MSFS 2024 value, so a material authored for MSFS 2024 exports 1000x
+    too bright for MSFS 2020. Needs a per-simulator value or a defined conversion.
+  - Legacy normals migration tool (pre-4.1 Auto Smooth semantics) not written yet.
+  - Panels are verified to register; their drawing needs a manual check in the UI.
