@@ -39,7 +39,17 @@ class Export:
         from io_scene_gltf2.io.com.gltf2_io_extensions import Extension
         self.Extension = Extension
         self.properties = bpy.context.scene.msfs_exporter_settings
-        
+
+    def pre_export_hook(self, export_settings):
+        # Unified add-on: Khronos reads the standard material fields from the MSFS 2020 preview tree,
+        # also with the MSFS extension disabled (see _msfs2020/blender/legacy_tree.py)
+        from ..blender import legacy_tree
+        legacy_tree.build_legacy_trees()
+
+    def post_export_hook(self, export_settings):
+        from ..blender import legacy_tree
+        legacy_tree.restore_trees()
+
     def gather_asset_hook(
         self,
         gltf2_asset,
