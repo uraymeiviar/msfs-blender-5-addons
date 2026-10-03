@@ -32,6 +32,18 @@ def _args():
     return p.parse_args(argv)
 
 
+def _node_tree_signatures():
+    out = {}
+    for m in bpy.data.materials:
+        if m.node_tree is None:
+            continue
+        nodes = sorted(f"{n.type}:{n.name}" for n in m.node_tree.nodes)
+        links = sorted(f"{l.from_node.name}.{l.from_socket.identifier}>{l.to_node.name}.{l.to_socket.identifier}"
+                       for l in m.node_tree.links)
+        out[m.name] = (tuple(nodes), tuple(links))
+    return out
+
+
 def _select_all():
     for obj in bpy.context.scene.objects:
         obj.select_set(True)
@@ -151,7 +163,11 @@ def main():
             if bpy.context.object and bpy.context.object.mode != "OBJECT":
                 bpy.ops.object.mode_set(mode="OBJECT")
             _select_all()
+            trees_before = _node_tree_signatures()
             ret = _exporter(args.addon, args.sim)(args.addon, args.out, args.case, not args.vanilla, result)
+            # Exporting must not leave the artist's materials with a different preview node tree
+            trees_after = _node_tree_signatures()
+            result["changed_node_trees"] = sorted(n for n in trees_before if trees_before[n] != trees_after.get(n))
             for dirpath, _dirs, files in os.walk(args.out):
                 for name in files:
                     if name.endswith((".gltf", ".xml")):

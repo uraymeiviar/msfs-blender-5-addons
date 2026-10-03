@@ -225,6 +225,71 @@ def case_materials(out_dir, log: CaseLog):
                         setattr(mat, p.identifier, v)
             except Exception as e:  # noqa: BLE001
                 log.warn(f"{key}: {e!r}")
+        if SIM == "2020":
+            # Each add-on's material type callback writes its own simulator's defaults (alpha mode,
+            # emissive scale 1.0 vs 1000, ...): state them explicitly, as an MSFS 2020 asset would
+            for name, value in LEGACY_2020_VALUES.items():
+                setattr(mat, name, value)
+            _set_stored_enum(mat, "msfs_alpha_mode", MSFS2020_TYPE_ALPHA_MODE.get(type_name, "OPAQUE"))
+    if SIM == "2020" and ADDON == "io_scene_gltf2_msfs_2020":
+        _canonical_msfs2020_trees()
+
+
+def _set_stored_enum(id_data, name, identifier):
+    """
+    Store an enum value as an MSFS 2020 asset carries it. On the unified add-on the MSFS 2024 update
+    callback would run against whichever preview tree the type built (and fails for types whose MSFS 2024
+    tree has no alpha group); the stored value is what the export reads.
+    """
+    if not _unified_msfs2020():
+        setattr(id_data, name, identifier)
+        return
+    value = next(item.value for item in id_data.bl_rna.properties[name].enum_items if item.identifier == identifier)
+    id_data.bl_system_properties_get(do_create=True)[name] = value
+
+
+# MSFS 2020 defaults of CONFLICTING_2020_2024 (valid in both add-ons' ranges)
+LEGACY_2020_VALUES = {
+    "msfs_detail_blend_threshold": 0.1, "msfs_emissive_scale": 1.0, "msfs_ghost_bias": 1.0,
+    "msfs_ghost_power": 1.0, "msfs_parallax_room_size_x": 1.0, "msfs_parallax_room_size_y": 1.0,
+    "msfs_uv_tiling_u": 1.0, "msfs_uv_tiling_v": 1.0,
+}
+
+# Alpha mode the MSFS 2020 add-on assigns per material type (update_msfs_material_type)
+MSFS2020_TYPE_ALPHA_MODE = {
+    "msfs_geo_decal": "BLEND", "msfs_geo_decal_frosted": "BLEND", "msfs_windshield": "BLEND",
+    "msfs_glass": "BLEND", "msfs_parallax": "MASK", "msfs_invisible": "BLEND", "msfs_fresnel_fade": "BLEND",
+    "msfs_environment_occluder": "BLEND", "msfs_ghost": "BLEND",
+}
+
+
+def _canonical_msfs2020_trees():
+    """
+    The MSFS 2020 add-on's preview tree depends on the order properties were set in (e.g. the blend
+    factor comes from the vertex color or the blend mask, whichever update ran last). Rebuild every tree
+    the way the add-on does after a material type change, which is what the unified add-on builds for an
+    MSFS 2020 export of a material carrying an MSFS 2024 tree.
+    """
+    import importlib
+    from io_scene_gltf2_msfs_2020.blender.msfs_material_function import MSFS2020_Material  # noqa: F401
+    builders = {
+        "msfs_standard": "standard.MSFS2020_Standard", "msfs_geo_decal": "geo_decal.MSFS2020_Geo_Decal",
+        "msfs_geo_decal_frosted": "geo_decal_frosted.MSFS2020_Geo_Decal_Frosted",
+        "msfs_windshield": "windshield.MSFS2020_Windshield", "msfs_porthole": "porthole.MSFS2020_Porthole",
+        "msfs_glass": "glass.MSFS2020_Glass", "msfs_clearcoat": "clearcoat.MSFS2020_Clearcoat",
+        "msfs_parallax": "parallax.MSFS2020_Parallax", "msfs_anisotropic": "anisotropic.MSFS2020_Anisotropic",
+        "msfs_hair": "hair.MSFS2020_Hair", "msfs_sss": "sss.MSFS2020_SSS", "msfs_invisible": "invisible.MSFS2020_Invisible",
+        "msfs_fake_terrain": "fake_terrain.MSFS2020_Fake_Terrain", "msfs_fresnel_fade": "fresnel_fade.MSFS2020_Fresnel_Fade",
+        "msfs_environment_occluder": "environment_occluder.MSFS2020_Environment_Occluder",
+        "msfs_ghost": "ghost.MSFS2020_Ghost",
+    }
+    for mat in bpy.data.materials:
+        spec = builders.get(getattr(mat, "msfs_material_type", "NONE"))
+        if not spec or mat.node_tree is None:
+            continue
+        module_name, cls_name = spec.split(".")
+        module = importlib.import_module("io_scene_gltf2_msfs_2020.blender.material.msfs_material_" + module_name)
+        getattr(module, cls_name)(mat, buildTree=True)
 
 
 def case_skinning(out_dir, log: CaseLog):

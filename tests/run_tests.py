@@ -134,7 +134,8 @@ def diff_outputs(r_ref, r_new):
 
 
 def is_problem(r):
-    return not r["exported"] or r["console_tracebacks"] or r["msfs_errors"] or r.get("leftover_temp_nodes")
+    return (not r["exported"] or r["console_tracebacks"] or r["msfs_errors"] or r.get("leftover_temp_nodes")
+            or r.get("changed_node_trees"))
 
 
 def _print_run(side, case, mode, r):
@@ -149,6 +150,9 @@ def _print_run(side, case, mode, r):
         print("    enable: " + e.strip().splitlines()[-1])
     for e in r["msfs_errors"]:
         print("    " + e.replace("\n", "\n    ")[:600])
+    if r.get("changed_node_trees"):
+        print(f"    export changed the node tree of {len(r['changed_node_trees'])} material(s), e.g. "
+              + ", ".join(r["changed_node_trees"][:3]))
     if r.get("leftover_temp_nodes"):
         print(f"    {len(r['leftover_temp_nodes'])} temp node(s) left in materials, e.g. "
               + ", ".join(r["leftover_temp_nodes"][:3]))
