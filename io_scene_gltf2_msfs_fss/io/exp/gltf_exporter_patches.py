@@ -22,6 +22,14 @@ _original_get_normals = None
 _PrimitiveCreator = None
 _gltf2_blender_extract = None
 
+def _msfs2020_export() -> bool:
+    """
+    Unified add-on: these patches implement MSFS 2024 export behaviour and are installed globally,
+    so they step aside while the scene exports for MSFS 2020 (FSS MSFS 2020 pipeline parity).
+    """
+    from io_scene_gltf2_msfs_fss.msfs2020_target import is_msfs2020_target
+    return is_msfs2020_target(bpy.context.scene)
+
 # region Animation
 def _reset_force_keep_animation(khronos_export_settings: dict):
     khronos_export_settings["gltf_optimize_animation_keep_object"] = (
@@ -54,6 +62,8 @@ def force_keep_animation(
     Preserve animation channels that are listed in export_cache.animations_to_force_keep.
     """
 
+    if _msfs2020_export():
+        return
     if not asobo_property_animation.export_cache:
         return
     _reset_force_keep_animation(khronos_export_settings)
@@ -234,8 +244,11 @@ if bpy.app.version >= (3, 6, 0):
         engine to correctly load skinned meshes.
         """
         global _original_get_positions
-        
+
         _original_get_positions(self)
+
+        if _msfs2020_export():
+            return
 
         if not self.uuid_for_skined_data:
             return
@@ -278,8 +291,11 @@ if bpy.app.version >= (3, 6, 0):
         engine to correctly load skinned meshes.
         """
         global _original_get_normals
-        
+
         _original_get_normals(self)
+
+        if _msfs2020_export():
+            return
 
         if not self.armature and self.blender_object:
             return

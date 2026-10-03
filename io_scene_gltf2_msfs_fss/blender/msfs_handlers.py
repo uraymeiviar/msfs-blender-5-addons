@@ -37,6 +37,14 @@ def new_object_handler(scene: bpy.types.Scene, depsgraph: bpy.types.Depsgraph):
     current_mesh_names = set(bpy.data.meshes.keys())
     new_mesh_names = current_mesh_names - known_mesh_names
     known_mesh_names = current_mesh_names
+    if not new_mesh_names:
+        return
+
+    # Unified add-on: MSFS 2020 assets are exported with the active color attribute (FSS pipeline), so an
+    # added default color would add COLOR_0 to every primitive. Meshes are shared between scenes.
+    from io_scene_gltf2_msfs_fss import msfs2020_target
+    if any(msfs2020_target.is_msfs2020_target(s) for s in bpy.data.scenes):
+        return
 
     for name in new_mesh_names:
         mesh = bpy.data.meshes.get(name)
@@ -49,9 +57,11 @@ if bpy.app.version >= (4,5,0):
     @persistent  
     def blend_import_post_handler(blend_import_context:bpy.types.BlendImportContext):
         """Replace old gizmo after scene append.
+
+        Unified add-on: disabled. Legacy gizmo empties are the MSFS 2020 export representation of
+        collisions; converting them to MSFS 2024 gizmos is an explicit step.
         """
-        for scene in bpy.data.scenes:
-            scene_loading.replace_old_gizmos(scene)
+        return
 
 # scene_opened_for_edit marks scenes that should trigger a Perforce edit on save.
 #

@@ -17,10 +17,10 @@ reload_addon(__name__)
 import bpy
 
 bl_info = {
-    "name": "Microsoft Flight Simulator 2024: glTF Extension",
+    "name": "Microsoft Flight Simulator 2020 + 2024: glTF Extension (FSS)",
     "module_name": "io_scene_gltf2_msfs_fss",
-    "author": "Asobo Studio (ykhodja and mrichecoeur)",
-    "description": "Toolkit to export/import GLTF Models for Microsoft Flight Simulator 2024",
+    "author": "Asobo Studio (ykhodja and mrichecoeur), FlightSimStudio",
+    "description": "Toolkit to export/import GLTF Models for Microsoft Flight Simulator 2024 and 2020 (per scene export target)",
     "location": "View 3d Tools and Menus, Objects properties, Material properties and Light properties",
     "blender": (3, 3, 0),
     "version": (7, 4, 3),
@@ -81,6 +81,9 @@ def register():
     except:
         pass
     RG.register()
+    # After the MSFS 2024 registration: only adds what MSFS 2024 does not define
+    from . import msfs2020_target
+    msfs2020_target.register_target()
     # We can't access bpy.data during addon registering, so we need to wait
     bpy.app.timers.register(_delayed_init, first_interval=0.1)
 
@@ -89,6 +92,8 @@ def unregister():
         bpy.utils.unregister_class(MSFS2024AddonPrefs)
     except:
         pass
+    from . import msfs2020_target
+    msfs2020_target.unregister_target()
     RG.unregister()
 
 # endregion
@@ -141,7 +146,26 @@ class glTF2ImportUserExtension(Import):
 # region ######################### EXPORT #################################
 from .io.exp.gltf_hooks import Export
 
-class glTF2ExportUserExtension(Export):
+
+class glTF2ExportUserExtension:
+    """
+    Khronos creates one instance per export and looks hooks up with getattr(), so the instance
+    forwards to the MSFS 2024 or the MSFS 2020 hook implementation according to the scene's
+    export target.
+    """
+
     def __init__(self):
-        super().__init__()
+        from .msfs2020_target import is_msfs2020_target
+        if is_msfs2020_target(bpy.context.scene):
+            from ._msfs2020.io.msfs_export import Export as Export2020
+            self._impl = Export2020()
+        else:
+            self._impl = Export()
+
+    def __getattr__(self, name):
+        # Only called for attributes not found on the dispatcher itself
+        impl = self.__dict__.get("_impl")
+        if impl is None:
+            raise AttributeError(name)
+        return getattr(impl, name)
 # endregion

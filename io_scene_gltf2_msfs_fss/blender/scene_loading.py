@@ -86,8 +86,8 @@ def replace_old_gizmos(scene:bpy.types.Scene):
 
 def _convert_old_scene(scene: bpy.types.Scene):
 
-    # Gizmo retro compatibility
-    replace_old_gizmos(scene)
+    # Unified add-on: legacy gizmo empties are NOT replaced on load. They are the MSFS 2020 export
+    # representation of collisions; converting them to MSFS 2024 gizmos is an explicit step.
 
     # Presets compatibility
     scene_presets = exp_presets.get_scene_exporter_presets(scene)
@@ -135,10 +135,18 @@ def prepare_scenes():
     
     asset_library.NodeGroupLibrary.update_appended_assets()
 
+    # Unified add-on: decide every scene's export target before anything converts data
+    from io_scene_gltf2_msfs_fss import msfs2020_target
+    for scene in bpy.data.scenes:
+        msfs2020_target.detect_export_target(scene)
+    msfs2020_in_file = any(msfs2020_target.is_msfs2020_target(scene) for scene in bpy.data.scenes)
+
     addon_name = "io_scene_gltf2_msfs"
     (loaded_default, loaded_state) = addon_utils.check(addon_name)
     # Update material graph nodes if 2020 addon is not enabled
-    if not loaded_default and not loaded_state:
+    # Unified add-on: and not while a scene exports for MSFS 2020 (materials are shared between scenes,
+    # and rebuilding replaces the MSFS 2020 node trees)
+    if not loaded_default and not loaded_state and not msfs2020_in_file:
         MSFS2024_SceneUtils.update_msfs2024_materials_graphs()
 
     force_update_all_lights()
