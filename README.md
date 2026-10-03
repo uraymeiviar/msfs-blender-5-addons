@@ -102,13 +102,27 @@ python tests/run_tests.py --sim 2020 --ref-repo H:/git-repos/msfs2020-blender-5.
 
 - MSFS 2024: identical to the MSFS 2024 fork on every harness case.
 - MSFS 2020: identical to the MSFS 2020 fork on every harness case (including materials authored with the MSFS
-  2024 node tree); `assets/visual/cockpit/Cockpit.blend` (E195) exports identically to the MSFS 2020 fork, and
-  versus the FSS production Blender 3.6 export only legacy normals and the Asobo 3.3.2 `alphaMode` addition
-  differ.
-- Known issues:
-  - Some material properties mean different things per simulator; the most visible is `msfs_emissive_scale`
-    (MSFS 2024 exports color x scale with default 1000, MSFS 2020 uses it as a 1.0-based strength). Choosing a
-    material type in this add-on writes the MSFS 2024 value, so a material authored for MSFS 2024 exports 1000x
-    too bright for MSFS 2020. Needs a per-simulator value or a defined conversion.
-  - Legacy normals migration tool (pre-4.1 Auto Smooth semantics) not written yet.
-  - Panels are verified to register; their drawing needs a manual check in the UI.
+  2024 node tree). `assets/visual/cockpit/Cockpit.blend` (E195), opened for the first time (35 materials
+  migrated), versus the FSS production Blender 3.6 export: only legacy normals, the Asobo 3.3.2 `alphaMode`
+  addition and the emissive factor of 2 invisible collider materials (graph recreated, never rendered) differ.
+
+## Material values: MSFS 2024 meaning
+
+The .blend stores MSFS 2024 meaning; MSFS 2020 exports convert:
+
+- `msfs_emissive_scale` is a brightness in cd/m2. MSFS 2020 exports divide it by
+  `Scene.msfs_fss_msfs2020_emissive_reference` (*Emissive 1.0 (cd/m2)*, default 1000) in the export dialog and
+  the Export Target panel.
+- Materials authored with the MSFS 2020 add-on (MSFS 2020 preview node tree) are migrated once, on load, after
+  Append and before any export (`migration.py`): values whose default differs are stored explicitly with the
+  MSFS 2020 default, the emissive scale is multiplied by the reference, the MSFS 2024 graph is rebuilt and the
+  material is marked `msfs_fss_migrated_from_msfs2020`.
+- Graph rebuilds that are not an artist action keep every stored value (Asobo's builders reset properties the
+  MSFS 2024 type does not use; MSFS 2020 exports still read some of them).
+
+## Known issues
+
+- `msfs_ghost_bias` / `msfs_ghost_power` have swapped ranges between the add-ons, which suggests swapped meaning;
+  not converted yet (ghost materials only).
+- Legacy normals migration tool (pre-4.1 Auto Smooth semantics) not written yet.
+- Panels are verified to register; their drawing needs a manual check in the UI.
