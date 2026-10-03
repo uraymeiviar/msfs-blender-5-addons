@@ -11,6 +11,10 @@ import zlib
 
 import bpy
 
+# Set by blender_case.py before a case is built
+SIM = "2024"     # "2024" or "2020": simulator the scene is exported for
+ADDON = ""       # add-on module under test
+
 
 def _stable_unit(name: str) -> float:
     """Deterministic value in [0, 1) derived from a name (no Python hash randomization)."""
@@ -131,20 +135,57 @@ class CaseLog:
 
 # --------------------------------------------------------------------------- cases
 
+def _unified_msfs2020():
+    return SIM == "2020" and ADDON == "io_scene_gltf2_msfs_fss"
+
+
+def _material_types():
+    """[(identifier to assign, MSFS 2020/2024 name used for object names and value keys)]."""
+    ids = [t for t in _enum_ids(bpy.types.Material, "msfs_material_type") if t not in {"NONE", "msfs_none"}]
+    if _unified_msfs2020():
+        # Same scene as the MSFS 2020 add-on builds: only types MSFS 2020 has, under their 2020 names
+        from io_scene_gltf2_msfs_fss._msfs2020 import compat
+        return [(t, compat.legacy_material_type_name(t)) for t in ids if compat.legacy_material_type_name(t)]
+    return [(t, t) for t in ids]
+
+
+# Material properties whose definition (range or default) differs between the MSFS 2020 and MSFS 2024
+# add-ons. Assigned values would land differently, so MSFS 2020 runs leave them unset; the unified
+# add-on's MSFS 2020 defaults for them are covered by the production asset benchmark instead.
+CONFLICTING_2020_2024 = {
+    "msfs_detail_blend_threshold", "msfs_emissive_scale", "msfs_ghost_bias", "msfs_ghost_power",
+    "msfs_parallax_room_size_x", "msfs_parallax_room_size_y", "msfs_uv_tiling_u", "msfs_uv_tiling_v",
+}
+
+
+def _material_props():
+    props = _rna_props(bpy.types.Material, "msfs_")
+    if SIM != "2020":
+        return props
+    props = [p for p in props if p.identifier not in CONFLICTING_2020_2024]
+    if _unified_msfs2020():
+        # Only properties the MSFS 2020 add-on defines, like a scene built with it
+        from io_scene_gltf2_msfs_fss._msfs2020.legacy_props import LEGACY_PROPS
+        props = [p for p in props if ("Material", p.identifier) in LEGACY_PROPS]
+    return props
+
+
 def case_materials(out_dir, log: CaseLog):
     """One box per MSFS material type, every texture slot bound, scalars set to stable non-defaults."""
-    types = _enum_ids(bpy.types.Material, "msfs_material_type")
+    types = _material_types()
     if not types:
         log.warn("Material.msfs_material_type not registered")
         return
-    tex_props = [p for p in _rna_props(bpy.types.Material, "msfs_")
+    props = _material_props()
+    tex_props = [p for p in props
                  if p.type == "POINTER" and getattr(p.fixed_type, "identifier", "") == "Image"]
-    scalar_props = [p for p in _rna_props(bpy.types.Material, "msfs_")
-                    if p.type in {"FLOAT", "INT", "BOOLEAN"} and not p.is_readonly]
+    scalar_props = [p for p in props
+                    if p.type in {"FLOAT", "INT", "BOOLEAN"} and not p.is_readonly
+                    and p.identifier != "msfs_material_type"]
     images = {}
-    for i, mtype in enumerate(t for t in types if t not in {"NONE", "msfs_none"}):
-        obj = _box("MAT_" + mtype, location=(i * 2.0, 0, 0))
-        mat = bpy.data.materials.new("M_" + mtype)
+    for i, (mtype, type_name) in enumerate(types):
+        obj = _box("MAT_" + type_name, location=(i * 2.0, 0, 0))
+        mat = bpy.data.materials.new("M_" + type_name)
         mat.use_nodes = True
         obj.data.materials.append(mat)
         try:
@@ -152,6 +193,7 @@ def case_materials(out_dir, log: CaseLog):
         except Exception as e:  # noqa: BLE001
             log.warn(f"{mtype}: set type failed: {e!r}")
             continue
+        mtype = type_name
         for p in tex_props:
             img_name = p.identifier.replace("msfs_", "").replace("_texture", "")
             if img_name not in images:
@@ -284,6 +326,8 @@ def case_lights(out_dir, log: CaseLog):
                           ("msfs_light_flash_phase", 0.5), ("msfs_light_rotation_speed", 15.0)):
             if hasattr(obj, name):
                 setattr(obj, name, val)
+    if SIM == "2020":
+        return  # MSFS 2024 light types (Light.msfs_light_type) do not exist for MSFS 2020
     for i, mtype in enumerate(_enum_ids(bpy.types.Light, "msfs_light_type")):
         if mtype.upper() == "NONE":
             continue
@@ -299,10 +343,10 @@ def case_lights(out_dir, log: CaseLog):
 def case_gizmos(out_dir, log: CaseLog):
     """One collision gizmo per gizmo type, parented under a mesh."""
     holder = _box("G_Holder")
-    try:  # bpy.ops resolves any name, so probe for the 2024 add-on module instead
-        from io_scene_gltf2_msfs_fss.blender.msfs_gizmo import GizmoTypes
-    except ImportError:
-        GizmoTypes = None
+    GizmoTypes = None
+    if SIM == "2024":
+        import importlib
+        GizmoTypes = importlib.import_module(ADDON + ".blender.msfs_gizmo").GizmoTypes
     if GizmoTypes is not None:
         # MSFS 2024: gizmos are geometry-node meshes created by the add-on's own operator
         add_gizmo = bpy.ops.msfs2024.add_gizmo

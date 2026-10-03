@@ -1,13 +1,17 @@
 # Differential Test Harness
 
-Verifies the add-on on a **target** Blender (default 5.2) by exporting identical,
-procedurally built scenes on a **reference** Blender and diffing the glTF output.
+Exports identical, procedurally built scenes on two **sides** and diffs the output. A side is an add-on
+repository plus a Blender version; `--sim` selects the simulator (MSFS 2024 or 2020) both sides export for.
 
 ```bash
 # any Python 3.10+ works; Blender's bundled one is convenient
-"C:\Program Files\Blender Foundation\Blender 5.2\5.2\python\bin\python.exe" tests/run_tests.py
-python tests/run_tests.py --case skinning --ref 4.5 --target 5.2
-python tests/run_tests.py --target-only            # smoke test, no comparison
+PY="C:\Program Files\Blender Foundation\Blender 5.2\5.2\python\bin\python.exe"
+# unified add-on vs the per-simulator fork, both on Blender 5.2
+$PY tests/run_tests.py --sim 2024 --ref-repo H:/git-repos/msfs2024-blender-5.2.x-addons --ref 5.2
+$PY tests/run_tests.py --sim 2020 --ref-repo H:/git-repos/msfs2020-blender-5.2.x-addons --ref 5.2
+# this repo on Blender 4.5 vs 5.2
+$PY tests/run_tests.py --sim 2024 --case skinning
+$PY tests/run_tests.py --target-only            # smoke test, no comparison
 ```
 
 Blender installs are found at `%BLENDER_ROOT%\Blender <version>\blender.exe`
@@ -31,8 +35,11 @@ attributed to the MSFS add-on. A run is also flagged as a problem when Blender p
 - **MSFS 2024**: drives the full artist path. Each case is parented under `<case>_LOD0`, LOD groups are
   discovered in `OBJECTS` mode and `msfs2024.multi_export_gltf` runs (object duplication, modifier apply,
   mesh merge, glTF export, model XML, texture XML).
-- **MSFS 2020**: calls the add-on's own version-specific `export_blender_*` function, i.e. the exact
-  Khronos operator arguments the multi-exporter passes.
+- **MSFS 2020**: plain `export_scene.gltf` with the FSS production arguments (`scripts/export-blend-to-gltf.py`,
+  mapped to Khronos 4.2+ option names). Scenes only use what the MSFS 2020 add-on can represent: MSFS 2020
+  material types and names, gizmo empties, no MSFS 2024 light types; properties whose definition differs
+  between the add-ons (`CONFLICTING_2020_2024` in `scenes.py`) are left unset.
+- For the unified add-on the export target is set before a scene is built, like an artist would.
 
 ## Cases (`harness/scenes.py`)
 

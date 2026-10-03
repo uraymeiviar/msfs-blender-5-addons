@@ -1,14 +1,17 @@
 """
-Differential test driver: exports every harness case on a reference Blender and a
-target Blender, then semantically diffs the glTF output.
+Differential test driver: exports every harness case on a reference side and a new side, then
+semantically diffs the output. A side is an add-on repository + a Blender version.
 
-Each case is exported twice per Blender: with the MSFS extension ("msfs") and
-without it ("vanilla"). Differences that also appear in the vanilla diff come
-from the Khronos exporter itself, not from the MSFS add-on, and are tagged so.
+Each case is exported twice per side: with the MSFS extension ("msfs") and without it
+("vanilla"). Differences that also appear in the vanilla diff come from the Khronos
+exporter itself, not from the MSFS add-on, and are tagged [khronos].
 
-    python tests/run_tests.py                      # all cases, default versions
-    python tests/run_tests.py --case skinning --target 5.2 --ref 4.5
-    python tests/run_tests.py --target-only        # smoke test: no comparison
+    # unified add-on vs the per-simulator fork, same Blender
+    python tests/run_tests.py --sim 2024 --ref-repo H:/git-repos/msfs2024-blender-5.2.x-addons --ref 5.2
+    python tests/run_tests.py --sim 2020 --ref-repo H:/git-repos/msfs2020-blender-5.2.x-addons --ref 5.2
+    # unified add-on, Blender 4.5 vs 5.2
+    python tests/run_tests.py --sim 2024
+    python tests/run_tests.py --target-only            # smoke test, no comparison
 
 Any Python 3.10+ works (e.g. Blender's bundled python.exe). Output: tests/_work/
 """
@@ -31,11 +34,13 @@ CASES = ["materials", "skinning", "hierarchy", "lights", "gizmos", "vertex_data"
 
 BLENDER_ROOT = os.environ.get("BLENDER_ROOT", r"C:\Program Files\Blender Foundation")
 
-# Add-on module -> (add-on folders to install, default reference Blender)
+COMPANION_ADDONS = ["_addons_common", "lod_tools_msfs_2024", "wipermask_generator_msfs_2024", "max_bridge_msfs_2024"]
+
+# Add-on module -> (folders to install, simulators it exports for)
 ADDONS = {
-    "io_scene_gltf2_msfs_fss": (["_addons_common", "io_scene_gltf2_msfs_fss", "lod_tools_msfs_2024",
-                                  "wipermask_generator_msfs_2024", "max_bridge_msfs_2024"], "4.5"),
-    "io_scene_gltf2_msfs_2020": (["io_scene_gltf2_msfs_2020"], "4.5"),
+    "io_scene_gltf2_msfs_fss": (["io_scene_gltf2_msfs_fss"] + COMPANION_ADDONS, ("2024", "2020")),
+    "io_scene_gltf2_msfs_2024": (["io_scene_gltf2_msfs_2024"] + COMPANION_ADDONS, ("2024",)),
+    "io_scene_gltf2_msfs_2020": (["io_scene_gltf2_msfs_2020"], ("2020",)),
 }
 
 
@@ -43,35 +48,42 @@ def blender_exe(version):
     return os.path.join(BLENDER_ROOT, f"Blender {version}", "blender.exe")
 
 
-def detect_addon():
+def detect_addon(repo):
     for name in ADDONS:
-        if os.path.isdir(os.path.join(REPO, name)):
+        if os.path.isdir(os.path.join(repo, name)):
             return name
-    sys.exit("no known MSFS add-on folder in repo root")
+    sys.exit(f"no known MSFS add-on folder in {repo}")
 
 
-def install_addons(addon, version, work):
-    """Copy the add-ons into a private BLENDER_USER_SCRIPTS so the user's Blender setup is untouched."""
-    scripts = os.path.join(work, "scripts", version)
-    dst_root = os.path.join(scripts, "addons")
-    if os.path.isdir(dst_root):
-        shutil.rmtree(dst_root)
-    for folder in ADDONS[addon][0]:
-        src = os.path.join(REPO, folder)
-        if os.path.isdir(src):
-            shutil.copytree(src, os.path.join(dst_root, folder),
-                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "documentation*"))
-    return scripts
+class Side:
+    def __init__(self, label, repo, version):
+        self.label, self.repo, self.version = label, os.path.abspath(repo), version
+        self.addon = detect_addon(self.repo)
+        self.name = f"{os.path.basename(self.repo)}@{version}"
+
+    def install(self, work):
+        """Copy the add-ons into a private BLENDER_USER_SCRIPTS so the user's Blender setup is untouched."""
+        scripts = os.path.join(work, "scripts", self.label)
+        dst_root = os.path.join(scripts, "addons")
+        if os.path.isdir(dst_root):
+            shutil.rmtree(dst_root)
+        for folder in ADDONS[self.addon][0]:
+            src = os.path.join(self.repo, folder)
+            if os.path.isdir(src):
+                shutil.copytree(src, os.path.join(dst_root, folder),
+                                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "documentation*"))
+        return scripts
 
 
-def run_case(addon, version, case, mode, work, scripts, timeout):
-    out = os.path.join(work, version, mode, case)
+def run_case(side, sim, case, mode, work, scripts, timeout):
+    out = os.path.join(work, side.label, mode, case)
     if os.path.isdir(out):
         shutil.rmtree(out)
     os.makedirs(out)
-    cmd = [blender_exe(version), "--background", "--factory-startup",
+    cmd = [blender_exe(side.version), "--background", "--factory-startup",
            "--python", os.path.join(HERE, "harness", "blender_case.py"), "--",
-           "--addon", addon, "--case", case, "--out", out] + (["--vanilla"] if mode == "vanilla" else [])
+           "--addon", side.addon, "--sim", sim, "--case", case, "--out", out] \
+        + (["--vanilla"] if mode == "vanilla" else [])
     env = dict(os.environ, BLENDER_USER_SCRIPTS=scripts)
     t0 = time.time()
     try:
@@ -125,11 +137,30 @@ def is_problem(r):
     return not r["exported"] or r["console_tracebacks"] or r["msfs_errors"] or r.get("leftover_temp_nodes")
 
 
+def _print_run(side, case, mode, r):
+    status = "ok" if r["exported"] else "EXPORT FAILED"
+    extra = f", {r['console_tracebacks']} console traceback(s)" if r["console_tracebacks"] else ""
+    extra += f", {len(r['msfs_errors'])} MSFS log error(s)" if r["msfs_errors"] else ""
+    print(f"[{side.name}] {case:<12} {mode:<8} {status} ({r['seconds']}s{extra}) -> {', '.join(r['outputs'])}",
+          flush=True)
+    if r.get("export_error"):
+        print("    " + r["export_error"].strip().replace("\n", "\n    "))
+    for e in r.get("enable_errors", []):
+        print("    enable: " + e.strip().splitlines()[-1])
+    for e in r["msfs_errors"]:
+        print("    " + e.replace("\n", "\n    ")[:600])
+    if r.get("leftover_temp_nodes"):
+        print(f"    {len(r['leftover_temp_nodes'])} temp node(s) left in materials, e.g. "
+              + ", ".join(r["leftover_temp_nodes"][:3]))
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--addon", default=None)
-    ap.add_argument("--target", default="5.2")
-    ap.add_argument("--ref", default=None)
+    ap.add_argument("--sim", choices=("2024", "2020"), default="2024", help="simulator the exports are for")
+    ap.add_argument("--repo", default=REPO, help="add-on repository under test (new side)")
+    ap.add_argument("--target", default="5.2", help="Blender version of the new side")
+    ap.add_argument("--ref-repo", default=None, help="add-on repository of the reference side (default: --repo)")
+    ap.add_argument("--ref", default="4.5", help="Blender version of the reference side")
     ap.add_argument("--case", action="append")
     ap.add_argument("--target-only", action="store_true")
     ap.add_argument("--no-vanilla", action="store_true")
@@ -137,54 +168,45 @@ def main():
     ap.add_argument("--max-diffs", type=int, default=25)
     a = ap.parse_args()
 
-    addon = a.addon or detect_addon()
-    ref = a.ref or ADDONS[addon][1]
+    new = Side("new", a.repo, a.target)
+    sides = [new] if a.target_only else [Side("ref", a.ref_repo or a.repo, a.ref), new]
+    for side in sides:
+        if a.sim not in ADDONS[side.addon][1]:
+            sys.exit(f"{side.addon} does not export for MSFS {a.sim}")
+        if not os.path.isfile(blender_exe(side.version)):
+            sys.exit(f"Blender {side.version} not found at {blender_exe(side.version)} (set BLENDER_ROOT)")
     cases = a.case or CASES
-    versions = [a.target] if a.target_only else [ref, a.target]
     modes = ["msfs"] if a.no_vanilla else ["msfs", "vanilla"]
-    work = os.path.join(HERE, "_work", addon)
+    work = os.path.join(HERE, "_work", f"msfs{a.sim}")
 
     results = {}
-    for v in versions:
-        if not os.path.isfile(blender_exe(v)):
-            sys.exit(f"Blender {v} not found at {blender_exe(v)} (set BLENDER_ROOT)")
-        scripts = install_addons(addon, v, work)
+    for side in sides:
+        scripts = side.install(work)
         for case in cases:
             for mode in modes:
-                r = run_case(addon, v, case, mode, work, scripts, a.timeout)
-                results[(v, case, mode)] = r
-                status = "ok" if r["exported"] else "EXPORT FAILED"
-                extra = f", {r['console_tracebacks']} console traceback(s)" if r["console_tracebacks"] else ""
-                extra += f", {len(r['msfs_errors'])} MSFS log error(s)" if r["msfs_errors"] else ""
-                print(f"[{v}] {case:<12} {mode:<8} {status} ({r['seconds']}s{extra}) -> {', '.join(r['outputs'])}",
-                      flush=True)
-                if r.get("export_error"):
-                    print("    " + r["export_error"].strip().replace("\n", "\n    "))
-                for e in r.get("enable_errors", []):
-                    print("    enable: " + e.strip().splitlines()[-1])
-                for e in r["msfs_errors"]:
-                    print("    " + e.replace("\n", "\n    ")[:600])
-                if r.get("leftover_temp_nodes"):
-                    print(f"    {len(r['leftover_temp_nodes'])} temp node(s) left in materials, e.g. "
-                          + ", ".join(r["leftover_temp_nodes"][:3]))
+                r = run_case(side, a.sim, case, mode, work, scripts, a.timeout)
+                results[(side.label, case, mode)] = r
+                _print_run(side, case, mode, r)
 
     failed = sum(1 for r in results.values() if is_problem(r))
     if a.target_only:
         print(f"\n{failed} problem run(s)")
         return 1 if failed else 0
 
-    print(f"\n==== diff {ref} -> {a.target} ({addon}) ====")
+    ref = sides[0]
+    print(f"\n==== MSFS {a.sim}: {ref.name} ({ref.addon}) -> {new.name} ({new.addon}) ====")
     total = 0
     for case in cases:
-        r_ref, r_new = results[(ref, case, "msfs")], results[(a.target, case, "msfs")]
+        r_ref, r_new = results[("ref", case, "msfs")], results[("new", case, "msfs")]
         if not (r_ref["exported"] and r_new["exported"]):
             print(f"{case}: skipped (export failed)")
             continue
         d = diff_outputs(r_ref, r_new)
         vanilla_paths = set()
-        if not a.no_vanilla and results[(ref, case, "vanilla")]["exported"] and results[(a.target, case, "vanilla")]["exported"]:
-            vanilla_paths = {p for p, _, _ in diff_outputs(results[(ref, case, "vanilla")],
-                                                          results[(a.target, case, "vanilla")])}
+        if (not a.no_vanilla and results[("ref", case, "vanilla")]["exported"]
+                and results[("new", case, "vanilla")]["exported"]):
+            vanilla_paths = {p for p, _, _ in diff_outputs(results[("ref", case, "vanilla")],
+                                                          results[("new", case, "vanilla")])}
         msfs_only = [x for x in d if x[0] not in vanilla_paths]
         total += len(msfs_only)
         print(f"{case}: {len(d)} diff(s), {len(msfs_only)} not explained by vanilla Khronos")

@@ -28,6 +28,7 @@ def _args():
     p.add_argument("--case", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--vanilla", action="store_true", help="export with the MSFS extension disabled")
+    p.add_argument("--sim", choices=("2024", "2020"), default="2024", help="simulator the export is for")
     return p.parse_args(argv)
 
 
@@ -38,13 +39,16 @@ def _select_all():
 
 # --------------------------------------------------------------------------- adapters
 
-def _export_2024(out_dir, case, msfs_on, result):
+def _export_2024(addon, out_dir, case, msfs_on, result):
     """Full artist path: OBJECTS-mode LOD group discovery + msfs2024.multi_export_gltf
     (object duplication, modifier apply, mesh merge, glTF export, model XML)."""
-    from io_scene_gltf2_msfs_fss.io.com import msfs_logs
-    from io_scene_gltf2_msfs_fss.io.exp import export_settings as es
-    from io_scene_gltf2_msfs_fss.io.exp import lod_groups
+    import importlib
+    msfs_logs = importlib.import_module(addon + ".io.com.msfs_logs")
+    es = importlib.import_module(addon + ".io.exp.export_settings")
+    lod_groups = importlib.import_module(addon + ".io.exp.lod_groups")
     scene = bpy.context.scene
+    if hasattr(scene, "msfs_fss_export_target"):
+        scene.msfs_fss_export_target = "MSFS2024"
     es.init_setting_presets(scene)
     es.get_active_export_settings(scene).enable_msfs_extension = msfs_on
     scene.msfs_background_export = False
@@ -74,25 +78,37 @@ def _export_2024(out_dir, case, msfs_on, result):
     return bpy.ops.msfs2024.multi_export_gltf(export_mode="OBJECTS")
 
 
-def _export_2020(out_dir, case, msfs_on, result):
+def _export_2020(addon, out_dir, case, msfs_on, result):
+    """FSS production MSFS 2020 path: plain export_scene.gltf with the arguments of
+    scripts/export-blend-to-gltf.py (mapped to Khronos 4.2+ where options were renamed)."""
     path = os.path.join(out_dir, case + ".gltf")
-    from io_scene_gltf2_msfs_2020.io import msfs_multi_export
     scene = bpy.context.scene
-    scene.msfs_multi_exporter_settings.enable_msfs_extension = msfs_on
+    if hasattr(scene, "msfs_fss_export_target"):
+        scene.msfs_fss_export_target = "MSFS2020"
     scene.msfs_exporter_settings.enable_msfs_extension = msfs_on
-    if bpy.app.version < (3, 6, 0):
-        fn = msfs_multi_export.export_blender_3_3
-    elif bpy.app.version < (4, 2, 0):
-        fn = msfs_multi_export.export_blender_3_6
+    kwargs = dict(
+        filepath=path,
+        export_format="GLTF_SEPARATE",
+        use_visible=True,
+        export_image_format="AUTO",
+        export_force_sampling=False,
+        export_apply=True,
+        export_rest_position_armature=True,
+        export_animation_mode="ACTIONS",
+        export_reset_pose_bones=True,
+        export_copyright="FlightSimStudio",
+    )
+    if bpy.app.version >= (4, 2, 0):
+        kwargs.update(export_vertex_color="ACTIVE", export_merge_animation="NLA_TRACK")
     else:
-        fn = msfs_multi_export.export_blender_4_2
-    return fn(path, scene.msfs_multi_exporter_settings)
+        kwargs.update(export_colors=True)
+    return bpy.ops.export_scene.gltf(**kwargs)
 
 
-EXPORTERS = {
-    "io_scene_gltf2_msfs_fss": _export_2024,
-    "io_scene_gltf2_msfs_2020": _export_2020,
-}
+def _exporter(addon, sim):
+    if addon == "io_scene_gltf2_msfs_2020" or sim == "2020":
+        return _export_2020
+    return _export_2024
 
 
 def main():
@@ -121,15 +137,21 @@ def main():
         result["export_error"] = "add-on failed to enable"
     else:
         log = scenes.CaseLog()
+        scenes.SIM = args.sim
+        scenes.ADDON = args.addon
         try:
             scenes.clear_scene()
+            # Unified add-on: choose the target before modelling, like an artist would (handlers such as
+            # the MSFS 2024 default vertex color react to it while the scene is built)
+            if hasattr(bpy.context.scene, "msfs_fss_export_target"):
+                bpy.context.scene.msfs_fss_export_target = "MSFS2020" if args.sim == "2020" else "MSFS2024"
             scenes.CASES[args.case](args.out, log)
             scenes.push_actions_to_nla()
             bpy.context.scene.frame_set(1)
             if bpy.context.object and bpy.context.object.mode != "OBJECT":
                 bpy.ops.object.mode_set(mode="OBJECT")
             _select_all()
-            ret = EXPORTERS[args.addon](args.out, args.case, not args.vanilla, result)
+            ret = _exporter(args.addon, args.sim)(args.addon, args.out, args.case, not args.vanilla, result)
             for dirpath, _dirs, files in os.walk(args.out):
                 for name in files:
                     if name.endswith((".gltf", ".xml")):
