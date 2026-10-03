@@ -58,10 +58,12 @@ if bpy.app.version >= (4,5,0):
     def blend_import_post_handler(blend_import_context:bpy.types.BlendImportContext):
         """Replace old gizmo after scene append.
 
-        Unified add-on: disabled. Legacy gizmo empties are the MSFS 2020 export representation of
-        collisions; converting them to MSFS 2024 gizmos is an explicit step.
+        Unified add-on: gizmo replacement disabled (legacy gizmo empties are the MSFS 2020 export
+        representation of collisions; converting them is an explicit step). Appended materials authored
+        with the MSFS 2020 add-on are migrated to MSFS 2024 meaning.
         """
-        return
+        from io_scene_gltf2_msfs_fss import migration
+        migration.migrate_materials(bpy.context.scene)
 
 # scene_opened_for_edit marks scenes that should trigger a Perforce edit on save.
 #

@@ -18,7 +18,7 @@ back to the untouched copy, which takes the original name.
 
 import bpy
 
-from ..compat import LegacyMaterialView, has_msfs2020_node_tree, legacy_material_type_name
+from ..compat import EXPORT_TREE_KEY, LegacyMaterialView, has_msfs2020_node_tree, legacy_material_type_name
 from .material.msfs_material_anisotropic import MSFS2020_Anisotropic
 from .material.msfs_material_clearcoat import MSFS2020_Clearcoat
 from .material.msfs_material_environment_occluder import MSFS2020_Environment_Occluder
@@ -74,6 +74,8 @@ def build_legacy_trees():
         backup = material.copy()
         backup.name = material.name + _BACKUP_SUFFIX
         _swapped.append((material.name, backup.name))
+        # MSFS 2024 meaning despite the MSFS 2020 tree; this material is replaced by the copy afterwards
+        material[EXPORT_TREE_KEY] = 1
         builder(LegacyMaterialView(material), buildTree=True)
 
 

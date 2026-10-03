@@ -100,7 +100,7 @@ def _has_msfs2024_data(scene) -> bool:
 
 
 def _has_msfs2020_data(scene) -> bool:
-    from ._msfs2020.compat import has_msfs2020_node_tree
+    from ._msfs2020.compat import MIGRATED_KEY, has_msfs2020_node_tree
     if any(_stored(scene, name) is not None for name in ("msfs_exporter_settings", "msfs_multi_exporter_settings")):
         return True
     for obj in scene.objects:
@@ -109,8 +109,9 @@ def _has_msfs2020_data(scene) -> bool:
                 "msfs_light_day_night_cycle")):
             return True
         for slot in getattr(obj, "material_slots", ()):
-            # Preview node tree built by the MSFS 2020 add-on: every legacy MSFS material has one
-            if slot.material and has_msfs2020_node_tree(slot.material):
+            # Preview node tree built by the MSFS 2020 add-on (every legacy MSFS material has one until it
+            # is migrated, see migration.py)
+            if slot.material and (has_msfs2020_node_tree(slot.material) or slot.material.get(MIGRATED_KEY)):
                 return True
     return False
 
@@ -158,6 +159,16 @@ def register_target():
         items=TARGET_ITEMS,
         default=TARGET_MSFS2024,
     )
+    bpy.types.Scene.msfs_fss_msfs2020_emissive_reference = bpy.props.FloatProperty(
+        name="MSFS 2020 Emissive Reference",
+        description=("Emission brightness (cd/m²) exported as emissive strength 1.0 for MSFS 2020. "
+                     "Materials store MSFS 2024 brightness; MSFS 2020 exports divide by this value, and MSFS 2020 "
+                     "materials are migrated with it on first use"),
+        default=compat.DEFAULT_EMISSIVE_REFERENCE,
+        min=0.001,
+        soft_max=20000.0,
+    )
+    _registered_props.append((bpy.types.Scene, "msfs_fss_msfs2020_emissive_reference"))
     bpy.types.Object.msfs_fss_export_only = bpy.props.EnumProperty(
         name="Export For",
         description="Simulators this object is exported for",

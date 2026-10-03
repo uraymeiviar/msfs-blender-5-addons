@@ -9,8 +9,13 @@ Both add-ons store material settings under the same property names, but some def
 - Defaults: a .blend only stores values an artist changed, everything else reads the registered
   default, and a few defaults differ between the add-ons (e.g. `msfs_emissive_scale` 1.0 vs 1000.0).
 
-`LegacyMaterialView` wraps a material for the MSFS 2020 export code: the material type is translated,
-and unset properties return their MSFS 2020 default. Everything else is forwarded to the material.
+- Units: `msfs_emissive_scale` is an emission brightness in cd/m2 for MSFS 2024 (default 1000) but a
+  1.0-based strength for MSFS 2020.
+
+The .blend stores MSFS 2024 meaning. Materials authored with the MSFS 2020 add-on are migrated once
+(`migration.py`). `LegacyMaterialView` wraps a material for the MSFS 2020 export code: the material type is
+translated and the emissive strength divided by the scene's MSFS 2020 emissive reference. A legacy material
+that was not migrated yet keeps its MSFS 2020 meaning (unset properties return MSFS 2020 defaults).
 """
 
 import struct
@@ -94,10 +99,13 @@ class LegacyMaterialView:
         material = object.__getattribute__(self, "_material")
         if name == "msfs_material_type":
             return legacy_material_type(material)
-        if _legacy_defaults is None:
-            _build_tables()
-        if name in _legacy_defaults and not material.is_property_set(name):
-            return _legacy_defaults[name]
+        if is_unmigrated_legacy(material):
+            # Still MSFS 2020 meaning: values as the MSFS 2020 add-on read them
+            if name in legacy_defaults() and not material.is_property_set(name):
+                return legacy_defaults()[name]
+            return getattr(material, name)
+        if name == EMISSIVE_SCALE:
+            return _float32(material.msfs_emissive_scale / msfs2020_emissive_reference())
         return getattr(material, name)
 
     def __setattr__(self, name, value):
@@ -108,10 +116,37 @@ class LegacyMaterialView:
         return object.__getattribute__(self, "_material")
 
 
+EMISSIVE_SCALE = "msfs_emissive_scale"
+MIGRATED_KEY = "msfs_fss_migrated_from_msfs2020"  # custom property set by migration.py
+DEFAULT_EMISSIVE_REFERENCE = 1000.0  # cd/m2 exported as 1.0 for MSFS 2020
+
+
+def msfs2020_emissive_reference(scene=None) -> float:
+    scene = scene or bpy.context.scene
+    value = getattr(scene, "msfs_fss_msfs2020_emissive_reference", DEFAULT_EMISSIVE_REFERENCE)
+    return value if value > 0.0 else DEFAULT_EMISSIVE_REFERENCE
+
+
+def legacy_defaults():
+    """Property name -> MSFS 2020 default, for properties whose MSFS 2024 default differs."""
+    if _legacy_defaults is None:
+        _build_tables()
+    return _legacy_defaults
+
+
 def has_msfs2020_node_tree(material) -> bool:
     """True when the material's preview node tree was built by the MSFS 2020 code (legacy assets)."""
     tree = getattr(material, "node_tree", None)
     return bool(tree and tree.nodes.get("Shader Output Material"))
+
+
+EXPORT_TREE_KEY = "msfs_fss_msfs2020_export_tree"  # set on materials carrying a temporary export tree
+
+
+def is_unmigrated_legacy(material) -> bool:
+    """Authored with the MSFS 2020 add-on and not migrated to MSFS 2024 meaning yet."""
+    return (has_msfs2020_node_tree(material) and not material.get(MIGRATED_KEY)
+            and not material.get(EXPORT_TREE_KEY))
 
 
 def legacy_only_definition(definition):

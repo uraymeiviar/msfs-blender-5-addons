@@ -135,18 +135,17 @@ def prepare_scenes():
     
     asset_library.NodeGroupLibrary.update_appended_assets()
 
-    # Unified add-on: decide every scene's export target before anything converts data
-    from io_scene_gltf2_msfs_fss import msfs2020_target
+    # Unified add-on: decide every scene's export target, then migrate materials authored with the
+    # MSFS 2020 add-on to MSFS 2024 meaning (once per material), before any graph is rebuilt
+    from io_scene_gltf2_msfs_fss import migration, msfs2020_target
     for scene in bpy.data.scenes:
         msfs2020_target.detect_export_target(scene)
-    msfs2020_in_file = any(msfs2020_target.is_msfs2020_target(scene) for scene in bpy.data.scenes)
+    migration.migrate_materials(bpy.context.scene)
 
     addon_name = "io_scene_gltf2_msfs"
     (loaded_default, loaded_state) = addon_utils.check(addon_name)
     # Update material graph nodes if 2020 addon is not enabled
-    # Unified add-on: and not while a scene exports for MSFS 2020 (materials are shared between scenes,
-    # and rebuilding replaces the MSFS 2020 node trees)
-    if not loaded_default and not loaded_state and not msfs2020_in_file:
+    if not loaded_default and not loaded_state:
         MSFS2024_SceneUtils.update_msfs2024_materials_graphs()
 
     force_update_all_lights()

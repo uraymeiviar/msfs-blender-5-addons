@@ -39,12 +39,12 @@ class MSFS2024_SceneUtils:
         # endregion
 
         # region Update shader materials
+        # Unified add-on: rebuild graphs without resetting the values the material type does not use
+        # (MSFS 2020 exports still use some of them), see migration.rebuild_preview_tree
+        from io_scene_gltf2_msfs_fss.migration import rebuild_preview_tree
         for material in bpy.data.materials:
             if hasattr(material, MSFS2024_MaterialProperties.MATERIALTYPE.attribute_name()):
-                MSFS2024_MaterialPropUpdate.update_msfs_material_type(
-                    material=material,
-                    rebuild_native_mat=False
-                )
+                rebuild_preview_tree(material)
         # endregion
     # endregion
 

@@ -163,6 +163,9 @@ class glTF2ExportUserExtension:
 
     def __init__(self):
         from .msfs2020_target import is_msfs2020_target
+        from . import migration
+        # Scripts can export before the load handlers ran: never export unmigrated MSFS 2020 materials
+        migration.migrate_materials(bpy.context.scene)
         if is_msfs2020_target(bpy.context.scene):
             from ._msfs2020.io.msfs_export import Export as Export2020
             self._impl = Export2020()

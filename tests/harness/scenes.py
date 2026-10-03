@@ -229,6 +229,9 @@ def case_materials(out_dir, log: CaseLog):
             # Each add-on's material type callback writes its own simulator's defaults (alpha mode,
             # emissive scale 1.0 vs 1000, ...): state them explicitly, as an MSFS 2020 asset would
             for name, value in LEGACY_2020_VALUES.items():
+                if name == "msfs_emissive_scale" and _unified_msfs2020():
+                    # Unified add-on stores MSFS 2024 brightness (cd/m2); MSFS 2020 1.0 = the scene reference
+                    value *= bpy.context.scene.msfs_fss_msfs2020_emissive_reference
                 setattr(mat, name, value)
             _set_stored_enum(mat, "msfs_alpha_mode", MSFS2020_TYPE_ALPHA_MODE.get(type_name, "OPAQUE"))
     if SIM == "2020" and ADDON == "io_scene_gltf2_msfs_2020":
