@@ -147,6 +147,13 @@ class glTF2ImportUserExtension(Import):
 from .io.exp.gltf_hooks import Export
 
 
+class _ExportMSFS2024(Export):
+    def gather_tree_filter_tag_hook(self, vtree, khronos_export_settings):
+        # Unified add-on: skip MSFS 2020-only objects (e.g. legacy gizmo empties)
+        from .msfs2020_target import TARGET_MSFS2024, filter_export_tree
+        filter_export_tree(vtree, TARGET_MSFS2024)
+
+
 class glTF2ExportUserExtension:
     """
     Khronos creates one instance per export and looks hooks up with getattr(), so the instance
@@ -160,7 +167,7 @@ class glTF2ExportUserExtension:
             from ._msfs2020.io.msfs_export import Export as Export2020
             self._impl = Export2020()
         else:
-            self._impl = Export()
+            self._impl = _ExportMSFS2024()
 
     def __getattr__(self, name):
         # Only called for attributes not found on the dispatcher itself

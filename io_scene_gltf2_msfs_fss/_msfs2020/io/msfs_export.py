@@ -50,6 +50,11 @@ class Export:
         from ..blender import legacy_tree
         legacy_tree.restore_trees()
 
+    def gather_tree_filter_tag_hook(self, vtree, export_settings):
+        # Unified add-on: skip MSFS 2024-only objects (e.g. geometry nodes gizmos)
+        from ...msfs2020_target import TARGET_MSFS2020, filter_export_tree
+        filter_export_tree(vtree, TARGET_MSFS2020)
+
     def gather_asset_hook(
         self,
         gltf2_asset,
