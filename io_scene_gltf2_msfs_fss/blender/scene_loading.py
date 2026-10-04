@@ -137,7 +137,9 @@ def prepare_scenes():
 
     # Unified add-on: decide every scene's export target, then migrate materials authored with the
     # MSFS 2020 add-on to MSFS 2024 meaning (once per material), before any graph is rebuilt
-    from io_scene_gltf2_msfs_fss import migration, msfs2020_target
+    from io_scene_gltf2_msfs_fss import legacy_normals, migration, msfs2020_target
+    # Blender <= 4.0 files: keep the per-mesh Auto Smooth flag Blender drops on load (Restore 3.6 Normals)
+    legacy_normals.record_legacy_auto_smooth()
     for scene in bpy.data.scenes:
         msfs2020_target.detect_export_target(scene)
     migration.migrate_materials(bpy.context.scene)

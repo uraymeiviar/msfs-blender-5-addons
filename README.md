@@ -120,9 +120,22 @@ The .blend stores MSFS 2024 meaning; MSFS 2020 exports convert:
 - Graph rebuilds that are not an artist action keep every stored value (Asobo's builders reset properties the
   MSFS 2024 type does not use; MSFS 2020 exports still read some of them).
 
+## Legacy normals (files saved by Blender 4.0 or older)
+
+Blender 4.1 removed Auto Smooth. With Auto Smooth off, Blender <= 4.0 ignored sharp edges, custom normals and
+Weighted Normal modifiers and shaded smooth faces with plain vertex normals; Blender 4.1+ applies all of them.
+When such a file is opened, `legacy_normals.py` reads each mesh's saved Auto Smooth flag from the .blend on disk
+(Blender drops it on load) and keeps it on the mesh (`msfs_fss_legacy_auto_smooth`), so it survives saving.
+The Export Target panel then offers **Restore Blender 3.6 Normals**: meshes that had Auto Smooth off and now
+shade differently get the Blender 3.6 normals as custom normals, and their Weighted Normal modifiers (which had no
+effect) are removed. Meshes that had Auto Smooth on keep Blender's own conversion (Smooth by Angle).
+
+`Cockpit.blend` after restoring: 1,301 of 1,314 primitives export the same normals as Blender 3.6; the rest are
+Auto Smooth + Weighted Normal meshes where 298 of 1.4 million corners, all on sliver faces, differ.
+
 ## Known issues
 
 - `msfs_ghost_bias` / `msfs_ghost_power` have swapped ranges between the add-ons, which suggests swapped meaning;
   not converted yet (ghost materials only).
-- Legacy normals migration tool (pre-4.1 Auto Smooth semantics) not written yet.
-- Panels are verified to register; their drawing needs a manual check in the UI.
+- Two small cockpit meshes (`Cube`, `Cube.001`) export fewer duplicated vertices than Blender 3.6 (same shape).
+- Panels were checked once in the UI; the Restore Normals box needs a manual check.
