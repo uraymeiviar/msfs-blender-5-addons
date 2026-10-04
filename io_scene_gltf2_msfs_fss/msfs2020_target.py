@@ -94,11 +94,6 @@ def _stored(id_data, name):
     return value
 
 
-def _has_msfs2024_data(scene) -> bool:
-    return any(_stored(scene, name) for name in (
-        "msfs_multi_exporter_settings_presets", "msfs_multi_exporter_lod_groups", "msfs_multi_exporter_presets"))
-
-
 def _has_msfs2020_data(scene) -> bool:
     from ._msfs2020.compat import MIGRATED_KEY, has_msfs2020_node_tree
     if any(_stored(scene, name) is not None for name in ("msfs_exporter_settings", "msfs_multi_exporter_settings")):
@@ -120,13 +115,18 @@ _detected_scenes = set()  # Scene.session_uid already checked since the file was
 
 
 def detect_export_target(scene):
-    """Scenes without an explicit target that only carry MSFS 2020 data are MSFS 2020 assets."""
+    """
+    Scenes without an explicit target that carry MSFS 2020 data are MSFS 2020 assets.
+
+    MSFS 2024 data is not a counter-indication: the MSFS 2024 code creates its export presets and LOD groups
+    in every file it opens, and a file that was meant for MSFS 2024 has its target set explicitly.
+    """
     if scene.session_uid in _detected_scenes:
         return
     _detected_scenes.add(scene.session_uid)
     if scene.is_property_set("msfs_fss_export_target"):
         return
-    if _has_msfs2020_data(scene) and not _has_msfs2024_data(scene):
+    if _has_msfs2020_data(scene):
         scene.msfs_fss_export_target = TARGET_MSFS2020
         print(f"[MSFS FSS] Scene '{scene.name}': MSFS 2020 data found, export target set to MSFS 2020")
 
