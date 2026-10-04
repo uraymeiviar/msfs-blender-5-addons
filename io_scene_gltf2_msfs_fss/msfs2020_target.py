@@ -132,8 +132,14 @@ def detect_export_target(scene):
 
 
 @persistent
-def _on_load_post(*_args):
+def _on_load_pre(*_args):
+    # Session uids restart with the new file: forget the previous file's scenes before any load_post
+    # handler (the MSFS 2024 one runs first) asks for a target
     _detected_scenes.clear()
+
+
+@persistent
+def _on_load_post(*_args):
     for scene in bpy.data.scenes:
         detect_export_target(scene)
 # endregion
@@ -195,6 +201,8 @@ def register_target():
 
     compat.reset_tables()
     khronos_patches.register()
+    if _on_load_pre not in bpy.app.handlers.load_pre:
+        bpy.app.handlers.load_pre.append(_on_load_pre)
     if _on_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_on_load_post)
     _register_gltf_export_ui()
@@ -225,6 +233,8 @@ def _unregister_gltf_export_ui():
 def unregister_target():
     _gizmo, khronos_patches, _settings = _vendored_modules()
     _unregister_gltf_export_ui()
+    if _on_load_pre in bpy.app.handlers.load_pre:
+        bpy.app.handlers.load_pre.remove(_on_load_pre)
     if _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
     khronos_patches.unregister()
