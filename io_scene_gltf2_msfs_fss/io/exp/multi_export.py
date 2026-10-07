@@ -310,6 +310,7 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
             export_frame_step=settings.export_frame_step,
             export_force_sampling=settings.export_force_sampling,
             export_animation_mode=settings.export_animation_mode,
+            export_merge_animation=settings.export_merge_animation,
             export_def_bones=settings.export_def_bones,
             export_optimize_animation_size=settings.export_optimize_animation_size,
             export_optimize_animation_keep_anim_armature=settings.export_optimize_animation_keep_anim_armature,

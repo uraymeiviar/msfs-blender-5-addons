@@ -537,6 +537,8 @@ class MSFS2024_PT_export_animation(bpy.types.Panel):
 
             if active_settings_preset.export_animation_mode == "ACTIVE_ACTIONS":
                 layout.prop(active_settings_preset, 'export_nla_strips_merged_animation_name')
+            elif active_settings_preset.export_animation_mode == "ACTIONS" and bpy.app.version >= (4, 2, 0):
+                layout.prop(active_settings_preset, 'export_merge_animation')
 
             row = layout.row()
             row.active = (

@@ -769,6 +769,18 @@ class MSFS2024_MultiExporterSettings(bpy.types.PropertyGroup):
             set=_set_export_animation_mode,
         )  # type: ignore
 
+        # Merge Animation (Blender 4.2+, Actions mode): Khronos default merges animations by action
+        export_merge_animation: bpy.props.EnumProperty(
+            name="Merge Animation",
+            items=(
+                ("NLA_TRACK", "NLA Track Names", "Merge by NLA Track Names"),
+                ("ACTION", "Actions", "Merge by Actions"),
+                ("NONE", "No Merge", "Do Not Merge Animations"),
+            ),
+            description="Merge Animations",
+            default="ACTION",
+        )  # type: ignore
+
         # Optimize Animation Force keeping channels for bones Check
         export_optimize_animation_keep_anim_armature: bpy.props.BoolProperty(
             name="Force keeping channels for bones",
