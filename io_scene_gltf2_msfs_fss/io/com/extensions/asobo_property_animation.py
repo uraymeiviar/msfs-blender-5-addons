@@ -1072,17 +1072,25 @@ def _construct_input_output_accessors(
     min_time = keyframes[0].seconds 
     max_time = keyframes[-1].seconds
 
-    input_accessor = gltf2_blender_gather_accessors.gather_accessor(
-        gltf2_io_binary_data.BinaryData.from_list(
+    # Unified add-on: built directly, as the output accessor below. Khronos' gather_accessor gained a `normalized`
+    # parameter in Blender 5; the positional call raised a TypeError inside the hook, which the exporter swallows,
+    # so material property animations were dropped silently
+    input_accessor = gltf2_io.Accessor(
+        buffer_view=gltf2_io_binary_data.BinaryData.from_list(
             final_frame_times,
             gltf2_io_constants.ComponentType.Float
         ),
-        gltf2_io_constants.ComponentType.Float,
-        len(final_frame_times),
-        tuple([max_time]),
-        tuple([min_time]),
-        gltf2_io_constants.DataType.Scalar,
-        export_settings
+        byte_offset=None,
+        component_type=gltf2_io_constants.ComponentType.Float,
+        count=len(final_frame_times),
+        extensions=None,
+        extras=None,
+        max=[max_time],
+        min=[min_time],
+        name=None,
+        normalized=None,
+        sparse=None,
+        type=gltf2_io_constants.DataType.Scalar
     )
 
     # Construct output accessor
