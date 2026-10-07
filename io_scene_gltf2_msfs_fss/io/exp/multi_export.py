@@ -47,7 +47,9 @@ if TYPE_CHECKING:
     from .lod_groups import MultiExporterLODGroup, MultiExporterLOD
     from .presets import MultiExporterPreset
 
-MSFS2024_LOGGER : msfs_logs.Logger 
+MSFS2024_LOGGER : msfs_logs.Logger
+
+_DUPLICATE_SOURCE_KEY = "msfs_fss_duplicate_source"  # temporary: source object name, copied to its duplicate
 
 # region Operators
 class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
@@ -640,6 +642,18 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
             Duplicated Objects
         """
         source_objects = context.selected_objects
+        # Unified add-on: the duplicate operator skips objects saved in Pose or Edit mode (still selected), which
+        # shifted the pairing below by one: duplicates got the original name of another object
+        view_layer = context.view_layer
+        active = view_layer.objects.active
+        for obj in source_objects:
+            if obj.mode != "OBJECT":
+                view_layer.objects.active = obj
+                bpy.ops.object.mode_set(mode="OBJECT")
+        view_layer.objects.active = active
+        # Pair each duplicate with its source by a tag the duplicate operator copies, not by list order
+        for obj in source_objects:
+            obj[_DUPLICATE_SOURCE_KEY] = obj.name
         # Unified add-on: duplicates use the source objects' actions in NLA strips as well as the active action.
         # Blender would copy the actions; reassigning only the active one left a copy with the same animation
         # twice when the active action is also in an NLA track
@@ -650,11 +664,19 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
             bpy.ops.object.duplicate(linked=False)
         finally:
             edit_prefs.use_duplicate_action = duplicate_action
+            for obj in source_objects:
+                obj.pop(_DUPLICATE_SOURCE_KEY, None)
         duplicated_objects = context.selected_objects
+        pairs = []
+        for duplicate in duplicated_objects:
+            pairs.append((bpy.data.objects[duplicate.pop(_DUPLICATE_SOURCE_KEY)], duplicate))
+        missing = set(o.name for o in source_objects) - set(source.name for source, _duplicate in pairs)
+        if missing:
+            raise RuntimeError(f"Objects could not be duplicated for export: {sorted(missing)}")
         # Store original name in order reassign it later in process
         # cf gather_node_hook in msfs_export.py
         # cf gather_mesh_hook in msfs_export.py
-        for source, duplicate in zip(source_objects, duplicated_objects):
+        for source, duplicate in pairs:
             MSFS2024_DataUtils.set_msfs_original_name(duplicate, source.name)
             if source.data:
                 MSFS2024_DataUtils.set_msfs_original_name(
