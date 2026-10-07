@@ -180,8 +180,52 @@ def candidates():
             if m.library is None and m.get(LEGACY_AUTO_SMOOTH_KEY) == 0 and not m.get(RESTORED_KEY)]
 
 
+_NORMAL_MODIFIERS = {"WEIGHTED_NORMAL", "NORMAL_EDIT"}
+
+
+def _is_converted_auto_smooth(modifier) -> bool:
+    """The Geometry Nodes modifier Blender 4.1+ adds when loading a mesh saved with Auto Smooth on."""
+    return (modifier.type == "NODES" and modifier.node_group is not None
+            and modifier.node_group.name.split(".")[0] == "Auto Smooth")
+
+
+def misordered_auto_smooth() -> list:
+    """
+    Objects of meshes saved with Auto Smooth on whose converted Auto Smooth modifier comes after a Weighted
+    Normal / Normal Edit modifier: it recomputes the shading and discards their custom normals. In Blender <= 4.0
+    Auto Smooth was a mesh setting those modifiers worked on top of. Returns [(object, from index, to index)].
+    """
+    result = []
+    for obj in bpy.data.objects:
+        if obj.library is not None or obj.type != "MESH" or obj.data.get(LEGACY_AUTO_SMOOTH_KEY) != 1:
+            continue
+        mods = list(obj.modifiers)
+        smooth = next((i for i, m in enumerate(mods) if _is_converted_auto_smooth(m)), None)
+        normal = next((i for i, m in enumerate(mods) if m.type in _NORMAL_MODIFIERS), None)
+        if smooth is not None and normal is not None and smooth > normal:
+            result.append((obj, smooth, normal))
+    return result
+
+
+def reorder_auto_smooth() -> int:
+    """Move the converted Auto Smooth modifier before the normal modifiers (Blender 3.6 evaluation order)."""
+    moved = misordered_auto_smooth()
+    for obj, smooth, normal in moved:
+        obj.modifiers.move(smooth, normal)
+    return len(moved)
+
+
+def pending() -> int:
+    """Meshes and objects the Restore Blender 3.6 Normals operator would change."""
+    return len(candidates()) + len(misordered_auto_smooth())
+
+
 def restore(meshes=None) -> tuple:
-    """Restore Blender 3.6 normals; returns (meshes changed, Weighted Normal modifiers removed)."""
+    """
+    Restore Blender 3.6 normals; returns (meshes changed, Weighted Normal modifiers removed, Auto Smooth
+    modifiers moved). The modifier order is only restored when all meshes are processed (meshes is None).
+    """
+    reordered = reorder_auto_smooth() if meshes is None else 0
     changed, removed = 0, 0
     for mesh in (meshes if meshes is not None else candidates()):
         if not mesh.loops:
@@ -200,20 +244,21 @@ def restore(meshes=None) -> tuple:
             obj.modifiers.remove(mod)
             removed += 1
         mesh[RESTORED_KEY] = 1
-    return changed, removed
+    return changed, removed, reordered
 
 
 class MSFS_FSS_OT_restore_legacy_normals(bpy.types.Operator):
     bl_idname = "msfs_fss.restore_legacy_normals"
     bl_label = "Restore Blender 3.6 Normals"
-    bl_description = ("Meshes saved by Blender 4.0 or older with Auto Smooth off shade differently in Blender 4.1+ "
-                      "(sharp edges, custom normals and Weighted Normal modifiers now apply). Store the normals "
-                      "Blender 3.6 showed as custom normals and remove the Weighted Normal modifiers that had no effect")
+    bl_description = ("Meshes saved by Blender 4.0 or older shade differently in Blender 4.1+. With Auto Smooth off, "
+                      "sharp edges, custom normals and Weighted Normal modifiers now apply: store the normals Blender "
+                      "3.6 showed as custom normals and remove the Weighted Normal modifiers that had no effect. With "
+                      "Auto Smooth on, move the converted Auto Smooth modifier before Weighted Normal / Normal Edit")
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
     def poll(cls, context):
-        return bool(candidates())
+        return pending() > 0
 
     def invoke(self, context, event):
         return context.window_manager.invoke_confirm(self, event)
@@ -222,7 +267,8 @@ class MSFS_FSS_OT_restore_legacy_normals(bpy.types.Operator):
         if context.mode != "OBJECT":
             bpy.ops.object.mode_set(mode="OBJECT")
         count = len(candidates())
-        changed, removed = restore()
+        changed, removed, reordered = restore()
         self.report({"INFO"}, f"Checked {count} mesh(es): restored normals on {changed}, "
-                              f"removed {removed} Weighted Normal modifier(s)")
+                              f"removed {removed} Weighted Normal modifier(s), "
+                              f"moved {reordered} Auto Smooth modifier(s)")
         return {"FINISHED"}

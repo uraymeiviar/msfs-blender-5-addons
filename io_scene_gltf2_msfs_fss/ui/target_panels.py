@@ -48,11 +48,14 @@ class MSFS_FSS_PT_export_target(bpy.types.Panel):
             col.label(text="(the multi-exporter writes MSFS 2024 glTF)")
         if bpy.ops.msfs_fss.prepare_msfs2024.poll():
             layout.operator("msfs_fss.prepare_msfs2024", icon="EXPORT")
-        from ..legacy_normals import candidates
-        pending = len(candidates())
-        if pending:
+        from ..legacy_normals import candidates, misordered_auto_smooth
+        off, misordered = len(candidates()), len(misordered_auto_smooth())
+        if off or misordered:
             box = layout.box()
-            box.label(text=f"{pending} mesh(es) from Blender 4.0 or older had Auto Smooth off", icon="ERROR")
+            if off:
+                box.label(text=f"{off} mesh(es) from Blender 4.0 or older had Auto Smooth off", icon="ERROR")
+            if misordered:
+                box.label(text=f"{misordered} object(s): Auto Smooth modifier after Weighted Normal", icon="ERROR")
             box.label(text="and may shade differently than in Blender 3.6")
             box.operator("msfs_fss.restore_legacy_normals", icon="NORMALS_FACE")
 
