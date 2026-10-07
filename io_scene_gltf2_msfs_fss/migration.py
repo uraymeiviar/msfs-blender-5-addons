@@ -83,7 +83,11 @@ def migrate_materials(scene=None) -> list:
     materials = legacy_materials()
     if not materials:
         return []
+    scene = scene or bpy.context.scene
     reference = compat.msfs2020_emissive_reference(scene)
+    # The values now depend on this reference: keep it with the scene, so a later change of the add-on
+    # preference does not change what the migrated materials mean
+    scene.msfs_fss_msfs2020_emissive_reference = reference
     defaults = compat.legacy_defaults()
 
     for material in materials:

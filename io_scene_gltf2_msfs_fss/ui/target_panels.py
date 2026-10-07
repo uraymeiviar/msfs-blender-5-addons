@@ -21,7 +21,11 @@ def draw_export_target(layout, scene):
         settings = scene.msfs_exporter_settings
         layout.prop(settings, "enable_msfs_extension")
         layout.prop(settings, "use_unique_id")
-        layout.prop(scene, "msfs_fss_msfs2020_emissive_reference", text="Emissive 1.0 (cd/m²)")
+        if scene.is_property_set("msfs_fss_msfs2020_emissive_reference"):
+            layout.prop(scene, "msfs_fss_msfs2020_emissive_reference", text="Emissive 1.0 (cd/m²)")
+        else:
+            from .._msfs2020.compat import msfs2020_emissive_reference
+            layout.label(text=f"Emissive 1.0: {msfs2020_emissive_reference(scene):g} cd/m² (add-on preference)")
 
 
 class MSFS_FSS_PT_export_target(bpy.types.Panel):

@@ -43,9 +43,21 @@ class MSFS2024AddonPrefs(bpy.types.AddonPreferences):
         default=True,
     )  # type: ignore
 
+    # Unified add-on: project-wide calibration of the MSFS 2020 <-> MSFS 2024 emissive conversion
+    msfs2020_emissive_reference: bpy.props.FloatProperty(
+        name="MSFS 2020 Emissive Reference",
+        description=("Emission brightness (cd/m²) of MSFS 2020 emissive strength 1.0, for scenes that do not set "
+                     "their own: used when MSFS 2020 materials are migrated (the scene then keeps the value) and "
+                     "by MSFS 2020 exports of such scenes"),
+        default=1000.0,
+        min=0.001,
+        soft_max=20000.0,
+    )  # type: ignore
+
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "make_relative_on_save")
+        layout.prop(self, "msfs2020_emissive_reference")
 
 def get_addon_prefs():
     addon_name = __package__

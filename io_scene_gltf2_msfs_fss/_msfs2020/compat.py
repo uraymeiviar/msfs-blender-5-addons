@@ -122,8 +122,13 @@ DEFAULT_EMISSIVE_REFERENCE = 1000.0  # cd/m2 exported as 1.0 for MSFS 2020
 
 
 def msfs2020_emissive_reference(scene=None) -> float:
+    """The scene's own reference, otherwise the add-on preference (project-wide default)."""
     scene = scene or bpy.context.scene
-    value = getattr(scene, "msfs_fss_msfs2020_emissive_reference", DEFAULT_EMISSIVE_REFERENCE)
+    if scene is not None and scene.is_property_set("msfs_fss_msfs2020_emissive_reference"):
+        value = scene.msfs_fss_msfs2020_emissive_reference
+    else:
+        addon = bpy.context.preferences.addons.get(__package__.split(".")[0])
+        value = getattr(addon.preferences, "msfs2020_emissive_reference", 0.0) if addon else 0.0
     return value if value > 0.0 else DEFAULT_EMISSIVE_REFERENCE
 
 
