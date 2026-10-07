@@ -54,7 +54,10 @@ def rebuild_preview_tree(material):
     store = _property_store(material, create=bool(before))
     if store is None:
         return
-    for key in [k for k in store.keys() if k not in before]:
+    # Values the builder set for the first time: unset again only where MSFS 2020 reads them (unset reads the
+    # MSFS 2020 meaning). MSFS 2024-only values are part of the type (e.g. `msfs_decal_mode`, which decides
+    # whether the decal extension is written) and stay as the builder set them.
+    for key in [k for k in store.keys() if k not in before and ("Material", k) in compat.LEGACY_PROPS]:
         del store[key]
     for key, value in before.items():
         if key in store and _snapshot(store[key]) == value:
