@@ -21,6 +21,8 @@ _original_get_positions = None
 _original_get_normals = None
 _PrimitiveCreator = None
 _gltf2_blender_extract = None
+_original_gather_mesh = None
+_nodes = None
 
 def _msfs2020_export() -> bool:
     """
@@ -441,6 +443,30 @@ elif bpy.app.version >= (3, 3, 0):
 # endregion
 
 
+# region Object linked materials (unified add-on, both simulators)
+def msfs_gather_mesh(vnode, blender_object, export_settings):
+    """
+    With modifiers applied, Khronos takes the materials of the evaluated mesh, which only carries the mesh data's
+    materials: slots linked to the object lost their material. Blender 5 turns Auto Smooth into a modifier, so
+    objects that exported correctly with Blender 4.0 or older are affected. For this object's export only, the mesh
+    data gets the object's materials in those slots.
+    """
+    swapped = []
+    if (export_settings.get("gltf_apply") and blender_object is not None and blender_object.type == "MESH"
+            and blender_object.modifiers and blender_object.data.library is None):
+        materials = blender_object.data.materials
+        for index, slot in enumerate(blender_object.material_slots):
+            if slot.link == "OBJECT" and index < len(materials) and materials[index] != slot.material:
+                swapped.append((index, materials[index]))
+                materials[index] = slot.material
+    try:
+        return _original_gather_mesh(vnode, blender_object, export_settings)
+    finally:
+        for index, material in swapped:
+            blender_object.data.materials[index] = material
+# endregion
+
+
 def register():
     # Not following pep8 but import must be done in register in order to correctly patch exporter in background mode.
     global _original_gather_sample_object_channel
@@ -505,6 +531,13 @@ def register():
         _original_get_normals = _gltf2_blender_extract.__get_normals
         _gltf2_blender_extract.__get_normals = msfs_get_normals
 
+    global _original_gather_mesh
+    global _nodes
+    if bpy.app.version >= (4, 5, 0):
+        from io_scene_gltf2.blender.exp import nodes as _nodes
+        _original_gather_mesh = getattr(_nodes, "__gather_mesh")
+        setattr(_nodes, "__gather_mesh", msfs_gather_mesh)
+
 def unregister():
     # Reload patched modules to undo patch
     to_reload = []
@@ -542,6 +575,8 @@ def unregister():
         )
     if primitive_extract:
         to_reload.append(primitive_extract)
+    if _nodes is not None:
+        to_reload.append(_nodes)
 
     if not to_reload:
         return
