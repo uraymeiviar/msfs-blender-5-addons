@@ -192,6 +192,7 @@ class ExportCache:
         self.force_keep_obj_anim_original_value: bool = khronos_export_settings.get("gltf_optimize_animation_keep_object", False)
         self.force_keep_bone_anim_original_value: bool = khronos_export_settings.get("gltf_optimize_animation_keep_armature", False)
         self.export_nla : bool = _is_export_nla_enabled(khronos_export_settings)
+        self.force_sampling : bool = khronos_export_settings.get("gltf_force_sampling", True)
         self.disable_material_animation : bool = False
         self.treated_materials: set[str] = set()
         self.new_gltf_anim_names: set[str] = set()
@@ -649,6 +650,27 @@ def _get_placeholder_action(
     return (action, empty_slot)
 
 
+def _key_placeholder_scale(
+    obj: bpy.types.Object,
+    action: bpy.types.Action,
+    slot: None | bpy.types.ActionSlot
+):
+    """
+    Unified add-on: without sampling, Khronos drops an animation that has no channels, and the material
+    animation appended to it is lost (the forced scale channel only applies to sampled channels). A constant
+    scale key on the placeholder keeps the animation, as the forced channel does when sampling.
+    """
+    if SUPPORTED_ACTION_SLOTS:
+        from bpy_extras import anim_utils
+        fcurves = anim_utils.action_ensure_channelbag_for_slot(action, slot).fcurves
+    else:
+        fcurves = action.fcurves
+    frame = bpy.context.scene.frame_start
+    for index in range(3):
+        fcurve = fcurves.find("scale", index=index) or fcurves.new("scale", index=index)
+        fcurve.keyframe_points.insert(frame, obj.scale[index])
+
+
 def _add_new_NLA_track_with_action(
     blender_object: bpy.types.Object, 
     track_name:str, 
@@ -708,6 +730,7 @@ def _prepare_obj_material_animation(
     track = None
     action = None
     slot = None
+    placeholder = True  # False when an existing track of the object is used
 
     if obj.animation_data is None:
         obj.animation_data_create()
@@ -742,6 +765,7 @@ def _prepare_obj_material_animation(
                     slot = first_strip.action_slot
 
                 track = _track
+                placeholder = False
                 break
 
         if not track:
@@ -762,6 +786,16 @@ def _prepare_obj_material_animation(
             # be carrefull, exported anim name is action.name instead of track.name
             action, slot = _get_placeholder_action(anim_name)
             _add_new_NLA_track_with_action(obj, anim_name, action, slot)
+        else:
+            # Unified add-on: the active action already has the animation name (action was left None, the
+            # cache below failed and the material animation was dropped)
+            action = active_action
+            if SUPPORTED_ACTION_SLOTS:
+                slot = obj.animation_data.action_slot
+            placeholder = False
+
+    if placeholder and not export_cache.force_sampling:
+        _key_placeholder_scale(obj, action, slot)
 
     # Add to cache
     animation_name = action.name
