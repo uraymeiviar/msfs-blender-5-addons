@@ -634,13 +634,22 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
         """Duplicate selected objects.
         Do not duplicate hidden objects.
         Assign a msfs_original name to duplicated object, used to retrieve original source object.
-        Reassign object original action.
+        Duplicates keep the original actions.
 
         Returns:
             Duplicated Objects
         """
         source_objects = context.selected_objects
-        bpy.ops.object.duplicate(linked=False)
+        # Unified add-on: duplicates use the source objects' actions in NLA strips as well as the active action.
+        # Blender would copy the actions; reassigning only the active one left a copy with the same animation
+        # twice when the active action is also in an NLA track
+        edit_prefs = context.preferences.edit
+        duplicate_action = edit_prefs.use_duplicate_action
+        edit_prefs.use_duplicate_action = False
+        try:
+            bpy.ops.object.duplicate(linked=False)
+        finally:
+            edit_prefs.use_duplicate_action = duplicate_action
         duplicated_objects = context.selected_objects
         # Store original name in order reassign it later in process
         # cf gather_node_hook in msfs_export.py
@@ -651,9 +660,6 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
                 MSFS2024_DataUtils.set_msfs_original_name(
                     duplicate.data, source.data.name
                 )
-            # Action is also duplicated, reassign original action
-            if source.animation_data and source.animation_data.action:
-                duplicate.animation_data.action = source.animation_data.action
         self._force_duplicated_refresh(context, duplicated_objects)
         return duplicated_objects
 
