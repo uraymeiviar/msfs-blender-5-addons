@@ -74,21 +74,11 @@ class AsoboGizmoObject:
 
             if gizmo_type != msfs_gizmo.GizmoTypes.BOUNDING_SPHERE:
                 modifier = msfs_gizmo.get_collision_mod(gizmo_obj)
-                geometry_node_utils.set_modifier_input(
-                    modifier, 
-                    MSFS2024CollisionInputs.TYPE.input_label, 
-                    gizmo_type.index
-                )
-                geometry_node_utils.set_modifier_input(
-                    modifier, 
-                    MSFS2024CollisionInputs.ROAD_COLLIDER.input_label, 
-                    is_road_collider
-                )
-                geometry_node_utils.set_modifier_input(
-                    modifier,
-                    MSFS2024CollisionInputs.GROUND_COLLIDER.input_label,
-                    is_ground_collider,
-                )
+                msfs_gizmo.set_collision_type(modifier, gizmo_type)
+                  
+                msfs_gizmo.set_is_road_collider(modifier, is_road_collider)
+
+                msfs_gizmo.set_is_ground_collider(modifier, is_ground_collider)
             
             desired_location = mathutils.Vector(center)
             desired_rotation = mathutils.Quaternion(rotation)

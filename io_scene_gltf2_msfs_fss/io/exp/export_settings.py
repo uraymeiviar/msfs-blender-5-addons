@@ -167,11 +167,11 @@ class MSFS2024_MultiExporterSettings(bpy.types.PropertyGroup):
         default=""
     ) # type: ignore
 
-    # Remember export settings check
+    # Remember export settings check, NOT USED
     will_save_settings: bpy.props.BoolProperty(
         name="Remember Export Settings",
         description="Store glTF export settings in the Blender project.",
-        default=True
+        default=False
     ) # type: ignore
     # endregion
 
@@ -368,30 +368,38 @@ class MSFS2024_MultiExporterSettings(bpy.types.PropertyGroup):
         default=False
     ) # type: ignore
 
-    if bpy.app.version < (4, 2, 0):
-        # Export Vertex Colors Check
-        export_colors: bpy.props.BoolProperty(
-            name="Vertex Colors",
-            description="Export vertex colors with meshes",
-            default=True,
-        ) # type: ignore
-    else:
+    
+    # Export Vertex Colors Check
+    export_colors: bpy.props.BoolProperty(
+        name="Vertex Colors",
+        description="Export active vertex color with meshes",
+        default=True,
+    ) # type: ignore
+
+    if bpy.app.version >= (4, 2, 0):
+
+        # builtin vertex color gltf settings,only used if enable_msfs_extension is False
         export_vertex_color: bpy.props.EnumProperty(
             name="Use Vertex Color",
             items=(
                 (
-                    'MATERIAL',
-                    'Material',
+                    "MATERIAL",
+                    "Material",
                     "Export vertex color when used by material"
                 ),
                 (
-                    'NONE',
-                    'None',
+                    "ACTIVE",
+                    "Active",
+                    "Export Active vertex color"
+                ),
+                (
+                    "NONE",
+                    "None",
                     "Do not export vertex color"
                 )
             ),
             description="How to export vertex color",
-            default='MATERIAL'
+            default="ACTIVE"
         ) # type: ignore
 
         export_all_vertex_colors: bpy.props.BoolProperty(
@@ -401,7 +409,7 @@ class MSFS2024_MultiExporterSettings(bpy.types.PropertyGroup):
                 'If no Vertex Color is used in the mesh materials, a fake COLOR_0 will be created, '
                 'in order to keep material unchanged'
             ),
-            default=True
+            default=False
         ) # type: ignore
 
         export_active_vertex_color_when_no_material: bpy.props.BoolProperty(

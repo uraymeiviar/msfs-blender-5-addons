@@ -10,6 +10,9 @@ import numpy as np
 import numpy.typing as npt
 
 from lod_tools_msfs_2024 import obj_utils
+from lod_tools_msfs_2024.constants import IS_BLENDER_4_2_OR_SUP
+
+from io_scene_gltf2_msfs_fss.blender.utils import msfs_constants
 
 MESH_ACTIVE_UV_NAME = "___merged_active_uv___"
 MESH_ACTIVE_COLOR_NAME = "___merged_active_color___"
@@ -63,7 +66,7 @@ def _get_loop_normals(mesh: bpy.types.Mesh) -> npt.NDArray[np.float32] | None:
     Quantization to 8bit uint in optimised gltf.
     """
     # Update split normals cache
-    if bpy.app.version < (4, 2, 0):
+    if not IS_BLENDER_4_2_OR_SUP:
         mesh.calc_normals_split()
     normals = np.empty((len(mesh.loops), 3), dtype=np.float32)
     mesh.corner_normals.foreach_get("vector", np.ravel(normals))
@@ -131,18 +134,41 @@ def _get_loop_tex_coords(
     return uvs
 
 
-def _get_all_loop_tex_coords(mesh: bpy.types.Mesh) -> list[npt.NDArray[np.float32]]:
-    tex_coord_max = 0
-    if mesh.uv_layers.active:
-        tex_coord_max = len(mesh.uv_layers)
+def _get_tex_coords(mesh: bpy.types.Mesh) -> list[npt.NDArray[np.float32]]:
+    """Get first two uv channels. MSFS2024 shaders only use the two uv channels."""
     tex_coords = []
-    for i in range(tex_coord_max):
-        tcoord = _get_loop_tex_coords(mesh, i)
-        if tcoord is None:
-            continue
-        tex_coords.append(tcoord)
+    uv_layers = mesh.uv_layers
+    if not uv_layers:
+        return tex_coords
+
+    active_render_index = None
+    for i, layer in enumerate(uv_layers):
+        if layer.active_render:
+            active_render_index = i
+
+    if active_render_index is None:
+        return tex_coords
+    UV0 = _get_loop_tex_coords(mesh, active_render_index)
+    tex_coords.append(UV0)
+    if not len(mesh.uv_layers) > 1:
+        return tex_coords
+    # find uv2
+    uv2_index = uv_layers.find(msfs_constants.DefaultUV.UV2_NAME)
+
+    if uv2_index == -1:
+        # get first uv channel that is not active render layer
+        for i, layer in enumerate(uv_layers):
+            if layer.active_render:
+                continue
+            uv2_index = i
+            break
+    if uv2_index != -1:
+        UV2 = _get_loop_tex_coords(mesh, uv2_index)
+        tex_coords.append(UV2)
 
     return tex_coords
+
+
 # endregion
 
 
@@ -175,6 +201,21 @@ def _get_loop_colors(
 
     return loop_colors
 
+def _get_active_loop_colors(
+    mesh: bpy.types.Mesh,
+    loop_vertex_indices: npt.NDArray[np.uint32] | None = None,
+) -> list[npt.NDArray[np.float32]]:
+
+    colors = []
+    if not mesh.color_attributes:
+        return colors
+    render_color_index = mesh.color_attributes.render_color_index
+    color_attrib = mesh.color_attributes[render_color_index]
+    color = _get_loop_colors(mesh, color_attrib.name, loop_vertex_indices)
+    if color is not None:
+        colors.append(color)
+
+    return colors
 
 def _get_all_loop_colors(
     mesh: bpy.types.Mesh,
@@ -254,8 +295,8 @@ def get_gltf_vertex_count(
     loop_positions = _get_loop_positions(mesh, loop_vertex_indices)
     loop_normals = _get_loop_normals(mesh)
     # loop_tangents = _get_loop_tangents(trimesh)
-    tex_coords = _get_all_loop_tex_coords(mesh)
-    vertex_colors = _get_all_loop_colors(mesh, loop_vertex_indices)
+    tex_coords = _get_tex_coords(mesh)
+    vertex_colors = _get_active_loop_colors(mesh, loop_vertex_indices)
 
     all_attribs = [loop_positions, loop_normals, *tex_coords, *vertex_colors]
     full_dots = np.concatenate(
@@ -292,21 +333,24 @@ def prepare_mesh_for_tangent_compute(mesh: bpy.types.Mesh):
     prepare_uv_for_tangent_compute(mesh)
     triangulate_mesh(mesh)
 
-def get_obj_vcount(obj: bpy.types.Object, depsgraph: bpy.types.Depsgraph) -> int:
+def get_obj_vcount(obj: bpy.types.Object, depsgraph: bpy.types.Depsgraph, apply_modifiers: bool = True,) -> int:
     vcount = 0
-    obj_eval = obj.evaluated_get(depsgraph)
+    if apply_modifiers:
+        _obj = obj.evaluated_get(depsgraph)
+    else:
+        _obj = obj
     mesh = None
     try:
-        mesh = obj_eval.to_mesh(preserve_all_data_layers=True, depsgraph=depsgraph)
+        mesh = _obj.to_mesh(preserve_all_data_layers=True, depsgraph=depsgraph)
     except RuntimeError:
         # No Mesh data
-        obj_eval.to_mesh_clear()
+        _obj.to_mesh_clear()
     if mesh:
         # prepare_mesh_for_tangent_compute(mesh)
         vcount += get_gltf_vertex_count(mesh)
-    obj_eval.to_mesh_clear()
+    _obj.to_mesh_clear()
 
-    instances = obj_utils.get_object_instances(obj_eval, depsgraph)
+    instances = obj_utils.get_object_instances(_obj, depsgraph)
     for inst in instances:
         mesh = None
         try:
@@ -324,6 +368,7 @@ def get_obj_vcount(obj: bpy.types.Object, depsgraph: bpy.types.Depsgraph) -> int
 
 def get_gltf_objects_vertex_count(
     objects: Iterator[bpy.types.Object],
+    apply_modifiers: bool = True,
     depsgraph: bpy.types.Depsgraph | None = None,
 ) -> int:
     """
@@ -338,9 +383,19 @@ def get_gltf_objects_vertex_count(
     # bpy.data.meshes.remove(trimesh)
 
     vcount = 0
+    linked_data_vcount: dict[bpy.types.ID, int] = {}
     for obj in objects:
-        vcount += get_obj_vcount(obj, depsgraph) 
+        obj_data = getattr(obj, "data", None)
+        if obj_data and obj_data in linked_data_vcount.keys():
+            continue
+        vcount += get_obj_vcount(obj, depsgraph, apply_modifiers)
 
+        if not apply_modifiers and obj_data:
+            linked_data_vcount[obj_data] = vcount
+
+        elif apply_modifiers and obj_data and not obj.modifiers:
+            # Reuse vcount only if obj has no modifiers
+            linked_data_vcount[obj_data] = vcount
     return vcount
 
 def get_merged_trimesh_of_objects(

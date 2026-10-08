@@ -135,8 +135,7 @@ class AsoboMaterialGeometryDecalExtension:
             extension=result,
             material=blender_material,
             attribute=MSFS2024_MaterialProperties.DECALBLENDMASKTEXTURE,
-            settings=export_settings,
-            texture_type="DEFAULT"
+            settings=export_settings
         )
 
         if result:

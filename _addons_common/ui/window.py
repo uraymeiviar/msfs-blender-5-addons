@@ -165,3 +165,15 @@ def set_blank_space(
         make_view3d_space_blank(space)
 
     return view_area
+
+def set_cursor(cursor_type: str):
+    """Set the Blender cursor to a specified type."""
+    bpy.context.window.cursor_set(cursor_type)
+
+def set_cursor_wait():
+    """Set the Blender cursor to the "WAIT" type (hourglass/spinner)."""
+    set_cursor("WAIT")
+
+def set_cursor_default():
+    """Reset the Blender cursor to the "DEFAULT" type (normal arrow)."""
+    set_cursor("DEFAULT")

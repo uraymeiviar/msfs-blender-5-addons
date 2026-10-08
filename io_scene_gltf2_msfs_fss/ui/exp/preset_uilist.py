@@ -33,44 +33,8 @@ class LayerTreeManager(TreeManager):
         if not self.preset:
             return []
         return [self.preset.get_scene_root_layer()]
-    
-    @staticmethod
-    def _get_collection_parents(
-        collection: bpy.types.Collection, 
-        parent_names: list | None = None
-    ):
-        """
-        Returns a list of all parents for the given collection, ordered from
-        the closest parent to the top-level parent.
-        """
-        if parent_names is None:
-            parent_names = []
-        for parent_collection in bpy.data.collections:
-            if collection.name in parent_collection.children.keys():
-                parent_names.append(parent_collection.name)
-                LayerTreeManager._get_collection_parents(parent_collection, parent_names)
-                break
-        return parent_names
-    
-    def get_expanded_items(self) -> set[str]:
-        """
-        Get list of items name that should be expanded in ui tree
-        """
-        if not self.preset:
-            return set()
 
-        expanded_layers = {"Scene Collection"}
-
-        for layer in self.preset.layers:
-            if layer.enabled and layer.collection:
-                expanded_layers.add(layer.name)
-                # We need to add the parent of enabled layers to expand them to get to their children
-                parent_names = LayerTreeManager._get_collection_parents(layer.collection)
-                expanded_layers.update(set(parent_names))
-
-        return expanded_layers
-
-   
+    # endregion
     def get_data_children(
         self, data: bpy.types.bpy_struct
     ) -> list[bpy.types.bpy_struct]:
@@ -202,7 +166,12 @@ class MSFS2024_UL_Layers(bpy.types.UIList, UL_TreeView):
     ):
         collection = preset_layer.collection
         if collection:
-            row.label(text=preset_layer.collection.name)
+            col_icon = "OUTLINER_COLLECTION"
+            color_tag = collection.color_tag 
+            if color_tag != "NONE":
+                col_icon = f"COLLECTION_{color_tag}"
+  
+            row.label(text=preset_layer.collection.name, icon=col_icon)
         else:
             # Scene collection case
             row.label(text=preset_layer.name)
@@ -361,7 +330,7 @@ class PresetTreeManager(TreeManager):
         return []
 
     @classmethod
-    def set_ui_tree_item_name(cls, item: TreeItem, data: bpy.types.bpy_struct):
+    def set_tree_item_name(cls, item: TreeItem, data: bpy.types.bpy_struct):
         """
         Set UITreeItem name according to data.
         Item name is used by filters functions.
@@ -479,37 +448,63 @@ class MSFS2024_UL_Presets(bpy.types.UIList, UL_TreeView):
         else:
             row.label(text="Not Implemented")
 
+    @staticmethod
+    def _draw_rename_ope(layout: bpy.types.UILayout, active_item: TreeItem):
+        active_data = active_item.get_data()
+        if not active_data:
+            return
+        
+        group_id = None
+        preset_id = None
+        if isinstance(active_data, MultiExporterPresetGroup):
+            group_id = active_data.name
+        elif isinstance(active_data, MultiExporterPreset):
+            preset_id = active_data.name
+        
+        rename_selected_ope = layout.operator(
+            preset_ops.MSFS2024_OT_RenamePreset.bl_idname,
+            text="Rename",
+            icon="GREASEPENCIL",
+        )
+        if group_id:
+            rename_selected_ope.group_id = group_id
+        elif preset_id:
+            rename_selected_ope.preset_id = preset_id
+        
     @classmethod
     def draw_context_menu(cls, context: bpy.types.Context, layout: bpy.types.UILayout):
         super().draw_context_menu(context, layout)
+        tree_manager = cls.get_tree_manager()
+        if not tree_manager:
+            return
+        
         layout.separator()
+        active_item = tree_manager.get_active_item()
+        if active_item:
+            cls._draw_rename_ope(layout, active_item)
+            layout.separator()
+
         export_selected_ope = layout.operator(
-            exporter_panel_ops.MSFS2024_OT_ExportSelectedItems.bl_idname,
-            text="Export Selected",
-            icon="EXPORT",
-        )
+                    exporter_panel_ops.MSFS2024_OT_ExportSelectedItems.bl_idname,
+                    text="Export Selected",
+                    icon="EXPORT",
+                )
         export_selected_ope.export_mode = multi_export_mode.ExportMode.PRESETS.identifier
     @staticmethod
     def draw_preset( preset: MultiExporterPreset, item: TreeItem, index:int , row: bpy.types.UILayout):
-        item: TreeItem
+        # with emboss=False, the prop pointing to a text property looks like a label that can be double-clicked to edit it
+        row.prop(preset, "preset_name", emboss=False)
+        is_root = item.parent_index == -1
+        if is_root:
+            if bpy.app.version > (4, 0, 0):
+                row.prop(preset, "folder_path", text="", placeholder="Export Folder")
+            else:
+                row.prop(preset, "folder_path", text="")
 
-        row.label(text=preset.preset_name)
-        ope = row.operator(
-            preset_ops.MSFS2024_OT_RenamePreset.bl_idname,
-            text="",
-            icon="GREASEPENCIL",
-            emboss=False
-        )
-        ope.preset_id = preset.name
-        ope.group_id = ""
-        if bpy.app.version > (4, 0, 0):
-            row.prop(preset, "folder_path", text="", placeholder="Export Folder")
-        else:
-            row.prop(preset, "folder_path", text="")
-        row.operator(preset_ops.MSFS2024_OT_IsolatePresetObjects.bl_idname, text="", icon="HIDE_OFF").preset_id = preset.name
-        row.operator(preset_ops.MSFS2024_OT_EditLayers.bl_idname, text="", icon="COLLECTION_NEW").preset_id = preset.name
-        row.operator(preset_ops.MSFS2024_OT_DuplicatePreset.bl_idname, text="", icon="DUPLICATE").preset_id = preset.name
-        row.operator(preset_ops.MSFS2024_OT_RemovePreset.bl_idname, text="", icon="REMOVE").preset_id = preset.name
+        row.operator(preset_ops.MSFS2024_OT_IsolatePresetObjects.bl_idname, text="", icon="HIDE_OFF", emboss=is_root).preset_id = preset.name
+        row.operator(preset_ops.MSFS2024_OT_EditLayers.bl_idname, text="", icon="COLLECTION_NEW", emboss=is_root).preset_id = preset.name
+        row.operator(preset_ops.MSFS2024_OT_DuplicatePreset.bl_idname, text="", icon="DUPLICATE", emboss=is_root).preset_id = preset.name
+        row.operator(preset_ops.MSFS2024_OT_RemovePreset.bl_idname, text="", icon="PANEL_CLOSE", emboss=is_root).preset_id = preset.name
 
     @staticmethod
     def draw_preset_group(
@@ -518,26 +513,19 @@ class MSFS2024_UL_Presets(bpy.types.UIList, UL_TreeView):
         index: int,
         row: bpy.types.UILayout,
     ):
-
-        row.label(text=preset_group.group_name)
-        ope = row.operator(
-            preset_ops.MSFS2024_OT_RenamePreset.bl_idname,
-            text="",
-            icon="GREASEPENCIL",
-            emboss=False,
-        )
-        ope.group_id = preset_group.name
-        ope.preset_id = ""
+        # with emboss=False, the prop pointing to a text property looks like a label that can be double-clicked to edit it
+        row.prop(preset_group, "group_name", emboss=False)
+        is_root = item.parent_index == -1
 
         if bpy.app.version > (4, 0, 0):
             row.prop(preset_group, "folder_path", text="", placeholder="Export Folder")
         else:
             row.prop(preset_group, "folder_path", text="")
 
-        row.operator(preset_ops.MSFS2024_OT_IsolateGroupPresetObjects.bl_idname, text="", icon="HIDE_OFF").group_id = preset_group.name
-        row.operator(preset_ops.MSFS2024_OT_AddPreset.bl_idname, text="", icon="ADD").group_id = preset_group.name
-        row.operator(preset_ops.MSFS2024_OT_DuplicatePresetGroup.bl_idname, text="", icon="DUPLICATE").group_id = preset_group.name
-        row.operator(preset_ops.MSFS2024_OT_RemovePresetGroup.bl_idname, text="", icon="REMOVE").group_id = preset_group.name
+        row.operator(preset_ops.MSFS2024_OT_IsolateGroupPresetObjects.bl_idname, text="", icon="HIDE_OFF", emboss=is_root).group_id = preset_group.name
+        row.operator(preset_ops.MSFS2024_OT_AddPreset.bl_idname, text="", icon="ADD", emboss=is_root).group_id = preset_group.name
+        row.operator(preset_ops.MSFS2024_OT_DuplicatePresetGroup.bl_idname, text="", icon="DUPLICATE", emboss=is_root).group_id = preset_group.name
+        row.operator(preset_ops.MSFS2024_OT_RemovePresetGroup.bl_idname, text="", icon="PANEL_CLOSE", emboss=is_root).group_id = preset_group.name
 
     def draw_filter(self, context: bpy.types.Context, layout: bpy.types.UILayout):
 
@@ -626,13 +614,21 @@ def register():
         MultiExporterPresetGroup: ["group_name", "folder_path", "settings_preset"],
         MultiExporterPreset: ["preset_name", "folder_path", "settings_preset"]
     }
+
+    trigger_gen_tree_properties = {
+            MultiExporterPresetGroup: ["group_name"],
+            MultiExporterPreset: ["preset_name"]
+    }
+    
     _preset_tree_manager = PresetTreeManager(
         ul_tree_view_class=MSFS2024_UL_Presets,
         on_selection_function=_on_selection,
         alphabetical_order=True,
         multiselection_support=True,
         checkable_items=True,
-        multi_edit_properties=multi_edit_properties
+        multi_edit_properties=multi_edit_properties,
+        trigger_gen_tree_properties=trigger_gen_tree_properties,
+        colored_root_items=True
     )
 
     bpy.types.Scene.msfs_ui_tree_presets_sync_selection = bpy.props.BoolProperty( # type: ignore

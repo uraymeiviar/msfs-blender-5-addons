@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import bpy
 
-from io_scene_gltf2_msfs_fss.io.exp  import multi_export, multi_export_mode
+
 from io_scene_gltf2_msfs_fss.io.exp.presets  import MultiExporterPreset, MultiExporterPresetGroup
 
 from io_scene_gltf2_msfs_fss.ui.exp import preset_ops, preset_uilist
@@ -38,8 +38,8 @@ def _draw_active_preset_group_settings(
 
 def draw_presets_panel(layout: bpy.types.UILayout, context: bpy.types.Context):
     row = layout.row()
-    row.operator(preset_ops.MSFS2024_OT_AddPreset.bl_idname, text="Add Preset").group_id = ""
-    row.operator(preset_ops.MSFS2024_OT_AddPresetGroup.bl_idname, text="Add Group")
+    row.operator(preset_ops.MSFS2024_OT_AddPreset.bl_idname, text="Add Preset", icon="FILE_NEW").group_id = ""
+    row.operator(preset_ops.MSFS2024_OT_AddPresetGroup.bl_idname, text="Add Group", icon="NEWFOLDER")
     row = layout.row()
     row.prop(context.scene,"msfs_ui_tree_presets_sync_selection",text="Sync Selection")
     TREEVIEW_OT_ExpandAllItems.draw_expand_all_buttons(

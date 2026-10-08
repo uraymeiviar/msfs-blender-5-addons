@@ -7,7 +7,7 @@ MSFS2024 Properties.
 from __future__ import annotations
 from enum import Enum
 
-from ..common.usd_properties import *
+from max_bridge_asobo.bridge_base.usd_properties import *
 
 class MSFS2024_LightShapes:
     POINT = "point"

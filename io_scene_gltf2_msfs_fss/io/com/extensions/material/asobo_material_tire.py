@@ -35,7 +35,7 @@ class AsoboMaterialTireExtension:
     extension_textures = [
         MSFS2024_MaterialProperties.TIREMUDCUTOUTTEXTURE,
         MSFS2024_MaterialProperties.TIREDETAILSTEXTURE,
-        (MSFS2024_MaterialProperties.TIREMUDNORMALTEXTURE, "NORMAL")
+        MSFS2024_MaterialProperties.TIREMUDNORMALTEXTURE
     ]
     
     @staticmethod
@@ -87,18 +87,12 @@ class AsoboMaterialTireExtension:
             )
 
         for extension_texture in AsoboMaterialTireExtension.extension_textures:
-            texture_type="DEFAULT"
-            
-            if isinstance(extension_texture, tuple) and len(extension_texture) > 1:
-                texture_type=extension_texture[1]
-                extension_texture = extension_texture[0]
 
             MSFS2024_MaterialUtils.set_extension_texture(
                 extension=result,
                 material=blender_material,
                 attribute=extension_texture,
-                settings=export_settings,
-                texture_type=texture_type
+                settings=export_settings
             )
             
         if not result:

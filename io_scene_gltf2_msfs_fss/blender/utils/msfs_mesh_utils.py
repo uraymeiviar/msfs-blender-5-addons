@@ -16,7 +16,7 @@ Utilities for bpy.types.Mesh data
 """
 import bpy
 import numpy as np
-
+import uuid
 from .msfs_constants import DefaultVertexColor
 
 def add_default_vcolor(mesh:bpy.types.Mesh):
@@ -34,41 +34,57 @@ def add_default_vcolor(mesh:bpy.types.Mesh):
     return None
 
 
-def is_color_attribute_uniform_white(mesh:bpy.types.Mesh):
+def is_color_attribute_uniform_white(attribute: bpy.types.FloatColorAttribute):
     """
-    Checks if the render active color attribute in the specified mesh object 
+    Checks if the color attribute in the specified mesh object 
     is uniformly white.
     
-    Parameters:
-    - blender_mesh: The Blender mesh to check.
-
     Returns:
     - True if the render active color attribute is uniformly white, False otherwise.
     """
-    if mesh.attributes is None:
-        return False
-
-    render_color_index = mesh.attributes.render_color_index
-
-    if render_color_index == -1:
-        return False
-
-    if render_color_index >= len(mesh.color_attributes):
-        return False
-
-    render_active_attr = mesh.color_attributes[render_color_index]
-    color_data = render_active_attr.data
-
-    white_color = (1.0, 1.0, 1.0, 1.0)  
-    if all(color.color[:] == white_color for color in color_data):
+    
+    data = attribute.data
+    if not data:
         return True
 
-    return False
+    color_array = np.empty((len(data), 4), dtype=np.float32)
+    data.foreach_get("color", np.ravel(color_array))
 
-def get_active_color_attribute(mesh: bpy.types.Mesh) -> None | bpy.types.Attribute:
-    """Set color attribute to be active in viewport and render.
+    return np.all(color_array == 1)
+
+
+def get_active_color_attribute(mesh: bpy.types.Mesh) -> None | bpy.types.FloatColorAttribute:
+    """Get color attribute to be active in viewport.
+    Corresponds to attribute selected (outlined in blue) in Color Attributes panel.
+    Differs from the active_render attributes.
     """
-    return mesh.attributes.active_color
+    if not mesh.attributes:
+        return None
+    return mesh.attributes.active_color # type: ignore
+
+def get_active_render_color_index(mesh: bpy.types.Mesh) -> None | int:
+    """Get color attribute to be active in viewport.
+    Corresponds to attribute selected (outlined in blue) in Color Attributes panel.
+    Differs from the active_render attributes.
+    """
+    if not mesh.color_attributes:
+        return None
+
+    return mesh.color_attributes.render_color_index
+
+def get_active_render_color_attribute(mesh: bpy.types.Mesh) -> None | bpy.types.FloatColorAttribute:
+    """Get color attribute to be active in viewport.
+    Corresponds to attribute selected (outlined in blue) in Color Attributes panel.
+    Differs from the active_render attributes.
+    """
+    index = get_active_render_color_index(mesh)
+    if index is None:
+        return None
+
+    if index >= len(mesh.color_attributes):
+        return None
+
+    return mesh.color_attributes[index] # type: ignore
 
 def complies_with_default_vertex_color(color_attribute: bpy.types.Attribute) -> bool:
     """Check if color attribute type and domain match with
@@ -100,18 +116,20 @@ def swap_uv_layers(
     mesh: bpy.types.Mesh,
     idx: int,
     other_idx: int,
-    preserve_active_idx: bool = True,
+    preserve_active_idx: bool = True
 ):
     """Swap uv layers in obj.data.uv_layers list.
     Can preserve active and active_render index.
     """
     size = len(mesh.loops) * 2
-    uvs_a = np.empty(size, dtype="float32")
-    uvs_b = np.empty(size, dtype="float32")
+    uvs_a = np.empty(size, dtype=np.float32)
+    uvs_b = np.empty(size, dtype=np.float32)
 
     layers = mesh.uv_layers
     uv_layer_a = layers[idx]
     uv_layer_b = layers[other_idx]
+    
+
     uv_layer_a.data.foreach_get("uv", uvs_a)
     uv_layer_b.data.foreach_get("uv", uvs_b)
 
@@ -131,7 +149,12 @@ def swap_uv_layers(
     uv_layer_a_name = uv_layer_a.name
     uv_layer_b_name = uv_layer_b.name
     # Rename layers first to prevent numbered suffix ".001"
-    uv_layer_a.name = "temp"
-    uv_layer_b.name = "temp"
+    # Be carefull, uv_layer ref can be invalid after a rename, and point to another layer in the list.
+    layer_a_temp_name = str(uuid.uuid4())
+    layer_b_temp_name = str(uuid.uuid4())
+    uv_layer_a.name = layer_a_temp_name
+    uv_layer_b.name = layer_b_temp_name
+    uv_layer_a = mesh.uv_layers[layer_a_temp_name]
+    uv_layer_b = mesh.uv_layers[layer_b_temp_name]
     uv_layer_a.name = uv_layer_b_name
     uv_layer_b.name = uv_layer_a_name

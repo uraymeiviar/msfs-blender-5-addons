@@ -25,7 +25,7 @@ class MSFS2024_OT_ReloadLODGroups(bpy.types.Operator):
         # Reset Multiselection
         lod_group_tree_manager.unselect_all()
         lod_groups.reload_lod_groups(context.scene)
-        lod_group_tree_manager.generate_ui_tree_collection()
+        lod_group_tree_manager.generate_tree_collection()
         return {"FINISHED"}
 
 

@@ -9,6 +9,7 @@ from enum import Enum
 
 from _addons_common import p4, file_info
 
+
 from ..com import msfs_logs
 
 if TYPE_CHECKING:
@@ -229,13 +230,10 @@ def _save_xml(root: ET.Element, xml_path: str):
     xml_string = b"\n".join(line for line in xml_string.splitlines() if line.strip())
     xml_base_name = os.path.basename(xml_path)
     # Checkout File
-    if p4.use_p4():
-        p4_output = p4.P4LogOutput()
-        if not p4.p4_edit(xml_path, p4_output=p4_output):
-            MSFS2024_LOGGER.error(
-                message=f"'{xml_base_name}' : Could not be opened for edit.",
-                details=f"P4 error:\n{str(p4_output)}",
-            )
+    if p4.USE_P4 and not p4.p4_session_edit(xml_path):
+        MSFS2024_LOGGER.error(
+            message=f"'{xml_base_name}' : Could not be opened for edit.",
+        )
 
     xml_read_only = file_info.is_read_only(xml_path)
 

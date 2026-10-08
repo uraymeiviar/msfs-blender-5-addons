@@ -16,7 +16,7 @@ from lod_tools_msfs_2024 import (
     lod_viewer,
     active_lod_viewer
 )
-
+from lod_tools_msfs_2024.constants import IS_BLENDER_4_2_OR_SUP
 debug_draw_handle = None
 
 def _text_dimensions(text, size: int, font_id: int = 0) -> tuple[float, float]:
@@ -25,7 +25,7 @@ def _text_dimensions(text, size: int, font_id: int = 0) -> tuple[float, float]:
 
 # Region Statics
 # Outline not supported in 3.6 and inferior
-SHADOW_LEVEL = 6 if bpy.app.version >= (4, 2, 0) else 0
+SHADOW_LEVEL = 6 if IS_BLENDER_4_2_OR_SUP else 0
 WHITE_COLOR = (1, 1, 1)
 LOD_DEBUG_COLORS_COUNT = 100
 LOD_DEBUG_COLORS = []

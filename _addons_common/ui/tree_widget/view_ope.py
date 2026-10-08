@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING, Iterable
 
 import bpy
 
+from _addons_common.ui.tree_widget.item import TreeItemColor
+
 if TYPE_CHECKING:
     from _addons_common.ui.tree_widget.item import TreeItem
     from _addons_common.ui.tree_widget.manager import TreeManager
@@ -52,7 +54,7 @@ class TREEVIEW_OT_SetItemsSelection(bpy.types.Operator):
         if not selected_items and active_item.index == self.old_active_index:
             # User alt + click on active without any selection
             active_item.selected = False
-            tree_manager.set_ui_tree_active_index(None, update_selection=False)
+            tree_manager.set_active_index(None, update_selection=False)
         else:
             # User alt + click another item
             active_item.selected = not active_item.selected
@@ -75,7 +77,7 @@ class TREEVIEW_OT_SetItemsSelection(bpy.types.Operator):
                     new_active_index = item.index
 
                     break
-                tree_manager.set_ui_tree_active_index(
+                tree_manager.set_active_index(
                     new_active_index, update_selection=False
                 )
 
@@ -86,7 +88,7 @@ class TREEVIEW_OT_SetItemsSelection(bpy.types.Operator):
         tree_manager.unselect_all()
         # Set active as selected
         active_item.selected = True
-        tree_manager.set_ui_tree_active_index(
+        tree_manager.set_active_index(
             self.new_active_index, update_selection=False
         )
 
@@ -99,7 +101,7 @@ class TREEVIEW_OT_SetItemsSelection(bpy.types.Operator):
         if not tree_manager:
             return {"FINISHED"}
 
-        item_list = tree_manager.get_ui_tree_collection()
+        item_list = tree_manager.get_tree_collection()
         active_item = tree_manager.get_active_item()
 
         if not active_item:
@@ -161,7 +163,7 @@ def _set_visible_active_after_expand_edit(tree_manager: TreeManager, active_item
     if not active_item or (not active_item.hidden and tree_manager.item_visible_after_ui_filter(active_item)):
         return
     
-    item_list = tree_manager.get_ui_tree_collection()
+    item_list = tree_manager.get_tree_collection()
     # Only search items before the current active index”
     item_list = item_list[:active_item_index]
     new_active_index = -1
@@ -171,7 +173,7 @@ def _set_visible_active_after_expand_edit(tree_manager: TreeManager, active_item
         new_active_index = item.index
         
         break
-    tree_manager.set_ui_tree_active_index(new_active_index, update_selection=False)
+    tree_manager.set_active_index(new_active_index, update_selection=False)
 
 class TREEVIEW_OT_ToggleItemExpand(bpy.types.Operator):
 
@@ -190,7 +192,7 @@ class TREEVIEW_OT_ToggleItemExpand(bpy.types.Operator):
         tree_manager :TreeManager = TreeManager.tree_manager_instances.get(self.tree_manager_name, None)
         if not tree_manager:
             return {"FINISHED"}
-        item_list = tree_manager.get_ui_tree_collection()
+        item_list = tree_manager.get_tree_collection()
         item: TreeItem
         item = item_list[self.item_index]
 
@@ -211,7 +213,7 @@ class TREEVIEW_OT_ToggleItemExpand(bpy.types.Operator):
             if index_to_expand:
                 index_to_expand.reverse()
                 for i in index_to_expand:
-                    tree_manager.expand_ui_tree_item(
+                    tree_manager.expand_tree_item(
                         expand=expand,
                         item_index=i,
                         set_active=False,
@@ -225,11 +227,11 @@ class TREEVIEW_OT_ToggleItemExpand(bpy.types.Operator):
             _set_visible_active_after_expand_edit(tree_manager, active_item_index)
 
         else:
-            tree_manager.expand_ui_tree_item(
+            tree_manager.expand_tree_item(
                 expand=expand,
                 item_index=self.item_index,
                 set_active=True,
-                update_selection=False,
+                update_selection=True,
             )
         return {"FINISHED"}
 
@@ -250,7 +252,7 @@ class TREEVIEW_OT_ExpandAllItems(bpy.types.Operator):
         tree_manager :TreeManager = TreeManager.tree_manager_instances.get(self.tree_manager_name, None)
         if not tree_manager:
             return {"FINISHED"}
-        item_list = tree_manager.get_ui_tree_collection()
+        item_list = tree_manager.get_tree_collection()
 
         active_item = tree_manager.get_active_item()
         active_item_index = -1
@@ -266,7 +268,7 @@ class TREEVIEW_OT_ExpandAllItems(bpy.types.Operator):
         if index_to_expand:
             index_to_expand.reverse()
             for i in index_to_expand:
-                tree_manager.expand_ui_tree_item(
+                tree_manager.expand_tree_item(
                     expand=self.expand, 
                     item_index=i, 
                     set_active=False, 
@@ -330,3 +332,48 @@ class TREEVIEW_OT_CheckAllItems(bpy.types.Operator):
 
 
 # endregion
+
+class TREEVIEW_OT_SetRootItemColor(bpy.types.Operator):
+    bl_idname = "treeview.set_root_item_color"
+    bl_label = "Set Color Tag"
+    bl_description = "Set a color tag for the selected items"
+    bl_options = {"INTERNAL"}
+
+    
+    color_tag: bpy.props.StringProperty() # type: ignore
+    tree_manager_name: bpy.props.StringProperty() # type: ignore
+    
+    def execute(self, context: bpy.types.Context):
+        from _addons_common.ui.tree_widget.manager import TreeManager
+        tree_manager: TreeManager | None = TreeManager.tree_manager_instances.get(
+            self.tree_manager_name, None
+        )
+        if not tree_manager:
+            return {"FINISHED"}
+        active_item = tree_manager.get_active_item()
+        if not active_item:
+            return {"FINISHED"}
+        
+        if active_item.parent_index == -1:
+            active_item.color_tag = self.color_tag
+        
+        if not tree_manager.MULTISELECTION_SUPPORT:
+            return {"FINISHED"}
+        
+        for item in tree_manager.get_selected_items():
+            if item.parent_index == -1:
+                item.color_tag = self.color_tag
+                
+        context.area.tag_redraw()
+        return {"FINISHED"}
+
+def draw_root_item_colors_ops(tree_manager_name: str, layout: bpy.types.UILayout):
+
+    row = layout.row(align=True)
+    row.label(
+        text="", icon="BLANK1"
+    )  # Use empty label, row.separartor() doesnt work in this case
+    for item_color in TreeItemColor:
+        ope = row.operator(TREEVIEW_OT_SetRootItemColor.bl_idname, text="", icon=item_color.icon)
+        ope.color_tag = item_color.identifier
+        ope.tree_manager_name = tree_manager_name

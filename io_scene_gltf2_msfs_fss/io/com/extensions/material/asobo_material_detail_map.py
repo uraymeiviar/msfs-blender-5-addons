@@ -33,7 +33,7 @@ class AsoboMaterialDetailExtension:
     extension_textures = [
         MSFS2024_MaterialProperties.DETAILCOLORTEXTURE,
         MSFS2024_MaterialProperties.DETAILOMRTEXTURE,
-        (MSFS2024_MaterialProperties.DETAILNORMALTEXTURE, "NORMAL"),
+        MSFS2024_MaterialProperties.DETAILNORMALTEXTURE,
         MSFS2024_MaterialProperties.BLENDMASKTEXTURE
     ]
 
@@ -56,8 +56,6 @@ class AsoboMaterialDetailExtension:
             )
         
         for extension_texture in AsoboMaterialDetailExtension.extension_textures:
-            if isinstance(extension_texture, tuple) and len(extension_texture) > 1:
-                extension_texture = extension_texture[0]
 
             MSFS2024_MaterialUtils.get_extension_texture(
                 extension=extension,
@@ -84,18 +82,11 @@ class AsoboMaterialDetailExtension:
         result = {}
 
         for extension_texture in AsoboMaterialDetailExtension.extension_textures:
-            texture_type="DEFAULT"
-
-            if isinstance(extension_texture, tuple) and len(extension_texture) > 1:
-                texture_type=extension_texture[1]
-                extension_texture = extension_texture[0]
-
             MSFS2024_MaterialUtils.set_extension_texture(
                 extension=result,
                 material=blender_material,
                 attribute=extension_texture,
                 settings=export_settings,
-                texture_type=texture_type,
             )
 
         

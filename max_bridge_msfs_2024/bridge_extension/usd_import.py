@@ -3,15 +3,23 @@ from __future__ import annotations
 import bpy
 
 
-from max_bridge_msfs_2024 import logger, addon_prefs
-from max_bridge_msfs_2024.common import  obj_utils,anim_utils
-from max_bridge_msfs_2024.common.usd_import import *
-from max_bridge_msfs_2024.common.usd_properties import *
+from max_bridge_asobo import logger, importers
+from max_bridge_asobo.bridge_base import obj_utils, anim_utils
+from max_bridge_asobo.bridge_base.usd_import import *
+from max_bridge_asobo.bridge_base.usd_properties import *
 
-from max_bridge_msfs_2024.msfs_2024 import import_utils, setting_preset_utils, dependencies
-from max_bridge_msfs_2024.msfs_2024 import mat_utils as msfs_2024_mat_utils
-from max_bridge_msfs_2024.msfs_2024 import obj_utils as msfs_2024_obj_utils
-from max_bridge_msfs_2024.msfs_2024.msfs_properties import *
+from max_bridge_msfs_2024 import addon_prefs
+
+from max_bridge_msfs_2024.bridge_extension import (
+    attrib_utils,
+    import_utils,
+    setting_preset_utils,
+    dependencies,
+    mat_utils as msfs_2024_mat_utils,
+    obj_utils as msfs_2024_obj_utils
+)
+
+from max_bridge_msfs_2024.bridge_extension.msfs_properties import *
 
 
 from io_scene_gltf2_msfs_fss.io.exp import multi_export_mode
@@ -22,8 +30,7 @@ logging = logger.getLogger()
 
 
 class MSFS2024USDImporter(GenericUSDImporter):
-    IMPORTER = "MSFS2024USDImporter"  # used in export_definition
-    DCC = "BLENDER"  # used in export_definition
+    ID = "MSFS2024USD"  # Must be identical in corresponding Exporter Class
 
     @classmethod
     def can_import(cls) -> bool:
@@ -71,7 +78,6 @@ class MSFS2024USDImporter(GenericUSDImporter):
     @classmethod
     def on_before_definitions_set(
         cls,
-        imported_objects: list[bpy.types.Object],
         imported_object_defs: OBJECT_DEFS,
         imported_material_defs: MATERIAL_DEFS,
     ):
@@ -84,27 +90,32 @@ class MSFS2024USDImporter(GenericUSDImporter):
     @classmethod
     def on_after_import(
         cls,
-        imported_objects: list[bpy.types.Object],
         imported_object_defs: OBJECT_DEFS,
         imported_material_defs: MATERIAL_DEFS,
     ):
         """
+        Rename UV channels to follow MSFS2024 convention.
         Reload LodGroups after objects are imported
         """
+        for obj in imported_object_defs.keys():
+            if hasattr(obj, "data"):
+                attrib_utils.rename_uv_maps(obj)
         # Needed to refresh checkboxes
         bpy.ops.msfs2024.reload_lod_groups()
 
     @classmethod
-    def set_obj_custom_properties(cls, obj:bpy.types.Object, properties: dict) :
+    def set_obj_custom_properties(cls, obj: bpy.types.Object, properties: dict) :
         """
         MSFS2024 LODGroup creations.
         """
+        
+
         prefs = addon_prefs.get_addon_prefs()
         if prefs.msfs_2024_set_exporter_settings:
             cls._set_obj_lod_group(obj, properties)
 
     @classmethod
-    def set_material_custom_properties(cls, material:bpy.types.Material, properties: dict) :
+    def set_material_custom_properties(cls, material: bpy.types.Material, properties: dict) :
         """
         MSFS 2024 Material Setup
         """
@@ -264,7 +275,7 @@ class MSFS2024USDImporter(GenericUSDImporter):
         preset_tree_manager = preset_uilist.get_preset_tree_manager()
         if not preset_tree_manager:
             return
-        preset_tree_manager.generate_ui_tree_collection()
+        preset_tree_manager.generate_tree_collection()
 
     @classmethod
     def _setup_actions_from_anim_groups(cls, 
@@ -311,6 +322,7 @@ class MSFS2024USDImporter(GenericUSDImporter):
                 name = f"{anim_def.name}_{obj_def.name}"
 
                 new_action = anim_utils.extract_action_range(
+                    datablock=obj,
                     source_action=imported_action,
                     frame_range=(anim_def.frame_start, anim_def.frame_end),
                     name=name,
@@ -374,6 +386,7 @@ class MSFS2024USDImporter(GenericUSDImporter):
 
                 name = f"{anim_def.name}_{armature.name}"
                 new_action = anim_utils.extract_action_range(
+                    datablock=armature,
                     source_action=imported_action,
                     frame_range=(anim_def.frame_start, anim_def.frame_end),
                     name=name,
@@ -390,3 +403,18 @@ class MSFS2024USDImporter(GenericUSDImporter):
                 anim_utils.remove_object_action(armature)
             elif anim_utils.is_action_static(imported_action):
                 anim_utils.remove_object_action(armature)
+
+    # region Preset Settings ui
+    @classmethod
+    def draw_settings(cls, layout: bpy.types.UILayout):
+        prefs = addon_prefs.get_addon_prefs()
+        layout.prop(prefs, "msfs_2024_set_exporter_settings")
+
+    # enregion
+
+
+def register():
+    importers.register_importer_class(MSFS2024USDImporter)
+
+def unregister():
+    importers.unregister_importer_class(MSFS2024USDImporter)

@@ -96,7 +96,17 @@ class MultiExporterLOD(bpy.types.PropertyGroup):
         scene_objects = scene.objects
         objects = set()
 
-        if export_mode == ExportMode.COLLECTIONS:
+        if export_mode == ExportMode.COLLECTIONS :
+            # Collection can be None if deleted
+            if not self.collection:
+                return objects
+            try:
+                in_scene = self.collection in scene.collection.children_recursive
+                if not in_scene:
+                    return objects
+            except:
+                return objects
+            
             objects = set(self.collection.all_objects)
         elif export_mode == ExportMode.OBJECTS:
             in_scene = False

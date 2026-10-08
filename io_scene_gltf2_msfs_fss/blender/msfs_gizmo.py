@@ -8,8 +8,11 @@ from dataclasses import dataclass
 
 from _addons_common import geometry_node_utils
 
-from io_scene_gltf2_msfs_fss.datafiles.asset_library import NodeGroupLibrary, MSFS2024CollisionInputs
-
+from io_scene_gltf2_msfs_fss.datafiles.asset_library import (
+    NodeGroupLibrary,
+    MSFS2024CollisionInputs,
+    MSFS2024CollisionTypeEnum,
+)
 
 class GizmoTypes(Enum):
     # Collisions
@@ -93,17 +96,22 @@ def get_gizmo_attributes(obj: bpy.types.Object) -> GizmoAttributes | None:
     is_ground_collider = False
 
     if collision_modifier:
-        modifier_type_index: int = geometry_node_utils.get_modifier_input(
+        modifier_type_index: int | str = geometry_node_utils.get_modifier_input_value(
             collision_modifier, MSFS2024CollisionInputs.TYPE.input_label
         )  # type: ignore
-        gizmo_type = GizmoTypes.get_by_index(modifier_type_index)
         if gizmo_type is geometry_node_utils.NotFound:
             print(
                 f"{obj.name} - Modifier {collision_modifier.name}: {MSFS2024CollisionInputs.TYPE.input_label} was not found!"
             )
             gizmo_type = None
 
-        is_road_collider = geometry_node_utils.get_modifier_input(
+        if bpy.app.version >= (5,2,0):
+            modifier_type_index = MSFS2024CollisionTypeEnum.get_enum_string_index(modifier_type_index)
+
+        gizmo_type = GizmoTypes.get_by_index(modifier_type_index)
+        
+        
+        is_road_collider = geometry_node_utils.get_modifier_input_value(
             collision_modifier,
             MSFS2024CollisionInputs.ROAD_COLLIDER.input_label,
         )
@@ -112,7 +120,7 @@ def get_gizmo_attributes(obj: bpy.types.Object) -> GizmoAttributes | None:
                 f"{obj.name} - Modifier {collision_modifier.name}: {MSFS2024CollisionInputs.ROAD_COLLIDER.input_label} was not found!"
             )
             is_road_collider = False
-        is_ground_collider = geometry_node_utils.get_modifier_input(
+        is_ground_collider = geometry_node_utils.get_modifier_input_value(
             collision_modifier,
             MSFS2024CollisionInputs.GROUND_COLLIDER.input_label,
         )
@@ -132,21 +140,28 @@ def get_gizmo_attributes(obj: bpy.types.Object) -> GizmoAttributes | None:
 def set_collision_type(collision_mod: bpy.types.Modifier, gizmo_type: GizmoTypes):
 
     inputs: MSFS2024CollisionInputs = NodeGroupLibrary.COLLISIONS.node_group_inputs
-    geometry_node_utils.set_modifier_input(
-        collision_mod, inputs.TYPE.input_label, gizmo_type.index
-    )
+    if bpy.app.version >= (5,2,0):
+        geometry_node_utils.set_modifier_input_value(
+            collision_mod,
+            inputs.TYPE.input_label,
+            MSFS2024CollisionTypeEnum.get_enum_string(gizmo_type.index),
+        )
+    else:
+        geometry_node_utils.set_modifier_input_value(
+            collision_mod, inputs.TYPE.input_label, gizmo_type.index
+        )
 
 def set_is_road_collider(collision_mod: bpy.types.Modifier, value: bool):
 
     inputs: MSFS2024CollisionInputs = NodeGroupLibrary.COLLISIONS.node_group_inputs
-    geometry_node_utils.set_modifier_input(
+    geometry_node_utils.set_modifier_input_value(
         collision_mod, inputs.ROAD_COLLIDER.input_label, value
     )
 
 def set_is_ground_collider(collision_mod: bpy.types.Modifier, value: bool):
 
     inputs: MSFS2024CollisionInputs = NodeGroupLibrary.COLLISIONS.node_group_inputs
-    geometry_node_utils.set_modifier_input(
+    geometry_node_utils.set_modifier_input_value(
         collision_mod, inputs.GROUND_COLLIDER.input_label, value
     )
 
@@ -188,7 +203,7 @@ def _set_gizmo_scale(gizmo_obj: bpy.types.Object, scale: list[float]):
         max_value = max(scale)
         gizmo_obj.scale = [max_value] * 3
     elif collision_modifier:
-        gizmo_type = geometry_node_utils.get_modifier_input(
+        gizmo_type = geometry_node_utils.get_modifier_input_value(
             collision_modifier, MSFS2024CollisionInputs.TYPE.value
         )
         if gizmo_type is geometry_node_utils.NotFound:

@@ -1,20 +1,11 @@
-# Copyright 2023-2024 The glTF-Blender-IO-MSFS2024 authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 from __future__ import annotations
+import traceback
 from typing import TYPE_CHECKING
-from copy import copy
+from types import FunctionType
 
+from copy import copy
+from pathlib import Path
+import traceback
 
 import bpy
 
@@ -22,18 +13,20 @@ from io_scene_gltf2_msfs_fss import get_version_string
 from io_scene_gltf2_msfs_fss.io.exp import export_settings
 from io_scene_gltf2.io.com.gltf2_io_extensions import Extension
 
+from io_scene_gltf2_msfs_fss.io.com.extensions.object.asobo_facial_animation import AsoboFacialAnimation
+from io_scene_gltf2_msfs_fss.io.com.extensions.object.asobo_gizmo_object import AsoboGizmoObject
+from io_scene_gltf2_msfs_fss.io.com.extensions.object.asobo_softbody_mesh import AsoboSoftBodyMesh
+from io_scene_gltf2_msfs_fss.io.com.extensions.object.asobo_unique_id import AsoboUniqueId
+from io_scene_gltf2_msfs_fss.io.com.extensions import asobo_property_animation
+from io_scene_gltf2_msfs_fss.io.com.msfs_material_extensions import MSFS2024_MaterialExtension
+from io_scene_gltf2_msfs_fss.io.com.msfs_light_extensions import MSFS2024_LightExtension
+from io_scene_gltf2_msfs_fss.io.com.msfs_nodes_utils import MSFS2024_NodeUtils
+from io_scene_gltf2_msfs_fss.io.com import msfs_gltf_mesh_utils
+from io_scene_gltf2_msfs_fss.io.com.msfs_material_utils import MSFS2024_MaterialUtils
+from io_scene_gltf2_msfs_fss.io.com.msfs_data_utils import MSFS2024_DataUtils
 
-from ..com.extensions.object.asobo_facial_animation import AsoboFacialAnimation
-from ..com.extensions.object.asobo_gizmo_object import AsoboGizmoObject
-from ..com.extensions.object.asobo_softbody_mesh import AsoboSoftBodyMesh
-from ..com.extensions.object.asobo_unique_id import AsoboUniqueId
-from ..com.extensions import asobo_property_animation
-from ..com.msfs_material_extensions import MSFS2024_MaterialExtension
-from ..com.msfs_light_extensions import MSFS2024_LightExtension
-from ..com.msfs_nodes_utils import MSFS2024_NodeUtils
-from ..com import msfs_gltf_mesh_utils
-from ..com.msfs_material_utils import MSFS2024_MaterialUtils
-from ..com.msfs_data_utils import MSFS2024_DataUtils
+from io_scene_gltf2_msfs_fss.io.com import msfs_logs
+
 
 if TYPE_CHECKING:
     from io_scene_gltf2.io.com import gltf2_io
@@ -42,6 +35,21 @@ if TYPE_CHECKING:
     else:
         from io_scene_gltf2.blender.exp import tree as gltf2_tree
 
+
+def hook_wrapper(func: FunctionType):
+    """Safely execute hook and push exception to logs.
+    """
+    def inner(*args, **kwargs):
+        try:
+            func(*args, **kwargs)
+        except:
+            MSFS2024_LOGGER = msfs_logs.get_logger()
+            MSFS2024_LOGGER.error(
+                message=f"Exception in Hook '{func.__name__}'",
+                details=f"Report this error to DevSupport:\n{str(traceback.format_exc())}",
+            )
+        
+    return inner
 
 class Export:
     """
@@ -52,6 +60,7 @@ class Export:
         - vtree_before_filter_hook
         - vtree_after_filter_hook
         - gather_material_hook
+        - gather_image_hook
         - gather_mesh_hook
         - gather_joint_hook
         - gather_skin_hook
@@ -92,6 +101,7 @@ class Export:
             and self.msfs_export_settings.enable_msfs_extension
         ) # type: ignore
 
+    @hook_wrapper
     def gather_asset_hook(
         self,
         gltf2_asset: gltf2_io.Asset,
@@ -119,6 +129,10 @@ class Export:
         gltf2_asset.generator += f" with Blender v{self._get_blender_version_string()}"
 
         asobo_property_animation.prepare_for_export(khronos_export_settings)
+        # Reset Texture infos Cache
+        MSFS2024_MaterialUtils.reset_tex_infos_cache()
+
+    @hook_wrapper   
     def vtree_before_filter_hook(self, vtree: gltf2_tree.VExportTree, khronos_export_settings: dict):
         """
         Launched before Vtree filter. 
@@ -171,6 +185,7 @@ class Export:
 
                 self._gather_nodes_transforms(children_vnodes, vtree)
 
+    @hook_wrapper
     def vtree_after_filter_hook(self, vtree: gltf2_tree.VExportTree, khronos_export_settings:dict):
         # Retrieve the glTF node transform here because this hook runs on parent nodes
         # before their children. This ensures children later inherit the updated parent
@@ -178,6 +193,7 @@ class Export:
         if vtree.nodes:
             self._gather_nodes_transforms(vtree.nodes.values(), vtree)
 
+    @hook_wrapper
     def gather_material_hook(
         self,
         gltf2_material: gltf2_io.Material,
@@ -189,6 +205,25 @@ class Export:
         """
         if not self._hooks_enabled():
             return
+
+        # Clear textures detected by the built-in glTF exporter.
+        # Bug found in io_scene_gltf2/blender/exp/nodes.py (__gather_mesh()):
+        # The following line can return invalid materials from the evaluated mesh
+        # when Apply Modifiers is enabled:
+        # materials = tuple(mat for mat in blender_mesh.materials)
+        # Bug occurs when "Export In Background" Export is disabled.
+        gltf2_material.emissive_texture = None
+        gltf2_material.normal_texture = None
+        gltf2_material.occlusion_texture = None
+        pbr_metallic_roughness = gltf2_material.pbr_metallic_roughness
+        if pbr_metallic_roughness:
+            pbr_metallic_roughness.base_color_texture = None
+            pbr_metallic_roughness.metallic_roughness_texture = None
+
+        if bpy.app.version >= (5, 2, 0):
+            # in 5.2 passed blender_material is bpy.types.InlineShaderNodes instead of bpy.types.Material ...
+            # Retrieve material with name
+            blender_material = bpy.data.materials.get(gltf2_material.name)
 
         _blender_material = blender_material
         original = MSFS2024_MaterialUtils.get_original_material(blender_material)
@@ -208,6 +243,33 @@ class Export:
                 _blender_material,
                 khronos_export_settings,
             )
+    @staticmethod
+    def _fix_gltf2_image(gltf2_image: gltf2_io.Image):
+        # Correct image name when it ends with unwanted suffixes like '.png.png' or '.png.001'
+        gltf2_image.name = gltf2_image.name.split(".", 1)[0]
+        image_data = gltf2_image.uri
+        if not image_data:
+            return
+        
+        if hasattr(image_data, "_name"):
+            image_data._name = gltf2_image.name
+        if hasattr(image_data, "_adjusted_name"):
+            image_data._adjusted_name = image_data.name + image_data.file_extension
+        if hasattr(image_data, "uri"):
+            uri = Path(image_data.uri).with_name(image_data.name)
+            uri = uri.with_suffix(image_data.file_extension)
+            image_data.uri = uri.as_posix()
+
+    if bpy.app.version < (4, 5, 0):
+        @hook_wrapper
+        def gather_image_hook(self, gltf2_image: gltf2_io.Image, blender_shader_sockets, khronos_export_settings: dict):
+
+            self._fix_gltf2_image(gltf2_image)
+    else:
+        @hook_wrapper
+        def gather_image_hook(self, gltf2_image: gltf2_io.Image, mapping, blender_shader_sockets, khronos_export_settings: dict):
+
+            self._fix_gltf2_image(gltf2_image)
 
     def _gather_mesh_hook(self, 
             gltf2_mesh: gltf2_io.Mesh,
@@ -225,15 +287,17 @@ class Export:
         if original_mesh_name is not None:
             gltf2_mesh.name = original_mesh_name
 
-        # Remove uniform white vertex color attribute since
-        # no vertex color in shaders results in a default white value.
-        msfs_gltf_mesh_utils.remove_color_attribute(
+        msfs_gltf_mesh_utils.clean_color_attributes(
+            gltf2_mesh=gltf2_mesh,
+            blender_mesh=blender_mesh
+        )
+        msfs_gltf_mesh_utils.clean_texcoord_attributes(
             gltf2_mesh=gltf2_mesh,
             blender_mesh=blender_mesh
         )
 
     if bpy.app.version < (3, 6, 0):
-
+        @hook_wrapper
         def gather_mesh_hook(
             self,
             gltf2_mesh: gltf2_io.Mesh,
@@ -248,7 +312,7 @@ class Export:
 
             self._gather_mesh_hook(gltf2_mesh, blender_mesh)
     else:
-
+        @hook_wrapper
         def gather_mesh_hook(
             self,
             gltf2_mesh: gltf2_io.Mesh,
@@ -260,14 +324,15 @@ class Export:
             khronos_export_settings: dict,
         ):
             self._gather_mesh_hook(gltf2_mesh, blender_mesh)
-
+    
+    @hook_wrapper
     def gather_joint_hook(
         self,
         gltf2_node: gltf2_io.Node,
         blender_bone: bpy.types.PoseBone,
         khronos_export_settings: dict
     ):
-
+        
         if not self._hooks_enabled():
             return
 
@@ -282,14 +347,15 @@ class Export:
             blender_object=blender_bone
         )
         return
-
+    
+    @hook_wrapper
     def gather_node_hook(
         self, 
         gltf2_node: gltf2_io.Node,
         blender_object: bpy.types.Object,
         khronos_export_settings: dict
     ):  
-
+        
         if not self._hooks_enabled():
             return
 
@@ -327,6 +393,7 @@ class Export:
         )
 
     if bpy.app.version >= (3, 6, 0):
+        @hook_wrapper
         def pre_gather_tracks_hook(self, blender_object: bpy.types.Object, khronos_export_settings: dict):
             if not self._hooks_enabled():
                 return
@@ -339,7 +406,8 @@ class Export:
                 return
             for track in blender_object.animation_data.nla_tracks:
                 asobo_property_animation.gather_track_animated_channels(blender_object, track, self.scene_vexport_nodes_copy)
-
+    
+    @hook_wrapper
     def gather_scene_hook(
         self,
         gltf2_scene: gltf2_io.Scene,
@@ -365,7 +433,8 @@ class Export:
 
         for parent_name, neutral_node in neutral_nodes_parent_map.items():
             AsoboUniqueId.add_unique_id_to_neutral_bone(neutral_node, parent_name)
-
+    
+    @hook_wrapper
     def gather_animation_hook(
         self,
         gltf2_animation: gltf2_io.Animation,
@@ -383,7 +452,8 @@ class Export:
             gltf2_object=gltf2_animation,
             blender_object=blender_action
         )
-
+    
+    @hook_wrapper
     def gather_gltf_hook(
         self,
         active_scene_idx: int,
@@ -402,7 +472,8 @@ class Export:
         # This must be done in this hook because it is called before the exporter's
         # `__create_buffer` function (see `__export` function in the glTF addon).
         asobo_property_animation.init_mat_anim_extensions(animations)
-
+    
+    @hook_wrapper
     def gather_gltf_extensions_hook(
         self,
         gltf2_plan: gltf2_io.Gltf,

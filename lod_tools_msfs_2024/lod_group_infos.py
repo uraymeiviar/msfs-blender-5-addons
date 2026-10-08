@@ -53,6 +53,8 @@ class LODGroupInfos:
 
     root_origin_settings: RootOriginSettings | None = None # Settings applied to all LOD Roots
 
+    apply_modifiers: bool = True
+
     has_per_object_origin_settings: bool = False
 
     lod_viewer_offset: mathutils.Matrix | None = None # LOD Viewer Offset from LOD0 first root
@@ -163,6 +165,9 @@ def _capture_export_settings(
     """
     group_export_settings = lod_group_source.get_export_settings_preset()
     if group_export_settings:
+
+        lod_group_infos.apply_modifiers = group_export_settings.export_apply
+
         if group_export_settings.reset_origins == export_settings.ResetOriginMode.ALL_ROOTS.identifier:
             export_transform_properties = group_export_settings.export_transform_properties
             if not (export_transform_properties.reset_translation or export_transform_properties.reset_rotation or export_transform_properties.reset_scale):

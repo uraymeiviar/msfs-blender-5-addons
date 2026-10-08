@@ -91,8 +91,8 @@ class MSFS2024_Windshield(MSFS2024_Material):
         MSFS2024_MaterialProperties.WINDSHIELDINSECTSALBEDOTEXTURE,
         MSFS2024_MaterialProperties.WINDSHIELDINSECTSMASKTEXTURE,
 
-        MSFS2024_MaterialProperties.WINDSHIELDSSRATTENUATION,
         MSFS2024_MaterialProperties.WINDSHIELDCUBEMAPREFLECTIONMASKING,
+        MSFS2024_MaterialProperties.WINDSHIELDSSRATTENUATION,
     ]
 
     def __init__(self, material, build_tree=False):
@@ -353,14 +353,11 @@ class MSFS2024_Windshield(MSFS2024_Material):
             prop=MSFS2024_MaterialProperties.WINDSHIELDDETAILNORMALREFRACTSCALE.attribute_name(),
             text=MSFS2024_MaterialProperties.WINDSHIELDDETAILNORMALREFRACTSCALE.property_name()
         )
-
-        ## Windshield Screen Space Reflection Attenuation
-        MSFS2024_MaterialUtilsUI.draw_prop(
-            layout=box,
-            material=material,
-            prop=MSFS2024_MaterialProperties.WINDSHIELDSSRATTENUATION.attribute_name(),
-            text=MSFS2024_MaterialProperties.WINDSHIELDSSRATTENUATION.property_name()
-        )
+        # endregion
+        
+        # region Windshield Reflection Parameters
+        box = layout.box()
+        box.label(text="Windshield Reflection Parameters")
 
         ## Windhsiled Cubemap Reflection Masking
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -368,6 +365,14 @@ class MSFS2024_Windshield(MSFS2024_Material):
             material=material,
             prop=MSFS2024_MaterialProperties.WINDSHIELDCUBEMAPREFLECTIONMASKING.attribute_name(),
             text=MSFS2024_MaterialProperties.WINDSHIELDCUBEMAPREFLECTIONMASKING.property_name()
+        )
+
+        ## Windshield Screen Space Reflection Attenuation
+        MSFS2024_MaterialUtilsUI.draw_prop(
+            layout=box,
+            material=material,
+            prop=MSFS2024_MaterialProperties.WINDSHIELDSSRATTENUATION.attribute_name(),
+            text=MSFS2024_MaterialProperties.WINDSHIELDSSRATTENUATION.property_name()
         )
         # endregion
 

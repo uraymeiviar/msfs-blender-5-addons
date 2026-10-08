@@ -1,7 +1,9 @@
 import bpy
-from lod_tools_msfs_2024 import lod_camera, lod_viewer, active_lod_viewer, prefs, operators, data_utils
+from lod_tools_msfs_2024 import lod_camera, active_lod_viewer, prefs, operators, data_utils
+from lod_tools_msfs_2024.constants import IS_BLENDER_5_2_OR_SUP
 from lod_tools_msfs_2024.datafiles.asset_library import MSFS2024LODViewerInputs
 
+from _addons_common import geometry_node_utils
 
 class MSFS2024_OT_OpenLODToolsDocumentation(bpy.types.Operator):
     bl_idname = "msfs204.open_lod_tools_documentation"
@@ -86,7 +88,7 @@ class MSFS2024_PT_ActiveLODViewer(bpy.types.Panel):
         if not data_utils.data_is_valid(active.object) or not data_utils.data_is_valid(active.modifier):
             active.reset()
             return
-  
+
         row = self.layout.row()
         row.label(text="LOD Minimum Screen Size")
         row.operator(operators.MSFS2024_OT_SendSetupToExporter.bl_idname,text="", icon="EXPORT")
@@ -94,11 +96,18 @@ class MSFS2024_PT_ActiveLODViewer(bpy.types.Panel):
             screen_size_label = MSFS2024LODViewerInputs.get_lod_screen_size_input(i)
             if not screen_size_label:
                 return
-            screen_size_identifier = active.lod_viewer_input_map.get(screen_size_label.value, None)
-            if not screen_size_identifier:
-                return
             
-            self.layout.prop(active.modifier, f'["{screen_size_identifier}"]', text=f"LOD{i}")
-
-
-
+            if IS_BLENDER_5_2_OR_SUP:
+                input = geometry_node_utils.get_modifier_input(
+                    active.modifier,
+                    screen_size_label.value,
+                )
+                if input is geometry_node_utils.NotFound:
+                    return
+                self.layout.prop(input, "value", text=f"LOD{i}")
+            else:
+                screen_size_identifier = active.lod_viewer_input_map.get(screen_size_label.value, None)
+                if not screen_size_identifier:
+                    return
+                
+                self.layout.prop(active.modifier, f'["{screen_size_identifier}"]', text=f"LOD{i}")

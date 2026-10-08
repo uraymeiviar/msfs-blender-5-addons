@@ -107,7 +107,7 @@ class MSFS2024_Anisotropic(MSFS2024_Material):
         anisotropic_tex_node = add_node(
             nodes=self.nodes,
             name=MSFS2024_AnisotropicNodes.ANISOTROPICTEX.value,
-            type_node="ShaderNodeTexImage",
+            type_node=MSFS2024_ShaderNodeTypes.SHADERNODETEXIMAGE.value,
             location=(100.0, -700.0),
             width=200.0,
             frame=anisotropic_frame)
@@ -117,7 +117,7 @@ class MSFS2024_Anisotropic(MSFS2024_Material):
         separate_anisotropic_node = add_node(
             nodes=self.nodes,
             name=MSFS2024_AnisotropicNodes.SEPARATEANISOTROPIC.value,
-            type_node="ShaderNodeSeparateColor",  # ShaderNodeSeparateRGB was removed in Blender 5.0
+            type_node=MSFS2024_ShaderNodeTypes.SHADERNODESEPARATECOLOR.value,
             location=(400.0, -700.0),
             width=200.0,
             frame=anisotropic_frame)

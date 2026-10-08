@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 import bpy
 
+from enum import Enum
 
 from _addons_common.ui.tree_widget.manager import TreeManager
 
@@ -26,7 +27,7 @@ def _set_children_checked_state(item: TreeItem, ui_tree_utils: TreeManager):
     if not item.all_children_count:
         return
 
-    item_list = ui_tree_utils.get_ui_tree_collection()
+    item_list = ui_tree_utils.get_tree_collection()
     children_range_start = item.index + 1
     children_range_end = children_range_start + item.all_children_count
     for i in range(children_range_start, children_range_end):
@@ -37,6 +38,7 @@ def _set_children_checked_state(item: TreeItem, ui_tree_utils: TreeManager):
             continue
         # use [] operator to prevent update function to be called
         child_item["checked"] = item.checked
+        child_item["partially_checked"] = False
         # Reflect checked state on child item data
         data = child_item.get_data()
         if data:
@@ -45,9 +47,10 @@ def _set_children_checked_state(item: TreeItem, ui_tree_utils: TreeManager):
 
 def _set_parent_checked_state(item: TreeItem, ui_tree_utils_class: TreeManager):
     """
-    Check parent item if all direct children are checked
+    Check parent item if all direct children are checked.
+    Set parent item as partially checked is some of children are checked.
     """
-    item_list = ui_tree_utils_class.get_ui_tree_collection()
+    item_list = ui_tree_utils_class.get_tree_collection()
 
     for int_item in item.all_parent_indexes:
         i = int_item.value
@@ -58,16 +61,20 @@ def _set_parent_checked_state(item: TreeItem, ui_tree_utils_class: TreeManager):
         if not parent_item.children_count:
             continue
         all_children_enabled = True
+        has_enabled_children = False
         for j in range(i + 1, i + 1 + parent_item.children_count):
             try:
                 child_item: TreeItem = item_list[j]
             except:
                 continue
-            if not child_item.checked:
+            if child_item.checked:
+                has_enabled_children = True
+            else :
                 all_children_enabled = False
-                break
         # use [] operator to prevent update function to be called
         parent_item["checked"] = all_children_enabled
+        parent_item.partially_checked = has_enabled_children and not all_children_enabled
+
         # Reflect checked state on parent item data
         data = parent_item.get_data()
         if data:
@@ -82,6 +89,7 @@ def _process_checked_selection(ui_tree_utils_class: TreeManager, checked: bool):
     for item in selected_items:
         # use [] operator to prevent update function to be called
         item["checked"] = checked
+        item["partially_checked"] = False
         data = item.get_data()
         if data:
             ui_tree_utils_class.on_data_checked(item.checked, data)
@@ -106,7 +114,9 @@ def _on_item_checked(self: TreeItem, context):
     active_data = self.get_data()
     if active_data:
         tree_manager.on_data_checked(self.checked, active_data)
-    
+
+    self.partially_checked = False
+
     # Update chilren checked state
     _set_children_checked_state(self, tree_manager)
 
@@ -127,6 +137,28 @@ def _on_item_checked(self: TreeItem, context):
     if active_data_in_selection:
         _process_checked_selection(tree_manager, self.checked)
 
+class TreeItemColor(Enum):
+    NONE = ("NONE", "None", "OUTLINER_COLLECTION")
+    RED = ("RED", "Red", "COLLECTION_COLOR_01")
+    ORANGE = ("ORANGE", "Orange","COLLECTION_COLOR_02")
+    YELLOW = ("YELLOW","Yellow", "COLLECTION_COLOR_03")
+    GREEN = ("GREEN", "Green","COLLECTION_COLOR_04")
+    BLUE = ("BLUE", "Blue","COLLECTION_COLOR_05")
+    PURPLE = ("PURPLE", "Purple","COLLECTION_COLOR_06")
+    PINK = ("PINK", "Orange","COLLECTION_COLOR_07")
+    BROWN = ("BROWN", "Brown","COLLECTION_COLOR_08")
+
+    def __init__(self, identifier: str, label:str, icon: str):
+        self.identifier = identifier
+        self.label = label
+        self.icon = icon
+
+    @classmethod
+    def from_identifier(cls, identifier: str) -> TreeItemColor | None:
+        for mode in cls:
+            if mode.identifier == identifier:
+                return mode
+        return None
 
 class TreeItem(bpy.types.PropertyGroup):
     """
@@ -147,6 +179,11 @@ class TreeItem(bpy.types.PropertyGroup):
         
     ) # type: ignore
 
+    partially_checked: bpy.props.BoolProperty(
+        default=False,
+        description="True when children is unchecked, but one of it's children is",          
+    ) # type: ignore
+    
     expanded: bpy.props.BoolProperty(
         default=False,
         description="Is item expanded"
@@ -210,8 +247,23 @@ class TreeItem(bpy.types.PropertyGroup):
     
     tree_manager_name: bpy.props.StringProperty() # type: ignore
 
+    color_tag: bpy.props.EnumProperty(
+        name ="Color Tag",
+        items=((TreeItemColor.NONE.identifier, TreeItemColor.NONE.label, "", TreeItemColor.NONE.icon, 0),
+               (TreeItemColor.RED.identifier, TreeItemColor.RED.label, "", TreeItemColor.RED.icon, 1),
+               (TreeItemColor.ORANGE.identifier, TreeItemColor.ORANGE.label, "", TreeItemColor.ORANGE.icon, 2),
+               (TreeItemColor.YELLOW.identifier, TreeItemColor.YELLOW.label, "", TreeItemColor.YELLOW.icon, 3),
+               (TreeItemColor.GREEN.identifier, TreeItemColor.GREEN.label, "", TreeItemColor.GREEN.icon, 4),
+               (TreeItemColor.BLUE.identifier, TreeItemColor.BLUE.label, "", TreeItemColor.BLUE.icon, 5),
+               (TreeItemColor.PURPLE.identifier, TreeItemColor.PURPLE.label, "", TreeItemColor.PURPLE.icon, 6),
+               (TreeItemColor.PINK.identifier, TreeItemColor.PINK.label, "", TreeItemColor.PINK.icon, 7),
+               (TreeItemColor.BROWN.identifier, TreeItemColor.BROWN.label, "", TreeItemColor.BROWN.icon, 8),
+        ), # type: ignore
+        default=TreeItemColor.NONE.identifier,
+    ) # type: ignore
+
     @staticmethod
-    def _get_full_data_path(data: bpy.types.bpy_struct) -> str:
+    def _get_full_data_path(data: bpy.types.ID) -> str:
 
         # repr() can be a bit slow here so use full_data_path prop if present
         full_data_path = getattr(data, "full_data_path", None)
@@ -222,15 +274,15 @@ class TreeItem(bpy.types.PropertyGroup):
                 data.full_data_path  = full_data_path
         return full_data_path
 
-    def set_parent_data(self, data: bpy.types.bpy_struct):
+    def set_parent_data(self, data: bpy.types.ID):
 
         self.parent_full_data_path = self._get_full_data_path(data)
 
-    def set_data(self, data: bpy.types.bpy_struct):
+    def set_data(self, data: bpy.types.ID):
         # repr can be a bit slow here
         self.full_data_path = self._get_full_data_path(data)
 
-    def _get_data(self, parent: bool = False) -> None | bpy.types.bpy_struct:
+    def _get_data(self, parent: bool = False) -> None | bpy.types.ID:
         """
         Safely get data from data_path string
 
@@ -250,10 +302,10 @@ class TreeItem(bpy.types.PropertyGroup):
         except:
             return None
 
-    def get_data(self) -> None | bpy.types.bpy_struct:
+    def get_data(self) -> None | bpy.types.ID:
         return self._get_data(parent=False)
 
-    def get_parent_data(self) -> None | bpy.types.bpy_struct:
+    def get_parent_data(self) -> None | bpy.types.ID:
         return self._get_data(parent=True)
 
 # endregion

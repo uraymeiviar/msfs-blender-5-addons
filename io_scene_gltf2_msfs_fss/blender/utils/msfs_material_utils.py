@@ -1,16 +1,4 @@
-# Copyright 2023-2024 The glTF-Blender-IO-MSFS2024 authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+import bpy
 
 from enum import Enum
 from typing import Any
@@ -189,8 +177,8 @@ class MSFS2024_MaterialProperties(MSFS2024_Enum_Properties):
     WINDSHIELDWIPERLINESSTRENGTH = "Wiper Lines Strength", 1.0, "msfs_windshield_wiper_lines_strength", "wiperLinesStrength"
     WINDSHIELDWIPER1STATE = "Wiper 1 State", 0.0, "msfs_windshield_wiper_1_state", "wiper1State"
     WINDSHIELDREFLECTIONMASKSTRENGTH = "Reflection Mask Strength", 1.0, "msfs_occlusion_strength", "strength"
+    WINDSHIELDCUBEMAPREFLECTIONMASKING = "Enable Soft Scalar Cubemap Reflection Masking", False, "msfs_cubemap_reflection_masking", "cubemapReflectionMasking"
     WINDSHIELDSSRATTENUATION = "SSR Attenuation", 1.0, "msfs_ssr_attenuation", "ssrAttenuation"
-    WINDSHIELDCUBEMAPREFLECTIONMASKING = "Cubemap Reflection Masking", False, "msfs_cubemap_reflection_masking", "cubemapReflectionMasking"
     # endregion
 
     # region Iridescent
@@ -267,8 +255,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         prop: str,
         text: str = "",
         enabled: bool = True
@@ -284,8 +272,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_texture_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         prop: str,
         text: str = "",
         enabled: bool = True
@@ -305,14 +293,20 @@ class MSFS2024_MaterialUtilsUI:
                 hide_buttons=False
             )
         else:
-            sub_row.template_ID(material, prop, open="image.open", live_icon=False)
+            sub_row.template_ID(
+                material, 
+                prop, 
+                open="image.open", 
+                new="image.new", 
+                live_icon=False
+            )
         return column
 
     ## Parameters
     @staticmethod
     def draw_base_color_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.BASECOLOR.property_name()
     ) -> None:
         box = layout.box()
@@ -325,8 +319,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_emissive_props(
-        layout: Any,
-        material: Any
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material
     ):
         box = layout.box()
 
@@ -337,8 +331,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_emissive_color_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.EMISSIVECOLOR.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -350,8 +344,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_emissive_scale_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.EMISSIVESCALE.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -363,8 +357,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_emissive_day_multiplier_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.EMISSIVE_DAY_MULTIPLIER.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -376,8 +370,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_emissive_night_multiplier_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.EMISSIVE_NIGHT_MULTIPLIER.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -389,8 +383,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_alpha_mode_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = ""
     ) -> None:
         box = layout.box()
@@ -403,8 +397,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_order_offset_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.DRAWORDEROFFSET.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -416,8 +410,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_no_cast_shadow_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.NOCASTSHADOW.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -429,8 +423,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_double_sided_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.DOUBLESIDED.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -442,8 +436,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_flip_back_face_normal_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.FLIPBACKFACENORMAL.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -455,8 +449,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_day_night_cycle_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.DAYNIGHTCYCLE.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -468,8 +462,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_motion_blur_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.DISABLEMOTIONBLUR.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -481,8 +475,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_collision_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.COLLISIONMATERIAL.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -494,8 +488,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_road_collision_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.ROADCOLLISIONMATERIAL.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -504,11 +498,11 @@ class MSFS2024_MaterialUtilsUI:
             prop=MSFS2024_MaterialProperties.ROADCOLLISIONMATERIAL.attribute_name(),
             text=text
         )
-    
+
     @staticmethod
     def draw_ground_collision_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.GROUNDCOLLISIONMATERIAL.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -519,7 +513,7 @@ class MSFS2024_MaterialUtilsUI:
         )
 
     @staticmethod
-    def draw_gameplay_panel(layout: Any, material: Any) -> None:
+    def draw_gameplay_panel(layout: bpy.types.UILayout, material: bpy.types.Material) -> None:
         box = layout.box()
         box.label(text="Gameplay Parameters")
 
@@ -529,8 +523,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_uv_offset_u_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.UVOFFSETU.property_name()
     ) -> None:
         layout.use_property_decorate = True
@@ -543,8 +537,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_uv_offset_v_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.UVOFFSETV.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -556,8 +550,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_tiling_u_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.UVTILINGU.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -569,8 +563,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_tiling_v_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.UVTILINGV.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -582,8 +576,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_clamp_uv_x_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.CLAMPUVX.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -595,8 +589,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_clamp_uv_y_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.CLAMPUVY.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -608,8 +602,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_uv_rotation_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.UVROTATION.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -620,7 +614,7 @@ class MSFS2024_MaterialUtilsUI:
         )
 
     @staticmethod
-    def draw_uv_panel(layout: Any, material: Any) -> None:
+    def draw_uv_panel(layout: bpy.types.UILayout, material: bpy.types.Material) -> None:
         box = layout.box()
         box.label(text="UV Options")
 
@@ -634,8 +628,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_metallic_scale_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.METALLICSCALE.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -647,8 +641,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_roughness_scale_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.ROUGHNESSSCALE.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -660,8 +654,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_occlusion_strength_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.OCCLUSIONSTRENGTH.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -673,8 +667,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_normal_scale_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.NORMALSCALE.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -686,8 +680,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_alpha_cutoff_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.ALPHACUTOFF.property_name()
     ) -> None:
         alpha_mode = getattr(
@@ -706,8 +700,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_detail_uv_scale_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.DETAILUVSCALE.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -719,8 +713,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_detail_normal_scale_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.DETAILNORMALSCALE.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -732,8 +726,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_blend_threshold_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.DETAILBLENDTHRESHOLD.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -745,8 +739,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_wear_overlay_uv_scale_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.WEAROVERLAYUVSCALE.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -758,8 +752,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_wear_blend_sharpness_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.WEARBLENDSHARPNESS.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -771,8 +765,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_wear_amount_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.WEARAMOUNT.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -784,8 +778,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_sss_color_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.SSSCOLOR.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -797,8 +791,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_receive_rain_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.RECEIVERAIN.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -810,8 +804,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_rain_drop_tiling_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.RAINDROPTILING.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -823,8 +817,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_rain_on_backface_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.RAINONBACKFACE.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_prop(
@@ -837,8 +831,8 @@ class MSFS2024_MaterialUtilsUI:
     ## Textures
     @staticmethod
     def draw_base_color_texture_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.BASECOLORTEXTURE.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_texture_prop(
@@ -850,8 +844,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_omr_texture_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.OMRTEXTURE.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_texture_prop(
@@ -863,8 +857,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_normal_texture_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.NORMALTEXTURE.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_texture_prop(
@@ -876,8 +870,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_emissive_texture_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.EMISSIVETEXTURE.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_texture_prop(
@@ -889,8 +883,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_detail_color_texture_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.DETAILCOLORTEXTURE.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_texture_prop(
@@ -902,8 +896,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_detail_omr_texture_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.DETAILOMRTEXTURE.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_texture_prop(
@@ -915,8 +909,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_detail_normal_texture_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.DETAILNORMALTEXTURE.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_texture_prop(
@@ -928,8 +922,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_blend_mask_texture_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.BLENDMASKTEXTURE.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_texture_prop(
@@ -941,8 +935,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_decal_blend_mask_texture_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.DECALBLENDMASKTEXTURE.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_texture_prop(
@@ -954,8 +948,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_occlusion_uv2_texture_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.OCCLUSIONUV2.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_texture_prop(
@@ -967,8 +961,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_wear_albedo_mask_texture_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.WEARALBEDOMASKTEXTURE.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_texture_prop(
@@ -980,8 +974,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_wear_omr_intensity_texture_prop(
-        layout: Any,
-        material: Any,
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material,
         text: str = MSFS2024_MaterialProperties.WEAROMRINTENSITYTEXTURE.property_name()
     ) -> None:
         MSFS2024_MaterialUtilsUI.draw_texture_prop(
@@ -993,8 +987,8 @@ class MSFS2024_MaterialUtilsUI:
 
     @staticmethod
     def draw_decal_channel_mask_props(
-        layout: Any,
-        material: Any
+        layout: bpy.types.UILayout,
+        material: bpy.types.Material
     ):
         box = layout.box()
         box.label(text="Decal Channel Mask")

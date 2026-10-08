@@ -158,15 +158,33 @@ class MSFS2024_MaterialPropUpdate:
         alpha_mode: msfs_image.ImageAlphaMode,
         colorspace: msfs_image.ImageColorSpace,
     ) -> bpy.types.Image:
+        
         image = getattr(material, attribute_name, None)
+
+        # PointerProperty does not support a custom setter/getter, and assigning
+        # through the ID-property API (material[attribute_name] = image) cannot
+        # be used to update this property in Blender 5.2.
+        #
+        # Assigning with setattr() triggers the property's update callback again,
+        # so use a temporary ID-property as a recursion guard.
+
+        recursion_flag = "__validating_mat_image__"
+        if material.get(recursion_flag):
+            del material[recursion_flag]
+            return image
+    
         if isinstance(image, bpy.types.Image):
             image = msfs_image.validate_image(
                 image=image,
                 alpha_mode=alpha_mode,
                 colorspace=colorspace,
             )
-            # using [] prevent infinite loop with update function
-            material[attribute_name] = image
+
+            # The assignment triggers the PointerProperty update callback again.
+            # Set the guard first so the recursive invocation returns immediately.
+            material[recursion_flag] = True
+            setattr(material, attribute_name, image)
+            
         return image
 
     @staticmethod
@@ -177,8 +195,8 @@ class MSFS2024_MaterialPropUpdate:
         image = MSFS2024_MaterialPropUpdate._validate_material_image(
             material,
             MSFS2024_MaterialProperties.BASECOLORTEXTURE.attribute_name(),
-            msfs_image.ImageAlphaMode.channel_packed,
-            msfs_image.ImageColorSpace.srgb,
+            msfs_image.ImageAlphaMode.CHANNEL_PACKED,
+            msfs_image.ImageColorSpace.SRGB,
         )
 
         if not isinstance(msfs_material, MSFS2024_Invisible):
@@ -192,8 +210,8 @@ class MSFS2024_MaterialPropUpdate:
         image = MSFS2024_MaterialPropUpdate._validate_material_image(
             material,
             MSFS2024_MaterialProperties.OMRTEXTURE.attribute_name(),
-            msfs_image.ImageAlphaMode.none,
-            msfs_image.ImageColorSpace.non_color,
+            msfs_image.ImageAlphaMode.NONE,
+            msfs_image.ImageColorSpace.NON_COLOR,
         )
 
         if not isinstance(msfs_material, MSFS2024_Invisible):
@@ -210,8 +228,8 @@ class MSFS2024_MaterialPropUpdate:
         image = MSFS2024_MaterialPropUpdate._validate_material_image(
             material,
             MSFS2024_MaterialProperties.NORMALTEXTURE.attribute_name(),
-            msfs_image.ImageAlphaMode.none,
-            msfs_image.ImageColorSpace.non_color,
+            msfs_image.ImageAlphaMode.NONE,
+            msfs_image.ImageColorSpace.NON_COLOR,
         )
 
         if not isinstance(msfs_material, MSFS2024_Invisible):
@@ -228,8 +246,8 @@ class MSFS2024_MaterialPropUpdate:
         image = MSFS2024_MaterialPropUpdate._validate_material_image(
             material,
             MSFS2024_MaterialProperties.EMISSIVETEXTURE.attribute_name(),
-            msfs_image.ImageAlphaMode.none,
-            msfs_image.ImageColorSpace.non_color,
+            msfs_image.ImageAlphaMode.NONE,
+            msfs_image.ImageColorSpace.NON_COLOR,
         )
         if not isinstance(msfs_material, MSFS2024_Invisible):
             msfs_material.set_emissive_tex(image)
@@ -242,8 +260,8 @@ class MSFS2024_MaterialPropUpdate:
         image = MSFS2024_MaterialPropUpdate._validate_material_image(
             material,
             MSFS2024_MaterialProperties.DETAILCOLORTEXTURE.attribute_name(),
-            msfs_image.ImageAlphaMode.channel_packed,
-            msfs_image.ImageColorSpace.srgb,
+            msfs_image.ImageAlphaMode.CHANNEL_PACKED,
+            msfs_image.ImageColorSpace.SRGB,
         )
 
         if not isinstance(msfs_material, MSFS2024_Invisible):
@@ -257,8 +275,8 @@ class MSFS2024_MaterialPropUpdate:
         image = MSFS2024_MaterialPropUpdate._validate_material_image(
             material,
             MSFS2024_MaterialProperties.DETAILOMRTEXTURE.attribute_name(),
-            msfs_image.ImageAlphaMode.none,
-            msfs_image.ImageColorSpace.non_color,
+            msfs_image.ImageAlphaMode.NONE,
+            msfs_image.ImageColorSpace.NON_COLOR,
         )
 
         if not isinstance(msfs_material, MSFS2024_Invisible):
@@ -272,8 +290,8 @@ class MSFS2024_MaterialPropUpdate:
         image = MSFS2024_MaterialPropUpdate._validate_material_image(
             material,
             MSFS2024_MaterialProperties.OCCLUSIONUV2.attribute_name(),
-            msfs_image.ImageAlphaMode.none,
-            msfs_image.ImageColorSpace.non_color,
+            msfs_image.ImageAlphaMode.NONE,
+            msfs_image.ImageColorSpace.NON_COLOR,
         )
 
         if not isinstance(msfs_material, MSFS2024_Invisible):
@@ -287,8 +305,8 @@ class MSFS2024_MaterialPropUpdate:
         image = MSFS2024_MaterialPropUpdate._validate_material_image(
             material,
             MSFS2024_MaterialProperties.DETAILNORMALTEXTURE.attribute_name(),
-            msfs_image.ImageAlphaMode.none,
-            msfs_image.ImageColorSpace.non_color,
+            msfs_image.ImageAlphaMode.NONE,
+            msfs_image.ImageColorSpace.NON_COLOR,
         )
 
         if not isinstance(msfs_material, MSFS2024_Invisible):
@@ -302,8 +320,8 @@ class MSFS2024_MaterialPropUpdate:
         image = MSFS2024_MaterialPropUpdate._validate_material_image(
             material,
             MSFS2024_MaterialProperties.BLENDMASKTEXTURE.attribute_name(),
-            msfs_image.ImageAlphaMode.none,
-            msfs_image.ImageColorSpace.non_color,
+            msfs_image.ImageAlphaMode.NONE,
+            msfs_image.ImageColorSpace.NON_COLOR,
         )
 
         valid_material_types = (MSFS2024_Standard, MSFS2024_Tree)
@@ -319,8 +337,8 @@ class MSFS2024_MaterialPropUpdate:
         image = MSFS2024_MaterialPropUpdate._validate_material_image(
             material,
             MSFS2024_MaterialProperties.DECALBLENDMASKTEXTURE.attribute_name(),
-            msfs_image.ImageAlphaMode.none,
-            msfs_image.ImageColorSpace.non_color,
+            msfs_image.ImageAlphaMode.NONE,
+            msfs_image.ImageColorSpace.NON_COLOR,
         )
 
         if isinstance(msfs_material, MSFS2024_Geo_Decal_BlendMasked):
@@ -550,8 +568,8 @@ class MSFS2024_MaterialPropUpdate:
         image = MSFS2024_MaterialPropUpdate._validate_material_image(
             material,
             MSFS2024_MaterialProperties.CLEARCOATCOLORROUGHNESSTEXTURE.attribute_name(),
-            msfs_image.ImageAlphaMode.none,
-            msfs_image.ImageColorSpace.non_color,
+            msfs_image.ImageAlphaMode.NONE,
+            msfs_image.ImageColorSpace.NON_COLOR,
         )
         if isinstance(msfs_material, MSFS2024_Clearcoat):
             msfs_material.set_clearcoat_tex(image)
@@ -565,8 +583,8 @@ class MSFS2024_MaterialPropUpdate:
         image = MSFS2024_MaterialPropUpdate._validate_material_image(
             material,
             MSFS2024_MaterialProperties.CLEARCOATNORMALTEXTURE.attribute_name(),
-            msfs_image.ImageAlphaMode.none,
-            msfs_image.ImageColorSpace.non_color,
+            msfs_image.ImageAlphaMode.NONE,
+            msfs_image.ImageColorSpace.NON_COLOR,
         )
 
         if isinstance(msfs_material, MSFS2024_Clearcoat):
@@ -580,8 +598,8 @@ class MSFS2024_MaterialPropUpdate:
         image = MSFS2024_MaterialPropUpdate._validate_material_image(
             material,
             MSFS2024_MaterialProperties.BEHINDGLASSCOLORTEXTURE.attribute_name(),
-            msfs_image.ImageAlphaMode.none,
-            msfs_image.ImageColorSpace.srgb,
+            msfs_image.ImageAlphaMode.NONE,
+            msfs_image.ImageColorSpace.SRGB,
         )
 
         if not isinstance(msfs_material, MSFS2024_Invisible):

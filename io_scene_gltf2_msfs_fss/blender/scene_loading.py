@@ -178,11 +178,11 @@ def prepare_scenes():
             # UI List refresh for each scene
             lod_group_tree_manager = lod_groups_uilist.get_lod_group_tree_manager()
             if lod_group_tree_manager:
-                lod_group_tree_manager.generate_ui_tree_collection()
+                lod_group_tree_manager.generate_tree_collection()
 
         preset_tree_manager = preset_uilist.get_preset_tree_manager()
         if preset_tree_manager:
-            preset_tree_manager.generate_ui_tree_collection()
+            preset_tree_manager.generate_tree_collection()
 
     if bpy.context.window.scene != original_scene:
         bpy.context.window.scene = original_scene

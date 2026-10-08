@@ -3,7 +3,6 @@ from pathlib import Path
 
 from _addons_common.asset_library import asset_library
 
-SUPPORTED_MSFS_VERSIONS: list[str] = ["2024"]  # type: ignore
 SUPPORTED_BLENDER_VERSIONS: list[tuple[int, int, int]] = [(3, 3, 0)]  # type: ignore
 DATAFILES_DIR: Path = Path(__file__).parent
 
@@ -60,7 +59,6 @@ class NodeGroupLibrary(asset_library.NodeGroupLibrary):
         asset_library.EmptyInputs,
     )
 
-NodeGroupLibrary.SUPPORTED_MSFS_VERSIONS = SUPPORTED_MSFS_VERSIONS  # type: ignore
 NodeGroupLibrary.SUPPORTED_BLENDER_VERSIONS = SUPPORTED_BLENDER_VERSIONS  # type: ignore
 NodeGroupLibrary.DATAFILES_DIR = DATAFILES_DIR  # type: ignore
 
@@ -76,6 +74,5 @@ class ObjectLibrary(asset_library.ObjectLibrary):
         "CURVE",
     )
 
-ObjectLibrary.SUPPORTED_MSFS_VERSIONS = SUPPORTED_MSFS_VERSIONS  # type: ignore
 ObjectLibrary.SUPPORTED_BLENDER_VERSIONS = SUPPORTED_BLENDER_VERSIONS  # type: ignore
 ObjectLibrary.DATAFILES_DIR = DATAFILES_DIR  # type: ignore

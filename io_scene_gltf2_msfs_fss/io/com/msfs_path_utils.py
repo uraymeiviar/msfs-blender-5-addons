@@ -24,9 +24,15 @@ def get_relative_path_to_scene(path: str) -> str:
         return ""
 
     path: Path = Path(path)
-
-    if path.is_file():
+    
+    try:
+        is_file = path.is_file()
+    except :
+        return str(path)
+    
+    if is_file:
         path = path.parent
+   
 
     relative_path = ""
     if bpy.data.is_saved and path.is_absolute():

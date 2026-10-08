@@ -1,12 +1,20 @@
 from __future__ import annotations
+import bpy
 
 from pathlib import Path
 
 from _addons_common.asset_library import asset_library
 
-SUPPORTED_MSFS_VERSIONS: list[str] = ["2024"]  # type: ignore
+
 SUPPORTED_BLENDER_VERSIONS: list[tuple[int, int, int]] = [(4, 2, 0), (3, 3, 0)]  # type: ignore
 DATAFILES_DIR: Path = Path(__file__).parent
+
+
+class MSFS2024CollisionTypeEnum(asset_library.NodeGroupEnumInput):
+    BOX = (0, "Box")
+    SPHERE = (1, "Sphere")
+    CYLINDER = (2, "Cylinder")
+    BOUNDING_VOLUME_SPHERE = (3, "Bounding Volume Sphere")
 
 class MSFS2024CollisionInputs(asset_library.NodeGroupInputs):
     TYPE = "Collision Type"
@@ -29,6 +37,5 @@ class NodeGroupLibrary(asset_library.NodeGroupLibrary):
         asset_library.EmptyInputs,
     )
 
-NodeGroupLibrary.SUPPORTED_MSFS_VERSIONS = SUPPORTED_MSFS_VERSIONS  # type: ignore
 NodeGroupLibrary.SUPPORTED_BLENDER_VERSIONS = SUPPORTED_BLENDER_VERSIONS  # type: ignore
 NodeGroupLibrary.DATAFILES_DIR = DATAFILES_DIR  # type: ignore

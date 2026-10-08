@@ -7,7 +7,7 @@ Cf implementation example in msfs_multi_export_objects.py and msfs_multi_export_
 """
 from __future__ import annotations
 from contextlib import contextmanager
-
+from itertools import chain
 import bpy
 
 import string
@@ -31,6 +31,9 @@ class TreeManager:
     
     This class manages items hierarchy, expand and collapsed items, checked items
     and items multi selection.
+    
+    Root items can  have a customizable color tag when colored_root_items is enabled, 
+    similar to Blender's Outliner collection color tags.
 
     Reimplement it to fit your needs (cf region with overridables functions)
     """
@@ -40,7 +43,7 @@ class TreeManager:
     @classmethod
     def get_unique_name(cls):
         return str(cls.__name__)
-    
+
     def __init__(
         self,
         ul_tree_view_class: Type[UL_TreeView],
@@ -49,9 +52,27 @@ class TreeManager:
         alphabetical_order: bool = True,
         multiselection_support: bool = True,
         checkable_items: bool = True,
-        multi_edit_properties : dict[type, list[str]] = {}
-        
+        multi_edit_properties: dict[Type[bpy.types.ID], list[str]] = {},
+        trigger_gen_tree_properties: dict[Type[bpy.types.ID], list[str]] = {},
+        colored_root_items: bool = False,
     ) -> None:
+        """Create a single of instance of TreeManager.
+
+        Args:
+            ul_tree_view_class: UL_TreeView used by TreeManager.
+            on_selection_function: Callable invoked when an item is selected.
+            data_collection_getter: Callable that returns the data represented in the list.
+            alphabetical_order: Sort items alphabetically. 
+                Uses data.name by default and can be customized by reimplementing get_name_for_alpha_order().
+            multiselection_support: Enable multiple item selection using Shift and Alt.
+            checkable_items: Make items checkable in the UI. Triggers on_data_checked().
+            multi_edit_properties: Data classes and their associated properties that can be edited 
+                simultaneously across selected items. Requires multiselection_support to be enabled.
+            trigger_gen_tree_properties: Data classes and their associated properties that trigger a regeneration
+                of tree item collection. Typical usecase is when renaming an item that needs to be in alphabetical order.
+            colored_root_items: Enable color tags for root items, similar to Blender's Outliner collection color tags.
+        """
+
         # Remove white spaces in unique name
         unique_name = self.get_unique_name()
         if not unique_name[0] in string.ascii_letters:
@@ -71,6 +92,9 @@ class TreeManager:
         self.MULTISELECTION_SUPPORT = multiselection_support
         self.CHECKABLE_ITEMS = checkable_items
         self.MULTI_EDIT_PROPERTIES = {}
+        self.TRIGGER_GEN_TREE_PROPERTIES = trigger_gen_tree_properties
+        self.COLORED_ROOT_ITEMS = colored_root_items
+        self.IS_FLAT_LIST = True #False if items have children
 
         if self.MULTISELECTION_SUPPORT and not multiselection_support:
             raise ValueError("multiselection_support must be True in order to use multi_edit_properties.")
@@ -81,12 +105,11 @@ class TreeManager:
         self.disable_multi_edit = False 
         # endregion
 
-        self.ui_tree_prop_name : str 
+        self.tree_col_prop_name : str 
         self.active_index_prop_name : str 
-        self.old_active_index_prop_name :str 
+        self.previous_active_index_prop_name :str 
 
         TreeManager.tree_manager_instances[self.unique_name] = self
-        self._expanded_items = []
 
         # Filter flags must be set in UIList filter_items() if you want
         # Multiselection to work with filters
@@ -98,9 +121,16 @@ class TreeManager:
         self.register()
 
     @classmethod
-    def get_tree_manager_instance(cls, tree_manager_name: str) -> TreeManager | None:
+    def get_tree_manager_instance_by_name(cls, tree_manager_name: str) -> TreeManager | None:
         tree_manager: TreeManager | None = cls.tree_manager_instances.get(
             tree_manager_name, None
+        )
+        return tree_manager
+
+    @classmethod
+    def get_tree_manager_instance(cls) -> TreeManager | None:
+        tree_manager: TreeManager | None = cls.tree_manager_instances.get(
+            cls.get_unique_name(), None
         )
         return tree_manager
 
@@ -114,34 +144,24 @@ class TreeManager:
 
     def get_data_children(
         self, 
-        data: bpy.types.bpy_struct
-    ) -> list[bpy.types.bpy_struct]:
+        data: bpy.types.ID
+    ) -> list[bpy.types.ID]:
         """
         Return a list of data children.
         Children must have list have a "name" attribute.
         """
         return []
 
-    def set_ui_tree_item_name(
+    def set_tree_item_name(
         self,
         item: TreeItem,
-        data: bpy.types.bpy_struct
+        data: bpy.types.ID
     ):
         """
         Set UITreeItem name according to data.
         Item name is used by filters functions.
         """
         item.name = data.name
-
-    def get_expanded_items(self) -> set[str]:
-        """
-        Get list of items name that are expanded in ui tree
-        """
-        expanded_ui_tree_items = set()
-        for item in self.get_ui_tree_collection():
-            if item.expanded:
-                expanded_ui_tree_items.add(item.name)
-        return expanded_ui_tree_items
 
     def is_data_checked(self, data: Any)->bool:
         return False
@@ -151,7 +171,7 @@ class TreeManager:
 
     # endregion
 
-    def get_data_collection(self) -> Iterable:
+    def get_data_collection(self) -> Iterable[bpy.types.ID]:
         """
         Return main data Collection Iterable.
         """
@@ -160,20 +180,20 @@ class TreeManager:
                             "or implement get_data_collection() in derived class")
         return self.data_collection_getter()
 
-    def get_ui_tree_collection(self) -> bpy.types.bpy_prop_collection_idprop[TreeItem]:
+    def get_tree_collection(self) -> bpy.types.bpy_prop_collection_idprop[TreeItem]:
         """
-        Return Collection property of UITreeItem.This is
+        Return Collection property of TreeItem.This is
         the collection that will be displayed in UIList view.
         """
-        return getattr(bpy.context.scene, self.ui_tree_prop_name)
+        return getattr(bpy.context.scene, self.tree_col_prop_name)
 
-    def _get_ui_tree_active_index(self) -> int:
+    def _get_active_index(self) -> int:
         """
         Return ui list active item property.
         """
         return getattr(bpy.context.window_manager, self.active_index_prop_name)
 
-    def set_ui_tree_active_index(self, value: int | None, update_selection: bool = False):
+    def set_active_index(self, value: int | None, update_selection: bool = False):
         """
         Set ui list active item property.
         Selection update is disabled by default in order to prevent infinite recusion.
@@ -186,92 +206,104 @@ class TreeManager:
         else:
             bpy.context.window_manager[self.active_index_prop_name] = value
 
-    def _get_ui_old_tree_active_index(self) -> int:
+    def _get_previous_active_index(self) -> int:
         """
         Return ui list old active item property.
         Used for multiselection.
         """
-        return getattr(bpy.context.window_manager, self.old_active_index_prop_name)
+        return getattr(bpy.context.window_manager, self.previous_active_index_prop_name)
 
-    def _set_ui_old_tree_active_index(self, value: int):
+    def _set_previous_active_index(self, value: int):
         """
-        Set ui list old active item property.
+        Set ui list previous active item property.
         Used for multiselection.
         """
-        setattr(bpy.context.window_manager, self.old_active_index_prop_name, value)
+        setattr(bpy.context.window_manager, self.previous_active_index_prop_name, value)
 
-    def set_ui_tree_active_item_by_data(
-        self, data: bpy.types.bpy_struct, 
+    def set_active_item_by_data(
+        self, data: bpy.types.ID, 
         update_selection: bool = False
     ):
         """
         Set active item with corresponding data
         """
 
-        ui_tree_collection = self.get_ui_tree_collection()
-        for i, item in enumerate(ui_tree_collection):
+        tree_collection = self.get_tree_collection()
+        for i, item in enumerate(tree_collection):
             item: TreeItem
             item_data = item.get_data()
             if item_data == data:
-                self.set_ui_tree_active_index(i, update_selection)
+                self.set_active_index(i, update_selection)
                 return
 
     def _create_tree_item_from_data(
         self,
-        data: bpy.types.bpy_struct,
+        data: bpy.types.ID,
+        expanded_items: set[str], 
+        root_item_colors: dict[str,str],
         parent_item_index: int | None = None,
         child_index=0,
     ):
         """
-        Create UITreeItem from provided data.
-        """
-        ui_tree_collection = self.get_ui_tree_collection()
-        ui_tree_item: TreeItem = ui_tree_collection.add()
-        item_index = len(ui_tree_collection) - 1
-        ui_tree_item.index = item_index
-        # Store tree manager import class in item so we call tree manager from item (cf _on_item_checked)
-        ui_tree_item.tree_manager_name = self.unique_name
+        Create TreeItem from provided data.
 
+        """
+        tree_collection = self.get_tree_collection()
+        tree_item: TreeItem = tree_collection.add()
+        item_index = len(tree_collection) - 1
+        tree_item.index = item_index
+        # Store tree manager import class in item so we call tree manager from item (cf _on_item_checked)
+        tree_item.tree_manager_name = self.unique_name
+        tree_item.hidden = False
         # Set properties depending on parent state
         parent_item = None
         if not parent_item_index is None:
             # Get the parent item each time a new item is added to the UI tree collection.
             # Sometimes the parent_item pointer can become invalid when a new element is added.
             try:
-                parent_item = ui_tree_collection[parent_item_index]
+                parent_item = tree_collection[parent_item_index]
             except IndexError:
                 parent_item = None
         if not parent_item:
-            ui_tree_item.parent_index = -1
+            tree_item.parent_index = -1
         else:
-            ui_tree_item.parent_index = parent_item_index
+            tree_item.parent_index = parent_item_index
 
             # Generate list of parents ordered by proximity
-            p_index_item :IntItem = ui_tree_item.all_parent_indexes.add()
-            p_index_item.value = ui_tree_item.parent_index
+            p_index_item: IntItem = tree_item.all_parent_indexes.add()
+            p_index_item.value = tree_item.parent_index
             for item in parent_item.all_parent_indexes:
-                p_index_item :IntItem = ui_tree_item.all_parent_indexes.add()
+                p_index_item: IntItem = tree_item.all_parent_indexes.add()
                 p_index_item.value = item.value
-            ui_tree_item.all_parent_count = len(ui_tree_item.all_parent_indexes)
+            tree_item.all_parent_count = len(tree_item.all_parent_indexes)
 
-            ui_tree_item.parent_full_data_path = parent_item.full_data_path
+            tree_item.parent_full_data_path = parent_item.full_data_path
             # Item is not visible in list if parent is not expanded
-            ui_tree_item.hidden = not parent_item.expanded
-            ui_tree_item.child_index = child_index
+            tree_item.hidden = not parent_item.expanded
 
-        ui_tree_item.set_data(data)
-        self.set_ui_tree_item_name(ui_tree_item, data)
+            tree_item.child_index = child_index
+
+        tree_item.set_data(data)
+        self.set_tree_item_name(tree_item, data)
 
         # Restore checked state
-        ui_tree_item.checked = self.is_data_checked(data)
+        if self.CHECKABLE_ITEMS:
+            tree_item.checked = self.is_data_checked(data)
         # Restore expanded state
-        ui_tree_item.expanded = ui_tree_item.name in self._expanded_items
 
+        tree_item.expanded = data.name in expanded_items
+
+        # Restore item color
+        if self.COLORED_ROOT_ITEMS and not parent_item:
+            color_tag = root_item_colors.get(data.name, "NONE")
+            tree_item.color_tag = color_tag
         # Process item children
         children_data = self.get_data_children(data)
-        ui_tree_item.children_count = len(children_data)
+        if children_data:
+            self.IS_FLAT_LIST = False
+        tree_item.children_count = len(children_data)
 
-        children_range_start = len(ui_tree_collection)
+        children_range_start = len(tree_collection)
         if self.ALPHABETICAL_ORDER:
             children_data = sorted(
                 children_data, 
@@ -282,30 +314,36 @@ class TreeManager:
         for i, child_data in enumerate(children_data):
             self._create_tree_item_from_data(
                 data=child_data,
+                expanded_items=expanded_items,
+                root_item_colors=root_item_colors,
                 parent_item_index=item_index,
                 child_index=i,
             )
-        # Be carefull here, do not use ui_tree_item reference after adding new items in collection
+
+        # Be carefull here, do not use tree_item reference after adding new items in collection
         # This is likely to crash, as internal code may re-allocate
         # the whole container (the collection) memory at some point.
 
         # In our case, this caused 'item.all_children_count' to be randomly reset because
-        # ui_tree_item was pointing to a stale RNA struct after children were added.
+        # tree_item was pointing to a stale RNA struct after children were added.
         # Always re-fetch the item from the collection after modifying it.
-        ui_tree_item = ui_tree_collection[item_index]
-        if ui_tree_item.children_count:
+        tree_item = tree_collection[item_index]
+
+        if tree_item.children_count:
             # Get range of item children
-            children_range_end = len(ui_tree_collection)
+            children_range_end = len(tree_collection)
 
-            ui_tree_item.all_children_count = children_range_end - children_range_start
+            tree_item.all_children_count = children_range_end - children_range_start
 
-    def _generate_ui_tree_items(self, data_collection: Iterable):
+    def _generate_tree_items(self, data_collection: Iterable, expanded_items: set[str], root_item_colors: dict[str,str]):
         """
         Generate UI Items from data_collection prop.
         Process entire hierarchy with children items.
         """
+        self.IS_FLAT_LIST = True
+
         for data in data_collection:
-            self._create_tree_item_from_data(data)
+            self._create_tree_item_from_data(data, expanded_items, root_item_colors)
 
     # region Multi Edit Properties
     @contextmanager
@@ -368,7 +406,7 @@ class TreeManager:
         Only update if active item is in selected items list.
         Update only if item data class is identical to active_data class.
         """
-        tree_manager = TreeManager.get_tree_manager_instance(tree_manager_name)
+        tree_manager = TreeManager.get_tree_manager_instance_by_name(tree_manager_name)
         if not tree_manager:
             return
         active_data = None
@@ -423,6 +461,37 @@ class TreeManager:
         tree_manager._updating_props = False
 
     @staticmethod
+    def _generate_tree_on_prop_update(
+        tree_manager_name: str,
+    ):
+        """
+        Do not directly used this function. It is called bpy.msgbus on notify event.
+        """
+        tree_manager = TreeManager.get_tree_manager_instance_by_name(tree_manager_name)
+        if not tree_manager:
+            return
+        if tree_manager._updating_props:
+            return
+        # Save active item name to set it back after
+        full_data_path = None
+        active_item = tree_manager.get_active_item()
+        if active_item:
+            full_data_path = active_item.full_data_path
+
+        def _delayed_update():
+            # delayed update to prevent a crash
+            # updating ui during a msgbus callback is a bad idea.
+            tree_manager.generate_tree_collection()
+            if full_data_path:
+                try:
+                    active_data = eval(full_data_path)
+                except:
+                    return
+                tree_manager.set_active_item_by_data(active_data, update_selection=True)
+
+        bpy.app.timers.register(_delayed_update)
+
+    @staticmethod
     def _check_for_data_reallocation(
         tree_manager_name: str,
         instance_full_data_path: str,
@@ -432,7 +501,7 @@ class TreeManager:
         Check if data pointer has changed.
         """
 
-        tree_manager = TreeManager.get_tree_manager_instance(tree_manager_name)
+        tree_manager = TreeManager.get_tree_manager_instance_by_name(tree_manager_name)
         if not tree_manager:
             return False
         instance = None
@@ -468,12 +537,14 @@ class TreeManager:
                 # First instance of this class pointer has changed.
                 # It means that past subscribe_rna() are now invalid.
                 # We need to subscribe again.
-                self.subscribe_to_multi_edit_properties()
+                self.subscribe_to_data_properties()
                 break
 
-    def subscribe_to_multi_edit_properties(self):
+    def subscribe_to_data_properties(self):
         """
-        Enable synchronized editing of properties across all selected items.
+        Subscribe to provided data properties in order to :
+        - Enable synchronized editing of properties (MULTI_EDIT_PROPERTIES) across all selected items. and
+        - Trigger generate_tree_collection when provided properties are edited (TRIGGER_GEN_UI_PROPERTIES)
 
         Uses bpy.msgbus to notify the tree manager when an item data property
         is modified, allowing updates to propagate to all selected objects.
@@ -486,7 +557,7 @@ class TreeManager:
 
         More infos here: https://docs.blender.org/api/current/bpy.msgbus.html#module-bpy.msgbus
         """
-        if not (self.MULTISELECTION_SUPPORT and self.MULTI_EDIT_PROPERTIES):
+        if not (self.MULTISELECTION_SUPPORT and self.MULTI_EDIT_PROPERTIES) or not self.TRIGGER_GEN_TREE_PROPERTIES:
             return
         owner = type(self)
 
@@ -494,10 +565,10 @@ class TreeManager:
 
         instantiated_classes = set()
         self._reallocation_checker_args = []
-        for data_class, properties in self.MULTI_EDIT_PROPERTIES.items():
+        for data_class, properties in chain(self.MULTI_EDIT_PROPERTIES.items(), self.TRIGGER_GEN_TREE_PROPERTIES.items()):
             first_instance = None
             first_instance_data_path = None
-            for tree_item in self.get_ui_tree_collection():
+            for tree_item in self.get_tree_collection():
                 first_instance = tree_item.get_data()
                 first_instance_data_path = tree_item.full_data_path
                 if isinstance(first_instance, data_class):
@@ -519,10 +590,11 @@ class TreeManager:
             return
 
         # Subscribe to instances
+        # Multi Edit Properties
         for data_class, properties in self.MULTI_EDIT_PROPERTIES.items():
             if data_class not in instantiated_classes:
                 continue
-            for tree_item in self.get_ui_tree_collection():
+            for tree_item in self.get_tree_collection():
                 data = tree_item.get_data()
                 if not isinstance(data, data_class):
                     continue
@@ -533,17 +605,61 @@ class TreeManager:
                         args=(self.unique_name, prop_path, tree_item.full_data_path),
                         notify=TreeManager._update_prop_on_selected_data,
                     )
+
+        # Properties that trigger generate_tree
+        for data_class, properties in self.TRIGGER_GEN_TREE_PROPERTIES.items():
+            if data_class not in instantiated_classes:
+                continue
+            for tree_item in self.get_tree_collection():
+                data = tree_item.get_data()
+                if not isinstance(data, data_class):
+                    continue
+                for prop_path in properties:
+                    bpy.msgbus.subscribe_rna(
+                        key=data.path_resolve(prop_path, False),
+                        owner=owner,
+                        args=(self.unique_name,),
+                        notify=TreeManager._generate_tree_on_prop_update,
+                    )
+
     # endregion
-    def generate_ui_tree_collection(self):
+    def _get_expanded_items(self) -> set[str]:
         """
-        Generate a flat collection of UITreeItem
+        Get list of items data that are expanded in ui tree
+        """
+        expanded_items_data = set()
+        for item in self.get_tree_collection():
+            if not item.expanded:
+                continue
+            data = item.get_data()
+            if data:
+                expanded_items_data.add(data.name)
+        return expanded_items_data
+
+    def _get_root_data_color(self)->dict[str,str]:
+        item_color = {}
+        for item in self.get_tree_collection():
+            item: TreeItem
+            if item.parent_index == -1:
+                data = item.get_data()
+                if data:
+                    item_color[data.name] = item.color_tag
+
+        return item_color
+
+    def generate_tree_collection(self):
+        """
+        Generate a flat collection of TreeItem
         from data_collection_prop.
-        Preserve expanded state of UITreeItems using names.
+        Preserve expanded state and colors of items.
+
         """
-        self._expanded_items = self.get_expanded_items()
+
+        _expanded_items = self._get_expanded_items()
+        _root_item_colors = self._get_root_data_color()
         # We need to clear the list used to draw items in the ui
-        ui_tree_collection = self.get_ui_tree_collection()
-        ui_tree_collection.clear()
+        tree_collection = self.get_tree_collection()
+        tree_collection.clear()
         data_collection = self.get_data_collection()
         if self.ALPHABETICAL_ORDER:
             data_collection = sorted(
@@ -551,15 +667,37 @@ class TreeManager:
                 key=self.get_name_for_alpha_order, 
                 reverse=False
             )
-        self._generate_ui_tree_items(data_collection)
-        self.subscribe_to_multi_edit_properties()
-        self._expanded_items = []
+        self._generate_tree_items(data_collection, _expanded_items, _root_item_colors)
+        self.subscribe_to_data_properties()
 
+    def expose_checked_items(self):
+
+        if not self.CHECKABLE_ITEMS:
+            return
+        tree_collection = self.get_tree_collection()
+        index_to_expand = set()
+        # expand from end of item list
+        for item in tree_collection:
+            item: TreeItem
+            if item.checked :
+                for i in item.all_parent_indexes:
+                    if i.value != -1:
+                        index_to_expand.add(i.value)
+
+        for i in index_to_expand:
+            self.expand_tree_item(
+                expand=True,
+                item_index=i,
+                set_active=False,
+                update_selection=False,
+            )
+        # for item in tree_collection:
+        #     item.hidden = False
     def clear_ui_collection(self):
-        ui_tree_collection = self.get_ui_tree_collection()
-        ui_tree_collection.clear()
+        tree_collection = self.get_tree_collection()
+        tree_collection.clear()
 
-    def expand_ui_tree_item(
+    def expand_tree_item(
         self,
         expand: bool,
         item_index: int, 
@@ -567,18 +705,17 @@ class TreeManager:
         update_selection: bool = False
     ) :
         """
-        Set expand state of UITreeItem
+        Set expand state of TreeItem
 
         Args:
             expand: Wanted expand state.
             item_index: Index of item to expand.
             set_active: Set active item to preserve UIList scrolling. Defaults to False.
             update_selection: Triggers active index property update.
-        Return:
-            Return True if ui_tree_collection_prop len changed.
+
         """
         item: TreeItem
-        item_list = self.get_ui_tree_collection()
+        item_list = self.get_tree_collection()
         item = item_list[item_index]
         data = item.get_data()
         if not data:
@@ -613,19 +750,17 @@ class TreeManager:
                     child_item.hidden = not parent_item.expanded 
                     if parent_item.expanded:
                         expanded_parent_items.add(i)
-            else:
-                break
 
         if set_active:
-            self.set_ui_tree_active_index(item_index, update_selection)
+            self.set_active_index(item_index, update_selection)
 
     def get_active_item(self) -> TreeItem | None:
-        ui_tree_collection_prop = self.get_ui_tree_collection()
-        active_index = self._get_ui_tree_active_index()
+        tree_collection = self.get_tree_collection()
+        active_index = self._get_active_index()
         if active_index < 0: # if -1, means not active index set
             return None
         try:
-            active_item = ui_tree_collection_prop[active_index]
+            active_item = tree_collection[active_index]
             return active_item
         except IndexError:
             return None
@@ -648,7 +783,7 @@ class TreeManager:
             return True
 
     def unselect_all(self):
-        item_collection = self.get_ui_tree_collection()
+        item_collection = self.get_tree_collection()
         for item in item_collection:
             item:TreeItem
             item.selected = False
@@ -656,17 +791,17 @@ class TreeManager:
         self._has_multiselection = False
         if self.on_selection_function:
             self.on_selection_function(self, bpy.context) # type: ignore
-        self.set_ui_tree_active_index(None)
+        self.set_active_index(None)
 
     def select_all_visible(self):
-        item_collection = self.get_ui_tree_collection()
+        item_collection = self.get_tree_collection()
         for item in item_collection:
             item:TreeItem
             if self.item_visible_after_ui_filter(item):
                 item.selected = True
-        active_index = self._get_ui_tree_active_index()
+        active_index = self._get_active_index()
         if len(item_collection) and active_index < 0:
-            self.set_ui_tree_active_index(0, update_selection=False)
+            self.set_active_index(0, update_selection=False)
 
         self.update_has_multiselection_state()
         if self.on_selection_function:
@@ -689,9 +824,9 @@ class TreeManager:
         Must be launched after update_selected_items() 
         if you want to get up to date list.
         """
-        ui_tree_collection_prop = self.get_ui_tree_collection()
+        tree_collection = self.get_tree_collection()
         selected_items = []
-        for item in ui_tree_collection_prop:
+        for item in tree_collection:
             if item.selected :
                 selected_items.append(item)
         return selected_items
@@ -701,8 +836,8 @@ class TreeManager:
         This must be called when user set active item in hierarchy
         in order to update items selection state.
         """
-        old_active_index = self._get_ui_old_tree_active_index()
-        active_index = self._get_ui_tree_active_index()
+        old_active_index = self._get_previous_active_index()
+        active_index = self._get_active_index()
         if old_active_index != -1:
 
             bpy.ops.treeview.set_items_selection(
@@ -712,11 +847,11 @@ class TreeManager:
                 tree_manager_name=self.unique_name
             )
         # Get Active index again, it can change during items selection
-        active_index = self._get_ui_tree_active_index()
-        self._set_ui_old_tree_active_index(active_index)
+        active_index = self._get_active_index()
+        self._set_previous_active_index(active_index)
 
     def check_all(self, checked: bool = True, visible_only: bool = True):
-        item_collection = self.get_ui_tree_collection()
+        item_collection = self.get_tree_collection()
         for item in item_collection:
             item: TreeItem
             if visible_only and not self.item_visible_after_ui_filter(item):
@@ -726,9 +861,9 @@ class TreeManager:
     def get_checked_items(self)->list[TreeItem]:
         if not self.CHECKABLE_ITEMS:
             return []
-        ui_tree_collection_prop = self.get_ui_tree_collection()
+        tree_collection = self.get_tree_collection()
         checked_items = []
-        for item in ui_tree_collection_prop:
+        for item in tree_collection:
             if item.checked :
                 checked_items.append(item)
         return checked_items
@@ -746,15 +881,15 @@ class TreeManager:
         """
         self.ul_tree_view_class.tree_manager_name = self.unique_name
 
-        self.ui_tree_prop_name = f"{self.unique_name}_ui_tree"
+        self.tree_col_prop_name = f"{self.unique_name}_ui_tree"
         self.active_index_prop_name = f"{self.unique_name}_active_index"
-        self.old_active_index_prop_name = f"{self.unique_name}_old_active_index"
+        self.previous_active_index_prop_name = f"{self.unique_name}_previous_active_index"
 
         # Import here to avoid circular import
         from _addons_common.ui.tree_widget.item import TreeItem
         setattr(
             bpy.types.Scene,
-            self.ui_tree_prop_name,
+            self.tree_col_prop_name,
             bpy.props.CollectionProperty(type=TreeItem),
         )
 
@@ -784,7 +919,7 @@ class TreeManager:
             )
             setattr(
                 bpy.types.WindowManager,
-                self.old_active_index_prop_name,
+                self.previous_active_index_prop_name,
                 bpy.props.IntProperty(default=0),
             )
 
@@ -810,9 +945,9 @@ class TreeManager:
         self.ul_tree_view_class.unregister()
         try:
             TreeManager.tree_manager_instances.pop(self.unique_name)
-            delattr(bpy.types.Scene, self.ui_tree_prop_name)
+            delattr(bpy.types.Scene, self.tree_col_prop_name)
             delattr(bpy.types.WindowManager, self.active_index_prop_name)
-            delattr(bpy.types.WindowManager, self.old_active_index_prop_name)
+            delattr(bpy.types.WindowManager, self.previous_active_index_prop_name)
 
         except Exception:
             pass

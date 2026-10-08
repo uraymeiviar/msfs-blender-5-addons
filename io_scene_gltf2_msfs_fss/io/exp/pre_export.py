@@ -195,6 +195,9 @@ class CheckObjectsResult:
     skinned_objects_unincluded_armature: set[str] = field(default_factory=set)
     skinned_objects_root_transform_reset: set[str] = field(default_factory=set)
     skinned_objects_obj_transform_reset: set[str] = field(default_factory=set)
+    objects_without_unique_id: set[str] = field(default_factory=set)
+    objects_with_same_id: dict[str, set[str]] = field(default_factory=dict)
+    
 
 def _in_scene(obj: bpy.types.Object) -> bool:
     """Check if object has not been deleted and is present in current scene."""
@@ -218,20 +221,24 @@ def _get_last_armature_modifier(
     return arm_mod
 
 
-def _check_objects(
+def _check_gltf_objects(
     objects: Iterable[bpy.types.Object], msfs_export_settings: None | export_settings.MSFS2024_MultiExporterSettings
 ) -> CheckObjectsResult:
-    """Perform standard validation checks on the given objects.
+    """Perform standard validation checks on the given gltf objects.
 
     - Validate skinned objects and their Armature modifiers.
     - Validate parent relationships when submodel export is enabled.
-
+    - Validate asobo unique ids.
     Returns a CheckObjectsResult describing any detected issues.
     """
+
     skinned_objects_without_armature: set[str] = set()
     skinned_objects_unincluded_armature: set[str] = set()
     skinned_objects_root_transform_reset: set[str] = set()
     skinned_objects_obj_transform_reset: set[str] = set()
+
+    objects_without_unique_id: set[str] = set()
+    objects_with_same_id: dict[str, set[str]] = {}
 
     # Check what's needed depending on what's enabled in export settings
     check_skin = False 
@@ -256,53 +263,66 @@ def _check_objects(
         if obj.type == "ARMATURE":
             armatures.add(obj)
 
-    submodel_root_count = 0
-
+    unique_id_objects: dict[str, set[str]] = {}
     for obj in objects:
         if not _in_scene(obj):
             continue
 
-        if check_skin:
-            if obj.type == "ARMATURE":
-                continue
+        if check_skin and not obj.type == "ARMATURE":
             # Find the last armature modifiers, since this the one used by gltf exporter
             arm_mod = _get_last_armature_modifier(obj)
-            if not arm_mod:
+            if arm_mod:
+                arm_ref = arm_mod.object
+                skin_export = False
+                if not arm_ref or not _in_scene(arm_ref):
+                    skinned_objects_without_armature.add(obj.name)
+                elif arm_ref not in armatures:
+                    skinned_objects_unincluded_armature.add(obj.name)
+                else:
+                    # A skin is going to be exported
+                    skin_export = True
+
+                if check_root_transform_reset and not obj.parent and skin_export:
+                    skinned_objects_root_transform_reset.add(obj.name)
+                elif (
+                    check_per_object_transform_reset
+                    and skin_export
+                    and (
+                        obj.msfs_export_transform.reset_translation
+                        or obj.msfs_export_transform.reset_rotation
+                        or obj.msfs_export_transform.reset_scale
+                    )
+                ):
+                    skinned_objects_obj_transform_reset.add(obj.name)
+
+        unique_id = obj.name
+
+        if hasattr(obj, "msfs_override_unique_id") and obj.msfs_override_unique_id:
+            unique_id = obj.msfs_unique_id
+
+        if not unique_id:
+            objects_without_unique_id.add(obj.name)
+        elif unique_id in unique_id_objects.keys():
+            unique_id_objects[unique_id].add(obj.name)
+        else:
+            unique_id_objects[unique_id] = set((obj.name,))
+
+        for id, objects in unique_id_objects.items():
+            if len(objects) == 1:
                 continue
-            arm_ref = arm_mod.object
-            skin_export = False
-            if not arm_ref or not _in_scene(arm_ref):
-                skinned_objects_without_armature.add(obj.name)
-            elif arm_ref not in armatures:
-                skinned_objects_unincluded_armature.add(obj.name)
-            else:
-                # A skin is going to be exported
-                skin_export = True
-
-            if check_root_transform_reset and not obj.parent and skin_export:
-                skinned_objects_root_transform_reset.add(obj.name)
-            elif (
-                check_per_object_transform_reset
-                and skin_export
-                and (
-                    obj.msfs_export_transform.reset_translation
-                    or obj.msfs_export_transform.reset_rotation
-                    or obj.msfs_export_transform.reset_scale
-                )
-            ):
-                skinned_objects_obj_transform_reset.add(obj.name)
-            # check if
-
+            objects_with_same_id[id] = objects
 
     return CheckObjectsResult(
         skinned_objects_without_armature,
         skinned_objects_unincluded_armature,
         skinned_objects_root_transform_reset,
-        skinned_objects_obj_transform_reset
+        skinned_objects_obj_transform_reset,
+        objects_without_unique_id,
+        objects_with_same_id
     )
 
 
-def _process_check_objects_result(
+def _process_check_gltf_objects_result(
     check_objects_result: CheckObjectsResult,
     item_name: str,
 ) -> tuple[bool, bool]:
@@ -330,6 +350,8 @@ def _process_check_objects_result(
                 f"{invalid_skinned_objects}"
             ),
         )
+
+
     if check_objects_result.skinned_objects_unincluded_armature:
 
         invalid_skinned_objects = _get_list_formatted_string(
@@ -379,6 +401,35 @@ def _process_check_objects_result(
                 f"{invalid_skinned_objects}"
             ),
         )
+
+    if check_objects_result.objects_without_unique_id:
+    
+        objects_without_unique_id = _get_list_formatted_string(
+            check_objects_result.objects_without_unique_id
+        )
+        MSFS2024_LOGGER.warning(
+            message=f"'{item_name}' : Objects without unique ID",
+            details=(
+                "Objects with 'Override Unique ID' enabled but ID field is empty:\n"
+                f"{objects_without_unique_id}"
+            ),
+        )
+        result = False
+
+    if check_objects_result.objects_with_same_id:
+        for id, objects in check_objects_result.objects_with_same_id.items():
+            objects_with_same_id = _get_list_formatted_string(
+                objects
+            )
+            MSFS2024_LOGGER.warning(
+                message=f"'{item_name}' : Duplicate object ID",
+                details=(
+                    f"Multiple objects have the same ID '{id}':\n"
+                    f"{objects_with_same_id}"
+                ),
+            )
+        result = False
+    
     return result, skip_next_checks
 
 
@@ -481,7 +532,7 @@ class CheckLODsResult:
     deleted_enabled_lods: set[str] = field(default_factory=set)
 
 
-def _check_lods_collections(lod_group: MultiExporterLODGroup) -> CheckLODsResult:
+def _check_lod_group_entries_collections(lod_group: MultiExporterLODGroup) -> CheckLODsResult:
     """Check lod groups in collections mode.
     """
     empty_enabled_lods: set[str] = set()
@@ -526,7 +577,7 @@ def _check_lods_collections(lod_group: MultiExporterLODGroup) -> CheckLODsResult
     )
 
 
-def _check_lods_objects(lod_group: MultiExporterLODGroup) -> CheckLODsResult:
+def _check_lod_group_entries_objects(lod_group: MultiExporterLODGroup) -> CheckLODsResult:
     """Check lod groups in objects mode.
     """
 
@@ -548,15 +599,15 @@ def _check_lods_objects(lod_group: MultiExporterLODGroup) -> CheckLODsResult:
         deleted_enabled_lods=deleted_enabled_lods,
     )
 
-def _check_lods(lod_group: MultiExporterLODGroup, export_mode: multi_export_mode.ExportMode) -> CheckLODsResult:
+def _check_lod_group_entries(lod_group: MultiExporterLODGroup, export_mode: multi_export_mode.ExportMode) -> CheckLODsResult:
     # region Check enabled LODS
     if export_mode == multi_export_mode.ExportMode.COLLECTIONS:  # type: ignore
-        check_lods_result: CheckLODsResult = _check_lods_collections(lod_group)
+        check_lods_result: CheckLODsResult = _check_lod_group_entries_collections(lod_group)
     elif export_mode == multi_export_mode.ExportMode.OBJECTS:
-        check_lods_result: CheckLODsResult = _check_lods_objects(lod_group)
+        check_lods_result: CheckLODsResult = _check_lod_group_entries_objects(lod_group)
     return check_lods_result
 
-def _process_check_lods_result(check_lods_result: CheckLODsResult, lod_group: MultiExporterLODGroup, export_mode: multi_export_mode.ExportMode)->tuple[bool, bool]:
+def _process_check_lod_group_entries_result(check_lods_result: CheckLODsResult, lod_group: MultiExporterLODGroup, export_mode: multi_export_mode.ExportMode)->tuple[bool, bool]:
     """Process lods check result and log 
     appropriate messages when necessary.
     
@@ -638,28 +689,33 @@ def check_lod_groups(export_mode: multi_export_mode.ExportMode) -> bool:
             scene_export_settings.get(lod_group.settings_preset, None)
         )
         # region Check enabled LODS
-        check_lods_result: CheckLODsResult = _check_lods(lod_group, export_mode)
+        check_lod_group_entries_result: CheckLODsResult = _check_lod_group_entries(lod_group, export_mode)
 
-        _result, skip_next_checks = _process_check_lods_result(
-            check_lods_result, lod_group, export_mode
+        _result, skip_next_checks = _process_check_lod_group_entries_result(
+            check_lod_group_entries_result, 
+            lod_group, 
+            export_mode
         )
         if not _result:
             result = False
         if skip_next_checks:
             continue
 
-        # region Check Objects
-
-        check_objects_result: CheckObjectsResult = _check_objects(
-            lod_group.get_lod_group_objects(
-                export_mode, 
-                enabled_only=True
-            ),
-            msfs_export_settings,
-        )
-        _result, skip_next_checks = _process_check_objects_result(check_objects_result, lod_group.name)
-        if not _result:
-            result = False
+        # region Check Objects for each exported gltf
+        for lod in lod_group.lods:
+            if not lod.enabled:
+                continue
+            objects = lod.get_lod_objects(export_mode)
+            check_objects_result: CheckObjectsResult = _check_gltf_objects(
+                objects,
+                msfs_export_settings,
+            )
+            _result, skip_next_checks = _process_check_gltf_objects_result(check_objects_result, lod.name )
+            if not _result:
+                result = False
+            if skip_next_checks:
+                skip_next_checks = True
+ 
         if skip_next_checks:
             continue
 
@@ -819,17 +875,19 @@ def check_presets() -> bool:
         if skip_next_checks:
             continue
             
-        # region Check Objects
-        check_objects_result: CheckObjectsResult = _check_objects(
-            preset.get_preset_objects(),
-            msfs_export_settings
+        # region Check Objects for each exported gltf
+        objects = preset.get_preset_objects()
+        check_objects_result: CheckObjectsResult = _check_gltf_objects(
+            objects,
+            msfs_export_settings,
         )
-        _result, skip_next_checks = _process_check_objects_result(check_objects_result, preset.preset_name)
+        _result, skip_next_checks = _process_check_gltf_objects_result(check_objects_result, preset.preset_name)
         if not _result:
             result = False
+
         if skip_next_checks:
             continue
-
+    
         # Check Path
         check_export_folder_result: CheckExportFolderResult = _check_export_folder(
             preset.folder_path

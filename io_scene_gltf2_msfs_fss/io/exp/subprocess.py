@@ -71,10 +71,10 @@ class MSFS2024_OT_SubProcessExport(bpy.types.Operator):
     _thread_finished: bool = False
     _thread: threading.Thread | None = None
 
-    _blend_file_path: str | None = None
+    _blend_file_path: Path | None = None
 
     @staticmethod
-    def _get_additionnal_exporter_addons(gltf2_exporter_script_dir:str) -> dict[str, str| None]:
+    def _get_additionnal_exporter_addons(addons_dir:str) -> dict[str, str| None]:
         """Get additionnal addons that needs to be enabled during exporter.
         In order to force an addon to be enabled during export,
         dev should had a "is_gltf_exporter_addon":True in bl_info dict.
@@ -98,16 +98,16 @@ class MSFS2024_OT_SubProcessExport(bpy.types.Operator):
                 )
 
             if is_gltf_export_addon:
-                addon_dir = Path(module.__file__)
-                if len(addon_dir.parents) >= 2:
-                    addon_dir = addon_dir.parents[1]
+                mod_dir = Path(module.__file__)
+                if len(mod_dir.parents) >= 2:
+                    mod_dir = mod_dir.parents[1]
                 else:
                     continue
-                addon_dir = addon_dir.as_posix()
-                if addon_dir == gltf2_exporter_script_dir:
+                mod_dir = mod_dir.as_posix()
+                if mod_dir == addons_dir:
                     # No need to include gltf2 exporter script dir
-                    addon_dir = None
-                exporter_addons[module_name] = addon_dir
+                    mod_dir = None
+                exporter_addons[module_name] = mod_dir
         return exporter_addons
 
     @staticmethod
@@ -127,39 +127,48 @@ class MSFS2024_OT_SubProcessExport(bpy.types.Operator):
 
         return user_script_dirs
 
-    def thread_target(self, scene_path: str, blender_exe_path: str, debug: bool = False):
-
-        addon_name = "io_scene_gltf2_msfs_fss"
+    def thread_target(self, scene_path: Path, blender_exe_path: str, debug: bool = False):
 
         _user_scripts_dirs = self._get_user_scripts_dirs()
-        gltf2_exporter_script_dir = ""
-        to_remove = []
+        addons_dir = None
+        modules_dir = None
+        additionnal_exporter_addons = {}
         for dir in _user_scripts_dirs:
             script_path = Path(dir)
             if Path(__file__).is_relative_to(script_path):
-                to_remove.append(dir)
-                gltf2_exporter_script_dir = script_path.as_posix()
+                addons_dir = script_path / "addons"
+                modules_dir = script_path / "modules"
+                
+            additionnal_addons = self._get_additionnal_exporter_addons(dir)
+            if additionnal_addons:
+                additionnal_exporter_addons.update(additionnal_addons)
+    
+        if not addons_dir or not modules_dir:
+            return
+        addons_dir = addons_dir.as_posix()
+        modules_dir = modules_dir.as_posix()
+        env = os.environ.copy()
+        # Disable system add-ons handlers in subprocess for faster scene loading
+        env["BLENDER_SYSTEM_SCRIPTS"] = ""
+        env["BLENDER_USER_SCRIPTS"] = ""
+        msfs_handlers.disable_handlers(env)
 
-        for dir in to_remove:
-            _user_scripts_dirs.remove(dir)
-
-        # We can provide only one user script dir with environment var
-        if gltf2_exporter_script_dir:
-            env = os.environ.copy()
-            env["BLENDER_USER_SCRIPTS"] = gltf2_exporter_script_dir
-            # Disable handlers in subprocess for faster scene loading
-            env[msfs_handlers.HANDLER_DISABLED_ENV_VAR] = "True"
-
-        additionnal_exporter_addons = self._get_additionnal_exporter_addons(gltf2_exporter_script_dir)
 
         for mod_name, mod_dir in additionnal_exporter_addons.items():
-            if mod_dir == gltf2_exporter_script_dir:
+            if mod_dir == addons_dir:
                 additionnal_exporter_addons[mod_name] = None
 
         python_script = (
             "try: \n"
+                "\timport os\n"
+                "\timport sys\n"
+                "\timport bpy\n"
+                f"\tsys.path.append('{modules_dir}')\n"
+                f"\tsys.path.append('{addons_dir}')\n"
+
                 "\tfrom io_scene_gltf2_msfs_fss.io.exp.subprocess_script import subprocess_export\n"
                 "\tsubprocess_export("
+                    f"scene='{scene_path.as_posix()}',"
                     f"export_mode='{self.export_mode}',"
                     f"additionnal_exporter_addons={additionnal_exporter_addons},"
                     f"profiling={self._profiling},"
@@ -175,10 +184,8 @@ class MSFS2024_OT_SubProcessExport(bpy.types.Operator):
         # Start a new blender process with only addon io_scene_gltf2_msfs_fss enabled
         args = [
                 blender_exe_path,
-                scene_path,
                 "--background",
                 "--factory-startup",
-                "--addons", addon_name,
                 "--disable-autoexec",
                 "-noaudio",
                 "--python-expr",python_script,        
@@ -276,7 +283,7 @@ class MSFS2024_OT_SubProcessExport(bpy.types.Operator):
 
         return {"PASS_THROUGH"}
 
-    def create_blender_file_copy(self, context: bpy.types.Context) -> None | str:
+    def create_blender_file_copy(self, context: bpy.types.Context) -> None | Path:
         """Save a temporary copy of the blend file and store the path.
         Make sure the path doesn't exist first.
         All Export will be done using this copy so the user can continue working in this session.
@@ -287,16 +294,14 @@ class MSFS2024_OT_SubProcessExport(bpy.types.Operator):
             self.report({"ERROR"}, "Save scene before export")
             return None
         blend_name = secrets.token_hex(6)
-        directory = os.path.dirname(current_scene)
-        blend_file = os.path.join(directory, blend_name)
-        blend_file += ".blend"
+        directory = Path(current_scene).parent
+        blend_file = directory / blend_name
+        blend_file = blend_file.with_suffix(".blend")
 
         scene_preview = context.preferences.filepaths.file_preview_type
 
-        while os.path.exists(blend_file):
-            blend_name = secrets.token_hex(6)
-            blend_file = os.path.join(directory, blend_name)
-            blend_file += ".blend"
+        while blend_file.exists():
+            blend_file = blend_file.with_stem(secrets.token_hex(6))
 
         print(f"Create blend file copy {blend_file}")
         failed = False
@@ -310,9 +315,9 @@ class MSFS2024_OT_SubProcessExport(bpy.types.Operator):
             # Prevent temp blender file to be processed by save handlers
             try:
                 bpy.ops.wm.save_as_mainfile(
-                    filepath=blend_file, copy=True, compress=False, relative_remap=False
+                    filepath=blend_file.as_posix(), copy=True, compress=False, relative_remap=False
                 )
-                if not os.path.exists(blend_file):
+                if not blend_file.exists():
                     self.report({"ERROR"}, "Blend file copy failed")
                     failed = True
 

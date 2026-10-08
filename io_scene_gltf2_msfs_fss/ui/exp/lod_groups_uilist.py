@@ -1,7 +1,5 @@
 from __future__ import annotations
-from typing import Any
 
-import re
 
 import bpy
 
@@ -17,6 +15,7 @@ from io_scene_gltf2_msfs_fss.io.exp  import lod_groups as exp_lod_groups
 from io_scene_gltf2_msfs_fss.io.exp.lod_groups import MultiExporterLOD, MultiExporterLODGroup, LOD_NAME_PATTERN
 
 from io_scene_gltf2_msfs_fss.ui.exp import exporter_panel_ops
+
 
 _lod_group_tree_manager: LODGroupTreeManager | None = None
 
@@ -109,7 +108,7 @@ class LODGroupTreeManager(TreeManager):
             new_name = LOD_NAME_PATTERN.sub(new_suffix, new_name)
         return new_name
 
-    def set_ui_tree_item_name(self, item: TreeItem, data: bpy.types.bpy_struct):
+    def set_tree_item_name(self, item: TreeItem, data: bpy.types.bpy_struct):
         """
         Set UITreeItem name according to data.
         Item name is used by filters functions.
@@ -217,7 +216,6 @@ class MSFS2024_UL_LODGroups(bpy.types.UIList, UL_TreeView):
         )
         export_selected_ope.export_mode = multi_export_mode.ExportMode.OBJECTS.identifier
 
-
     def on_reset_filters(self, context):
         self.use_filter_invert = False
         self.lods_only = False
@@ -238,8 +236,14 @@ class MSFS2024_UL_LODGroups(bpy.types.UIList, UL_TreeView):
 
     # Inherited Methods
     @classmethod
-    def custom_draw_item(cls, context, index, item, layout):
-        item: TreeItem
+    def custom_draw_item(
+        cls,
+        context: bpy.types.Context,
+        index: int,
+        item: TreeItem,
+        layout: bpy.types.UILayout,
+    ):
+
         data = item.get_data()
         if not data:
             return
@@ -254,11 +258,10 @@ class MSFS2024_UL_LODGroups(bpy.types.UIList, UL_TreeView):
             row.label(text="Not Implemented")
 
     @staticmethod
-    def draw_lod(lod, item, index, row):
+    def draw_lod(lod: MultiExporterLOD, item: TreeItem, index: int, row: bpy.types.UILayout):
         lod_group = item.get_parent_data()
         if not lod_group:
             return
-        item: TreeItem
 
         row.prop(lod, "file_name", text=f"LOD{item.child_index}", expand=False)
 
@@ -267,12 +270,14 @@ class MSFS2024_UL_LODGroups(bpy.types.UIList, UL_TreeView):
             row.ui_units_x = 8
             row.label(text="", icon="FULLSCREEN_ENTER")
             row.prop(lod, "lod_value", text="", expand=False)
+
     @staticmethod
-    def draw_lod_group(lod_group, item, index, row):
+    def draw_lod_group(lod_group: MultiExporterLODGroup, item: int, index: int, row: bpy.types.UILayout):
 
         small_row = row.row()
         small_row.scale_x = 0.7
         small_row.label(text=lod_group.name)
+
         if bpy.app.version > (4, 0, 0):
             row.prop(lod_group, "folder_path", text="", placeholder="Export Folder")
         else:
@@ -337,7 +342,7 @@ class MSFS2024_UL_LODGroups(bpy.types.UIList, UL_TreeView):
 
         return False
 
-    def is_active(self, context, item) -> bool:
+    def is_active(self, context: bpy.types.Context, item: TreeItem) -> bool:
         """
         Check if the given item coresponds to active object.
         """
@@ -363,13 +368,13 @@ class MSFS2024_UL_LODGroups(bpy.types.UIList, UL_TreeView):
 
         return False
 
-    def _get_layer_collection(self,context,collection)->bpy.types.LayerCollection:
+    def _get_layer_collection(self, context: bpy.types.Context, collection: bpy.types.Collection) -> bpy.types.LayerCollection:
         for layer_collection in bpy.context.view_layer.layer_collection.children:
             if layer_collection.collection == collection:
                 return layer_collection
         return None
 
-    def is_visible(self, context, item) -> bool:
+    def is_visible(self, context: bpy.types.Context, item: TreeItem) -> bool:
         """
         Check if the given item coresponds to a visible object.
         """
@@ -404,7 +409,7 @@ class MSFS2024_UL_LODGroups(bpy.types.UIList, UL_TreeView):
 
         return False
 
-    def filter_items(self, context, data, propname):
+    def filter_items(self, context: bpy.types.Context, data, propname):
         """
         This function gets the collection property (as the usual tuple (data, propname)), and must return two lists:
         * The first one is for filtering, it must contain 32bit integers were self.bitflag_filter_item marks the
@@ -421,7 +426,7 @@ class MSFS2024_UL_LODGroups(bpy.types.UIList, UL_TreeView):
         flt_flags, flt_neworder = super().filter_items(context, data, propname)
 
         # msfs_lod_groups_ui_tree
-        msfs_lod_groups_ui_tree :list[TreeItem]= getattr(data, propname)
+        ui_tree: list[TreeItem] = getattr(data, propname)
         helper_funcs = bpy.types.UI_UL_list
 
         # Filtering by name
@@ -429,11 +434,11 @@ class MSFS2024_UL_LODGroups(bpy.types.UIList, UL_TreeView):
             flt_flags = helper_funcs.filter_items_by_name(
                 self.filter_name,
                 self.bitflag_filter_item,
-                msfs_lod_groups_ui_tree,
+                ui_tree,
                 "name",
                 reverse=self.use_filter_invert,
             )  
-        for i, item in enumerate(msfs_lod_groups_ui_tree):
+        for i, item in enumerate(ui_tree):
             if self.lods_only and not MSFS2024_UL_LODGroups.is_lods_only_item(item):
                 flt_flags[i] &= ~self.bitflag_filter_item
             if self.active_only and not self.is_active(context, item):
@@ -448,7 +453,7 @@ class MSFS2024_UL_LODGroups(bpy.types.UIList, UL_TreeView):
                 flt_flags[i] &= ~self.bitflag_filter_item
 
         if self.parents_of_filtered_items:
-            self.show_parents_of_filtered_items(msfs_lod_groups_ui_tree, flt_flags)
+            self.show_parents_of_filtered_items(ui_tree, flt_flags)
 
         self.save_flags_in_tree_manager(flt_flags)
 
@@ -476,7 +481,8 @@ def register():
         alphabetical_order=True,
         multiselection_support=True,
         checkable_items=True,
-        multi_edit_properties=multi_edit_properties
+        multi_edit_properties=multi_edit_properties,
+        colored_root_items=True
     )
 
 

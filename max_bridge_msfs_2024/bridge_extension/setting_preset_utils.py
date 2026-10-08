@@ -1,7 +1,9 @@
 import bpy
 
-from max_bridge_msfs_2024.msfs_2024.msfs_properties import *
-from max_bridge_msfs_2024 import logger
+from max_bridge_asobo import logger
+
+from max_bridge_msfs_2024.bridge_extension.msfs_properties import *
+
 
 from io_scene_gltf2_msfs_fss.io.exp import export_settings
 

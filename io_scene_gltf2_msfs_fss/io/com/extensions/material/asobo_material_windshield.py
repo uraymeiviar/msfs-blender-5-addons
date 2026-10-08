@@ -46,8 +46,8 @@ class AsoboMaterialWindshieldExtension:
 
     extension_textures = [
         MSFS2024_MaterialProperties.WINDSHIELDWIPERMASKTEXTURE,
-        (MSFS2024_MaterialProperties.WINDSHILEDDETAILNORMALTEXTURE, "NORMAL"),
-        (MSFS2024_MaterialProperties.WINDSHIELDSCRACHESNORMALTEXTURE, "NORMAL"),
+        MSFS2024_MaterialProperties.WINDSHILEDDETAILNORMALTEXTURE,
+        MSFS2024_MaterialProperties.WINDSHIELDSCRACHESNORMALTEXTURE,
         MSFS2024_MaterialProperties.WINDSHIELDINSECTSALBEDOTEXTURE,
         MSFS2024_MaterialProperties.WINDSHIELDINSECTSMASKTEXTURE
     ]
@@ -118,18 +118,13 @@ class AsoboMaterialWindshieldExtension:
             )
 
         for extension_texture in AsoboMaterialWindshieldExtension.extension_textures:
-            texture_type = "DEFAULT"
 
-            if isinstance(extension_texture, tuple) and len(extension_texture) > 1:
-                texture_type = extension_texture[1]
-                extension_texture = extension_texture[0]
 
             MSFS2024_MaterialUtils.set_extension_texture(
                 extension=result,
                 material=blender_material,
                 attribute=extension_texture,
-                settings=export_settings,
-                texture_type=texture_type
+                settings=export_settings
             )
 
         # Set detail

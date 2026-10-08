@@ -6,7 +6,6 @@ This is particularly useful for panels with a parent panel defined by `bl_parent
 
 To skip registration entirely, set a `skip_register` attribute on the class.
 """
-
 import bpy
 import importlib
 import inspect
@@ -28,7 +27,7 @@ class Registration:
         self._modules = []
         self._classes = {}
 
-    def _recursive_module_search(self, path: str, root: str = ""):
+    def _recursive_module_search(self, path: Path, root: str = ""):
         """ Recursively search for all modules in a given path """
         for _, module_name, ispkg in pkgutil.iter_modules([str(path)]):
             if ispkg:
@@ -48,6 +47,9 @@ class Registration:
 
         parent_path = Path(self.__file).parent
         for root, module_name in self._recursive_module_search(parent_path):
+            if not root and module_name == "__init__":
+                # Skip package __init__, prevent loading package __init__ two times
+                continue
             self._modules.append(
                 importlib.import_module(
                     f".{module_name}",
@@ -91,21 +93,6 @@ class Registration:
                 else:
                     self._classes[order_index] = [obj]
 
-    def _is_package_init_module(self, md):
-        """ Check if a module is the __init__.py of the package of the instance """
-        return (
-            Path(md.__file__).stem == "__init__"
-            and md.__package__ == self.__package
-        )
-
-    def set_file(self, file):
-        """ Set the file path of the module """
-        self.__file = file
-
-    def set_package(self, package):
-        """ Set the package name of the module """
-        self.__package = package
-
     def register(self):
         """ Register all classes and modules """
         self._update_module_list()
@@ -129,9 +116,6 @@ class Registration:
                     
 
         for md in self._modules:
-            if self._is_package_init_module(md):
-                continue
-
             if hasattr(md, "register"):
                 md.register()
     
@@ -147,8 +131,5 @@ class Registration:
                     
 
         for md in self._modules:
-            if self._is_package_init_module(md):
-                continue
-
             if hasattr(md, "unregister"):
                 md.unregister()

@@ -23,7 +23,6 @@ if bpy.app.version >= (4, 5, 0):
         NodeSocket
     )
     from io_scene_gltf2.blender.exp.material.texture_info import (
-        gather_material_normal_texture_info_class,
         gather_texture_info
     )
 else:
@@ -36,12 +35,10 @@ else:
         
     if bpy.app.version >= (3, 6, 0):
         from io_scene_gltf2.blender.exp.material.gltf2_blender_gather_texture_info import (
-            gather_material_normal_texture_info_class,
             gather_texture_info
         )
     else:
         from io_scene_gltf2.blender.exp.gltf2_blender_gather_texture_info import (
-            gather_material_normal_texture_info_class,
             gather_texture_info
         )
 
@@ -58,48 +55,46 @@ from .msfs_data_utils import MSFS2024_DataUtils
 class MSFS2024_MaterialUtils:
 
     # key : absolute texture path, value : gltf texture info
-    _exported_textures_cache: dict = {}
+    _tex_infos_cache: dict = {}
     @staticmethod
-    def reset_exported_textures_cache():
-        MSFS2024_MaterialUtils._exported_textures_cache = {}
+    def reset_tex_infos_cache():
+        MSFS2024_MaterialUtils._tex_infos_cache = {}
 
     @staticmethod
-    def _add_tex_info_to_cache(texture_filepath: str, texture_info):
-        texture_filepath = bpy.path.abspath(texture_filepath)
-        MSFS2024_MaterialUtils._exported_textures_cache[texture_filepath] = texture_info
+    def _add_tex_info_to_cache(image_name: str, texture_info):
+        image_name = bpy.path.abspath(image_name)
+        MSFS2024_MaterialUtils._tex_infos_cache[image_name] = texture_info
 
     @staticmethod
-    def _get_tex_info_from_cache(texture_filepath: str):
-        texture_filepath = bpy.path.abspath(texture_filepath)
-        MSFS2024_MaterialUtils._exported_textures_cache.get(texture_filepath, None)
+    def _get_tex_info_from_cache(image_name: str):
+        image_name = bpy.path.abspath(image_name)
+        return MSFS2024_MaterialUtils._tex_infos_cache.get(image_name, None)
 
     @staticmethod
     def get_texture_info(
-        blender_material,
-        attribute,
-        export_settings,
-        image_type="DEFAULT"
+        blender_material: bpy.types.Material,
+        attribute: str,
+        export_settings: dict,
     ):
-        texture = getattr(
+        image = getattr(
             blender_material,
             attribute
         )
 
-        if texture is None:
+        if image is None:
             return None
 
-        texture_info = MSFS2024_MaterialUtils._get_tex_info_from_cache(texture.filepath)
+        texture_info = MSFS2024_MaterialUtils._get_tex_info_from_cache(image.name)
 
         if texture_info is None:
             texture_info = MSFS2024_MaterialUtils.export_image(
-                blender_image=texture,
-                image_type=image_type,
+                blender_image=image,
                 export_settings=export_settings
             )
 
             # Add texture in exported_textures map
             if texture_info is not None:
-                MSFS2024_MaterialUtils._add_tex_info_to_cache(texture.filepath, texture_info)
+                MSFS2024_MaterialUtils._add_tex_info_to_cache(image.name, texture_info)
 
         return texture_info
 
@@ -115,13 +110,19 @@ class MSFS2024_MaterialUtils:
         return bpy.data.images[pyimg.blender_image_name]
 
     @staticmethod
-    def export_image(blender_image, image_type, export_settings):
+    def export_image(blender_image: bpy.types.Image, export_settings):
         # Make sure image is editable or gather_texture_info will return None
         # It happens when image is linked
         if not data_utils.is_editable(blender_image):
             blender_image = blender_image.copy()
             blender_image.make_local()
-        
+
+        if export_settings["gltf_keep_original_textures"] and not blender_image.filepath:
+            print(
+                f"Skip image '{blender_image.name}': 'Keep Original Texture' is enabled, "
+                "but the image data has no associated file path."
+            )
+            return None
         # Create a new temp material dedicated to image export
         # Prevents issue with gltf addon gather_texture_info()
         # This material will be automatically deleted by MSFS2024_DataUtils.purge_new_data()
@@ -156,67 +157,32 @@ class MSFS2024_MaterialUtils:
         texture_info = None
 
         # region Gather texture info
-        if image_type == "DEFAULT":
-            link(
-                links,
-                texture_node.outputs[0],
-                principled_bsdf_node.inputs[MSFS2024_PrincipledBSDFInputs.BASECOLOR.value]
+  
+        link(
+            links,
+            texture_node.outputs[0],
+            principled_bsdf_node.inputs[MSFS2024_PrincipledBSDFInputs.BASECOLOR.value]
+        )
+
+        if bpy.app.version >= (4, 2, 0):
+            node_socket = NodeSocket(
+                principled_bsdf_node.inputs[MSFS2024_PrincipledBSDFInputs.BASECOLOR.value],
+                [temp_mat.node_tree]
             )
 
-            if bpy.app.version >= (4, 2, 0):
-                node_socket = NodeSocket(
-                    principled_bsdf_node.inputs[MSFS2024_PrincipledBSDFInputs.BASECOLOR.value],
-                    [temp_mat.node_tree]
-                )
-
-                texture_info = gather_texture_info(
-                    node_socket,
-                    (node_socket,),
-                    export_settings
-                )
-            else:
-                texture_info = gather_texture_info(
-                    principled_bsdf_node.inputs[MSFS2024_PrincipledBSDFInputs.BASECOLOR.value],
-                    (principled_bsdf_node.inputs[MSFS2024_PrincipledBSDFInputs.BASECOLOR.value],),
-                    export_settings
-                )
-
-        elif image_type == "NORMAL":
-            normal_node = add_node(
-                nodes=nodes,
-                name="Normal Texture Output",
-                type_node=MSFS2024_ShaderNodeTypes.SHADERNODENORMALMAP.value
+            texture_info = gather_texture_info(
+                node_socket,
+                (node_socket,),
+                export_settings
+            )
+        else:
+            texture_info = gather_texture_info(
+                principled_bsdf_node.inputs[MSFS2024_PrincipledBSDFInputs.BASECOLOR.value],
+                (principled_bsdf_node.inputs[MSFS2024_PrincipledBSDFInputs.BASECOLOR.value],),
+                export_settings
             )
 
-            link(
-                links,
-                texture_node.outputs[0],
-                normal_node.inputs["Color"]
-            )
-
-            link(
-                links,
-                normal_node.outputs[0],
-                principled_bsdf_node.inputs[MSFS2024_PrincipledBSDFInputs.NORMAL.value]
-            )
-
-            if bpy.app.version >= (4, 2, 0):
-                node_socket = NodeSocket(
-                    principled_bsdf_node.inputs[MSFS2024_PrincipledBSDFInputs.NORMAL.value],
-                    [temp_mat.node_tree]
-                )
-
-                texture_info = gather_material_normal_texture_info_class(
-                    node_socket,
-                    (node_socket,),
-                    export_settings
-                )
-            else:
-                texture_info = gather_material_normal_texture_info_class(
-                    principled_bsdf_node.inputs[MSFS2024_PrincipledBSDFInputs.NORMAL.value],
-                    (principled_bsdf_node.inputs[MSFS2024_PrincipledBSDFInputs.NORMAL.value],),
-                    export_settings
-                )
+        
 
         # endregion
 
@@ -425,8 +391,7 @@ class MSFS2024_MaterialUtils:
         extension,
         material,
         attribute,
-        settings,
-        texture_type="DEFAULT"
+        settings
     ):
         material_value = getattr(material, attribute.attribute_name())
         if material_value is None:
@@ -436,18 +401,8 @@ class MSFS2024_MaterialUtils:
             attribute.extension_name()
             and material_value != attribute.default_value()
         ):
-            texture_info = MSFS2024_MaterialUtils._get_tex_info_from_cache(material_value.filepath)
+            texture_info = MSFS2024_MaterialUtils.get_texture_info(material, attribute.attribute_name(), settings)
 
             if not texture_info:
-                texture_info = MSFS2024_MaterialUtils.export_image(
-                    blender_image=material_value,
-                    image_type=texture_type,
-                    export_settings=settings
-                )
-
-                if texture_info is None:
-                    return
-
-                MSFS2024_MaterialUtils._add_tex_info_to_cache(material_value.filepath, texture_info)
-
+                return
             extension[attribute.extension_name()] = texture_info

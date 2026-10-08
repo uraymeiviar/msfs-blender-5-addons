@@ -6,7 +6,7 @@ import os
 import re
 import json
 import traceback
-from shutil import copyfile, _samefile
+
 import time
 
 
@@ -14,7 +14,7 @@ import bpy
 
 from _addons_common import p4, file_info
 
-from .textureLib import msfs_texturelib
+from io_scene_gltf2_msfs_fss.io.exp import texture_lib
 
 
 from io_scene_gltf2_msfs_fss.io.com.msfs_material_utils import MSFS2024_MaterialUtils
@@ -27,6 +27,8 @@ from io_scene_gltf2_msfs_fss.blender.utils import msfs_context_utils
 from io_scene_gltf2_msfs_fss.blender.utils import msfs_mesh_utils
 
 from io_scene_gltf2_msfs_fss.blender import msfs_gizmo, msfs_handlers
+
+from io_scene_gltf2_msfs_fss.io.exp import gltf_exporter_patches
 
 from io_scene_gltf2_msfs_fss.io.exp import presets as exp_presets
 from io_scene_gltf2_msfs_fss.io.exp import lod_groups as exp_lod_groups
@@ -113,13 +115,13 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
             export_draco_texcoord_quantization=settings.export_draco_texcoord_quantization,
             export_draco_color_quantization=settings.export_draco_color_quantization,
             export_draco_generic_quantization=settings.export_draco_generic_quantization,
-            export_tangents=settings.export_tangents,
+            export_tangents=False if settings.enable_msfs_extension else settings.export_tangents,
             export_materials=settings.export_materials,
             export_colors=settings.export_colors,
-            use_mesh_edges=settings.use_mesh_edges,
-            use_mesh_vertices=settings.use_mesh_vertices,
+            use_mesh_edges=False if settings.enable_msfs_extension else settings.use_mesh_edges,
+            use_mesh_vertices=False if settings.enable_msfs_extension else settings.use_mesh_vertices,
             export_cameras=settings.export_cameras,
-            use_selection=settings.use_selection,
+            use_selection=True,
             use_visible=settings.use_visible,
             use_renderable=False,
             use_active_collection=False,
@@ -137,7 +139,7 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
             export_all_influences=settings.export_all_influences,
             export_morph=settings.export_morph,
             export_morph_normal=settings.export_morph_normal,
-            export_morph_tangent=settings.export_morph_tangent,
+            export_morph_tangent=False if settings.enable_msfs_extension else settings.export_morph_tangent,
             export_lights=settings.export_lights,
             will_save_settings=settings.will_save_settings,
             export_extras=(False if settings.enable_msfs_extension else settings.export_extras),
@@ -166,15 +168,15 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
             export_draco_texcoord_quantization=settings.export_draco_texcoord_quantization,
             export_draco_color_quantization=settings.export_draco_color_quantization,
             export_draco_generic_quantization=settings.export_draco_generic_quantization,
-            export_tangents=settings.export_tangents,
+            export_tangents=False if settings.enable_msfs_extension else settings.export_tangents,
             export_materials=settings.export_materials,
             export_original_specular=False,
             ## No need to add option for MSFS uses PBR materials with comp texture for Roughness/Metallic/Occlusion
             export_colors=settings.export_colors,
-            use_mesh_edges=settings.use_mesh_edges,
-            use_mesh_vertices=settings.use_mesh_vertices,
+            use_mesh_edges=False if settings.enable_msfs_extension else settings.use_mesh_edges,
+            use_mesh_vertices=False if settings.enable_msfs_extension else settings.use_mesh_vertices,
             export_cameras=settings.export_cameras,
-            use_selection=settings.use_selection,
+            use_selection=True,
             use_visible=settings.use_visible,
             use_renderable=False,
             use_active_collection=False,
@@ -194,7 +196,7 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
             export_all_influences=settings.export_all_influences,
             export_morph=settings.export_morph,
             export_morph_normal=settings.export_morph_normal,
-            export_morph_tangent=settings.export_morph_tangent,
+            export_morph_tangent=False if settings.enable_msfs_extension else settings.export_morph_tangent,
             export_lights=settings.export_lights,
             will_save_settings=settings.will_save_settings,
             export_extras=(False if settings.enable_msfs_extension else settings.export_extras),
@@ -224,16 +226,16 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
             export_draco_texcoord_quantization=settings.export_draco_texcoord_quantization,
             export_draco_color_quantization=settings.export_draco_color_quantization,
             export_draco_generic_quantization=settings.export_draco_generic_quantization,
-            export_tangents=settings.export_tangents,
+            export_tangents=False if settings.enable_msfs_extension else settings.export_tangents,
             export_materials=settings.export_materials,
             export_original_specular=False,
             ## No need to add option for MSFS uses PBR materials with comp texture for Roughness/Metallic/Occlusion
             export_colors=settings.export_colors,
-            export_attributes=settings.export_attributes,
-            use_mesh_edges=settings.use_mesh_edges,
-            use_mesh_vertices=settings.use_mesh_vertices,
+            export_attributes=False if settings.enable_msfs_extension else settings.export_attributes,
+            use_mesh_edges=False if settings.enable_msfs_extension else settings.use_mesh_edges,
+            use_mesh_vertices=False if settings.enable_msfs_extension else settings.use_mesh_vertices,
             export_cameras=settings.export_cameras,
-            use_selection=settings.use_selection,
+            use_selection=True,
             use_visible=settings.use_visible,
             use_renderable=False,
             use_active_collection=False,
@@ -261,7 +263,7 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
             export_all_influences=settings.export_all_influences,
             export_morph=settings.export_morph,
             export_morph_normal=settings.export_morph_normal,
-            export_morph_tangent=settings.export_morph_tangent,
+            export_morph_tangent=False if settings.enable_msfs_extension else settings.export_morph_tangent,
             export_morph_animation=settings.export_morph_animation,
             export_lights=settings.export_lights,
             will_save_settings=settings.will_save_settings,
@@ -274,6 +276,8 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
         file_path: str,
         settings: MSFS2024_MultiExporterSettings,
     ):
+        export_vertex_color = "ACTIVE" if settings.export_colors else "NONE"
+        
         return bpy.ops.export_scene.gltf(
             filepath=file_path,
             check_existing=True,
@@ -296,11 +300,11 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
             export_materials=settings.export_materials,
             ## No need to add option for that MSFS uses PBR materials with comp texture for Roughness/Metallic/Occlusion
             export_original_specular=False,
-            export_attributes=settings.export_attributes,
-            use_mesh_edges=settings.use_mesh_edges,
-            use_mesh_vertices=settings.use_mesh_vertices,
+            export_attributes=False if settings.enable_msfs_extension else settings.export_attributes,
+            use_mesh_edges=False if settings.enable_msfs_extension else settings.use_mesh_edges,
+            use_mesh_vertices=False if settings.enable_msfs_extension else settings.use_mesh_vertices,
             export_cameras=settings.export_cameras,
-            use_selection=settings.use_selection,
+            use_selection=True,
             use_visible=settings.use_visible,
             use_renderable=False,
             use_active_collection=False,
@@ -329,7 +333,7 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
             export_all_influences=(False if settings.enable_msfs_extension else settings.export_all_influences),
             export_morph=settings.export_morph,
             export_morph_normal=settings.export_morph_normal,
-            export_morph_tangent=settings.export_morph_tangent,
+            export_morph_tangent=False if settings.enable_msfs_extension else settings.export_morph_tangent,
             export_morph_animation=settings.export_morph_animation,
             export_lights=settings.export_lights,
             will_save_settings=settings.will_save_settings,
@@ -339,10 +343,10 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
             export_hierarchy_flatten_objs=(
                 False if settings.enable_msfs_extension else settings.export_hierarchy_flatten_objs),
             export_hierarchy_full_collections=(
-                False if settings.enable_msfs_extension else settings.export_hierarchy_full_collections),
-            export_vertex_color=settings.export_vertex_color,
-            export_all_vertex_colors=settings.export_all_vertex_colors,
-            export_active_vertex_color_when_no_material=settings.export_active_vertex_color_when_no_material,
+                False if settings.enable_msfs_extension else settings.export_hierarchy_full_collections),#Always True, we remove if it is fully white
+            export_vertex_color=export_vertex_color if settings.enable_msfs_extension else settings.export_vertex_color,
+            export_all_vertex_colors=False if settings.enable_msfs_extension else settings.export_all_vertex_colors,
+            export_active_vertex_color_when_no_material=settings.export_colors if settings.enable_msfs_extension else settings.export_active_vertex_color_when_no_material,
             export_image_add_webp=(False if settings.enable_msfs_extension else settings.export_image_add_webp),
             export_image_webp_fallback=(
                 False if settings.enable_msfs_extension else settings.export_image_webp_fallback),
@@ -853,23 +857,21 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
         gltf_path: str, 
         bin_path: str
     ):
-        if not p4.use_p4():
+        if not p4.USE_P4:
             return
-        p4_output = p4.P4LogOutput()
-        if not p4.p4_edit(gltf_path,p4_output=p4_output):
+
+        if not p4.p4_session_edit(gltf_path):
             gltf_base_name = os.path.basename(gltf_path)
             MSFS2024_LOGGER.error(
-                message=f"'{gltf_base_name}' : Could not be opened for edit.",
-                details=f"P4 error:\n{str(p4_output)}",
+                message=f"'{gltf_base_name}' : Could not be opened for edit."
             )
             return
 
-        p4_output = p4.P4LogOutput()
-        if not p4.p4_edit(bin_path,p4_output=p4_output):
+
+        if not p4.p4_session_edit(bin_path):
             bin_base_name = os.path.basename(bin_path)
             MSFS2024_LOGGER.error(
-                message=f"'{bin_base_name}' : Could not be opened for edit.",
-                details=f"P4 error:\n{str(p4_output)}",
+                message=f"'{bin_base_name}' : Could not be opened for edit."
             )
 
     def is_gltf_read_only(self, gltf_path: str, bin_path: str) -> bool:
@@ -905,7 +907,7 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
 
         return False
 
-    def get_export_path(self, path:str, gltf_name:str):
+    def get_export_folder(self, path:str, gltf_name:str):
 
         path = path.strip()
         if path == "":
@@ -942,6 +944,12 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
                 message="Export was Cancelled",
                 details="",
             )
+            p4_output = p4.P4LogOutput()
+            if not p4.push_p4_session(p4_output=p4_output):
+                MSFS2024_LOGGER.error(
+                    message="Error when trying to open files for edits.",
+                    details=f"P4 error:\n{str(p4_output)}",
+                )
         subprocess_cancel.process_cancel_request()
 
     def realize_collection_instances(self, objects:list[bpy.types.Object]):
@@ -1165,7 +1173,7 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
     )->list[str]:
         exported_paths = []
         # Export glTF
-        export_folder_path = self.get_export_path(lod_group.folder_path, lod_group.name)
+        export_folder_path = self.get_export_folder(lod_group.folder_path, lod_group.name)
         if not export_folder_path:
             return exported_paths
 
@@ -1255,7 +1263,7 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
         preset: MultiExporterPreset,
         group_name: str = "",
     ):
-        export_folder_path = self.get_export_path(
+        export_folder_path = self.get_export_folder(
             preset.folder_path, preset.preset_name
         )
         if not export_folder_path:
@@ -1374,130 +1382,15 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
 
     # endregion
 
-    # region Textures
-    def _export_gltf_texture(
-        self, context: bpy.types.Context, gltf_path: str, texture_dir: str
-    ):
-        if not os.path.exists(gltf_path):
-            return
-
-        gltf_dir_path = os.path.dirname(gltf_path)
-
-        if not os.path.isabs(texture_dir):
-            texture_dir = os.path.join(gltf_dir_path, texture_dir)
-            texture_dir = os.path.abspath(texture_dir)
-
-        if not os.path.exists(texture_dir):
-            try:
-                os.mkdir(texture_dir)
-            except OSError:
-                MSFS2024_LOGGER.error(
-                    message=f"Texture folder could not be created.",
-                    details=f"Couldn't create texture folder:\n{texture_dir}"
-                )
-                return
-
-        json_file_object = None
-        try:
-            with open(gltf_path, 'r', encoding="utf-8") as file:
-                json_file_object = json.load(file)
-        except IOError:
-            gltf_base_name = os.path.basename(gltf_path)
-            MSFS2024_LOGGER.error(
-                message=f"'{gltf_base_name}' : Could not be opened. Textures will not be written.",
-                details=("Textures will not be written.\n"
-                "File access denied:\n"
-                f"{gltf_path}"
-                )
-            )
-
-            return
-
-        if json_file_object is None:
-            return
-
-        gltf_images = json_file_object.get("images")
-        if gltf_images is None:
-            return
-
-        for gltf_image in gltf_images:
-            image_path = gltf_image.get("uri")
-            if image_path is None:
-                continue
-
-            image_path = os.path.join(gltf_dir_path, image_path)
-            image_path = image_path.replace('/', '\\')
-            image_path = os.path.abspath(image_path)
-
-            # Check if there is a whitespace and replace it in path
-            if '%20' in image_path:
-                image_path = image_path.replace('%20', ' ')
-
-            if not os.path.exists(image_path):
-                image_name = gltf_image.get("name", image_path)
-                MSFS2024_LOGGER.error(message=f"'{image_name}' : Does not exist.",
-                                      details=f"File '{image_path}' does not exist.")
-                continue
-
-            image_name = os.path.basename(image_path)
-
-            new_image_path = os.path.join(texture_dir, image_name)
-            new_image_path = os.path.abspath(new_image_path)
-
-            # Change texture path in gltf
-            if len(os.path.commonprefix([new_image_path, gltf_path])) != 0:
-                gltf_image['uri'] = os.path.relpath(path=new_image_path, start=gltf_dir_path)
-
-            # Copy image if the image not already exists in the folder
-            if _samefile(image_path, new_image_path):
-                continue
-            if p4.use_p4():
-                p4_output = p4.P4LogOutput()
-                if not p4.p4_edit(new_image_path,p4_output=p4_output):
-                    MSFS2024_LOGGER.error(
-                        message=f"'{new_image_path}' : Could not be opened for edit.",
-                        details=f"P4 error:\n{str(p4_output)}",
-                    )
-            copyfile(image_path, new_image_path)
-            MSFS2024_LOGGER.info(
-                message=f"'{image_name}' : Texture was copied successfully!",
-                details=f"Texture copied from '{image_path}' to '{new_image_path}'",
-            )
-
-        # Serializing json
-        json_object = json.dumps(json_file_object, indent=4)
-
-        # Write in file
-        try:
-            file = open(gltf_path, 'w+', encoding="utf-8")
-            if file:
-                file.write(json_object)
-            file.close()
-        except IOError:
-            gltf_base_name = os.path.basename(gltf_path)
-            MSFS2024_LOGGER.error(
-                message=f"'{gltf_base_name}' : Could not be written.",
-                details=f"Access Denied:\n{gltf_path}",
-            )
-            return
-
-    def export_gltf_textures(
-        self, 
-        context: bpy.types.Context, 
-        gltf_paths: list[str], 
-        texture_dir: str
-    ):
-        for gltf_path in gltf_paths:
-            self._export_gltf_texture(context, gltf_path, texture_dir)
-
-    # endregion
-
     def _execute(self, context: bpy.types.Context):
 
         export_settings.init_setting_presets(context.scene)
         gltf_paths = []
-        # Reset Texture Cache
-        MSFS2024_MaterialUtils.reset_exported_textures_cache()
+        
+        
+        # Reset exported image cache
+        # Used when export_keep_originals is False and texture are saved into another directory.
+        gltf_exporter_patches.ExportedImageCache.reset()
 
         self._object_layer_collections = MSFS2024_OT_MultiExportGLTF2._construct_object_layer_collections_dict()
         self._treated_layer_collections = set()
@@ -1533,31 +1426,18 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
         self.check_for_cancel_request()
         # region Textures
 
-        texture_dir = self.msfs_export_settings.export_texture_dir
-
-        if not self.msfs_export_settings.export_keep_originals:
-            SubProcessReport.report_progress_text("Exporting Textures...")
-            self.export_gltf_textures(
-                context,
-                gltf_paths,
-                texture_dir
-            )
-
         self.check_for_cancel_request()
 
         if self.msfs_export_settings.generate_texturelib:
             SubProcessReport.report_progress_text("Generating Tex Lib...")
-            msfs_texturelib.export_texturelib_with_gltf(
-                gltf_paths,
-                self.msfs_export_settings.export_keep_originals,
-                texture_dir
-            )
-
+            texture_lib.export_gltfs_texture_lib(gltf_paths)
+        
         return {"FINISHED"}
 
     def execute(self, context: bpy.types.Context):
 
         self._start_export_time = time.perf_counter()
+
         if self.profiling:
             import cProfile
             import pstats
@@ -1587,6 +1467,8 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
 
         result = {"FINISHED"}
         # Safely launch _execute
+
+        p4.reset_p4_session()
         try:
             # Disable unecessary handlers during export
             with msfs_handlers.HandlersDisabled():
@@ -1597,6 +1479,12 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
                     details=str(traceback.format_exc()),
                 )
             result = {"CANCELLED"}
+        p4_output = p4.P4LogOutput()
+        if not p4.push_p4_session(p4_output=p4_output):
+            MSFS2024_LOGGER.error(
+                message="Error when trying to open files for edits.",
+                details=f"P4 error:\n{str(p4_output)}",
+            )
 
         # endregion
 

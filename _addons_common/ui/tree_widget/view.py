@@ -11,12 +11,8 @@ from typing import Any, TYPE_CHECKING
 
 
 from _addons_common.ui.tree_widget.manager import TreeManager
-from _addons_common.ui.tree_widget.view_ope import (
-    TREEVIEW_OT_ToggleItemExpand,
-    TREEVIEW_OT_SelectAllItems,
-    TREEVIEW_OT_CheckAllItems,
-)
-
+from _addons_common.ui.tree_widget import view_ope
+from _addons_common.ui.tree_widget.item import TreeItemColor
 if TYPE_CHECKING:
     from _addons_common.ui.tree_widget.item import TreeItem
 
@@ -32,7 +28,7 @@ class UL_TreeView():
     secondary base class alongside bpy.types.UIList.
     """
     # View Options:
-    _indent_scale = 4
+    _indent_scale = 3
     tree_manager_name = None
     ITEM_CONTEXT_POINTER = "tree_item"
 
@@ -60,7 +56,7 @@ class UL_TreeView():
         if tree_manager.MULTISELECTION_SUPPORT:
             layout.separator()
             select_all_ope = layout.operator(
-                TREEVIEW_OT_SelectAllItems.bl_idname,
+                view_ope.TREEVIEW_OT_SelectAllItems.bl_idname,
                 text="Select All",
                 icon="RESTRICT_SELECT_OFF",
             )
@@ -68,7 +64,7 @@ class UL_TreeView():
             select_all_ope.select = True
 
             deselect_all_ope = layout.operator(
-                TREEVIEW_OT_SelectAllItems.bl_idname,
+                view_ope.TREEVIEW_OT_SelectAllItems.bl_idname,
                 text="Deselect All",
                 icon="RESTRICT_SELECT_ON",
             )
@@ -79,7 +75,7 @@ class UL_TreeView():
         if tree_manager.CHECKABLE_ITEMS:
             layout.separator()
             check_all_ope = layout.operator(
-                TREEVIEW_OT_CheckAllItems.bl_idname,
+                view_ope.TREEVIEW_OT_CheckAllItems.bl_idname,
                 text="Check All",
                 icon="CHECKBOX_HLT",
             )
@@ -87,13 +83,18 @@ class UL_TreeView():
             check_all_ope.check = True
 
             uncheck_all_ope = layout.operator(
-                TREEVIEW_OT_CheckAllItems.bl_idname,
+                view_ope.TREEVIEW_OT_CheckAllItems.bl_idname,
                 text="Uncheck All",
                 icon="CHECKBOX_DEHLT",
             )
             uncheck_all_ope.tree_manager_name = cls.tree_manager_name
             uncheck_all_ope.check = False
 
+        if tree_manager.COLORED_ROOT_ITEMS:
+            layout.separator()
+            active_item = tree_manager.get_active_item()
+            if active_item.parent_index == -1:
+                view_ope.draw_root_item_colors_ops(cls.tree_manager_name, layout)
     @classmethod
     def draw_UL_TreeView(
         cls, context, layout: bpy.types.UILayout, rows: int = 10, type: str = "DEFAULT"
@@ -108,7 +109,7 @@ class UL_TreeView():
            cls.__name__,
             "",
             context.scene,
-            tree_manager.ui_tree_prop_name,
+            tree_manager.tree_col_prop_name,
             context.window_manager,
             tree_manager.active_index_prop_name,
             rows=rows,
@@ -119,7 +120,7 @@ class UL_TreeView():
     # endregion
     @classmethod
     def get_tree_manager(cls) -> TreeManager | None:
-        return TreeManager.get_tree_manager_instance(cls.tree_manager_name)
+        return TreeManager.get_tree_manager_instance_by_name(cls.tree_manager_name)
 
     @staticmethod
     def _get_item_from_context_pointer(context: bpy.types.Context | None= None)->bool:
@@ -159,31 +160,55 @@ class UL_TreeView():
         for _ in range(item.all_parent_count * self._indent_scale):
             # use layout.row instead of layout.separator_spacer
             row = layout.row(align=True)
+        if not tree_manager.IS_FLAT_LIST:
+            if not item.children_count:
+                # align item without children with item with children
+                row.label(text="", icon="BLANK1")
+            elif item.expanded :
+                op = row.operator(
+                    view_ope.TREEVIEW_OT_ToggleItemExpand.bl_idname,
+                    text="",
+                    icon="DOWNARROW_HLT",
+                    emboss=False
+                )
+                op.tree_manager_name = tree_manager.unique_name
+                op.item_index = index
 
-        if item.expanded and item.children_count:
-            op = row.operator(
-                TREEVIEW_OT_ToggleItemExpand.bl_idname,
-                text="",
-                icon="DOWNARROW_HLT",
-                emboss=False
-            )
-            op.tree_manager_name = tree_manager.unique_name
-            op.item_index = index
-
-        elif not item.expanded and item.children_count:
-            op = row.operator(
-                TREEVIEW_OT_ToggleItemExpand.bl_idname,
-                text="",
-                icon="RIGHTARROW",
-                emboss=False
-            )
-            op.tree_manager_name = tree_manager.unique_name
-            op.item_index = index
+            elif not item.expanded :
+                op = row.operator(
+                    view_ope.TREEVIEW_OT_ToggleItemExpand.bl_idname,
+                    text="",
+                    icon="RIGHTARROW",
+                    emboss=False
+                )
+                op.tree_manager_name = tree_manager.unique_name
+                op.item_index = index
 
         if tree_manager.CHECKABLE_ITEMS:
-            check_row = row.row()
-            check_row.scale_x = 0.25
-            check_row.prop(item, "checked", icon_only=True)
+            check_row = row.column()
+            # Make checkbox icon smaller and center it  vertically
+            check_row.separator(factor=0.25)
+            check_row.scale_y = 0.85
+            check_row.scale_x = 0.95
+            # use icon to simulate tri-state checkbox
+            icon = "BLANK1"
+            if item.partially_checked:
+                icon = "REMOVE"
+            elif item.checked:
+                icon = "CHECKMARK"
+
+            check_row.prop(item, "checked", icon_only=True, icon=icon)
+
+            row.separator(factor=0.4)
+
+        if tree_manager.COLORED_ROOT_ITEMS and item.parent_index == -1:
+            color_tag_row = row.row()
+            color_tag_row.scale_x = 0.85
+            item_color = TreeItemColor.from_identifier(item.color_tag)
+            icon = "BLANK1"
+            if item_color:
+                icon = item_color.icon
+            color_tag_row.label(text="", icon=icon)
 
         self.custom_draw_item(context, index, item, layout)
 
@@ -201,7 +226,7 @@ class UL_TreeView():
         returning full lists doing nothing!).
 
         """
-
+        
         ui_tree :list[TreeItem]= getattr(data, propname)
 
         flt_flags = []
@@ -247,7 +272,7 @@ class UL_TreeView():
         tree_item = UL_TreeView._get_item_from_context_pointer(context)
         if not tree_item:
             return
-        tree_manager = TreeManager.get_tree_manager_instance(tree_item.tree_manager_name)
+        tree_manager = TreeManager.get_tree_manager_instance_by_name(tree_item.tree_manager_name)
         if not tree_manager:
             return
         tree_manager.ul_tree_view_class.draw_context_menu(context, _self.layout)

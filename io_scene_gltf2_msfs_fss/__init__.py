@@ -23,7 +23,7 @@ bl_info = {
     "description": "Toolkit to export/import GLTF Models for Microsoft Flight Simulator 2024 and 2020 (per scene export target)",
     "location": "View 3d Tools and Menus, Objects properties, Material properties and Light properties",
     "blender": (3, 3, 0),
-    "version": (7, 4, 3),
+    "version": (8, 4, 1),
     "category": "Import-Export",
     "doc_url": "https://docs.flightsimulator.com/msfs2024/html/3_Models_And_Textures/Plugins/Blender_Plugin/Blender_Plugin_Properties.htm"
 }
@@ -96,8 +96,11 @@ def register():
     # After the MSFS 2024 registration: only adds what MSFS 2024 does not define
     from . import msfs2020_target
     msfs2020_target.register_target()
-    # We can't access bpy.data during addon registering, so we need to wait
-    bpy.app.timers.register(_delayed_init, first_interval=0.1)
+    from io_scene_gltf2_msfs_fss.blender import msfs_handlers
+    if not msfs_handlers.are_handlers_disabled():
+        # disabled during during subprocess export
+        # We can't access bpy.data during addon registering, so we need to wait
+        bpy.app.timers.register(_delayed_init, first_interval=0.1)
 
 def unregister():
     try:
@@ -111,7 +114,7 @@ def unregister():
 # endregion
 
 # region ######################### IMPORT #################################
-from .io.imp.msfs_import import Import
+from .io.imp.gltf_hooks import Import
 from .ui.imp import import_panel
 
 # region importer panel blender < 4.2

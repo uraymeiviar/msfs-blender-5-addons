@@ -17,26 +17,25 @@ from _addons_common.asset_library.library_utils import DataBlockTypes
 from _addons_common import geometry_node_utils, data_utils
 
 
-SUPPORTED_MSFS_VERSIONS: list[str] = ["2024"]
 SUPPORTED_BLENDER_VERSIONS: list[tuple[int, int, int]] = [(3, 3, 0)]
 
+ASSET_ID_NOMENCLATURE = r"^\.(?P<prefix>[A-Z0-9_]+)_(?P<unique_name>[A-Za-z0-9_]+)$"
 
 class BaseAssetLibrary(Enum):
     """Use this class to define a new asset library.
     """
-
     _ignore_ = (
-        "SUPPORTED_MSFS_VERSIONS",
         "SUPPORTED_BLENDER_VERSIONS",
         "DATAFILES_DIR",
+        "ASSET_ID_NOMENCLATURE"
     )
 
     # Non-member attributes, these assignments are totally ignored
     # This is only for type-hinting
     # Non-member attributes must be assigned outside of class
-    SUPPORTED_MSFS_VERSIONS: list[str] = SUPPORTED_MSFS_VERSIONS  # type: ignore
     SUPPORTED_BLENDER_VERSIONS: list[tuple[int, int, int]] = SUPPORTED_BLENDER_VERSIONS  # type: ignore
     DATAFILES_DIR: Path = Path()  # type: ignore
+    ASSET_ID_NOMENCLATURE: str = ASSET_ID_NOMENCLATURE
 
     @classmethod
     def __get_bpy_data_block(cls) -> bpy.types.bpy_prop_collection[bpy.types.ID]:
@@ -44,24 +43,13 @@ class BaseAssetLibrary(Enum):
 
     @classmethod
     def __check_id_name(cls, id_name:str):
-        supported_msfs = cls.SUPPORTED_MSFS_VERSIONS
-        id_name_parts = id_name.split("_", maxsplit=3)
-        if len(id_name_parts) < 3:
-            Exception(
-                f"id_name doesn't follow nomenclature : '.MSFS_%VERSIONS%_%uniqueName% "
-            )
-        if id_name_parts[0] != ".MSFS":
-            raise Exception(f"id_name doesn't start with .MSFS_ preffix!")
-        if id_name_parts[1] not in supported_msfs:
-            raise Exception(
-                f"id_name MSFS version is not valid {id_name_parts[1]}. Valid versions are {supported_msfs}!"
-            )
-
-        special_characters = re.findall(r"[^A-Za-z0-9_]", id_name_parts[2])
-        if special_characters:
-            special_characters = "".join(special_characters)
-            raise Exception(
-                f"id_name {id_name} contains special characters: {special_characters}"
+        match = re.fullmatch(
+            cls.ASSET_ID_NOMENCLATURE,
+            id_name
+        )
+        if match is None: 
+            raise SyntaxError(
+                f"Asset id_name {id_name} doesn't follow nomenclature : {cls.ASSET_ID_NOMENCLATURE}"
             )
 
     @classmethod
@@ -73,7 +61,7 @@ class BaseAssetLibrary(Enum):
 
         Args:
             id_name (str): Unique identifier of asset. 
-                Must follow nomenclature '.MSFS_%VERSIONS%_%uniqueName%'
+                Must follow nomenclature (cf ASSET_ID_NOMENCLATURE)
 
             asset_path (str): Relative path to blend file in datafiles directory.
                 Do not include version suffix and .blend extension.
@@ -284,10 +272,9 @@ class BaseAssetLibrary(Enum):
 
         bpy.data.batch_remove(to_delete)
 
-BaseAssetLibrary.SUPPORTED_MSFS_VERSIONS = SUPPORTED_MSFS_VERSIONS  # type: ignore
 BaseAssetLibrary.SUPPORTED_BLENDER_VERSIONS = SUPPORTED_BLENDER_VERSIONS  # type: ignore
 BaseAssetLibrary.DATAFILES_DIR = Path()  # type: ignore
-
+BaseAssetLibrary.ASSET_ID_NOMENCLATURE = ASSET_ID_NOMENCLATURE # type: ignore
 # region Node Groups Inputs
 
 
@@ -303,9 +290,37 @@ class NodeGroupInputs(Enum):
 class EmptyInputs(NodeGroupInputs):
     pass
 
+class NodeGroupEnumInput(Enum):
+    """
+    Enum storing both the index and identifier of a node group enum input.
+
+    Blender < 5.2 uses the enum index when assigning enum values.
+    Blender >= 5.2 uses the enum identifier string instead.
+    """
+
+    def __init__(self, index: int, enum_string: str) -> None:
+        self.index = index
+        self.enum_string = enum_string
+    
+    @classmethod
+    def get_enum_string(cls, index: int) -> str | None:
+        for entry in cls:
+            if entry.index == index:
+                return entry.enum_string
+
+        return None
+    
+    @classmethod
+    def get_enum_string_index(cls, enum_string: str) -> int | None:
+        for entry in cls:
+            if entry.enum_string == enum_string:
+                return entry.index
+
+        return None
 # endregion
 
 # region Nodegroup
+
 class NodeGroupLibrary(BaseAssetLibrary):
     """
     Library of node group assets.

@@ -1,18 +1,4 @@
-# Copyright 2023-2024 The glTF-Blender-IO-MSFS2024 authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 import bpy
-import mathutils
 
 from ..com.extensions.object.asobo_facial_animation import AsoboFacialAnimation
 from ..com.extensions.object.asobo_gizmo_object import AsoboGizmoObject
@@ -130,19 +116,20 @@ class Import:
         use_msfs_parameters = importer_settings.enable_msfs_extension
         if not use_msfs_parameters:
             return
-
-        if not importer_settings.import_materials:
-            # Remove Materials
-            for prim in gltf_mesh.primitives:
-                if getattr(prim, "material", None) is not None:
-                    prim.material = None
-
-        if not importer_settings.import_collisions:
-            # Remove Collisions
-            for prim in gltf_mesh.primitives:
-                if MSFS2024_ImportUtils.is_collision_prim(prim, gltf):
-                    prim.attributes = {}
-                    prim.material = None
+        import_materials = importer_settings.import_materials
+        import_collisions = importer_settings.import_collisions
+        for prim in gltf_mesh.primitives:
+            
+            if not import_materials and getattr(prim, "material", None) is not None:
+                prim.material = None
+            if not import_collisions and MSFS2024_ImportUtils.is_collision_prim(prim, gltf):
+                prim.attributes = {}
+                prim.material = None
+            
+    def gather_import_mesh_after_hook(self, gltf_mesh, blender_mesh: bpy.types.Mesh, gltf):
+        # Rename UV channels. UV2 must have the correct name to be used by the MSFS 2024 Blender shaders.
+        for i, layer in enumerate(blender_mesh.uv_layers, start=1):
+            layer.name = f"UV{i}"
 
     def gather_import_material_after_hook(
         self,

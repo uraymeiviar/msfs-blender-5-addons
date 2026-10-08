@@ -97,7 +97,6 @@ class AsoboMaterialCommon:
             blender_material=blender_material,
             attribute=MSFS2024_MaterialProperties.NORMALTEXTURE.attribute_name(),
             export_settings=export_settings,
-            image_type="NORMAL"
         )
     
     @staticmethod

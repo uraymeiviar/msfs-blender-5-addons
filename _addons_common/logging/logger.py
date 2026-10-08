@@ -400,7 +400,7 @@ class Logger:
     def push_logs_in_ui(self):
         if not self.tree_manager:
             return
-        self.tree_manager.generate_ui_tree_collection()
+        self.tree_manager.generate_tree_collection()
 
     def clear_logs(self):
         logs_prop = self.get_logs_prop()
@@ -415,7 +415,7 @@ class Logger:
         if not self.tree_manager:
             return
 
-        self.tree_manager.generate_ui_tree_collection()
+        self.tree_manager.generate_tree_collection()
 
     def register(self):
         if getattr(bpy.types.WindowManager, self.unique_name, False):

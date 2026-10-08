@@ -56,8 +56,9 @@ class MSFS2024_OT_SetPbrTextureSet(bpy.types.Operator):
                 image_path = directory / image_name
                 if image_path.exists():
                     try:
+                        image_path = image_path.resolve()
                         image = bpy.data.images.load(
-                            str(image_path), check_existing=True
+                            image_path.as_posix(), check_existing=True
                         )
                         images[label] = image
                     except Exception as e:

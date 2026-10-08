@@ -3,15 +3,14 @@ import bpy
 
 from io_scene_gltf2_msfs_fss.io.exp import export_settings
 from io_scene_gltf2_msfs_fss.ui.exp import exporter_panel, export_settings_ops
-
-if bpy.app.version >= (4, 5, 0):
-    # Public API since Khronos 4.5 (the draco module itself moved from io.com to io.exp in 5.x)
-    from io_scene_gltf2 import is_draco_available
+if bpy.app.version >= (5, 2, 0):
+    from io_scene_gltf2.io.com import (
+        library as gltf2_io_draco_compression_extension,
+    )
+elif bpy.app.version >= (4, 5, 0):
+    from io_scene_gltf2.io.com import draco as gltf2_io_draco_compression_extension
 else:
     from io_scene_gltf2.io.com import gltf2_io_draco_compression_extension
-
-    def is_draco_available():
-        return gltf2_io_draco_compression_extension.dll_exists(quiet=True)
 
 # region Panels
 class MSFS2024_PT_export_settings_preset(bpy.types.Panel):
@@ -65,7 +64,7 @@ class MSFS2024_PT_export_main(bpy.types.Panel):
         layout.prop(context.scene, "msfs_background_export")
         layout.separator()
         layout.prop(active_settings_preset, "export_copyright")
-        layout.prop(active_settings_preset, "will_save_settings")
+        # layout.prop(active_settings_preset, "will_save_settings") # not used
 
 class MSFS2024_PT_export_texture(bpy.types.Panel):
     bl_space_type = "VIEW_3D"
@@ -176,10 +175,7 @@ class MSFS2024_PT_export_include(bpy.types.Panel):
         layout.use_property_split = True
         layout.use_property_decorate = False  # No animation.
 
-        # To use the MultiExporter panel, it's important to have "use selected" to True
-        col = layout.column(heading="", align=True)
-        col.prop(active_settings_preset, "use_selection")
-        col.enabled = False
+
         
         col = layout.column(heading="Limit to", align=True)
         col.prop(active_settings_preset, "use_visible")
@@ -264,26 +260,26 @@ class MSFS2024_PT_export_geometry(bpy.types.Panel):
         layout.prop(active_settings_preset, "export_texcoords")
         layout.prop(active_settings_preset, "export_normals")
 
-        col = layout.column()
-        col.prop(active_settings_preset, "export_tangents")
-        col.active = active_settings_preset.export_normals
+        layout.prop(active_settings_preset, "export_colors")
+    
+        if not active_settings_preset.enable_msfs_extension : 
+            col = layout.column()
+            col.prop(active_settings_preset, "export_tangents")
+            col.active = active_settings_preset.export_normals
 
-        if bpy.app.version < (4, 2, 0):
-            layout.prop(active_settings_preset, "export_colors")
+            if bpy.app.version >= (3, 6, 0):
+                layout.prop(active_settings_preset, "export_attributes")
 
-        if bpy.app.version >= (3, 6, 0):
-            layout.prop(active_settings_preset, "export_attributes")
+            layout.prop(active_settings_preset, "use_mesh_edges")
+            layout.prop(active_settings_preset, "use_mesh_vertices")
 
-        layout.prop(active_settings_preset, "use_mesh_edges")
-        layout.prop(active_settings_preset, "use_mesh_vertices")
-
-        if bpy.app.version >= (4, 2, 0):
-            header, body = layout.panel("MSFS2024_PT_export_vertex_colors", default_closed=True)
-            header.label(text="Vertex Colors")
-            if body:
-                body.prop(active_settings_preset, "export_vertex_color")
-                body.prop(active_settings_preset, "export_all_vertex_colors")
-                body.prop(active_settings_preset, "export_active_vertex_color_when_no_material")
+            if bpy.app.version >= (4, 2, 0):
+                header, body = layout.panel("MSFS2024_PT_export_vertex_colors", default_closed=True)
+                header.label(text="Vertex Colors")
+                if body:
+                    body.prop(active_settings_preset, "export_vertex_color")
+                    body.prop(active_settings_preset, "export_all_vertex_colors")
+                    body.prop(active_settings_preset, "export_active_vertex_color_when_no_material")
 
 class MSFS2024_PT_export_material(bpy.types.Panel):
     bl_space_type = "VIEW_3D"
@@ -350,11 +346,10 @@ class MSFS2024_PT_export_shapekeys(bpy.types.Panel):
         layout.prop(active_settings_preset, "export_morph_normal")
         col = layout.column()
         col.active = active_settings_preset.export_morph_normal
-        col.prop(active_settings_preset, "export_morph_tangent")
 
         if active_settings_preset.enable_msfs_extension:
             return
-
+        col.prop(active_settings_preset, "export_morph_tangent")
         if bpy.app.version >= (4, 2, 0) and not active_settings_preset.enable_msfs_extension:
             header, body = layout.panel("MSFS2024_PT_export_optimize_shapekeys", default_closed=True)
             header.label(text="Optimize Shape Keys")
@@ -477,7 +472,7 @@ class MSFS2024_PT_export_geometry_compression(bpy.types.Panel):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.is_draco_available = is_draco_available()
+        self.is_draco_available = gltf2_io_draco_compression_extension.dll_exists(quiet=True)
 
     @classmethod
     def poll(cls, context: bpy.types.Context):

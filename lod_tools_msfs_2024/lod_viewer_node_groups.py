@@ -4,7 +4,7 @@ import bpy
 
 from lod_tools_msfs_2024.datafiles.asset_library import NodeGroupLibrary
 from lod_tools_msfs_2024 import data_properties
-
+from lod_tools_msfs_2024.constants import IS_BLENDER_5_2_OR_SUP
 from _addons_common import geometry_node_utils
 
 LOD_VIEWER_INPUT_MAP = {}
@@ -102,20 +102,16 @@ def setup_lod_viewer_constants(
     set_display_bpshere(lod_viewer_constants, display_bounding_sphere)
     set_force_active_lod(lod_viewer_constants, force_active_lod, active_lod_index)
 
-def construct_lod_viewer_input_map():
+def get_lod_viewer_input_map():
     """Construct a dict associating input label to their unique identifiers.
     Can be used later to get properties from modifier.
-    """
-    global LOD_VIEWER_INPUT_MAP
 
+    Needed only on version inferior to 5.2
+    """
+    if IS_BLENDER_5_2_OR_SUP:
+        return
+    
     lod_viewer_grp: bpy.types.NodeGroup | None = get_first_lod_viewer_group()
     if not lod_viewer_grp:
-        LOD_VIEWER_INPUT_MAP = {}
         return
-    LOD_VIEWER_INPUT_MAP = geometry_node_utils.construct_input_identifier_map(lod_viewer_grp)
-
-def get_lod_viewer_input_map()->dict:
-    global LOD_VIEWER_INPUT_MAP
-    if not LOD_VIEWER_INPUT_MAP:
-        construct_lod_viewer_input_map()
-    return LOD_VIEWER_INPUT_MAP
+    return geometry_node_utils.construct_input_identifier_map(lod_viewer_grp)

@@ -2,10 +2,12 @@ from __future__ import annotations
 import bpy
 
 from mathutils import Vector
-from max_bridge_msfs_2024 import logger
-from max_bridge_msfs_2024.common import obj_utils
-from max_bridge_msfs_2024.common.usd_properties import *
-from max_bridge_msfs_2024.msfs_2024.msfs_properties import *
+
+from max_bridge_asobo import logger
+from max_bridge_asobo.bridge_base import obj_utils
+from max_bridge_asobo.bridge_base.usd_properties import *
+
+from max_bridge_msfs_2024.bridge_extension.msfs_properties import *
 
 from io_scene_gltf2_msfs_fss.blender import msfs_lights
 from io_scene_gltf2_msfs_fss.blender import msfs_gizmo

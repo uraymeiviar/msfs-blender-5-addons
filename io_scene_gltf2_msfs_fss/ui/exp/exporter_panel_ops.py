@@ -1,5 +1,3 @@
-from asyncio import constants
-
 import bpy
 import webbrowser
 
@@ -107,7 +105,7 @@ class MSFS2024_OT_SetHierarchyMode(bpy.types.Operator):
             if not tree_manager:
                 return {"FINISHED"}
             # Refresh UiList
-            tree_manager.generate_ui_tree_collection()
+            tree_manager.generate_tree_collection()
 
         return {"FINISHED"}
 

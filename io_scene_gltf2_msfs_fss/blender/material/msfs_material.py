@@ -58,6 +58,9 @@ class MSFS2024_Material:
         build_tree=False,
         revert_to_pbr=False
     ):
+        # make sure use_nodes is enabled, or material.nodes will not be available
+        material.use_nodes = True 
+
         self.material = material
         self.node_tree = self.material.node_tree
         if self.node_tree is not None:
@@ -245,7 +248,6 @@ class MSFS2024_Material:
             set_input_value(omr_group_node.inputs[4], 1) #enable detail
 
     def _update_ao_links(self):
-        base_color_tex_node = get_node_by_name(self.nodes, MSFS2024_ShaderNodes.BASECOLORTEX.value)
 
         apply_ao_group_node = get_node_by_name(self.nodes, MSFS2024_GroupNodes.APPLYAOGROUP.value)
 
@@ -258,13 +260,11 @@ class MSFS2024_Material:
         unlink_node_input(self.links, apply_ao_group_node, 1)
         unlink_node_input(self.links, apply_ao_group_node, 2)
 
-        # Only use AO maps when there is a base_color_tex in order to prevent gltf export texture issue
-        # Error happens when material has an omr_tex or detail_omr_tex without a base_color_tex
-        # GLTF Khronos exporter mistakenly assigns omr texture or detail omr texture to base color texture slot...
-        if occlusion_uv2_tex_node.image and base_color_tex_node.image:
+
+        if occlusion_uv2_tex_node.image :
             link(self.links, occlusion_uv2_tex_node.outputs[0], apply_ao_group_node.inputs[2])
 
-        if (omr_tex_node.image or detail_omr_tex_node.image) and base_color_tex_node.image:
+        if (omr_tex_node.image or detail_omr_tex_node.image):
             link(self.links, omr_group_node.outputs[2], apply_ao_group_node.inputs[1])
 
     def _update_emissive_links(self):

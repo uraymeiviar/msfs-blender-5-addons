@@ -28,8 +28,8 @@ class MSFS2024_OT_AddPresetGroup(bpy.types.Operator):
         if not preset_tree_manager:
             return {"FINISHED"}
         
-        preset_tree_manager.generate_ui_tree_collection()
-        preset_tree_manager.set_ui_tree_active_item_by_data(preset_group, update_selection=True)
+        preset_tree_manager.generate_tree_collection()
+        preset_tree_manager.set_active_item_by_data(preset_group, update_selection=True)
         
         return {"FINISHED"}
 
@@ -64,7 +64,7 @@ class MSFS2024_OT_RemovePresetGroup(bpy.types.Operator):
 
         # Refresh UI
         if preset_tree_manager:
-            preset_tree_manager.generate_ui_tree_collection()
+            preset_tree_manager.generate_tree_collection()
 
         return {"FINISHED"}
 
@@ -109,8 +109,8 @@ class MSFS2024_OT_DuplicatePresetGroup(bpy.types.Operator):
             return {"CANCELLED"}
         duplicated_group = exp_presets.duplicate_preset_group(active_group)
 
-        preset_tree_manager.generate_ui_tree_collection()
-        preset_tree_manager.set_ui_tree_active_item_by_data(duplicated_group, update_selection=True)
+        preset_tree_manager.generate_tree_collection()
+        preset_tree_manager.set_active_item_by_data(duplicated_group, update_selection=True)
         return {"FINISHED"}
 
 # endregion
@@ -129,6 +129,7 @@ class MSFS2024_OT_EditLayers(bpy.types.Operator):
 
     def __del__(self):
         try:
+            
             self.layers_tree_manager.unregister()
         except:
             pass
@@ -154,8 +155,9 @@ class MSFS2024_OT_EditLayers(bpy.types.Operator):
         self.layers_tree_manager.preset = preset
 
         # Generate Layers UI List
-        self.layers_tree_manager.generate_ui_tree_collection()
-
+        self.layers_tree_manager.clear_ui_collection()
+        self.layers_tree_manager.generate_tree_collection()
+        self.layers_tree_manager.expose_checked_items()
         wm = context.window_manager
         return wm.invoke_popup(self, width=500)
 
@@ -191,8 +193,8 @@ class MSFS2024_OT_AddPreset(bpy.types.Operator):
         
         preset = exp_presets.add_preset(context.scene, self.group_id)
 
-        preset_tree_manager.generate_ui_tree_collection()
-        preset_tree_manager.set_ui_tree_active_item_by_data(preset, update_selection=True)
+        preset_tree_manager.generate_tree_collection()
+        preset_tree_manager.set_active_item_by_data(preset, update_selection=True)
         return {"FINISHED"}
 
 class MSFS2024_OT_RemovePreset(bpy.types.Operator):
@@ -223,7 +225,7 @@ class MSFS2024_OT_RemovePreset(bpy.types.Operator):
 
         # Refresh full data path after a preset deletion
         MultiExporterPreset.update_presets_full_data_path(context.scene)
-        preset_tree_manager.generate_ui_tree_collection()
+        preset_tree_manager.generate_tree_collection()
         return {"FINISHED"}
 
 class MSFS2024_OT_IsolatePresetObjects(bpy.types.Operator):
@@ -270,7 +272,7 @@ class MSFS2024_OT_RenamePreset(bpy.types.Operator):
         if not preset_tree_manager:
             return 
         # generate tree collection for alphabetical order
-        preset_tree_manager.generate_ui_tree_collection()
+        preset_tree_manager.generate_tree_collection()
 
 
     def invoke(self, context: bpy.types.Context, event: bpy.types.Event):
@@ -318,8 +320,8 @@ class MSFS2024_OT_DuplicatePreset(bpy.types.Operator):
 
         preset: MultiExporterPreset = exp_presets.duplicate_preset(active_preset, context.scene)
 
-        preset_tree_manager.generate_ui_tree_collection()
-        preset_tree_manager.set_ui_tree_active_item_by_data(preset, update_selection=True)
+        preset_tree_manager.generate_tree_collection()
+        preset_tree_manager.set_active_item_by_data(preset, update_selection=True)
         return {"FINISHED"}
 
 # endregion

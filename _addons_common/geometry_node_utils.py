@@ -70,20 +70,20 @@ def get_input_identifier(
     Returns:
         str: The identifier if found, otherwise None.
     """
-    if bpy.app.version < (4, 0, 0):
+    
+    if bpy.app.version > (4, 0, 0):
+        for item in node_group.interface.items_tree:  # type: ignore
+            if not item.in_out == "INPUT" or not item.name == input_label:  # type: ignore
+                continue
 
+            return item.identifier
+    else:
         inputs = node_group.inputs
         input = inputs.get(input_label, None)
         if not input:
             return None
         identifier = input.identifier
         return identifier
-    else:
-        for item in node_group.interface.items_tree:  # type: ignore
-            if not item.in_out == "INPUT" or not item.name == input_label:  # type: ignore
-                continue
-
-            return item.identifier
     return None
 
 def construct_input_identifier_map(node_group: bpy.types.NodeGroup) -> dict:
@@ -135,43 +135,27 @@ def _is_geometry_node_modifier(modifier):
         return False
     return True
 
-def get_modifier_input_value(
-    modifier: bpy.types.Modifier, input_identifier: str, default: Any = None
-) -> Any:
-    """
-    Get modifier input value using the input identifier ("Socket_0", ...).
-
-    Blender 5.0 replaced the ID properties behind geometry node modifier inputs
-    (modifier["Socket_0"]) with typed RNA (modifier.properties.inputs.Socket_0.value).
-    Menu sockets are returned as their integer item value, as the ID property was.
-    """
-    if hasattr(modifier, "properties"):
-        socket = getattr(modifier.properties.inputs, input_identifier, None)
-        if socket is None:
-            return default
-        value_prop = socket.bl_rna.properties["value"]
-        if value_prop.type == "ENUM":
-            return value_prop.enum_items[socket.value].value
-        return socket.value
-    return modifier.get(input_identifier, default)
-
-
-def set_modifier_input_value(modifier: bpy.types.Modifier, input_identifier: str, value: Any):
-    """
-    Set modifier input value using the input identifier (see get_modifier_input_value).
-    Menu sockets accept their integer item value, as the ID property did.
-    """
-    if hasattr(modifier, "properties"):
-        socket = getattr(modifier.properties.inputs, input_identifier)
-        value_prop = socket.bl_rna.properties["value"]
-        if value_prop.type == "ENUM" and isinstance(value, int):
-            value = next(item.identifier for item in value_prop.enum_items if item.value == value)
-        socket.value = value
-    else:
-        modifier[input_identifier] = value
-
-
 def get_modifier_input(
+    modifier: bpy.types.Modifier, input_label: str
+) -> Any | NotFound:
+    """
+    Get modifier input.
+    """
+    if bpy.app.version < (5, 2, 0):
+        raise Exception ("Can't use this function in version inferior to 5.2.0")
+    if not _is_geometry_node_modifier(modifier):
+        raise TypeError("Not a valid Geometry Node modifier!")
+
+    input_identifier = get_input_identifier(modifier.node_group, input_label)
+    if not input_identifier:
+        return NotFound
+    
+    input = getattr(modifier.properties.inputs, input_identifier, None)
+    if input:
+        return input 
+    
+    
+def get_modifier_input_value(
     modifier: bpy.types.Modifier, input_label: str
 ) -> Any | NotFound:
     """
@@ -183,10 +167,15 @@ def get_modifier_input(
     input_identifier = get_input_identifier(modifier.node_group, input_label)
     if not input_identifier:
         return NotFound
-    return get_modifier_input_value(modifier, input_identifier, NotFound)
+    if bpy.app.version >= (5, 2, 0):
+        input = getattr(modifier.properties.inputs, input_identifier, None)
+        if input:
+            return input.value 
+    else:
+        return modifier[input_identifier]
 
 
-def set_modifier_input(modifier: bpy.types.Modifier, input_label: str, value: Any):
+def set_modifier_input_value(modifier: bpy.types.Modifier, input_label: str, value: Any):
     """
     Set modifier input value using input label
     """
@@ -196,6 +185,11 @@ def set_modifier_input(modifier: bpy.types.Modifier, input_label: str, value: An
     input_identifier = get_input_identifier(modifier.node_group, input_label)
     if not input_identifier:
         return
-    set_modifier_input_value(modifier, input_identifier, value)
+    if bpy.app.version >= (5, 2, 0):
+        input = getattr(modifier.properties.inputs, input_identifier, None)
+        if input:
+           input.value = value 
+    else:
+        modifier[input_identifier] = value
 
 # endregion

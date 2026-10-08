@@ -5,14 +5,13 @@ import bpy
 
 from _addons_common import geometry_node_utils
 
-from max_bridge_msfs_2024 import logger
+from max_bridge_asobo import logger, exporters
+from max_bridge_asobo.bridge_base.usd_properties import *
+from max_bridge_asobo.bridge_base import obj_utils
+from max_bridge_asobo.bridge_base.usd_export import GenericUSDExporter
 
-from max_bridge_msfs_2024.common.usd_properties import *
-from max_bridge_msfs_2024.common import obj_utils
-from max_bridge_msfs_2024.common.usd_export import GenericUSDExporter
-
-from max_bridge_msfs_2024.msfs_2024.msfs_properties import *
-from max_bridge_msfs_2024.msfs_2024 import export_utils, dependencies
+from max_bridge_msfs_2024.bridge_extension.msfs_properties import *
+from max_bridge_msfs_2024.bridge_extension import export_utils, dependencies
 
 from io_scene_gltf2_msfs_fss.blender import msfs_gizmo
 from io_scene_gltf2_msfs_fss.io.exp import lod_groups as exp_lod_groups
@@ -20,7 +19,9 @@ from io_scene_gltf2_msfs_fss.io.exp import lod_groups as exp_lod_groups
 logging=logger.getLogger()
 
 class MSFS2024USDExporter(GenericUSDExporter):
-    EXPORTER = "MSFS2024USDExporter"  # used in export_definition
+    ID = "MSFS2024USD"  # Must be identical in corresponding Importer Class
+
+    PRESET_UI_LABEL = "3ds Max MSFS 2024"
 
     custom_object_classes = MSFS2024_CustomObjectClasses
 
@@ -149,7 +150,7 @@ class MSFS2024USDExporter(GenericUSDExporter):
             if blender_name.startswith("Modifiers["):
                 # Prop is a modifier input
                 try:
-                    modifier_id_name = re.search("\[(.+?)\]", blender_name).group(1)
+                    modifier_id_name = re.search(r"\[(.+?)\]", blender_name).group(1)
                 except :
                     continue
 
@@ -165,7 +166,7 @@ class MSFS2024USDExporter(GenericUSDExporter):
                     print(f"{prop.name} in {class_properties_def} is not properly formatted")
                     continue
                 input_label = parts[-1]
-                value = geometry_node_utils.get_modifier_input(modifier, input_label)
+                value = geometry_node_utils.get_modifier_input_value(modifier, input_label)
                 if value is geometry_node_utils.NotFound:
                     logging.debug(f"No class property {prop.name} on obj '{obj.name}'")
                     logging.debug(f"{obj.name} - Modifier {modifier_id_name}: {blender_name} was not found!")
@@ -189,3 +190,9 @@ class MSFS2024USDExporter(GenericUSDExporter):
         return class_properties
 
     # endregion
+
+def register():
+    exporters.register_exporter_class(MSFS2024USDExporter)
+
+def unregister():
+    exporters.unregister_exporter_class(MSFS2024USDExporter)

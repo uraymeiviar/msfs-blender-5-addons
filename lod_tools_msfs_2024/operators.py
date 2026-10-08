@@ -36,7 +36,7 @@ class LODViewerTreeManager(TreeManager):
             return data.group_name
 
     @classmethod
-    def set_ui_tree_item_name(cls, item: TreeItem, data: bpy.types.bpy_struct):
+    def set_tree_item_name(cls, item: TreeItem, data: bpy.types.bpy_struct):
         """
         Set UITreeItem name according to data.
         Item name is used by filters functions.
@@ -167,7 +167,7 @@ class MSFS2024_OT_GenerateLODViewers(bpy.types.Operator):
         last_gen = get_last_lod_viewer_gen(context.scene)
         if not last_gen or last_gen.target_mode == "all":
             return
-        ui_tree_collection = self.lod_viewer_tree_manager.get_ui_tree_collection()
+        ui_tree_collection = self.lod_viewer_tree_manager.get_tree_collection()
         last_gen_ids = last_gen.get_lod_group_ids()
 
         if (
@@ -197,7 +197,7 @@ class MSFS2024_OT_GenerateLODViewers(bpy.types.Operator):
             last_gen.msfs_lod_groups.clear()
             return
         last_gen.msfs_lod_groups.clear()
-        ui_tree_collection = self.lod_viewer_tree_manager.get_ui_tree_collection()
+        ui_tree_collection = self.lod_viewer_tree_manager.get_tree_collection()
         if (
                 export_mode == multi_export_mode.ExportMode.OBJECTS
                 or export_mode == multi_export_mode.ExportMode.COLLECTIONS
@@ -233,7 +233,7 @@ class MSFS2024_OT_GenerateLODViewers(bpy.types.Operator):
             # Make sure TreeManager instance is deleted
             # TreeManager is deleted on __del__ but it can be skipped if execute() fails
             unique_name = LODViewerTreeManager.get_unique_name()
-            instance = TreeManager.get_tree_manager_instance(unique_name)
+            instance = TreeManager.get_tree_manager_instance_by_name(unique_name)
             if instance:
                 try:
                     instance.unregister()
@@ -247,7 +247,7 @@ class MSFS2024_OT_GenerateLODViewers(bpy.types.Operator):
                 multiselection_support=True,
                 checkable_items=True,
             )
-            self.lod_viewer_tree_manager.generate_ui_tree_collection()
+            self.lod_viewer_tree_manager.generate_tree_collection()
             self.restore_checked_items(context, export_mode)
             return context.window_manager.invoke_props_dialog(self, width=300)
 

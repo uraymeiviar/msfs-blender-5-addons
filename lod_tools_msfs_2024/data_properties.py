@@ -314,10 +314,11 @@ def compute_stats(
     index: int,
     lod_count: int,
     lod_objects: Iterable[bpy.types.Object],
+    apply_modifiers: bool,
     depsgraph: bpy.types.Depsgraph,
 ):
     lod_stats_entry.vertex_count = vertex_count.get_gltf_objects_vertex_count(
-        objects=list(lod_objects), depsgraph=depsgraph
+        objects=list(lod_objects), depsgraph=depsgraph, apply_modifiers=apply_modifiers
     )
     is_last_lod = (index + 1) == lod_count
     is_second_to_last_lod = (index + 2) == lod_count

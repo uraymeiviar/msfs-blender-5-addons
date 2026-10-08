@@ -58,8 +58,8 @@ def create_lod_viewer(
     modifier = node_group_asset.add_modifier(object=lod_viewer_obj)
 
     inputs: MSFS2024LODViewerInputs = node_group_asset.node_group_inputs
-    geometry_node_utils.set_modifier_input(modifier, inputs.CAMERA.input_label, camera)
-    geometry_node_utils.set_modifier_input(
+    geometry_node_utils.set_modifier_input_value(modifier, inputs.CAMERA.input_label, camera)
+    geometry_node_utils.set_modifier_input_value(
         modifier, inputs.BOUNDING_SPHERE.input_label, bsphere
     )
     # Create lod stats entries in order
@@ -87,7 +87,8 @@ def create_lod_viewer(
             stats_entry, 
             i, 
             lod_group.lod_count, 
-            lod_group.get_lod_objects(i), 
+            lod_group.get_lod_objects(i),
+            lod_group.apply_modifiers,
             depsgraph
         )
 
@@ -98,14 +99,14 @@ def create_lod_viewer(
 
         screen_size = stats_entry.get_size_to_use(percentage=True)
 
-        geometry_node_utils.set_modifier_input(
+        geometry_node_utils.set_modifier_input_value(
             modifier, inputs.get_lod_collection_input(i).input_label, collection
         )
-        geometry_node_utils.set_modifier_input(
+        geometry_node_utils.set_modifier_input_value(
             modifier, inputs.get_lod_screen_size_input(i).input_label, screen_size
         )
 
-    geometry_node_utils.set_modifier_input(
+    geometry_node_utils.set_modifier_input_value(
         modifier, inputs.LOD_COUNT.input_label, lod_group.lod_count
     )
 
@@ -256,7 +257,6 @@ def _generate_lod_viewers(
             debug_settings.display_bounding_spheres
         )
 
-        lod_viewer_node_groups.construct_lod_viewer_input_map()
 
     debug_settings.update_debug_draw()
 
@@ -337,21 +337,18 @@ def send_lod_setup_to_exporter(obj: bpy.types.Object) -> bool | type[data_proper
     
     source: MultiExporterLODGroup
     # Same pattern in panel
-    lod_viewer_input_map = lod_viewer_node_groups.get_lod_viewer_input_map()
-    if not lod_viewer_input_map:
-        return False
-
     lod_viewer_modifier = get_lod_viewer_modifier(obj)
 
     if not lod_viewer_modifier:
         return False
-    lod_count_identifier = lod_viewer_input_map.get(
-        MSFS2024LODViewerInputs.LOD_COUNT.value, None
+ 
+    lod_count = geometry_node_utils.get_modifier_input_value(
+        lod_viewer_modifier,
+        MSFS2024LODViewerInputs.LOD_COUNT.input_label,
     )
-    if not lod_count_identifier:
+    if lod_count is geometry_node_utils.NotFound:
         return False
-
-    lod_count = geometry_node_utils.get_modifier_input_value(lod_viewer_modifier, lod_count_identifier)
+    
     if not lod_count > 1 or lod_count != len(source.lods):
         return False
 
@@ -359,12 +356,14 @@ def send_lod_setup_to_exporter(obj: bpy.types.Object) -> bool | type[data_proper
         screen_size_label = MSFS2024LODViewerInputs.get_lod_screen_size_input(i)
         if not screen_size_label:
             return False
-        screen_size_identifier = lod_viewer_input_map.get(screen_size_label.value, None)
-        if not screen_size_identifier:
+        
+        val = geometry_node_utils.get_modifier_input_value(
+            lod_viewer_modifier,
+            screen_size_label,
+        )
+        if val is geometry_node_utils.NotFound:
             return False
-        val = geometry_node_utils.get_modifier_input_value(lod_viewer_modifier, screen_size_identifier)
-        if val is None:
-            return False
+
         source.lods[i].lod_value = val
 
     return True

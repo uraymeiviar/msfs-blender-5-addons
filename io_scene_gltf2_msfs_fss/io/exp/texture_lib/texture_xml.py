@@ -1,23 +1,8 @@
-# Copyright 2023-2024 The glTF-Blender-IO-MSFS2024 authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 from os import path
 from xml.etree import ElementTree
 
-from .msfs_bitmap_config import (
-    BITMAP_SLOTS,
-    find_bitmap_index,
+from .bitmap_config import (
+    BitmapSlots,
     BitmapConfig
 )
 
@@ -33,12 +18,12 @@ class XmlSerializer:
         and a modifiable bmpConfig 
     """
 
-    def __init__(self, path=""):
+    def __init__(self, path: str = ""):
         self.xml_path = path
         self.bmp_config = BitmapConfig()
         self.xml_bmp_config = BitmapConfig()
         self.xml_data = None
-        
+
     def is_dirty(self):
         """ 
             Tells if there is a difference between xml configs and modified config 
@@ -65,13 +50,13 @@ class XmlSerializer:
         except ElementTree.ParseError:
             print("[ERROR] Fail at parsing xml")
             return False
-        
+
         # Verify root node
         root_node = self.xml_data.getroot()
         if root_node.tag != BMP_CONFIG_NODETAG:
             print("[ERROR] Wrong root node name.")
             return False
-        
+
         # Get bitmap node (mandatory)
         bmp_slot_node = root_node.find(BMP_SLOT_NODETAG)
         if bmp_slot_node is None:
@@ -96,8 +81,12 @@ class XmlSerializer:
             no_alpha = (no_alpha_node.text.lower() == "true") or (no_alpha_node.text == "1")
 
         # Save xml values
+        flag_index = BitmapSlots.get_index_from_flag(bmp_slot)
+        if flag_index is None:
+            print(f"[ERROR] Flag {bmp_slot}not Found in BitmapSlots.")
+            return False
         self.xml_bmp_config = BitmapConfig(
-            material_bitmap=find_bitmap_index(bmp_slot), 
+            material_bitmap=flag_index, 
             user_flags=user_flags, 
             force_no_alpha=no_alpha
         )
@@ -116,7 +105,7 @@ class XmlSerializer:
             self.xml_data = ElementTree.ElementTree(
                 ElementTree.Element(BMP_CONFIG_NODETAG)
             )
-        
+
         root_node = self.xml_data.getroot()
 
         # Bitmap slot
@@ -127,7 +116,7 @@ class XmlSerializer:
                 BMP_SLOT_NODETAG
             )
 
-        bmp_node.text = BITMAP_SLOTS[self.bmp_config.material_bitmap]
+        bmp_node.text = BitmapSlots.get_flag_from_index(self.bmp_config.material_bitmap)
 
         # User flags
         user_node = root_node.find(EXTRA_FLAG_NODETAG)

@@ -52,25 +52,10 @@ class AsoboExtraOcclusionExtension:
             extension=result,
             material=blender_material,
             attribute=MSFS2024_MaterialProperties.OCCLUSIONUV2,
-            settings=export_settings,
-            texture_type="DEFAULT"
+            settings=export_settings
         )
 
         if not result:
-            return
-        
-        ## Something weard happens with the extra occlusion, the export set up the albedo and the occlusion texture
-        ## We need to make sure to have only the occlusion uv2 to set the tex_coord to 1
-        resulted_occlusion_uv2_name = result[MSFS2024_MaterialProperties.OCCLUSIONUV2.extension_name()].index.source.uri
-        if isinstance(resulted_occlusion_uv2_name, str):
-            resulted_occlusion_uv2_name = resulted_occlusion_uv2_name.strip(".") # Remove relative part
-        else: # Image data, happens when texture dir is enabled and keep original is disabled
-            resulted_occlusion_uv2_name = resulted_occlusion_uv2_name.name
-    
-        material_occlusion_uv2_name = getattr(blender_material, MSFS2024_MaterialProperties.OCCLUSIONUV2.attribute_name()).filepath
-        material_occlusion_uv2_name = material_occlusion_uv2_name.strip(".") # Remove relative part
-
-        if Path(resulted_occlusion_uv2_name).stem !=  Path(material_occlusion_uv2_name).stem:
             return
         
         if hasattr(result[MSFS2024_MaterialProperties.OCCLUSIONUV2.extension_name()], "tex_coord"):
