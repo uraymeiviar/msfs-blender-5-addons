@@ -5,7 +5,9 @@ One Blender 5.2 install that exports glTF for **Microsoft Flight Simulator 2024 
 Built from the Asobo MSFS 2024 Blender toolset (data model, UI, gizmos, LOD tools, multi-exporter) plus the
 FSS production MSFS 2020 exporter, both ported to Blender 5.2:
 
-- MSFS 2024 fork: <https://github.com/uraymeiviar/msfs2024-blender-addons>
+- MSFS 2024 fork: <https://github.com/uraymeiviar/msfs2024-blender-addons> — Asobo exporter **8.4.1**
+  (SDK 1.8.1 Flighting, which supports Blender 5.2 itself) plus a fix for exports without Perforce installed;
+  the `upstream` branch holds the vanilla Asobo versions
 - MSFS 2020 fork: <https://github.com/uraymeiviar/msfs2020-blender-addons>
 
 ## Add-ons
