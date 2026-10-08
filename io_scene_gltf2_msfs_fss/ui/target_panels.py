@@ -55,7 +55,7 @@ class MSFS_FSS_PT_export_target(bpy.types.Panel):
             if off:
                 box.label(text=f"{off} mesh(es) from Blender 4.0 or older had Auto Smooth off", icon="ERROR")
             if misordered:
-                box.label(text=f"{misordered} object(s): Auto Smooth modifier after Weighted Normal", icon="ERROR")
+                box.label(text=f"{misordered} object(s): Auto Smooth modifier not where Blender 3.6 applied it", icon="ERROR")
             box.label(text="and may shade differently than in Blender 3.6")
             box.operator("msfs_fss.restore_legacy_normals", icon="NORMALS_FACE")
 

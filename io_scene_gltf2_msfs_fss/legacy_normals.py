@@ -189,11 +189,39 @@ def is_converted_auto_smooth(modifier) -> bool:
             and modifier.node_group.name.split(".")[0] == "Auto Smooth")
 
 
+_DEFORM_MODIFIERS = {
+    "ARMATURE", "CAST", "CURVE", "DISPLACE", "HOOK", "LAPLACIANDEFORM", "LATTICE", "MESH_DEFORM", "SHRINKWRAP",
+    "SIMPLE_DEFORM", "SMOOTH", "CORRECTIVE_SMOOTH", "LAPLACIANSMOOTH", "SURFACE_DEFORM", "WARP", "WAVE",
+    "MESH_CACHE", "MESH_SEQUENCE_CACHE",
+}
+
+
+def _keeps_custom_normals(modifier) -> bool:
+    return (modifier.type in _DEFORM_MODIFIERS or modifier.type in _NORMAL_MODIFIERS or modifier.type == "MIRROR"
+            or (modifier.type == "SUBSURF" and modifier.use_custom_normals)
+            or (modifier.type == "TRIANGULATE" and modifier.keep_custom_normals))
+
+
+def _auto_smooth_index(mods, smooth) -> int:
+    """
+    Where Blender <= 4.0 effectively evaluated Auto Smooth (a mesh setting applied to the final mesh, which
+    Weighted Normal / Normal Edit worked on top of):
+    - before the first normal modifier when its custom normals reach the end of the stack;
+    - otherwise after the last modifier that is not a deformation (the normal modifiers' result is discarded).
+    """
+    others = [m for i, m in enumerate(mods) if i != smooth]
+    normal = next((i for i, m in enumerate(others) if m.type in _NORMAL_MODIFIERS), None)
+    if normal is not None and all(_keeps_custom_normals(m) for m in others[normal + 1:]):
+        return normal
+    last_generating = max((i for i, m in enumerate(others) if m.type not in _DEFORM_MODIFIERS), default=-1)
+    return last_generating + 1
+
+
 def misordered_auto_smooth() -> list:
     """
-    Objects of meshes saved with Auto Smooth on whose converted Auto Smooth modifier comes after a Weighted
-    Normal / Normal Edit modifier: it recomputes the shading and discards their custom normals. In Blender <= 4.0
-    Auto Smooth was a mesh setting those modifiers worked on top of. Returns [(object, from index, to index)].
+    Objects of meshes saved with Auto Smooth on whose converted Auto Smooth modifier is not where Blender <= 4.0
+    evaluated Auto Smooth (Blender 4.1+ may place it after Weighted Normal, discarding its custom normals, or
+    before a Subdivision Surface). Returns [(object, from index, to index)].
     """
     result = []
     for obj in bpy.data.objects:
@@ -201,14 +229,16 @@ def misordered_auto_smooth() -> list:
             continue
         mods = list(obj.modifiers)
         smooth = next((i for i, m in enumerate(mods) if is_converted_auto_smooth(m)), None)
-        normal = next((i for i, m in enumerate(mods) if m.type in _NORMAL_MODIFIERS), None)
-        if smooth is not None and normal is not None and smooth > normal:
-            result.append((obj, smooth, normal))
+        if smooth is None:
+            continue
+        target = _auto_smooth_index(mods, smooth)
+        if target != smooth:
+            result.append((obj, smooth, target))
     return result
 
 
 def reorder_auto_smooth() -> int:
-    """Move the converted Auto Smooth modifier before the normal modifiers (Blender 3.6 evaluation order)."""
+    """Move the converted Auto Smooth modifier where Blender 3.6 evaluated Auto Smooth."""
     moved = misordered_auto_smooth()
     for obj, smooth, normal in moved:
         obj.modifiers.move(smooth, normal)
@@ -253,7 +283,7 @@ class MSFS_FSS_OT_restore_legacy_normals(bpy.types.Operator):
     bl_description = ("Meshes saved by Blender 4.0 or older shade differently in Blender 4.1+. With Auto Smooth off, "
                       "sharp edges, custom normals and Weighted Normal modifiers now apply: store the normals Blender "
                       "3.6 showed as custom normals and remove the Weighted Normal modifiers that had no effect. With "
-                      "Auto Smooth on, move the converted Auto Smooth modifier before Weighted Normal / Normal Edit")
+                      "Auto Smooth on, move the converted Auto Smooth modifier where Blender 3.6 applied Auto Smooth")
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
