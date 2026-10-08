@@ -189,32 +189,15 @@ def is_converted_auto_smooth(modifier) -> bool:
             and modifier.node_group.name.split(".")[0] == "Auto Smooth")
 
 
-_DEFORM_MODIFIERS = {
-    "ARMATURE", "CAST", "CURVE", "DISPLACE", "HOOK", "LAPLACIANDEFORM", "LATTICE", "MESH_DEFORM", "SHRINKWRAP",
-    "SIMPLE_DEFORM", "SMOOTH", "CORRECTIVE_SMOOTH", "LAPLACIANSMOOTH", "SURFACE_DEFORM", "WARP", "WAVE",
-    "MESH_CACHE", "MESH_SEQUENCE_CACHE",
-}
-
-
-def _keeps_custom_normals(modifier) -> bool:
-    return (modifier.type in _DEFORM_MODIFIERS or modifier.type in _NORMAL_MODIFIERS or modifier.type == "MIRROR"
-            or (modifier.type == "SUBSURF" and modifier.use_custom_normals)
-            or (modifier.type == "TRIANGULATE" and modifier.keep_custom_normals))
-
-
 def _auto_smooth_index(mods, smooth) -> int:
     """
     Where Blender <= 4.0 effectively evaluated Auto Smooth (a mesh setting applied to the final mesh, which
-    Weighted Normal / Normal Edit worked on top of):
-    - before the first normal modifier when its custom normals reach the end of the stack;
-    - otherwise after the last modifier that is not a deformation (the normal modifiers' result is discarded).
+    Weighted Normal / Normal Edit worked on top of): before the first enabled normal modifier, otherwise at the
+    end of the stack. The export evaluates the viewport stack, so disabled modifiers do not count.
     """
     others = [m for i, m in enumerate(mods) if i != smooth]
-    normal = next((i for i, m in enumerate(others) if m.type in _NORMAL_MODIFIERS), None)
-    if normal is not None and all(_keeps_custom_normals(m) for m in others[normal + 1:]):
-        return normal
-    last_generating = max((i for i, m in enumerate(others) if m.type not in _DEFORM_MODIFIERS), default=-1)
-    return last_generating + 1
+    normal = next((i for i, m in enumerate(others) if m.type in _NORMAL_MODIFIERS and m.show_viewport), None)
+    return normal if normal is not None else len(others)
 
 
 def misordered_auto_smooth() -> list:
