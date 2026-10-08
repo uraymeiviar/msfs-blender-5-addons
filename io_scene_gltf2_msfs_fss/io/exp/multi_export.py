@@ -651,6 +651,16 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
                 view_layer.objects.active = obj
                 bpy.ops.object.mode_set(mode="OBJECT")
         view_layer.objects.active = active
+        # Unified add-on: NLA tweak mode is an editor state the NLA track export cannot handle (and a duplicate in
+        # tweak mode has a read-only action). Duplicates are made without it; the sources get it back afterwards
+        tweaked = [obj for obj in source_objects if obj.animation_data and obj.animation_data.use_tweak_mode]
+        for obj in tweaked:
+            obj.animation_data.use_tweak_mode = False
+        if tweaked:
+            MSFS2024_LOGGER.info(
+                message=f"{len(tweaked)} object(s) in NLA tweak mode: exported as if tweak mode was off.",
+                details="\n".join(sorted(obj.name for obj in tweaked))
+            )
         # Pair each duplicate with its source by a tag the duplicate operator copies, not by list order
         for obj in source_objects:
             obj[_DUPLICATE_SOURCE_KEY] = obj.name
@@ -666,6 +676,8 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
             edit_prefs.use_duplicate_action = duplicate_action
             for obj in source_objects:
                 obj.pop(_DUPLICATE_SOURCE_KEY, None)
+            for obj in tweaked:
+                obj.animation_data.use_tweak_mode = True
         duplicated_objects = context.selected_objects
         pairs = []
         for duplicate in duplicated_objects:
