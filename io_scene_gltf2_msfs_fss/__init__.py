@@ -183,6 +183,26 @@ class glTF2ExportUserExtension:
             self._impl = Export2020()
         else:
             self._impl = _ExportMSFS2024()
+        self._instancing = []
+
+    # Both simulators: shared meshes whose users only have the converted Auto Smooth modifier are exported once
+    # (see instancing.py); restored after the export
+    def pre_export_hook(self, export_settings):
+        from . import instancing
+        self._instancing = instancing.prepare(export_settings)
+        hook = getattr(self._impl, "pre_export_hook", None)
+        if hook:
+            hook(export_settings)
+
+    def post_export_hook(self, export_settings):
+        from . import instancing
+        try:
+            hook = getattr(self._impl, "post_export_hook", None)
+            if hook:
+                hook(export_settings)
+        finally:
+            instancing.restore(self._instancing)
+            self._instancing = []
 
     def __getattr__(self, name):
         # Only called for attributes not found on the dispatcher itself

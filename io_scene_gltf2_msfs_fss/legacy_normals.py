@@ -183,7 +183,7 @@ def candidates():
 _NORMAL_MODIFIERS = {"WEIGHTED_NORMAL", "NORMAL_EDIT"}
 
 
-def _is_converted_auto_smooth(modifier) -> bool:
+def is_converted_auto_smooth(modifier) -> bool:
     """The Geometry Nodes modifier Blender 4.1+ adds when loading a mesh saved with Auto Smooth on."""
     return (modifier.type == "NODES" and modifier.node_group is not None
             and modifier.node_group.name.split(".")[0] == "Auto Smooth")
@@ -200,7 +200,7 @@ def misordered_auto_smooth() -> list:
         if obj.library is not None or obj.type != "MESH" or obj.data.get(LEGACY_AUTO_SMOOTH_KEY) != 1:
             continue
         mods = list(obj.modifiers)
-        smooth = next((i for i, m in enumerate(mods) if _is_converted_auto_smooth(m)), None)
+        smooth = next((i for i, m in enumerate(mods) if is_converted_auto_smooth(m)), None)
         normal = next((i for i, m in enumerate(mods) if m.type in _NORMAL_MODIFIERS), None)
         if smooth is not None and normal is not None and smooth > normal:
             result.append((obj, smooth, normal))
