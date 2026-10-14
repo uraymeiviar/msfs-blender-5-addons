@@ -10,6 +10,8 @@ import re
 
 import bpy
 
+from .merge import PREFIX as MERGE_PREFIX
+
 SUFFIX = re.compile(r"^(.*)\.(\d{3,})$")
 # Asobo LOD prefix (x0_, x1_ ...), matched case-insensitively by the multi-exporter; kept as written
 LOD_PREFIX = re.compile(r"^x[0-9]_")
@@ -68,8 +70,10 @@ def check_names(names, taken):
             rules = (rules - {"SUFFIX"}) | {"DEFAULT"}
             proposal = name
         else:
-            fixed = ILLEGAL_CHARS.sub("_", base)
-            if fixed != base:
+            # The merge-group marker is allowed; the rules apply to the rest of the name
+            group_prefix = MERGE_PREFIX if base.startswith(MERGE_PREFIX) else ""
+            fixed = ILLEGAL_CHARS.sub("_", base[len(group_prefix):])
+            if fixed != base[len(group_prefix):]:
                 rules.add("CHARS")
             prefix = LOD_PREFIX.match(fixed)
             prefix = prefix.group(0) if prefix else ""
@@ -77,7 +81,7 @@ def check_names(names, taken):
             if any(c.islower() for c in body):
                 rules.add("CASE")
                 body = body.upper()
-            proposal = prefix + body + suffix
+            proposal = group_prefix + prefix + body + suffix
 
         if proposal != name:
             if proposal in taken or proposal in planned:

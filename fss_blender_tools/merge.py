@@ -1,10 +1,12 @@
-"""Merge groups: at export, the meshes under an EMPTY named MERGE_<name> become one mesh named <name>.
+"""Merge groups: at export, a node named @MERGE_<name> and its subtree become one mesh named <name>.
 
-The .blend keeps every part as its own object; only the export sees the merged mesh. Groups are processed deepest
-first, so a merged inner group is an ordinary member of the group above it. A node that cannot be merged (animated,
-skinned, with shape keys, not a mesh or an empty, or carrying one of the "don't merge" tags) is skipped with its subtree, and the
-rest of the group still merges; skipped nodes keep their exact transforms because every node above them that the merge
-removes is replaced by an object with the same world matrix.
+The root may be any node: an empty, or a mesh whose own geometry is merged too. The .blend keeps every part as its own
+object; only the export sees the merged mesh. A nested @MERGE_ node is not absorbed: it merges its own subtree and
+stays a child node of the merged mesh around it, so merged meshes can form a hierarchy. A node that cannot be merged
+(animated, skinned, with shape keys, not a mesh or an empty, or carrying one of the "don't merge" tags) is skipped with
+its subtree, and the rest of the group still merges; skipped nodes keep their exact transforms because every node
+above them that the merge removes is replaced by an object with the same world matrix. The prefix never reaches the
+glTF: merged meshes are named without it, and node names are stripped of it as the glTF is written.
 
 The merge edits the objects being exported, so it only runs where those are throwaway: the MSFS 2024 multi-exporter
 (it exports duplicates and purges everything created during the export) or a background Blender run (the deploy
@@ -17,7 +19,8 @@ import numpy as np
 
 from . import tags
 
-PREFIX = "MERGE_"
+# "@" keeps the marker from clashing with real node names and is stripped before the glTF is written
+PREFIX = "@MERGE_"
 # Set by the MSFS 2024 multi-exporter on its duplicates; the exporter writes it as the glTF node name
 ORIGINAL_NAME_KEY = "msfs_original_name"
 # Set by the multi-exporter on its export copies of materials: the material the artist assigned
@@ -33,7 +36,7 @@ def logical_name(obj) -> str:
 
 
 def is_merge_root(obj) -> bool:
-    return obj.type == 'EMPTY' and logical_name(obj).startswith(PREFIX)
+    return logical_name(obj).startswith(PREFIX)
 
 
 def _is_animated(obj) -> bool:
@@ -42,9 +45,14 @@ def _is_animated(obj) -> bool:
 
 
 def skip_reason(obj, skip_tags) -> str:
-    """Why obj (and its subtree) stays out of the merge, or "" when it can be merged."""
+    """Why obj (and its subtree) stays out of the group being merged, or "" when it can be merged."""
     if is_merge_root(obj):
-        return "merge group that was not merged"
+        return f"own {PREFIX} group"
+    return _unmergeable(obj, skip_tags)
+
+
+def _unmergeable(obj, skip_tags) -> str:
+    """Why obj itself cannot be merged, or "" (also decides whether a group root can merge)."""
     if _is_animated(obj):
         return "animated"
     if obj.type == 'ARMATURE' or obj.parent_type == 'BONE' or any(m.type == 'ARMATURE' for m in obj.modifiers):
@@ -85,6 +93,7 @@ class _Group:
         self.removed = []       # nodes the merge removes (members and pass-through empties)
         self.kept = []          # nodes that stay because a skipped node lies below them (replaced by empties)
         self.skipped = []       # (object, reason)
+        self.root_reason = ""   # why the whole group stays unmerged
 
 
 def _collect(group, obj, skip_tags, exported):
@@ -110,7 +119,7 @@ def _collect(group, obj, skip_tags, exported):
 
 
 def merge_roots(scene, exported):
-    """MERGE_ empties of the export, deepest first, so inner groups are merged before the groups around them."""
+    """@MERGE_ nodes of the export, outermost first: an outer group stops at an inner one, which then merges in place."""
     roots = [obj for obj in scene.objects if exported(obj) and is_merge_root(obj)]
 
     def depth(obj):
@@ -119,20 +128,24 @@ def merge_roots(scene, exported):
             obj, count = obj.parent, count + 1
         return count
 
-    return sorted(roots, key=depth, reverse=True)
+    return sorted(roots, key=depth)
 
 
 def collect_group(root, exported, skip_tags):
+    """The root's own reason not to merge (animated, skinned, ...) leaves the whole group unmerged."""
     group = _Group(root)
-    if _is_animated(root):
-        group.skipped.append((root, "animated MERGE_ empty"))
-    else:
-        _collect(group, root, skip_tags, exported)
+    reason = _unmergeable(root, skip_tags)
+    if reason:
+        group.root_reason = reason
+        return group
+    if root.type in MESH_LIKE:
+        group.members.append(root)
+    _collect(group, root, skip_tags, exported)
     return group
 
 
 def plan(scene, exported, skip_tags):
-    """Merge groups as they are now (inner groups not yet merged): for the preview."""
+    """Merge groups as they are now: for the preview."""
     return [collect_group(root, exported, skip_tags) for root in merge_roots(scene, exported)]
 
 
@@ -299,7 +312,7 @@ def merge_group(group, context, log):
                 "rename one of them", warning=True)
     # Replaced originals (plain export without duplicates) give up their names so the merged objects get them
     kept_names_by_node = {node: logical_name(node) for node in group.kept}
-    for obj in [root] + group.members + group.kept:
+    for obj in dict.fromkeys([root] + group.members + group.kept):
         if ORIGINAL_NAME_KEY not in obj and not obj.name.endswith(".fssmerge"):
             obj.name = obj.name + ".fssmerge"
 
@@ -360,8 +373,8 @@ def run(context, exported, selected_export, log):
     merged = 0
     for root in merge_roots(context.scene, exported):
         group = collect_group(root, exported, skip_tags)
-        if any(reason.startswith("animated MERGE_") for _, reason in group.skipped):
-            log(f"{logical_name(root)}: not merged (the MERGE_ empty is animated)", warning=True)
+        if group.root_reason:
+            log(f"{logical_name(root)}: not merged ({group.root_reason} {PREFIX} node)", warning=True)
             continue
         new_objects = merge_group(group, context, log)
         if not new_objects:
@@ -380,7 +393,14 @@ def run(context, exported, selected_export, log):
 
 
 class glTF2ExportUserExtension:
-    """Found by the glTF exporter on every enabled add-on; runs before the exporter collects the objects."""
+    """Found by the glTF exporter on every enabled add-on; pre_export_hook runs before it collects the objects."""
+
+    def gather_node_hook(self, gltf2_node, blender_object, export_settings):
+        # A group that was not merged still exports its root: the marker never reaches the glTF. Runs after the MSFS
+        # exporter's node hook (enabled first), which writes msfs_original_name into the node name.
+        name = gltf2_node.name
+        if isinstance(name, str) and name.startswith(PREFIX):
+            gltf2_node.name = name[len(PREFIX):] or name
 
     def pre_export_hook(self, export_settings):
         context = bpy.context
@@ -425,7 +445,7 @@ class glTF2ExportUserExtension:
 class FSS_MergeSettings(bpy.types.PropertyGroup):
     enabled: bpy.props.BoolProperty(
         name="Merge on Export", default=True,
-        description="At export, merge the meshes under every EMPTY named MERGE_<name> into one mesh named <name>")
+        description=f"At export, merge every node named {PREFIX}<name> and its subtree into one mesh named <name>")
     skip_tags: bpy.props.StringProperty(
         name="Don't Merge Tags",
         description="Objects with any of these tags (separate with ;) are never merged, with their subtree")
@@ -458,7 +478,7 @@ class FSS_OT_MergePreview(bpy.types.Operator):
 class FSS_OT_MergeCreateGroup(bpy.types.Operator):
     bl_idname = "fss.merge_create_group"
     bl_label = "New Merge Group"
-    bl_description = ("Create an EMPTY named MERGE_<name> at the active object's parent and parent the selected "
+    bl_description = (f"Create an empty named {PREFIX}<name> at the active object's parent and parent the selected "
                       "objects to it, keeping their transforms")
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -503,7 +523,7 @@ class FSS_PT_Merge(bpy.types.Panel):
         row = layout.row(align=True)
         row.operator(FSS_OT_MergeCreateGroup.bl_idname, icon='EMPTY_AXIS')
         row.operator(FSS_OT_MergePreview.bl_idname, icon='VIEWZOOM')
-        layout.label(text=f"{PREFIX}<name> empties merge their children at export", icon='INFO')
+        layout.label(text=f"{PREFIX}<name> nodes merge with their subtree at export", icon='INFO')
 
 
 CLASSES = (
