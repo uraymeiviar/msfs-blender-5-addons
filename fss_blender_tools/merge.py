@@ -467,7 +467,53 @@ class glTF2ExportUserExtension:
         log(f"{merged} merge group(s) merged, {len(created)} object(s) created for the export", warning=False)
 
 
+def _group_summary(group):
+    """Counts shown in the Merge Groups tree, from the original objects (no evaluation, cheap)."""
+    materials, kinds, uv_names = [], set(), []
+    for obj in group.members:
+        for slot in obj.material_slots:
+            material = source_material(slot.material)
+            if material is not None and material not in materials:
+                materials.append(material)
+                kinds.add(_material_kind(material))
+        if obj.type == 'MESH':
+            for layer in obj.data.uv_layers:
+                if layer.name not in uv_names:
+                    uv_names.append(layer.name)
+    reasons = {}
+    for _obj, reason in group.skipped:
+        reasons[reason] = reasons.get(reason, 0) + 1
+    return materials, kinds, uv_names, reasons
+
+
+def _on_tree_active(settings, context):
+    if 0 <= settings.active < len(settings.items):
+        obj = context.scene.objects.get(settings.items[settings.active].root)
+        if obj is not None and obj.visible_get():
+            for other in context.selected_objects:
+                other.select_set(False)
+            obj.select_set(True)
+            context.view_layer.objects.active = obj
+
+
+class FSS_MergeTreeItem(bpy.types.PropertyGroup):
+    # name (built in) is the merged mesh name, so the list's name filter works
+    root: bpy.props.StringProperty()
+    depth: bpy.props.IntProperty()
+    objects: bpy.props.IntProperty()
+    material_count: bpy.props.IntProperty()
+    kept: bpy.props.IntProperty()
+    transparent: bpy.props.BoolProperty()
+    root_reason: bpy.props.StringProperty()
+    material_names: bpy.props.StringProperty()
+    reasons: bpy.props.StringProperty()
+    uv_names: bpy.props.StringProperty()
+
+
 class FSS_MergeSettings(bpy.types.PropertyGroup):
+    items: bpy.props.CollectionProperty(type=FSS_MergeTreeItem)
+    active: bpy.props.IntProperty(update=_on_tree_active)
+    scanned: bpy.props.BoolProperty()
     enabled: bpy.props.BoolProperty(
         name="Merge on Export", default=True,
         description=f"At export, merge every node named {PREFIX}<name> and its subtree into one mesh named <name>")
@@ -476,9 +522,75 @@ class FSS_MergeSettings(bpy.types.PropertyGroup):
         description="Objects with any of these tags (separate with ;) are never merged, with their subtree")
 
 
+class FSS_OT_MergeRefresh(bpy.types.Operator):
+    bl_idname = "fss.merge_refresh"
+    bl_label = "Refresh"
+    bl_description = "List the merge groups of the visible objects, nested as they are, without changing anything"
+
+    def execute(self, context):
+        settings = context.scene.fss_merge
+        skip_tags = set(tags.parse_tag_list(settings.skip_tags))
+        view_layer = context.view_layer
+        groups = plan(context.scene, lambda obj: obj.visible_get(view_layer=view_layer), skip_tags)
+        by_root = {group.root: group for group in groups}
+
+        def parent_group(obj):
+            obj = obj.parent
+            while obj is not None and obj not in by_root:
+                obj = obj.parent
+            return obj
+
+        children = {}
+        for group in groups:
+            children.setdefault(parent_group(group.root), []).append(group.root)
+        settings.items.clear()
+
+        def add(root, depth):
+            group = by_root[root]
+            materials, kinds, uv_names, reasons = _group_summary(group)
+            item = settings.items.add()
+            item.name = strip_markers(logical_name(root))
+            item.root = root.name
+            item.depth = depth
+            item.objects = len(group.members)
+            item.material_count = len(materials)
+            item.kept = len(group.skipped)
+            item.transparent = len(kinds) > 1
+            item.root_reason = group.root_reason
+            item.material_names = ", ".join(material.name for material in materials)
+            ordered = sorted(reasons.items(), key=lambda entry: -entry[1])
+            item.reasons = ", ".join(f"{reason}: {count}" for reason, count in ordered)
+            item.uv_names = ", ".join(uv_names)
+            for child in sorted(children.get(root, []), key=lambda obj: obj.name):
+                add(child, depth + 1)
+
+        for root in sorted(children.get(None, []), key=lambda obj: obj.name):
+            add(root, 0)
+        settings.scanned = True
+        if settings.active >= len(settings.items):
+            settings.active = max(len(settings.items) - 1, 0)
+        self.report({'INFO'}, f"{len(settings.items)} merge group(s)")
+        return {'FINISHED'}
+
+
+class FSS_UL_MergeTree(bpy.types.UIList):
+    bl_idname = "FSS_UL_merge_tree"
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        row = layout.row(align=True)
+        for _ in range(item.depth):
+            row.label(icon='BLANK1')
+        if item.root_reason:
+            row.label(text=f"{item.name} (not merged: {item.root_reason})", icon='ERROR')
+            return
+        warning = item.material_count > 1 or item.transparent
+        row.label(text=item.name, icon='ERROR' if warning else 'MESH_DATA')
+        row.label(text=f"{item.objects} obj  {item.material_count} mat  {item.kept} kept")
+
+
 class FSS_OT_MergePreview(bpy.types.Operator):
     bl_idname = "fss.merge_preview"
-    bl_label = "Preview Merge"
+    bl_label = "Print Details"
     bl_description = "Print what the export would merge (visible objects) to the console, without changing anything"
 
     def execute(self, context):
@@ -547,13 +659,41 @@ class FSS_PT_Merge(bpy.types.Panel):
         layout.prop(settings, "skip_tags", icon='BOOKMARKS')
         row = layout.row(align=True)
         row.operator(FSS_OT_MergeCreateGroup.bl_idname, icon='EMPTY_AXIS')
-        row.operator(FSS_OT_MergePreview.bl_idname, icon='VIEWZOOM')
-        layout.label(text=f"{PREFIX}<name> nodes merge with their subtree at export", icon='INFO')
-        layout.label(text=f"{NO_MERGE_PREFIX}<name> nodes inside stay separate", icon='INFO')
+        row.operator(FSS_OT_MergeRefresh.bl_idname, icon='FILE_REFRESH')
+        if not settings.scanned:
+            layout.label(text=f"{PREFIX}name merges, {NO_MERGE_PREFIX}name stays", icon='INFO')
+            return
+        if not settings.items:
+            layout.label(text=f"No visible {PREFIX} nodes", icon='INFO')
+            return
+        layout.template_list(FSS_UL_MergeTree.bl_idname, "", settings, "items", settings, "active", rows=6)
+        if 0 <= settings.active < len(settings.items):
+            item = settings.items[settings.active]
+            box = layout.box()
+            box.label(text=f"{item.root} -> {item.name}", icon='OUTLINER_OB_EMPTY')
+            if item.root_reason:
+                box.label(text=f"Not merged: {item.root_reason}", icon='ERROR')
+            else:
+                column = box.column(align=True)
+                column.label(text=f"Merged: {item.objects} object(s), {item.material_count} material(s)")
+                if item.material_names:
+                    column.label(text=item.material_names, icon='MATERIAL')
+                if item.transparent:
+                    column.label(text=f"Transparent parts become {item.name}_TRANSPARENT", icon='ERROR')
+                if item.uv_names:
+                    uv_icon = 'ERROR' if item.uv_names.count(",") >= 2 else 'GROUP_UVS'
+                    column.label(text=f"UV maps: {item.uv_names}", icon=uv_icon)
+                column.label(text=f"Kept separate: {item.kept}", icon='OUTLINER_OB_GROUP_INSTANCE')
+                if item.reasons:
+                    column.label(text=item.reasons)
+        layout.operator(FSS_OT_MergePreview.bl_idname, icon='CONSOLE')
 
 
 CLASSES = (
+    FSS_MergeTreeItem,
     FSS_MergeSettings,
+    FSS_OT_MergeRefresh,
+    FSS_UL_MergeTree,
     FSS_OT_MergePreview,
     FSS_OT_MergeCreateGroup,
     FSS_PT_Merge,
