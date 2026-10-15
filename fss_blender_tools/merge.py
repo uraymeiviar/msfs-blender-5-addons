@@ -351,7 +351,10 @@ def merge_group(group, context, log):
         if main is None:
             main = obj
         else:
+            # A plain child of the main mesh: drop the bone parent copied from a bone-parented root
             obj.parent = main
+            obj.parent_type = 'OBJECT'
+            obj.parent_bone = ""
             obj.matrix_parent_inverse.identity()
             obj.matrix_basis.identity()
 
