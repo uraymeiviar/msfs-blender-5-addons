@@ -10,7 +10,7 @@ import re
 
 import bpy
 
-from .merge import PREFIX as MERGE_PREFIX
+from .merge import MARKERS
 
 SUFFIX = re.compile(r"^(.*)\.(\d{3,})$")
 # Asobo LOD prefix (x0_, x1_ ...), matched case-insensitively by the multi-exporter; kept as written
@@ -70,8 +70,8 @@ def check_names(names, taken):
             rules = (rules - {"SUFFIX"}) | {"DEFAULT"}
             proposal = name
         else:
-            # The merge-group marker is allowed; the rules apply to the rest of the name
-            group_prefix = MERGE_PREFIX if base.startswith(MERGE_PREFIX) else ""
+            # The merge markers are allowed; the rules apply to the rest of the name
+            group_prefix = next((marker for marker in MARKERS if base.startswith(marker)), "")
             fixed = ILLEGAL_CHARS.sub("_", base[len(group_prefix):])
             if fixed != base[len(group_prefix):]:
                 rules.add("CHARS")

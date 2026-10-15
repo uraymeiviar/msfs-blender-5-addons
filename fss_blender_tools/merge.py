@@ -7,12 +7,16 @@ stays a child node of the merged mesh around it, so merged meshes can form a hie
 its subtree, and the rest of the group still merges; skipped nodes keep their exact transforms because every node
 above them that the merge removes is replaced by an object with the same world matrix. The prefix never reaches the
 glTF: merged meshes are named without it, and node names are stripped of it as the glTF is written.
+A node named @NOMERGE_<name> inside a group is the opposite marker: it and its subtree are not merged and stay child
+nodes of the merged mesh, exported as <name>.
 
 The merge edits the objects being exported, so it only runs where those are throwaway: the MSFS 2024 multi-exporter
 (it exports duplicates and purges everything created during the export) or a background Blender run (the deploy
 scripts quit without saving). An interactive plain glTF export is left unmerged, with a warning.
 Rules and decisions: codes/wasm/doc/journal/20261014.fss-blender-tools-tags-and-merge.md (FSS repository).
 """
+
+import sys
 
 import bpy
 import numpy as np
@@ -21,6 +25,8 @@ from . import tags
 
 # "@" keeps the marker from clashing with real node names and is stripped before the glTF is written
 PREFIX = "@MERGE_"
+NO_MERGE_PREFIX = "@NOMERGE_"
+MARKERS = (PREFIX, NO_MERGE_PREFIX)
 # Set by the MSFS 2024 multi-exporter on its duplicates; the exporter writes it as the glTF node name
 ORIGINAL_NAME_KEY = "msfs_original_name"
 # Set by the multi-exporter on its export copies of materials: the material the artist assigned
@@ -33,6 +39,15 @@ def logical_name(obj) -> str:
     """The name the node gets in the glTF (duplicates carry their source name)."""
     name = obj.get(ORIGINAL_NAME_KEY)
     return name if isinstance(name, str) else obj.name
+
+
+def strip_markers(name):
+    """name without a leading @MERGE_ or @NOMERGE_ (unchanged when that would leave it empty)."""
+    if isinstance(name, str):
+        for marker in MARKERS:
+            if name.startswith(marker) and len(name) > len(marker):
+                return name[len(marker):]
+    return name
 
 
 def is_merge_root(obj) -> bool:
@@ -48,6 +63,8 @@ def skip_reason(obj, skip_tags) -> str:
     """Why obj (and its subtree) stays out of the group being merged, or "" when it can be merged."""
     if is_merge_root(obj):
         return f"own {PREFIX} group"
+    if logical_name(obj).startswith(NO_MERGE_PREFIX):
+        return f"{NO_MERGE_PREFIX} node"
     return _unmergeable(obj, skip_tags)
 
 
@@ -348,7 +365,7 @@ def merge_group(group, context, log):
     log(f"{root_name} -> {target}: {merged_count} object(s) merged into {len(buffers)} mesh(es), "
         f"{len(materials)} material(s), {len(group.skipped)} node(s) kept separate", warning=False)
     for obj, reason in group.skipped:
-        log(f"  kept separate: {logical_name(obj)} ({reason})", warning=False)
+        log(f"  kept separate: {logical_name(obj)} ({reason})", warning=False, detail=True)
     if len(materials) > 1:
         parts = []
         for name, users in sorted(material_users.items(), key=lambda item: -len(item[1])):
@@ -396,11 +413,14 @@ class glTF2ExportUserExtension:
     """Found by the glTF exporter on every enabled add-on; pre_export_hook runs before it collects the objects."""
 
     def gather_node_hook(self, gltf2_node, blender_object, export_settings):
-        # A group that was not merged still exports its root: the marker never reaches the glTF. Runs after the MSFS
+        # Unmerged roots and @NOMERGE_ nodes still export: the markers never reach the glTF. Runs after the MSFS
         # exporter's node hook (enabled first), which writes msfs_original_name into the node name.
-        name = gltf2_node.name
-        if isinstance(name, str) and name.startswith(PREFIX):
-            gltf2_node.name = name[len(PREFIX):] or name
+        gltf2_node.name = strip_markers(gltf2_node.name)
+
+    def gather_mesh_hook(self, gltf2_mesh, blender_mesh, blender_object, vertex_groups, modifiers, materials,
+                         export_settings):
+        # Mesh data is often named after its object, marker included
+        gltf2_mesh.name = strip_markers(gltf2_mesh.name)
 
     def pre_export_hook(self, export_settings):
         context = bpy.context
@@ -408,8 +428,13 @@ class glTF2ExportUserExtension:
         if settings is None or not settings.enabled:
             return
 
-        def log(message, warning):
-            print(f"{LOG_PREFIX} {'WARNING ' if warning else ''}{message}")
+        def log(message, warning, detail=False):
+            line = f"{LOG_PREFIX} {'WARNING ' if warning else ''}{message}"
+            print(line)
+            # Deploys run in background with stdout going to the export log: summaries and warnings also go to stderr,
+            # which stays on the console; per-node details stay in the log
+            if bpy.app.background and not detail:
+                print(line, file=sys.stderr, flush=True)
             logger = export_settings.get("log")
             if warning and logger is not None:
                 logger.warning(f"{LOG_PREFIX} {message}")
@@ -524,6 +549,7 @@ class FSS_PT_Merge(bpy.types.Panel):
         row.operator(FSS_OT_MergeCreateGroup.bl_idname, icon='EMPTY_AXIS')
         row.operator(FSS_OT_MergePreview.bl_idname, icon='VIEWZOOM')
         layout.label(text=f"{PREFIX}<name> nodes merge with their subtree at export", icon='INFO')
+        layout.label(text=f"{NO_MERGE_PREFIX}<name> nodes inside stay separate", icon='INFO')
 
 
 CLASSES = (
