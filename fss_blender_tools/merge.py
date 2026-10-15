@@ -68,12 +68,18 @@ def skip_reason(obj, skip_tags) -> str:
     return _unmergeable(obj, skip_tags)
 
 
-def _unmergeable(obj, skip_tags) -> str:
-    """Why obj itself cannot be merged, or "" (also decides whether a group root can merge)."""
+def _unmergeable(obj, skip_tags, is_root=False) -> str:
+    """Why obj itself cannot be merged, or "" (also decides whether a group root can merge).
+
+    A root that follows a bone rigidly can merge: the merged mesh keeps the same bone parent. A member that follows a
+    bone of its own moves differently from the group, so it stays separate.
+    """
     if _is_animated(obj):
         return "animated"
-    if obj.type == 'ARMATURE' or obj.parent_type == 'BONE' or any(m.type == 'ARMATURE' for m in obj.modifiers):
+    if obj.type == 'ARMATURE' or any(m.type == 'ARMATURE' for m in obj.modifiers):
         return "skinned"
+    if obj.parent_type == 'BONE' and not is_root:
+        return "bone-parented"
     hit = skip_tags.intersection(tags.get_tags(obj))
     if hit:
         return "tag " + ", ".join(sorted(hit))
@@ -151,7 +157,7 @@ def merge_roots(scene, exported):
 def collect_group(root, exported, skip_tags):
     """The root's own reason not to merge (animated, skinned, ...) leaves the whole group unmerged."""
     group = _Group(root)
-    reason = _unmergeable(root, skip_tags)
+    reason = _unmergeable(root, skip_tags, is_root=True)
     if reason:
         group.root_reason = reason
         return group
@@ -615,8 +621,8 @@ class FSS_OT_MergePreview(bpy.types.Operator):
 class FSS_OT_MergeCreateGroup(bpy.types.Operator):
     bl_idname = "fss.merge_create_group"
     bl_label = "New Merge Group"
-    bl_description = (f"Create an empty named {PREFIX}<name> at the active object's parent and parent the selected "
-                      "objects to it, keeping their transforms")
+    bl_description = (f"Create an empty named {PREFIX}<name> under the selected objects' parent (or parent bone) and "
+                      "parent them to it, keeping their transforms")
     bl_options = {'REGISTER', 'UNDO'}
 
     group_name: bpy.props.StringProperty(name="Name", default="GROUP")
@@ -629,17 +635,35 @@ class FSS_OT_MergeCreateGroup(bpy.types.Operator):
         return context.window_manager.invoke_props_dialog(self)
 
     def execute(self, context):
-        active = context.active_object or context.selected_objects[0]
+        selected = list(context.selected_objects)
+        active = context.active_object if context.active_object in selected else selected[0]
+        owners = {(obj.parent, obj.parent_type if obj.parent else 'OBJECT', obj.parent_bone if obj.parent else "")
+                  for obj in selected}
+        if len(owners) > 1:
+            self.report({'ERROR'}, "The selected objects have different parents or parent bones: group them separately")
+            return {'CANCELLED'}
+        parent, parent_type, parent_bone = owners.pop()
         empty = bpy.data.objects.new(PREFIX + self.group_name.strip(), None)
         empty.empty_display_type = 'PLAIN_AXES'
         empty.empty_display_size = 0.02
         for collection in active.users_collection:
             collection.objects.link(empty)
-        empty.parent = active.parent
-        empty.matrix_world = (active.parent.matrix_world.copy() if active.parent else empty.matrix_world)
-        for obj in context.selected_objects:
+        # The empty takes over the selection's parent, including a parent bone, so the group moves as the parts did
+        empty.parent = parent
+        if parent is not None and parent_type == 'BONE':
+            empty.parent_type = 'BONE'
+            empty.parent_bone = parent_bone
+            pose_bone = parent.pose.bones.get(parent_bone) if parent.pose else None
+            if pose_bone is not None:
+                empty.matrix_world = parent.matrix_world @ pose_bone.matrix
+        elif parent is not None:
+            empty.matrix_world = parent.matrix_world.copy()
+        context.view_layer.update()
+        for obj in selected:
             world = obj.matrix_world.copy()
             obj.parent = empty
+            obj.parent_type = 'OBJECT'
+            obj.parent_bone = ""
             obj.matrix_world = world
         self.report({'INFO'}, f"{empty.name}: {len(context.selected_objects)} object(s)")
         return {'FINISHED'}
