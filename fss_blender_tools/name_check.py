@@ -325,39 +325,31 @@ class FSS_OT_NameCheckSelect(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class FSS_PT_NameCheck(bpy.types.Panel):
-    bl_idname = "FSS_PT_name_check"
-    bl_label = "Name Check"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = "FSS Tools"
+def draw(layout, context):
+    settings = context.scene.fss_name_check
+    row = layout.row(align=True)
+    row.operator(FSS_OT_NameCheckScan.bl_idname, icon='VIEWZOOM')
+    row.prop(settings, "include_bones", toggle=True, icon='BONE_DATA')
+    if not settings.scanned:
+        return
+    if not settings.items:
+        layout.label(text="No naming issues found", icon='CHECKMARK')
+        return
 
-    def draw(self, context):
-        layout = self.layout
-        settings = context.scene.fss_name_check
-        row = layout.row(align=True)
-        row.operator(FSS_OT_NameCheckScan.bl_idname, icon='VIEWZOOM')
-        row.prop(settings, "include_bones", toggle=True, icon='BONE_DATA')
-        if not settings.scanned:
-            return
-        if not settings.items:
-            layout.label(text="No naming issues found", icon='CHECKMARK')
-            return
+    counts = {rule[0]: 0 for rule in RULES}
+    for item in settings.items:
+        for rule in item.rules:
+            counts[rule] += 1
+    layout.label(text="  ".join(f"{RULE_TAGS[rule]} {count}" for rule, count in counts.items() if count))
+    layout.row(align=True).prop(settings, "show_rules", expand=True)
+    layout.template_list(FSS_UL_NameCheck.bl_idname, "", settings, "items", settings, "active", rows=12)
 
-        counts = {rule[0]: 0 for rule in RULES}
-        for item in settings.items:
-            for rule in item.rules:
-                counts[rule] += 1
-        layout.label(text="  ".join(f"{RULE_TAGS[rule]} {count}" for rule, count in counts.items() if count))
-        layout.row(align=True).prop(settings, "show_rules", expand=True)
-        layout.template_list(FSS_UL_NameCheck.bl_idname, "", settings, "items", settings, "active", rows=12)
-
-        row = layout.row(align=True)
-        row.operator(FSS_OT_NameCheckSelect.bl_idname, text="Tick All", icon='CHECKBOX_HLT').tick = True
-        row.operator(FSS_OT_NameCheckSelect.bl_idname, text="Untick All", icon='CHECKBOX_DEHLT').tick = False
-        row.operator("view3d.view_selected", text="Frame", icon='ZOOM_SELECTED')
-        pending = sum(1 for item in settings.items if _is_pending(item))
-        layout.operator(FSS_OT_NameCheckRename.bl_idname, text=f"Rename Selected ({pending})", icon='SORTALPHA')
+    row = layout.row(align=True)
+    row.operator(FSS_OT_NameCheckSelect.bl_idname, text="Tick All", icon='CHECKBOX_HLT').tick = True
+    row.operator(FSS_OT_NameCheckSelect.bl_idname, text="Untick All", icon='CHECKBOX_DEHLT').tick = False
+    row.operator("view3d.view_selected", text="Frame", icon='ZOOM_SELECTED')
+    pending = sum(1 for item in settings.items if _is_pending(item))
+    layout.operator(FSS_OT_NameCheckRename.bl_idname, text=f"Rename Selected ({pending})", icon='SORTALPHA')
 
 
 CLASSES = (
@@ -367,7 +359,6 @@ CLASSES = (
     FSS_OT_NameCheckScan,
     FSS_OT_NameCheckRename,
     FSS_OT_NameCheckSelect,
-    FSS_PT_NameCheck,
 )
 
 

@@ -48,6 +48,23 @@ def _editable(obj) -> bool:
     return obj.library is None and obj.override_library is None
 
 
+def get_skip_tags(scene) -> list:
+    merge_settings = getattr(scene, "fss_merge", None)
+    if merge_settings is None:
+        return []
+    return parse_tag_list(merge_settings.skip_tags)
+
+
+def set_skip_tags(scene, skip_tags):
+    merge_settings = getattr(scene, "fss_merge", None)
+    if merge_settings is None:
+        return
+    unique = list(dict.fromkeys(tag for tag in skip_tags if tag))
+    merge_settings.skip_tags = SEPARATOR.join(unique)
+    if merge_settings.scanned and hasattr(bpy.ops, "fss") and hasattr(bpy.ops.fss, "merge_refresh"):
+        bpy.ops.fss.merge_refresh()
+
+
 class FSS_OT_TagAdd(bpy.types.Operator):
     bl_idname = "fss.tag_add"
     bl_label = "Add Tag"
@@ -128,6 +145,26 @@ class FSS_OT_TagSelect(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class FSS_OT_TagToggleSkipMerge(bpy.types.Operator):
+    bl_idname = "fss.tag_toggle_skip_merge"
+    bl_label = "Don't Merge Tag"
+    bl_description = "Toggle skipping objects with this tag (and their subtrees) when merging"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    tag: bpy.props.StringProperty(name="Tag")
+
+    def execute(self, context):
+        scene = context.scene
+        current = get_skip_tags(scene)
+        if self.tag in current:
+            set_skip_tags(scene, [tag for tag in current if tag != self.tag])
+            self.report({'INFO'}, f"Tag {self.tag}: included in merge")
+        else:
+            set_skip_tags(scene, current + [self.tag])
+            self.report({'INFO'}, f"Tag {self.tag}: skipped by merge")
+        return {'FINISHED'}
+
+
 class FSS_OT_TagRename(bpy.types.Operator):
     bl_idname = "fss.tag_rename"
     bl_label = "Rename Tag"
@@ -152,6 +189,9 @@ class FSS_OT_TagRename(bpy.types.Operator):
             if self.tag in tags and _editable(obj):
                 set_tags(obj, [new_tags[0] if tag == self.tag else tag for tag in tags])
                 count += 1
+        skip_tags = get_skip_tags(context.scene)
+        if self.tag in skip_tags:
+            set_skip_tags(context.scene, [new_tags[0] if tag == self.tag else tag for tag in skip_tags])
         self.report({'INFO'}, f"Renamed {self.tag} to {new_tags[0]} on {count} object(s)")
         return {'FINISHED'}
 
@@ -173,6 +213,9 @@ class FSS_OT_TagDelete(bpy.types.Operator):
             if has_tag(obj, self.tag) and _editable(obj):
                 set_tags(obj, [tag for tag in get_tags(obj) if tag != self.tag])
                 count += 1
+        skip_tags = get_skip_tags(context.scene)
+        if self.tag in skip_tags:
+            set_skip_tags(context.scene, [tag for tag in skip_tags if tag != self.tag])
         self.report({'INFO'}, f"Removed {self.tag} from {count} object(s)")
         return {'FINISHED'}
 
@@ -234,12 +277,20 @@ class FSS_PT_Tags(bpy.types.Panel):
 
         counts = tag_counts()
         if counts:
+            skip_tags = set(get_skip_tags(scene))
             layout.label(text="Tags in this file")
             column = layout.column(align=True)
             for tag in sorted(counts):
+                skipped = tag in skip_tags
                 tag_row = column.row(align=True)
                 tag_row.operator(FSS_OT_TagSelect.bl_idname, text=f"{tag} ({counts[tag]})",
                                  icon='RESTRICT_SELECT_OFF').tag = tag
+                op = tag_row.operator(
+                    FSS_OT_TagToggleSkipMerge.bl_idname, text="",
+                    icon='AUTOMERGE_OFF' if skipped else 'AUTOMERGE_ON',
+                    depress=skipped,
+                )
+                op.tag = tag
                 tag_row.operator(FSS_OT_TagRename.bl_idname, text="", icon='GREASEPENCIL').tag = tag
                 tag_row.operator(FSS_OT_TagDelete.bl_idname, text="", icon='TRASH').tag = tag
         else:
@@ -254,6 +305,7 @@ CLASSES = (
     FSS_OT_TagAdd,
     FSS_OT_TagRemove,
     FSS_OT_TagSelect,
+    FSS_OT_TagToggleSkipMerge,
     FSS_OT_TagRename,
     FSS_OT_TagDelete,
     FSS_OT_TagFromCollection,

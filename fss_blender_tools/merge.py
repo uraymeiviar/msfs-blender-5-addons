@@ -674,7 +674,7 @@ class FSS_OT_MergeCreateGroup(bpy.types.Operator):
 
 class FSS_PT_Merge(bpy.types.Panel):
     bl_idname = "FSS_PT_merge"
-    bl_label = "Merge Groups"
+    bl_label = "Merge Tree"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "FSS Tools"
@@ -683,7 +683,6 @@ class FSS_PT_Merge(bpy.types.Panel):
         layout = self.layout
         settings = context.scene.fss_merge
         layout.prop(settings, "enabled")
-        layout.prop(settings, "skip_tags", icon='BOOKMARKS')
         row = layout.row(align=True)
         row.operator(FSS_OT_MergeCreateGroup.bl_idname, icon='EMPTY_AXIS')
         row.operator(FSS_OT_MergeRefresh.bl_idname, icon='FILE_REFRESH')

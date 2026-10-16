@@ -8,6 +8,8 @@ Rules and decisions: codes/wasm/doc/journal/20261014.fss-blender-tools-tags-and-
 
 import bpy
 
+from . import name_check
+
 
 def broken_bone_parents():
     """Local objects with a parent bone whose parent is not an armature."""
@@ -44,10 +46,11 @@ class FSS_PT_Checks(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "FSS Tools"
-    bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
-        self.layout.operator(FSS_OT_FixBoneParents.bl_idname, icon='BONE_DATA')
+        layout = self.layout
+        name_check.draw(layout, context)
+        layout.operator(FSS_OT_FixBoneParents.bl_idname, icon='BONE_DATA')
 
 
 CLASSES = (

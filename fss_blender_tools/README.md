@@ -8,11 +8,12 @@ repository are in [../AGENTS.md](../AGENTS.md).
 
 | Module | What it does |
 | :--- | :--- |
-| `name_check.py` | Lists object and bone names that break the FSS naming rules (`.NNN` suffixes, case, characters, Blender defaults) and renames them in one batch. The merge markers `@MERGE_` / `@NOMERGE_` are allowed |
+| `tools.py` | Scene helpers: Add Empty Parent (`<Name>_PARENT` at object location and rotation), Origin to Bounding Box (minimum-volume OBB orientation with 8 corners, 6 face centers and 12 edge centers) |
 | `empty_bounds.py` | Draws the bounds of empties' subtrees and a hierarchy text in the viewport |
-| `tags.py` | Generic object tags, stored as the custom property `fss_tags` (semicolon-separated), readable without the add-on |
-| `merge.py` | Export-time merge groups, the merge group tree, New Merge Group |
-| `checks.py` | Repairs for states that break the export silently: Fix Broken Bone Parents |
+| `tags.py` | Generic object tags, stored as the custom property `fss_tags` (semicolon-separated), readable without the add-on, with per-tag skip-merge toggle |
+| `merge.py` | Export-time merge groups, the Merge Tree panel, New Merge Group |
+| `name_check.py` | Lists object and bone names that break the FSS naming rules (`.NNN` suffixes, case, characters, Blender defaults) and renames them in one batch. The merge markers `@MERGE_` / `@NOMERGE_` are allowed |
+| `checks.py` | Checks panel: Name Check and Fix Broken Bone Parents |
 
 The sidebar layout is being reworked; see the panels themselves for the current controls.
 
