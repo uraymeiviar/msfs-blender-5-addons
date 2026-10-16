@@ -11,3 +11,6 @@ documentation.html
 
 # Differential test harness output
 tests/_work/
+
+# Per-machine deploy targets (see deploy.local.json.example)
+deploy.local.json

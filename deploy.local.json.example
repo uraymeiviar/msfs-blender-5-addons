@@ -1,0 +1,21 @@
+{
+    "addons": [
+        "io_scene_gltf2_msfs_fss",
+        "_addons_common",
+        "lod_tools_msfs_2024",
+        "wipermask_generator_msfs_2024",
+        "fss_blender_tools"
+    ],
+    "targets": [
+        {
+            "name": "FSS aircraft repository, portable Blender",
+            "type": "portable",
+            "path": "C:\\path\\to\\fss-aircraft-repo\\tools\\blender"
+        },
+        {
+            "name": "Own Blender 5.2",
+            "type": "user",
+            "path": "%APPDATA%\\Blender Foundation\\Blender\\5.2\\scripts\\addons"
+        }
+    ]
+}
