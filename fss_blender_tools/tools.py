@@ -163,14 +163,11 @@ def _frame_from_axis(axis, pts_for_hull):
     return np.column_stack((x, y, z))
 
 
-def _box_score(world_pts, frame):
+def _box_score(world_pts, frame, fixed_scale):
     """Scores a 3x3 orthonormal frame by bounding box volume, with surface area and extent sum for flat/thin meshes."""
     proj = world_pts @ frame
     extents = np.maximum(proj.max(axis=0) - proj.min(axis=0), 0.0)
-    scale = float(extents.max())
-    if scale < 1e-12:
-        return 0.0
-    e = extents / scale
+    e = extents / fixed_scale
     volume = float(e[0] * e[1] * e[2])
     area = float(e[0] * e[1] + e[1] * e[2] + e[2] * e[0])
     length = float(e[0] + e[1] + e[2])
@@ -200,9 +197,13 @@ def compute_obb(obj, depsgraph):
     if world_pts is None or len(world_pts) == 0:
         return None
 
+    fixed_scale = float(np.linalg.norm(world_pts.max(axis=0) - world_pts.min(axis=0)))
+    if fixed_scale < 1e-12:
+        fixed_scale = 1.0
+
     ref_frame = np.array(obj.matrix_world.to_quaternion().to_matrix(), dtype=np.float64)
     best_frame = ref_frame
-    best_score = _box_score(world_pts, ref_frame)
+    best_score = _box_score(world_pts, ref_frame, fixed_scale)
 
     # Subsample very dense meshes for the 2D rotating-calipers search; full vertices still score and bound the box
     if len(world_pts) > 4096:
@@ -212,12 +213,14 @@ def compute_obb(obj, depsgraph):
         hull_pts = world_pts
 
     for axis in axes:
-        cand = _frame_from_axis(axis, hull_pts)
-        score = _box_score(world_pts, cand)
-        # Prefer the current orientation on ties (within floating-point noise)
-        if score < best_score * (1.0 - 1e-5):
-            best_score = score
-            best_frame = cand
+        f1 = _frame_from_axis(axis, hull_pts)
+        candidates = [f1, _frame_from_axis(f1[:, 0], hull_pts), _frame_from_axis(f1[:, 1], hull_pts)]
+        for cand in candidates:
+            score = _box_score(world_pts, cand, fixed_scale)
+            # Prefer the current orientation on ties (within floating-point noise)
+            if score < best_score * (1.0 - 1e-5):
+                best_score = score
+                best_frame = cand
 
     aligned = _align_axes_to_reference(best_frame, ref_frame)
     proj = world_pts @ aligned
@@ -340,8 +343,10 @@ class FSS_OT_OriginToBounds(bpy.types.Operator):
             changed += 1
 
         context.view_layer.update()
-        label = TARGET_LABELS.get(self.target, self.target)
         if changed:
+            if context.scene.transform_orientation_slots:
+                context.scene.transform_orientation_slots[0].type = 'LOCAL'
+            label = TARGET_LABELS.get(self.target, self.target)
             msg = f"Origin set to {label} on {changed} object(s)"
             if skipped:
                 msg += f" ({skipped} skipped)"
