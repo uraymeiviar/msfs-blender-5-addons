@@ -10,6 +10,7 @@ repository are in [../AGENTS.md](../AGENTS.md).
 | :--- | :--- |
 | `tools.py` | Scene helpers: Add Empty Parent (`<Name>_PARENT` at object location and rotation), Origin to Bounding Box (minimum-volume OBB orientation with 8 corners, 6 face centers and 12 edge centers) |
 | `empty_bounds.py` | Draws the bounds of empties' subtrees and a hierarchy text in the viewport |
+| `lod.py` | Explicit per-object LOD level marking (`0..6`, stored as `fss_lod`, default `0`) with top-down parent clamping and viewport LOD filter |
 | `tags.py` | Generic object tags, stored as the custom property `fss_tags` (semicolon-separated), readable without the add-on, with per-tag skip-merge toggle |
 | `merge.py` | Export-time merge groups, the Merge Tree panel, New Merge Group |
 | `name_check.py` | Lists object and bone names that break the FSS naming rules (`.NNN` suffixes, case, characters, Blender defaults) and renames them in one batch. The merge markers `@MERGE_` / `@NOMERGE_` are allowed |
