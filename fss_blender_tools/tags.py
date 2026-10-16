@@ -68,7 +68,7 @@ def set_skip_tags(scene, skip_tags):
 class FSS_OT_TagAdd(bpy.types.Operator):
     bl_idname = "fss.tag_add"
     bl_label = "Add Tag"
-    bl_description = "Add the tag to every selected object"
+    bl_description = "Add the tag to every selected object that does not already have it"
     bl_options = {'REGISTER', 'UNDO'}
 
     tag: bpy.props.StringProperty(name="Tag")
@@ -81,8 +81,10 @@ class FSS_OT_TagAdd(bpy.types.Operator):
         count = 0
         for obj in context.selected_objects:
             if _editable(obj):
-                set_tags(obj, get_tags(obj) + tags)
-                count += 1
+                existing = get_tags(obj)
+                if any(tag not in existing for tag in tags):
+                    set_tags(obj, existing + tags)
+                    count += 1
         self.report({'INFO'}, f"Tagged {count} object(s) with {', '.join(tags)}")
         return {'FINISHED'}
 
@@ -90,7 +92,7 @@ class FSS_OT_TagAdd(bpy.types.Operator):
 class FSS_OT_TagRemove(bpy.types.Operator):
     bl_idname = "fss.tag_remove"
     bl_label = "Remove Tag"
-    bl_description = "Remove the tag from the selected objects, or from the active object only"
+    bl_description = "Remove the tag from the selected objects that have it, or from the active object only"
     bl_options = {'REGISTER', 'UNDO'}
 
     tag: bpy.props.StringProperty(name="Tag")
@@ -220,31 +222,6 @@ class FSS_OT_TagDelete(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class FSS_OT_TagFromCollection(bpy.types.Operator):
-    bl_idname = "fss.tag_from_collection"
-    bl_label = "Tag from Collection"
-    bl_description = ("Give every object of the chosen collection (and its child collections) a tag named after the "
-                      "collection. The collection itself is not changed")
-    bl_options = {'REGISTER', 'UNDO'}
-
-    @classmethod
-    def poll(cls, context):
-        return context.scene.fss_tag_collection is not None
-
-    def execute(self, context):
-        collection = context.scene.fss_tag_collection
-        tag = parse_tag_list(collection.name)[0] if parse_tag_list(collection.name) else ""
-        if not tag:
-            return {'CANCELLED'}
-        count = 0
-        for obj in collection.all_objects:
-            if _editable(obj) and not has_tag(obj, tag):
-                set_tags(obj, get_tags(obj) + [tag])
-                count += 1
-        self.report({'INFO'}, f"Tagged {count} object(s) with {tag}")
-        return {'FINISHED'}
-
-
 class FSS_PT_Tags(bpy.types.Panel):
     bl_idname = "FSS_PT_tags"
     bl_label = "Tags"
@@ -258,8 +235,11 @@ class FSS_PT_Tags(bpy.types.Panel):
 
         row = layout.row(align=True)
         row.prop(scene, "fss_tag_name", text="", icon='BOOKMARKS')
-        row.operator(FSS_OT_TagAdd.bl_idname, text="", icon='ADD')
-        row.operator(FSS_OT_TagRemove.bl_idname, text="", icon='REMOVE')
+        op_add = row.operator(FSS_OT_TagAdd.bl_idname, text="", icon='ADD')
+        op_add.tag = ""
+        op_rem = row.operator(FSS_OT_TagRemove.bl_idname, text="", icon='REMOVE')
+        op_rem.tag = ""
+        op_rem.active_only = False
 
         obj = context.active_object
         box = layout.box()
@@ -275,16 +255,45 @@ class FSS_PT_Tags(bpy.types.Panel):
                 op.tag = tag
                 op.active_only = True
 
+        selected = [o for o in context.selected_objects if _editable(o)]
+        has_selection = bool(selected)
+        is_multi = len(selected) > 1
+
         counts = tag_counts()
         if counts:
             skip_tags = set(get_skip_tags(scene))
-            layout.label(text="Tags in this file")
             column = layout.column(align=True)
             for tag in sorted(counts):
                 skipped = tag in skip_tags
                 tag_row = column.row(align=True)
-                tag_row.operator(FSS_OT_TagSelect.bl_idname, text=f"{tag} ({counts[tag]})",
-                                 icon='RESTRICT_SELECT_OFF').tag = tag
+
+                if has_selection:
+                    can_remove = any(has_tag(o, tag) for o in selected)
+                    can_add = any(not has_tag(o, tag) for o in selected)
+
+                    sub_minus = tag_row.row(align=True)
+                    sub_minus.enabled = can_remove
+                    sub_minus.alert = is_multi
+                    op_minus = sub_minus.operator(FSS_OT_TagRemove.bl_idname, text="", icon='REMOVE')
+                    op_minus.tag = tag
+                    op_minus.active_only = False
+
+                    sub_plus = tag_row.row(align=True)
+                    sub_plus.enabled = can_add
+                    sub_plus.alert = is_multi
+                    op_plus = sub_plus.operator(FSS_OT_TagAdd.bl_idname, text="", icon='ADD')
+                    op_plus.tag = tag
+
+                tag_row.operator(FSS_OT_TagSelect.bl_idname, text="", icon='RESTRICT_SELECT_OFF').tag = tag
+                name_sub = tag_row.row(align=True)
+                name_sub.alignment = 'LEFT'
+                name_sub.operator(
+                    FSS_OT_TagSelect.bl_idname,
+                    text=f"{tag} ({counts[tag]})",
+                    emboss=False,
+                ).tag = tag
+                tag_row.label(text="")
+
                 op = tag_row.operator(
                     FSS_OT_TagToggleSkipMerge.bl_idname, text="",
                     icon='AUTOMERGE_OFF' if skipped else 'AUTOMERGE_ON',
@@ -296,10 +305,6 @@ class FSS_PT_Tags(bpy.types.Panel):
         else:
             layout.label(text="No tags in this file")
 
-        row = layout.row(align=True)
-        row.prop(scene, "fss_tag_collection", text="")
-        row.operator(FSS_OT_TagFromCollection.bl_idname, text="", icon='OUTLINER_COLLECTION')
-
 
 CLASSES = (
     FSS_OT_TagAdd,
@@ -308,7 +313,6 @@ CLASSES = (
     FSS_OT_TagToggleSkipMerge,
     FSS_OT_TagRename,
     FSS_OT_TagDelete,
-    FSS_OT_TagFromCollection,
     FSS_PT_Tags,
 )
 
@@ -318,12 +322,9 @@ def register():
         bpy.utils.register_class(cls)
     bpy.types.Scene.fss_tag_name = bpy.props.StringProperty(
         name="Tag", description="Tag to add or remove (several: separate with ;)")
-    bpy.types.Scene.fss_tag_collection = bpy.props.PointerProperty(
-        type=bpy.types.Collection, name="Collection", description="Collection whose objects Tag from Collection tags")
 
 
 def unregister():
-    del bpy.types.Scene.fss_tag_collection
     del bpy.types.Scene.fss_tag_name
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)

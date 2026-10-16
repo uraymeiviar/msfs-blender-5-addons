@@ -1,10 +1,11 @@
 """Tools: scene authoring helpers for parenting and object origins.
 
-Add Empty Parent inserts a <Name>_PARENT empty at each selected object's location and rotation (unit scale), taking
-over its current parent and collections while keeping the object's world transform.
+Add Empty Parent inserts an empty parent at each selected object's location and rotation (unit scale), taking over its
+current parent and collections while keeping the object's world transform. Naming supports Manual (single object only,
+defaulting to <SelectedObjectName>_PARENT), Suffix (default _PARENT) and Prefix (default PARENT_).
 Origin to Bounding Box computes the minimum-volume oriented bounding box (OBB) of each selected object's own geometry
-(children excluded), aligns the object's origin orientation to the OBB and moves its origin to one of the 8 corners,
-6 face centers or 12 edge centers without moving the geometry or any child objects in world space.
+(children excluded), aligns the object's origin orientation to the OBB and moves its origin to the chosen point (from
+8 corners, 6 face centers or 12 edge centers) without moving the geometry or any child objects in world space.
 """
 
 import itertools
@@ -54,6 +55,13 @@ ALL_TARGETS = CORNER_TARGETS + FACE_TARGETS + EDGE_TARGETS
 TARGET_COORDS = {item[0]: item[2] for item in ALL_TARGETS}
 TARGET_LABELS = {item[0]: item[1] for item in ALL_TARGETS}
 TARGET_ENUM_ITEMS = tuple((item[0], item[1], "") for item in ALL_TARGETS)
+
+NAMING_MODES = (
+    ("MANUAL", "Manual", "Type the full empty name (only available when a single object is selected)"),
+    ("SUFFIX", "Suffix", "Append the suffix to each selected object's name"),
+    ("PREFIX", "Prefix", "Prepend the prefix to each selected object's name"),
+)
+NAMING_MODE_LABELS = {item[0]: item[1] for item in NAMING_MODES}
 
 # All 24 right-handed signed permutations of 3 basis vectors
 _RIGHT_HANDED_PERMS = []
@@ -132,7 +140,7 @@ def _world_points_and_axes(obj, depsgraph):
         else:
             if not hasattr(obj, "bound_box"):
                 return None, None
-            local_pts = np.array([ tuple(c) for c in obj.bound_box ], dtype=np.float64)
+            local_pts = np.array([tuple(c) for c in obj.bound_box], dtype=np.float64)
             world_pts = local_pts @ linear.T + translation
             extra_axes = []
     finally:
@@ -230,10 +238,85 @@ def compute_obb(obj, depsgraph):
     return rot_mat, b_min, b_max
 
 
+def _single_selected_object(context):
+    if context is None:
+        return None
+    selected = getattr(context, "selected_objects", None)
+    if selected and len(selected) == 1:
+        return selected[0]
+    return None
+
+
+def _get_manual_name(scene):
+    obj = _single_selected_object(bpy.context)
+    custom = scene.get("_fss_empty_parent_custom_name", "")
+    custom_obj = scene.get("_fss_empty_parent_custom_obj", "")
+    if obj is not None:
+        if custom and custom_obj == obj.name:
+            return custom
+        return f"{obj.name}_PARENT"
+    return custom or "EMPTY_PARENT"
+
+
+def _set_manual_name(scene, value):
+    obj = _single_selected_object(bpy.context)
+    scene["_fss_empty_parent_custom_name"] = value
+    scene["_fss_empty_parent_custom_obj"] = obj.name if obj is not None else ""
+
+
+def effective_naming_mode(scene, context) -> str:
+    mode = scene.fss_empty_parent_mode
+    if mode == 'MANUAL' and len(context.selected_objects) > 1:
+        return 'SUFFIX'
+    return mode
+
+
+def build_empty_parent_name(scene, context, obj, mode) -> str:
+    if mode == 'MANUAL':
+        name = scene.fss_empty_parent_manual_name.strip()
+        return name if name else f"{obj.name}_PARENT"
+    if mode == 'PREFIX':
+        return f"{scene.fss_empty_parent_prefix}{obj.name}"
+    return f"{obj.name}{scene.fss_empty_parent_suffix}"
+
+
+class FSS_OT_SelectEmptyParentMode(bpy.types.Operator):
+    bl_idname = "fss.select_empty_parent_mode"
+    bl_label = "Select Empty Parent Naming Rule"
+    bl_description = "Choose how Add Empty Parent names the new empty object(s)"
+
+    mode: bpy.props.EnumProperty(name="Rule", items=NAMING_MODES, default="MANUAL")
+
+    def execute(self, context):
+        if self.mode == 'MANUAL' and len(context.selected_objects) > 1:
+            self.report({'WARNING'}, "Manual naming is only available when a single object is selected")
+            return {'CANCELLED'}
+        context.scene.fss_empty_parent_mode = self.mode
+        return {'FINISHED'}
+
+
+class FSS_MT_EmptyParentMode(bpy.types.Menu):
+    bl_idname = "FSS_MT_empty_parent_mode"
+    bl_label = "Naming Rule"
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+        multi = len(context.selected_objects) > 1
+        current = effective_naming_mode(scene, context)
+
+        for mode_id, label, _desc in NAMING_MODES:
+            row = layout.row()
+            if mode_id == 'MANUAL' and multi:
+                row.enabled = False
+            icon = 'RADIOBUT_ON' if current == mode_id else 'RADIOBUT_OFF'
+            row.operator(FSS_OT_SelectEmptyParentMode.bl_idname, text=label, icon=icon).mode = mode_id
+
+
 class FSS_OT_AddEmptyParent(bpy.types.Operator):
     bl_idname = "fss.add_empty_parent"
     bl_label = "Add Empty Parent"
-    bl_description = ("Insert an empty parent named <Object>_PARENT at each selected object's location and rotation, "
+    bl_description = ("Insert an empty parent at each selected object's location and rotation, "
                       "keeping all world transforms")
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -242,7 +325,9 @@ class FSS_OT_AddEmptyParent(bpy.types.Operator):
         return context.mode == 'OBJECT' and bool(context.selected_objects)
 
     def execute(self, context):
+        scene = context.scene
         selected = list(context.selected_objects)
+        mode = effective_naming_mode(scene, context)
         created = []
         for obj in selected:
             world = obj.matrix_world.copy()
@@ -253,7 +338,8 @@ class FSS_OT_AddEmptyParent(bpy.types.Operator):
             parent_type = obj.parent_type if parent is not None else 'OBJECT'
             parent_bone = obj.parent_bone if parent is not None else ""
 
-            empty = bpy.data.objects.new(f"{obj.name}_PARENT", None)
+            empty_name = build_empty_parent_name(scene, context, obj, mode)
+            empty = bpy.data.objects.new(empty_name, None)
             empty.empty_display_type = 'PLAIN_AXES'
             empty.empty_display_size = 0.02
             collections = list(obj.users_collection) or [context.scene.collection]
@@ -281,6 +367,18 @@ class FSS_OT_AddEmptyParent(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class FSS_OT_SelectOriginTarget(bpy.types.Operator):
+    bl_idname = "fss.select_origin_target"
+    bl_label = "Select Origin Target"
+    bl_description = "Choose the bounding box target position for Origin to Bounding Box"
+
+    target: bpy.props.EnumProperty(name="Position", items=TARGET_ENUM_ITEMS, default="FACE_NZ")
+
+    def execute(self, context):
+        context.scene.fss_origin_target = self.target
+        return {'FINISHED'}
+
+
 class FSS_OT_OriginToBounds(bpy.types.Operator):
     bl_idname = "fss.origin_to_bounds"
     bl_label = "Origin to Bounding Box"
@@ -295,7 +393,8 @@ class FSS_OT_OriginToBounds(bpy.types.Operator):
         return context.mode == 'OBJECT' and bool(context.selected_objects)
 
     def execute(self, context):
-        coords = np.array(TARGET_COORDS[self.target], dtype=np.float64)
+        target_id = self.target or context.scene.fss_origin_target
+        coords = np.array(TARGET_COORDS[target_id], dtype=np.float64)
         depsgraph = context.evaluated_depsgraph_get()
         changed = 0
         skipped = 0
@@ -346,7 +445,7 @@ class FSS_OT_OriginToBounds(bpy.types.Operator):
         if changed:
             if context.scene.transform_orientation_slots:
                 context.scene.transform_orientation_slots[0].type = 'LOCAL'
-            label = TARGET_LABELS.get(self.target, self.target)
+            label = TARGET_LABELS.get(target_id, target_id)
             msg = f"Origin set to {label} on {changed} object(s)"
             if skipped:
                 msg += f" ({skipped} skipped)"
@@ -363,8 +462,10 @@ class FSS_MT_OriginBoundsCorners(bpy.types.Menu):
 
     def draw(self, context):
         layout = self.layout
+        current = context.scene.fss_origin_target
         for target_id, label, _coords in CORNER_TARGETS:
-            layout.operator(FSS_OT_OriginToBounds.bl_idname, text=label).target = target_id
+            icon = 'RADIOBUT_ON' if current == target_id else 'RADIOBUT_OFF'
+            layout.operator(FSS_OT_SelectOriginTarget.bl_idname, text=label, icon=icon).target = target_id
 
 
 class FSS_MT_OriginBoundsFaces(bpy.types.Menu):
@@ -373,8 +474,10 @@ class FSS_MT_OriginBoundsFaces(bpy.types.Menu):
 
     def draw(self, context):
         layout = self.layout
+        current = context.scene.fss_origin_target
         for target_id, label, _coords in FACE_TARGETS:
-            layout.operator(FSS_OT_OriginToBounds.bl_idname, text=label).target = target_id
+            icon = 'RADIOBUT_ON' if current == target_id else 'RADIOBUT_OFF'
+            layout.operator(FSS_OT_SelectOriginTarget.bl_idname, text=label, icon=icon).target = target_id
 
 
 class FSS_MT_OriginBoundsEdges(bpy.types.Menu):
@@ -383,13 +486,15 @@ class FSS_MT_OriginBoundsEdges(bpy.types.Menu):
 
     def draw(self, context):
         layout = self.layout
+        current = context.scene.fss_origin_target
         for target_id, label, _coords in EDGE_TARGETS:
-            layout.operator(FSS_OT_OriginToBounds.bl_idname, text=label).target = target_id
+            icon = 'RADIOBUT_ON' if current == target_id else 'RADIOBUT_OFF'
+            layout.operator(FSS_OT_SelectOriginTarget.bl_idname, text=label, icon=icon).target = target_id
 
 
 class FSS_MT_OriginToBounds(bpy.types.Menu):
     bl_idname = "FSS_MT_origin_to_bounds"
-    bl_label = "Origin to Bounding Box"
+    bl_label = "Origin Target"
 
     def draw(self, context):
         layout = self.layout
@@ -407,12 +512,34 @@ class FSS_PT_Tools(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        layout.operator(FSS_OT_AddEmptyParent.bl_idname, icon='EMPTY_AXIS')
-        layout.menu(FSS_MT_OriginToBounds.bl_idname, icon='OBJECT_ORIGIN')
+        scene = context.scene
+
+        # Row 1: [Add Empty Parent] Name: [Mode pulldown] [Text input]
+        mode = effective_naming_mode(scene, context)
+        row = layout.row(align=True)
+        row.operator(FSS_OT_AddEmptyParent.bl_idname, text="Add Empty Parent", icon='EMPTY_AXIS')
+        row.label(text="Name:")
+        row.menu(FSS_MT_EmptyParentMode.bl_idname, text=NAMING_MODE_LABELS.get(mode, mode))
+        if mode == 'MANUAL':
+            row.prop(scene, "fss_empty_parent_manual_name", text="")
+        elif mode == 'PREFIX':
+            row.prop(scene, "fss_empty_parent_prefix", text="")
+        else:
+            row.prop(scene, "fss_empty_parent_suffix", text="")
+
+        # Row 2: [Origin to Bounding Box] [Target pulldown]
+        target = scene.fss_origin_target
+        row = layout.row(align=True)
+        op = row.operator(FSS_OT_OriginToBounds.bl_idname, text="Origin to Bounding Box", icon='OBJECT_ORIGIN')
+        op.target = target
+        row.menu(FSS_MT_OriginToBounds.bl_idname, text=TARGET_LABELS.get(target, target))
 
 
 CLASSES = (
+    FSS_OT_SelectEmptyParentMode,
+    FSS_MT_EmptyParentMode,
     FSS_OT_AddEmptyParent,
+    FSS_OT_SelectOriginTarget,
     FSS_OT_OriginToBounds,
     FSS_MT_OriginBoundsCorners,
     FSS_MT_OriginBoundsFaces,
@@ -425,8 +552,33 @@ CLASSES = (
 def register():
     for cls in CLASSES:
         bpy.utils.register_class(cls)
+    bpy.types.Scene.fss_origin_target = bpy.props.EnumProperty(
+        name="Origin Target", items=TARGET_ENUM_ITEMS, default="FACE_NZ",
+        description="Bounding box target position used by Origin to Bounding Box",
+    )
+    bpy.types.Scene.fss_empty_parent_mode = bpy.props.EnumProperty(
+        name="Naming Rule", items=NAMING_MODES, default="MANUAL",
+        description="How Add Empty Parent names the created empty object(s)",
+    )
+    bpy.types.Scene.fss_empty_parent_manual_name = bpy.props.StringProperty(
+        name="Name", get=_get_manual_name, set=_set_manual_name,
+        description="Empty parent name (defaults to <SelectedObjectName>_PARENT)",
+    )
+    bpy.types.Scene.fss_empty_parent_suffix = bpy.props.StringProperty(
+        name="Suffix", default="_PARENT",
+        description="Suffix appended to each selected object's name",
+    )
+    bpy.types.Scene.fss_empty_parent_prefix = bpy.props.StringProperty(
+        name="Prefix", default="PARENT_",
+        description="Prefix prepended to each selected object's name",
+    )
 
 
 def unregister():
+    del bpy.types.Scene.fss_empty_parent_prefix
+    del bpy.types.Scene.fss_empty_parent_suffix
+    del bpy.types.Scene.fss_empty_parent_manual_name
+    del bpy.types.Scene.fss_empty_parent_mode
+    del bpy.types.Scene.fss_origin_target
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)

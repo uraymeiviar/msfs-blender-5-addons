@@ -8,7 +8,7 @@ bl_info = {
     "author": "Flight Sim Studio",
     "description": "Authoring checks and helpers for MSFS aircraft (tools, empty bounds, tags, merge tree, checks)",
     "blender": (5, 2, 0),
-    "version": (0, 9, 1),
+    "version": (0, 9, 2),
     "location": "3D View > Sidebar > FSS Tools",
     "category": "Object",
 }
