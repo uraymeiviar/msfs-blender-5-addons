@@ -6,22 +6,19 @@ repository are in [../AGENTS.md](../AGENTS.md).
 
 ## Modules
 
-| Module | What it does |
-| :--- | :--- |
-| `tools.py` | Scene helpers: Add Empty Parent (`<Name>_PARENT` at object location and rotation), Origin to Bounding Box (minimum-volume OBB orientation with 8 corners, 6 face centers and 12 edge centers) |
-| `empty_bounds.py` | Draws the bounds of empties' subtrees and a hierarchy text in the viewport |
-| `lod.py` | Explicit per-object LOD level marking (`0..6`, stored as `fss_lod`, default `0`) with top-down parent clamping and viewport LOD filter |
-| `tags.py` | Generic object tags, stored as the custom property `fss_tags` (semicolon-separated), readable without the add-on, with per-tag skip-merge toggle |
-| `merge.py` | Export-time merge groups, the Merge Tree panel, New Merge Group |
-| `name_check.py` | Lists object and bone names that break the FSS naming rules (`.NNN` suffixes, case, characters, Blender defaults) and renames them in one batch. The merge markers `@MERGE_` / `@NOMERGE_` are allowed |
-| `checks.py` | Checks panel: Name Check and Fix Broken Bone Parents |
-
-The sidebar layout is being reworked; see the panels themselves for the current controls.
+| Module | Panel | What it does |
+| :--- | :--- | :--- |
+| `tools.py` | **Tools** | Scene helpers: **Add Empty Parent** (Manual / Suffix / Prefix naming rules), **Origin to Bounding Box** (minimum-volume OBB orientation with 8 corners, 6 face centers and 12 edge centers) |
+| `empty_bounds.py` | **Empty Bounds** | Draws the bounds of empties' subtrees (`All` / `Selected` / `Off`, `In Front`) and a clickable hierarchy text in the viewport |
+| `lod.py` | **LOD** | Explicit per-object LOD level marking (`[6][5][4][3][2][1][0]`, stored as `fss_lod`, default `0`) with top-down parent clamping and viewport LOD filter |
+| `tags.py` | **Tags** | Generic object tags (`fss_tags`, semicolon-separated), per-row `[-]`/`[+]` assignment, selection, and per-tag skip-merge toggle |
+| `merge.py` | **Merge Tree** | Export-time merge groups (`@MERGE_<name>` / `@NOMERGE_<name>`), New Merge Group, tree preview and console details |
+| `checks.py`, `name_check.py` | **Checks** | **Scan Names** (lists object and bone names that break FSS naming rules and renames them in batch; `@MERGE_` / `@NOMERGE_` allowed) and **Fix Broken Bone Parents** |
 
 ## Tags
 
 A tag is any name the artist chooses; nothing is inferred and nothing is MSFS-specific. An object can carry several
-tags. Tags are used by the merge ("don't merge" tags) and are meant for further tools.
+tags. Tags are used by the merge (per-tag skip-merge toggle) and are meant for further tools.
 
 ## Merge Groups
 
