@@ -110,13 +110,15 @@ def _redraw_viewports(context):
 
 
 def apply_viewport_lod(context):
-    """Hides objects with effective LOD > scene.fss_viewport_lod (e.g. for LOD3, hides 6, 5, 4) and restores the rest."""
+    """When scene.fss_viewport_lod > 0, hides objects with effective LOD > active_lod (e.g. for LOD3, hides 6, 5, 4).
+    When scene.fss_viewport_lod == 0, unhides all LOD levels.
+    """
     scene = context.scene
     view_layer = context.view_layer
     active_lod = scene.fss_viewport_lod
 
     for obj in view_layer.objects:
-        if active_lod >= 0 and get_lod(obj) > active_lod:
+        if active_lod > 0 and get_lod(obj) > active_lod:
             if not obj.hide_get(view_layer=view_layer):
                 obj[LOD_HIDDEN_KEY] = True
                 obj.hide_set(True, view_layer=view_layer)
@@ -134,8 +136,8 @@ def _draw_viewport_lod_text():
     space = getattr(context, "space_data", None)
     if scene is None or space is None or not space.overlay.show_overlays:
         return
-    active_lod = getattr(scene, "fss_viewport_lod", -1)
-    if active_lod < 0:
+    active_lod = getattr(scene, "fss_viewport_lod", 0)
+    if active_lod <= 0:
         return
 
     scale = context.preferences.system.ui_scale
@@ -160,7 +162,7 @@ def _draw_viewport_lod_text():
 class FSS_OT_SetObjectLod(bpy.types.Operator):
     bl_idname = "fss.set_object_lod"
     bl_label = "Set Object LOD"
-    bl_description = "Set the LOD level of the selected object(s) top-down, clamped by each parent's maximum LOD level"
+    bl_description = "Set the LOD level of the selected object(s) top-down, clamping children that had a higher level"
     bl_options = {'REGISTER', 'UNDO'}
 
     level: bpy.props.IntProperty(name="LOD Level", min=0, max=6, default=0)
@@ -171,7 +173,7 @@ class FSS_OT_SetObjectLod(bpy.types.Operator):
 
     def execute(self, context):
         changed, clamped = apply_lod_top_down(context.selected_objects, self.level)
-        if context.scene.fss_viewport_lod >= 0:
+        if context.scene.fss_viewport_lod > 0:
             apply_viewport_lod(context)
         msg = f"Set LOD {self.level} on {changed} object(s)"
         if clamped:
@@ -183,17 +185,13 @@ class FSS_OT_SetObjectLod(bpy.types.Operator):
 class FSS_OT_SetViewportLod(bpy.types.Operator):
     bl_idname = "fss.set_viewport_lod"
     bl_label = "Viewport LOD Filter"
-    bl_description = "Filter the viewport by this LOD level (click the active level again to turn filtering off)"
+    bl_description = "Filter the viewport by this LOD level (0 unhides all LOD levels)"
     bl_options = {'REGISTER', 'UNDO'}
 
-    level: bpy.props.IntProperty(name="Viewport LOD", min=-1, max=6, default=-1)
+    level: bpy.props.IntProperty(name="Viewport LOD", min=0, max=6, default=0)
 
     def execute(self, context):
-        scene = context.scene
-        if self.level == scene.fss_viewport_lod:
-            scene.fss_viewport_lod = -1
-        else:
-            scene.fss_viewport_lod = self.level
+        context.scene.fss_viewport_lod = self.level
         apply_viewport_lod(context)
         return {'FINISHED'}
 
@@ -211,7 +209,7 @@ class FSS_PT_Lod(bpy.types.Panel):
         selected = [obj for obj in context.selected_objects if _editable(obj)]
         selected_set = set(selected)
 
-        # Object LOD row: [6][5][4][3][2][1][0]
+        # Object LOD row: [6][5][4][3][2][1][0], with 6..current_lod highlighted
         layout.label(text="Object LOD")
         obj_row = layout.row(align=True)
         if not selected:
@@ -229,20 +227,20 @@ class FSS_PT_Lod(bpy.types.Panel):
                 op = sub.operator(
                     FSS_OT_SetObjectLod.bl_idname,
                     text=str(level),
-                    depress=(level <= current_lod),
+                    depress=(level >= current_lod),
                 )
                 op.level = level
 
-        # Viewport LOD row: [6][5][4][3][2][1][0]
-        v_lod = scene.fss_viewport_lod
-        header = f"Viewport LOD (LOD{v_lod})" if v_lod >= 0 else "Viewport LOD"
+        # Viewport LOD row: [6][5][4][3][2][1][0], with 6..v_lod highlighted (0 unhides all)
+        v_lod = max(0, min(6, scene.fss_viewport_lod))
+        header = f"Viewport LOD (LOD{v_lod})" if v_lod > 0 else "Viewport LOD"
         layout.label(text=header)
         view_row = layout.row(align=True)
         for level in LOD_LEVELS:
             op = view_row.operator(
                 FSS_OT_SetViewportLod.bl_idname,
                 text=str(level),
-                depress=(v_lod >= 0 and level <= v_lod),
+                depress=(level >= v_lod),
             )
             op.level = level
 
@@ -259,8 +257,8 @@ def register():
     for cls in CLASSES:
         bpy.utils.register_class(cls)
     bpy.types.Scene.fss_viewport_lod = bpy.props.IntProperty(
-        name="Viewport LOD", default=-1, min=-1, max=6,
-        description="Active viewport LOD filter (-1 = unfiltered, 0..6 = hide objects below this LOD)",
+        name="Viewport LOD", default=0, min=0, max=6,
+        description="Active viewport LOD filter (0 = all LOD levels visible, 1..6 = hide objects below this LOD)",
     )
     _text_handle = bpy.types.SpaceView3D.draw_handler_add(_draw_viewport_lod_text, (), 'WINDOW', 'POST_PIXEL')
 
