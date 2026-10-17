@@ -425,6 +425,17 @@ def begin_export(context, plan, level):
     _export_plan, _export_level, _merged_meshes, _culled_pieces = plan, level, 0, 0
     context.scene.fss_lod_export_level = level
     restore_filter(context)
+    # Hide the parts absent from this LOD in the source scene, so the exporter never duplicates, selects or walks
+    # them (LOD06 of the E2 cockpit keeps about 400 of 3,099 objects). cull_export still decides on the export
+    # copies; the driver reloads the source .blend before every LOD, so nothing is restored.
+    decision = plan['decisions'][level]
+    absent = {part.name for part in plan['parts']} - decision.present
+    if absent:
+        view_layer = context.view_layer
+        for obj in view_layer.objects:
+            if obj.name in absent:
+                obj.hide_set(True, view_layer=view_layer)
+        view_layer.update()
 
 
 def end_export(context):

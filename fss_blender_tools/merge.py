@@ -283,13 +283,14 @@ def _replace_parent(old, new):
         child.matrix_parent_inverse = inverse
 
 
-def merge_group(group, context, log):
-    """Builds the merged mesh(es) of one group and swaps them into the export. Returns the new objects."""
+def merge_group(group, context, log, depsgraph):
+    """Reads the evaluated meshes of one group and returns a function that builds the merged mesh(es) and swaps
+    them into the export, returning the new objects. Reading every group before building any keeps the scene
+    evaluated once: each built group adds objects, and the next evaluation re-evaluates the whole scene."""
     root = group.root
     root_name = logical_name(root)
     target = root_name[len(PREFIX):] or root_name
     collections = list(root.users_collection)
-    depsgraph = context.evaluated_depsgraph_get()
     inverse = root.matrix_world.inverted()
 
     materials, material_users, kinds, uv_slots = [], {}, {}, []
@@ -329,7 +330,13 @@ def merge_group(group, context, log):
 
     if not buffers:
         log(f"{root_name}: nothing to merge", warning=False)
-        return []
+        return lambda: []
+    return lambda: _build_group(group, log, root, root_name, target, collections, materials, material_users, kinds,
+                                uv_slots, buffers)
+
+
+def _build_group(group, log, root, root_name, target, collections, materials, material_users, kinds, uv_slots,
+                 buffers):
 
     kept_names = {logical_name(node) for node in group.kept} | {logical_name(obj) for obj, _ in group.skipped}
     names = [target] + ([f"{target}_TRANSPARENT"] if len(buffers) > 1 else [])
@@ -404,12 +411,16 @@ def run(context, exported, selected_export, log):
     skip_tags = set(tags.parse_tag_list(settings.skip_tags))
     created = []
     merged = 0
+    depsgraph = context.evaluated_depsgraph_get()
+    pending = []
     for root in merge_roots(context.scene, exported):
         group = collect_group(root, exported, skip_tags)
         if group.root_reason:
             log(f"{logical_name(root)}: not merged ({group.root_reason} {PREFIX} node)", warning=True)
             continue
-        new_objects = merge_group(group, context, log)
+        pending.append((group, merge_group(group, context, log, depsgraph)))
+    for group, build in pending:
+        new_objects = build()
         if not new_objects:
             continue
         merged += 1
@@ -421,6 +432,7 @@ def run(context, exported, selected_export, log):
             if selected_export:
                 obj.select_set(True)
         created.extend(new_objects)
+    if created:
         context.view_layer.update()
     return merged, created
 
@@ -461,9 +473,12 @@ class glTF2ExportUserExtension:
         selected_export = bool(export_settings.get("gltf_selected"))
         visible_export = bool(export_settings.get("gltf_visible"))
         view_layer = context.view_layer
+        # A name lookup in view_layer.objects scans the collection; called for every object several times per export
+        # (146,666 times for the E2 cockpit's seven LODs). Objects created later (merged meshes) use the lookup.
+        view_layer_names = {obj.name for obj in view_layer.objects}
 
         def exported(obj):
-            if obj.name not in view_layer.objects:
+            if obj.name not in view_layer_names and obj.name not in view_layer.objects:
                 return False
             if selected_export and not obj.select_get(view_layer=view_layer):
                 return False

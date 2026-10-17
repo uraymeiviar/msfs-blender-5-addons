@@ -208,9 +208,14 @@ class glTF2ExportUserExtension:
         from . import instancing
         from .io.exp import gltf_exporter_patches
         self._instancing = instancing.prepare(export_settings)
-        # Throwaway objects only (their changes are discarded): one scene evaluation instead of one per object
+        # Throwaway objects only (their changes are discarded): one scene evaluation instead of one per object. With
+        # the multi-exporter these are its duplicates only: a source object given an export-created mesh copy is
+        # deleted with that mesh when the exporter purges its data. Without duplicates, a background run (plain
+        # exporter, no purge) exports the objects themselves.
+        scene_objects = bpy.context.scene.objects
+        duplicates = [obj for obj in scene_objects if "msfs_original_name" in obj]
         gltf_exporter_patches.assign_linked_materials(
-            obj for obj in bpy.context.scene.objects if bpy.app.background or "msfs_original_name" in obj)
+            duplicates or (list(scene_objects) if bpy.app.background else []))
         hook = getattr(self._impl, "pre_export_hook", None)
         if hook:
             hook(export_settings)

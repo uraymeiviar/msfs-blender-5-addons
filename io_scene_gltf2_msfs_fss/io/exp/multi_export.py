@@ -487,11 +487,15 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
         via code.
         """
         reveal_hidden_objects = not self.msfs_export_settings.use_visible
+        # Unified add-on: attribute access on an operator (self.x) resolves its RNA properties every time; read the
+        # two containers once. The loop made 110 million such accesses for the E2 cockpit's seven LODs (140 s)
+        object_layer_collections = self._object_layer_collections
+        treated_layer_collections = self._treated_layer_collections
 
         for obj in objects:
-            layer_collections = self._object_layer_collections.get(obj, [])
+            layer_collections = object_layer_collections.get(obj, [])
             for layer in layer_collections:
-                if layer in self._treated_layer_collections:
+                if layer in treated_layer_collections:
                     # Prevent unhidding layer collection multiple times
                     # This can be very very slow on big scenes
                     continue
@@ -501,7 +505,7 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
                     layer.hide_viewport = False
                     layer.collection.hide_viewport = False
 
-                self._treated_layer_collections.add(layer)
+                treated_layer_collections.add(layer)
 
             obj.hide_select = False
 
@@ -565,16 +569,22 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
         blender_objects: list[bpy.types.Object], 
         recursive: bool = False
     ):
+        # Unified add-on: one set of the view layer's objects for the whole pass; select_object built a list of all
+        # of them on every call (21,693 calls for the E2 cockpit's seven LODs)
+        view_layer_objects = set(context.view_layer.objects)
         for blender_object in blender_objects:
-            self.select_object(context, blender_object, recursive)
+            self.select_object(context, blender_object, recursive, view_layer_objects)
 
     def select_object(
         self, 
         context: bpy.types.Context, 
         blender_object: bpy.types.Object, 
-        recursive: bool = True
+        recursive: bool = True,
+        view_layer_objects: set | None = None
     ):
-        if blender_object not in list(context.view_layer.objects):
+        if view_layer_objects is None:
+            view_layer_objects = set(context.view_layer.objects)
+        if blender_object not in view_layer_objects:
             return
 
         blender_object.select_set(True)
@@ -584,7 +594,7 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
             return
 
         for child in blender_object.children:
-            self.select_object(context, child, recursive)
+            self.select_object(context, child, recursive, view_layer_objects)
 
     def set_active(self, context: bpy.types.Context, blender_object: bpy.types.Object):
         try:
