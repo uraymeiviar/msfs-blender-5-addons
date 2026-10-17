@@ -102,7 +102,17 @@ tools\deploy.bat -Addons fss_blender_tools
 
 ## Where Decisions Are Recorded
 
-The FSS aircraft repository keeps the rationale in task journals (`codes/wasm/doc/journal/`):
+New work is recorded in this repository's task journals, `docs/journal/<yyyymmdd>.<topic>.md`, starting with
+[docs/journal/20261010.automated-lod-generation.md](docs/journal/20261010.automated-lod-generation.md) (LOD export:
+design, decisions, progress, handoffs). Journals are append-only: add `## Session <N>: <Title>` at the bottom and never
+rewrite an earlier, committed session. Read only the journal of your task, latest session first. Record decisions,
+runtime behaviour and what was verified, not machine-local files. Commit journal updates together with the work.
+
+Testing in an aircraft repository happens on the E2 testbed (`D:ss-e2`, not under git; back up a file into its
+`codes/wasm/.cache/backup/` before editing it). The FSS aircraft repository (E1) receives add-on updates only when the
+maintainer asks.
+
+Earlier rationale is in the FSS aircraft repository's task journals (`codes/wasm/doc/journal/`):
 `20261002.msfs2024-blender5-exporter-conversion.md` (exporter port and fixes),
 `20261010.fss-blender-tools-wishlist.md` (planned tools), `20261014.fss-blender-tools-tags-and-merge.md` (tags,
 merge groups, checks), `20261011.fss-blender-tools-name-check.md` (name check), and the authoring guide
