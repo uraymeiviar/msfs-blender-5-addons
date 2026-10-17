@@ -4,6 +4,9 @@ import math
 
 import blf
 import bpy
+import gpu
+from bpy_extras.view3d_utils import location_3d_to_region_2d
+from gpu_extras.batch import batch_for_shader
 from mathutils import Vector
 
 from . import lod_model, lod_rules
@@ -13,6 +16,11 @@ LOD_HIDDEN_KEY = lod_model.HIDDEN_KEY
 _ORTHO_FAKE_FOV = math.radians(1.0)
 _AUTO_INTERVAL = 0.15
 _text_handle = None
+_sphere_handles = []
+_SPHERE_COLOR = (1.0, .55, .1, 1.0)
+_MESH_BOX_COLOR = (.3, .9, .3, .8)
+_ORIGIN_COLOR = (1.0, .2, .2, 1.0)
+_VERTEX_COLOR = (1.0, .9, .2, 1.0)
 _auto_state = {
     'plan': None,
     'scene_name': None,
@@ -282,6 +290,86 @@ def _draw_viewport_lod_text():
     blf.draw(0, text)
 
 
+def _box_lines(lo, hi):
+    corners = [Vector((x, y, z)) for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])]
+    # Corner indices differ in exactly one bit along an edge
+    return [corners[i] for a in range(8) for b in range(a + 1, 8) if bin(a ^ b).count('1') == 1 for i in (a, b)]
+
+
+def _circle_lines(center, radius, u, v, segments=64):
+    points = [center + radius * (math.cos(2 * math.pi * k / segments) * u + math.sin(2 * math.pi * k / segments) * v)
+              for k in range(segments + 1)]
+    return [p for k in range(segments) for p in (points[k], points[k + 1])]
+
+
+def _sphere_faces(settings):
+    return [h for h in settings.hints if h.kind == 'BOX_FACE']
+
+
+def _show_sphere(context):
+    scene = context.scene
+    return (scene.fss_lod_show_sphere and context.space_data.overlay.show_overlays
+            and scene.fss_lod_settings.measured_diameter > 0)
+
+
+def _draw_lod_sphere():
+    """The LOD sphere MSFS uses (from the last Refresh), its box, the geometry box, and the point setting each face."""
+    context = bpy.context
+    if not _show_sphere(context):
+        return
+    settings = context.scene.fss_lod_settings
+    scale = context.scene.unit_settings.scale_length
+    lo, hi = Vector(settings.sphere_box[:3]) / scale, Vector(settings.sphere_box[3:]) / scale
+    center, radius = (lo + hi) / 2, (hi - lo).length / 2
+    axes = [Vector(axis) for axis in ((1, 0, 0), (0, 1, 0), (0, 0, 1))]
+    groups = [(_SPHERE_COLOR, 2.0, _box_lines(lo, hi)),
+              (_SPHERE_COLOR, 1.0, [p for u, v in ((0, 1), (0, 2), (1, 2))
+                                    for p in _circle_lines(center, radius, axes[u], axes[v])])]
+    if settings.mesh_diameter < settings.measured_diameter - lod_model.FAR_NODE_MARGIN:
+        groups.append((_MESH_BOX_COLOR, 1.5, _box_lines(Vector(settings.mesh_box[:3]) / scale,
+                                                         Vector(settings.mesh_box[3:]) / scale)))
+    marker = radius * .03
+    groups.append((_SPHERE_COLOR, 3.0, [p for axis in axes for p in (center - 2 * marker * axis,
+                                                                    center + 2 * marker * axis)]))
+    for h in _sphere_faces(settings):
+        point = Vector(h.point) / scale
+        groups.append((_ORIGIN_COLOR if h.from_origin else _VERTEX_COLOR, 2.0,
+                       [p for axis in axes for p in (point - marker * axis, point + marker * axis)]))
+    region = context.region
+    shader = gpu.shader.from_builtin('POLYLINE_UNIFORM_COLOR')
+    gpu.state.blend_set('ALPHA')
+    gpu.state.depth_test_set('NONE')
+    shader.bind()
+    shader.uniform_float("viewportSize", (region.width, region.height))
+    for color, width, lines in groups:
+        shader.uniform_float("color", color)
+        shader.uniform_float("lineWidth", width)
+        batch_for_shader(shader, 'LINES', {"pos": lines}).draw(shader)
+    gpu.state.blend_set('NONE')
+
+
+def _draw_lod_sphere_labels():
+    context = bpy.context
+    if not _show_sphere(context):
+        return
+    settings = context.scene.fss_lod_settings
+    scale = context.scene.unit_settings.scale_length
+    blf.size(0, 12 * context.preferences.system.ui_scale)
+    center = (Vector(settings.sphere_box[:3]) + Vector(settings.sphere_box[3:])) / 2
+    position = location_3d_to_region_2d(context.region, context.region_data, center / scale)
+    if position is not None:
+        blf.position(0, position.x + 8, position.y + 4, 0)
+        blf.color(0, *_SPHERE_COLOR)
+        blf.draw(0, f'LOD sphere centre, radius {format_length(settings.measured_diameter / 2)}')
+    for h in _sphere_faces(settings):
+        position = location_3d_to_region_2d(context.region, context.region_data, Vector(h.point) / scale)
+        if position is None:
+            continue
+        blf.position(0, position.x + 8, position.y + 4, 0)
+        blf.color(0, *(_ORIGIN_COLOR if h.from_origin else _VERTEX_COLOR))
+        blf.draw(0, f'{h.face} {h.object_name} ({"origin" if h.from_origin else "vertex"})')
+
+
 def _settings_changed(settings, context):
     settings.scanned = False
     invalidate_auto_plan()
@@ -364,6 +452,7 @@ class FSS_LodHintItem(bpy.types.PropertyGroup):
         ('LOOSE_PIECES', 'Loose Pieces Below Cut-off', ''),
         ('NEAR_CUTOFF', 'Near Cut-off', ''),
         ('FAR_NODE', 'Origin Outside the Geometry', ''),
+        ('BOX_FACE', 'Point Setting a Face of the LOD Sphere Box', ''),
     ])
     object_name: bpy.props.StringProperty()
     vertices: bpy.props.IntProperty()
@@ -371,6 +460,9 @@ class FSS_LodHintItem(bpy.types.PropertyGroup):
     size_m: bpy.props.FloatProperty()
     cutoff_m: bpy.props.FloatProperty()
     is_merge_group: bpy.props.BoolProperty()
+    face: bpy.props.StringProperty()
+    point: bpy.props.FloatVectorProperty(size=3)
+    from_origin: bpy.props.BoolProperty()
 
 
 class FSS_LodSettings(bpy.types.PropertyGroup):
@@ -392,6 +484,9 @@ class FSS_LodSettings(bpy.types.PropertyGroup):
                     'measured by the last Refresh LOD Counts')
     mesh_diameter: bpy.props.FloatProperty(name='Geometry Diameter', min=0, subtype='DISTANCE', unit='LENGTH',
         description='Diameter of the sphere enclosing LOD00 geometry only, measured by the last Refresh LOD Counts')
+    # Boxes in metres (min xyz, max xyz) from the last Refresh LOD Counts, drawn by Show LOD Sphere
+    sphere_box: bpy.props.FloatVectorProperty(size=6, options={'SKIP_SAVE'})
+    mesh_box: bpy.props.FloatVectorProperty(size=6, options={'SKIP_SAVE'})
     lowest_cutoff: bpy.props.FloatProperty(name='Smallest Part Kept', min=0, subtype='DISTANCE', unit='LENGTH',
         get=_get_lowest_cutoff, set=_set_lowest_cutoff, precision=1, step=10,
         description='Parts smaller than this are hidden from the lowest-detail LOD; every other LOD hides '
@@ -437,6 +532,9 @@ class FSS_OT_LodRefresh(bpy.types.Operator):
             settings.write_count = plan['write_count']
             settings.measured_diameter = plan['own_diameter']
             settings.mesh_diameter = plan['mesh_diameter']
+            if plan['bounds'] is not None:
+                settings.sphere_box = (*plan['bounds'][0], *plan['bounds'][1])
+                settings.mesh_box = (*plan['mesh_bounds'][0], *plan['mesh_bounds'][1])
             settings.vertex_estimates = [s['vertices'] for s in stats['lods']]
             settings.quotas = [s['quota'] for s in stats['lods']]
             settings.quota_percents = [s['percent'] for s in stats['lods']]
@@ -450,6 +548,14 @@ class FSS_OT_LodRefresh(bpy.types.Operator):
                 item.kind = 'FAR_NODE'
                 item.object_name = obj_name
                 item.size_m = outside
+            for face, obj_name, kind, point in plan['extremes']:
+                item = settings.hints.add()
+                item.lod_level = 0
+                item.kind = 'BOX_FACE'
+                item.face = face
+                item.object_name = obj_name
+                item.point = point
+                item.from_origin = kind == 'origin'
             for s in stats['lods'][:plan['write_count']]:
                 level = s['level']
                 for obj_name, verts, is_group in s['contributors']:
@@ -809,6 +915,15 @@ class FSS_PT_LodExport(bpy.types.Panel):
                     r.label(text=f'{h.object_name}: {format_length(h.size_m)} outside')
                     r.operator('fss.lod_select_hint', text='', icon='RESTRICT_SELECT_OFF').object_name = h.object_name
                 box.label(text='Move these origins into the geometry, or the empties out of this model')
+            layout.prop(context.scene, 'fss_lod_show_sphere', toggle=True, icon='SPHERE')
+            if context.scene.fss_lod_show_sphere:
+                box = layout.box()
+                box.label(text='LOD sphere box faces set by (last Refresh):')
+                for h in _sphere_faces(settings):
+                    r = box.row(align=True)
+                    r.label(text=f'{h.face}: {h.object_name} ({"origin" if h.from_origin else "vertex"})',
+                            icon='ERROR' if h.from_origin else 'DOT')
+                    r.operator('fss.lod_select_hint', text='', icon='RESTRICT_SELECT_OFF').object_name = h.object_name
         else:
             layout.label(text='Model diameter: not measured yet, press Refresh LOD Counts', icon='INFO')
         layout.prop(settings, 'reference_size')
@@ -884,8 +999,14 @@ def register():
     bpy.types.Scene.fss_viewport_lod = bpy.props.IntProperty(default=-1, min=-1, max=6)
     bpy.types.Scene.fss_viewport_lod_auto = bpy.props.BoolProperty(default=False, options={'SKIP_SAVE'})
     bpy.types.Scene.fss_lod_export_level = bpy.props.IntProperty(default=-1, min=-1, max=6, options={'SKIP_SAVE'})
+    bpy.types.Scene.fss_lod_show_sphere = bpy.props.BoolProperty(
+        name='Show LOD Sphere', default=False, options={'SKIP_SAVE'},
+        description='Draw the sphere MSFS uses for LOD selection, its box, and the vertex or origin setting each face '
+                    '(from the last Refresh LOD Counts)')
     if not bpy.app.background:
         _text_handle = bpy.types.SpaceView3D.draw_handler_add(_draw_viewport_lod_text, (), 'WINDOW', 'POST_PIXEL')
+        for draw, kind in ((_draw_lod_sphere, 'POST_VIEW'), (_draw_lod_sphere_labels, 'POST_PIXEL')):
+            _sphere_handles.append(bpy.types.SpaceView3D.draw_handler_add(draw, (), 'WINDOW', kind))
 
 
 def unregister():
@@ -894,7 +1015,10 @@ def unregister():
     if _text_handle is not None:
         bpy.types.SpaceView3D.draw_handler_remove(_text_handle, 'WINDOW')
         _text_handle = None
-    for name in ('fss_lod_settings', 'fss_viewport_lod', 'fss_viewport_lod_auto', 'fss_lod_export_level'):
+    while _sphere_handles:
+        bpy.types.SpaceView3D.draw_handler_remove(_sphere_handles.pop(), 'WINDOW')
+    for name in ('fss_lod_settings', 'fss_viewport_lod', 'fss_viewport_lod_auto', 'fss_lod_export_level',
+                 'fss_lod_show_sphere'):
         delattr(bpy.types.Scene, name)
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)

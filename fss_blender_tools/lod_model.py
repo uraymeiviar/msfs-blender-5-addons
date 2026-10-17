@@ -73,6 +73,13 @@ def _far_nodes(positions, mesh_bounds):
     return sorted(far, key=lambda item: -item[1])
 
 
+def _box_extremes(candidates):
+    """Per face of the LOD sphere box, the point that defines it: [(face, object name, kind, point)] from
+    candidates [(object name, 'vertex' or 'origin', point)]. One stray vertex or origin shows up here."""
+    return [(sign + axis, *pick(candidates, key=lambda c: c[2][i]))
+            for i, axis in enumerate('XYZ') for sign, pick in (('-', min), ('+', max))]
+
+
 def mesh_pieces(evaluated_obj, mesh, scale):
     """Connected components of an evaluated mesh and their largest world dimensions in metres.
 
@@ -393,6 +400,7 @@ evaluated geometry in metres, and a part includes all of its exported descendant
     depsgraph = context.evaluated_depsgraph_get()
     scale = scene.unit_settings.scale_length
     own_bounds = {}
+    own_points = {}
     for obj in objects:
         evaluated = obj.evaluated_get(depsgraph)
         points = []
@@ -406,12 +414,14 @@ evaluated geometry in metres, and a part includes all of its exported descendant
                     mesh.vertices.foreach_get('co', co)
                     world = np.array(evaluated.matrix_world)
                     co = (co.reshape(-1, 3) @ world[:3, :3].T + world[:3, 3]) * scale
-                    points = [tuple(co.min(0)), tuple(co.max(0))]
+                    # The extreme vertex per box face (their bound is the mesh bound), to show which vertex sets it
+                    points = [tuple(map(float, co[pick(co[:, i])])) for i in range(3) for pick in (np.argmin, np.argmax)]
             finally:
                 evaluated.to_mesh_clear()
         elif evaluated.type in {'CURVE', 'SURFACE', 'FONT', 'META', 'VOLUME'}:
             points = [tuple((evaluated.matrix_world @ Vector(corner)) * scale)
                       for corner in evaluated.bound_box]
+        own_points[obj] = points
         own_bounds[obj] = _bounds(points)
     subtree = {}
 
@@ -440,12 +450,15 @@ evaluated geometry in metres, and a part includes all of its exported descendant
                                    bool(obj.get(KEEP_KEY)) or bool(keep_tags.intersection(tags.get_tags(obj))),
                                    tuple(outside)))
     initial = lod_rules.decide(parts, 0, 0, lod_rules.DEFAULT_MIN_SIZES)
-    lod0_bounds = _union([own_bounds[obj] for obj in objects if obj.name in initial.present])
+    present = [obj for obj in objects if obj.name in initial.present]
+    lod0_bounds = _union([own_bounds[obj] for obj in present])
     # MSFS's LOD sphere also encloses every node position (measured, journal Session 17): one far origin moves
     # the sphere centre and enlarges it for every LOD
-    positions = {obj.name: _node_positions(obj, scale) for obj in objects if obj.name in initial.present}
+    positions = {obj.name: _node_positions(obj, scale) for obj in present}
     sphere_bounds = _union([lod0_bounds] + [_bounds(points) for points in positions.values()])
     own_diameter = _diameter(sphere_bounds)
+    candidates = ([(obj.name, 'vertex', point) for obj in present for point in own_points[obj]]
+                  + [(name, 'origin', point) for name, points in positions.items() for point in points])
     diameter = reference if reference is not None else (settings.reference_size or own_diameter)
     table = lod_rules.min_sizes(settings.model_type,
                                (settings.explicit_fs20 or settings.explicit_fs24) if target == 'fs20'
@@ -457,7 +470,8 @@ evaluated geometry in metres, and a part includes all of its exported descendant
                                 model_type=settings.model_type) for level in range(7)]
     return {'parts': parts, 'decisions': decisions, 'diameter': diameter, 'own_diameter': own_diameter,
             'table': table, 'target': target, 'model_type': settings.model_type,
-            'bounds': sphere_bounds, 'mesh_diameter': _diameter(lod0_bounds),
+            'bounds': sphere_bounds, 'mesh_bounds': lod0_bounds, 'mesh_diameter': _diameter(lod0_bounds),
+            'extremes': _box_extremes(candidates) if candidates else [],
             'far_nodes': _far_nodes(positions, lod0_bounds), 'write_count': lod_rules.written_lod_count(decisions)}
 
 
