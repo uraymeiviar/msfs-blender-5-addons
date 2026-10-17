@@ -448,12 +448,16 @@ def drop_small_pieces(context, objects, parts_by_name, cutoff):
     """Remove faces of disconnected pieces below cutoff on throwaway export meshes (decision 18).
 
     Keep on an object protects all its pieces. Returns the number of dropped pieces.
+    Objects without modifiers that share a mesh are exported as instances of one glTF mesh; when their trimmed
+    results are identical (same mesh, same dropped pieces, same materials) they share one trimmed mesh, so the
+    instancing survives.
     """
     if cutoff <= 0:
         return 0
     depsgraph = context.evaluated_depsgraph_get()
     scale = context.scene.unit_settings.scale_length
     dropped = 0
+    trimmed = {}
     for obj in objects:
         if obj.type != 'MESH':
             continue
@@ -480,8 +484,14 @@ def drop_small_pieces(context, objects, parts_by_name, cutoff):
         if not np.any(small):
             continue
         dropped += int(small.sum())
-        new_mesh = bpy.data.meshes.new_from_object(evaluated)
         slots = [slot.material.original if slot.material else None for slot in evaluated.material_slots]
+        key = None
+        if not obj.modifiers:
+            key = (obj.data.as_pointer(), small.tobytes(), tuple(m.as_pointer() if m else 0 for m in slots))
+            if key in trimmed:
+                obj.data = trimmed[key]
+                continue
+        new_mesh = bpy.data.meshes.new_from_object(evaluated)
         new_mesh.materials.clear()
         for material in slots:
             new_mesh.materials.append(material)
@@ -497,6 +507,8 @@ def drop_small_pieces(context, objects, parts_by_name, cutoff):
             bm.free()
         obj.modifiers.clear()
         obj.data = new_mesh
+        if key is not None:
+            trimmed[key] = new_mesh
     return dropped
 
 
