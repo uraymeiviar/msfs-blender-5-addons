@@ -10,7 +10,7 @@ repository are in [../AGENTS.md](../AGENTS.md).
 | :--- | :--- | :--- |
 | `tools.py` | **Tools** | Scene helpers: **Add Empty Parent** (Manual / Suffix / Prefix naming rules), **Origin to Bounding Box** (minimum-volume OBB orientation with 8 corners, 6 face centers and 12 edge centers) |
 | `empty_bounds.py` | **Empty Bounds** | Draws the bounds of empties' subtrees (`All` / `Selected` / `Off`, `In Front`) and a clickable hierarchy text in the viewport |
-| `lod.py`, `lod_model.py`, `lod_rules.py` | **LOD** | Auto size culling, hidden-from / visible-from / Keep marks, scene export settings, and viewport membership preview |
+| `lod.py`, `lod_model.py`, `lod_rules.py` | **LOD** | Auto size culling (objects and loose mesh pieces), hidden-from / visible-from / Keep marks, Quota and Hints subpanel, scene export settings, and viewport membership preview |
 | `tags.py` | **Tags** | Generic object tags (`fss_tags`, semicolon-separated), per-row `[-]`/`[+]` assignment, selection, and per-tag skip-merge and Keep toggles |
 | `merge.py` | **Merge Tree** | Export-time merge groups (`@MERGE_<name>` / `@NOMERGE_<name>`), New Merge Group, tree preview and console details |
 | `checks.py`, `name_check.py` | **Checks** | **Scan Names** (lists object and bone names that break FSS naming rules and renames them in batch; `@MERGE_` / `@NOMERGE_` allowed) and **Fix Broken Bone Parents** |
@@ -64,7 +64,10 @@ warning. Animated, skinned and Don't Merge objects follow the same visibility ru
 Part size is the largest dimension of the evaluated subtree's world bounding box in metres. The automatic
 reference diameter is the diagonal of the world bounding box enclosing the LOD00 source set; a scene can supply
 an explicit reference diameter instead. For LOD k above zero, Auto parts disappear below
-`reference diameter * pixel threshold / (minSize[k-1] * screen height)`.
+`reference diameter * pixel threshold / (minSize[k-1] * screen height)`. On throwaway export meshes (for LOD01–06),
+disconnected mesh pieces (evaluated connected components) whose own largest world bounding-box dimension is below
+that same cut-off are also dropped before `@MERGE_` groups run; `Keep` on an object or tag protects all of its
+pieces, and skinned or shape-keyed meshes keep all of their pieces.
 **Only the XML minSize table affects size culling. Vertex counts never affect membership.**
 
 The default exterior table is 100, 75, 55, 35, 8, 5, 1 percent. Settings store ratios (1 means 100 percent).
@@ -74,9 +77,13 @@ no objects and is not written. The first empty LOD ends the list; later visible-
 not more files. FS20 has its own table, initially following FS24, with its second-to-last entry at least 1 percent;
 FS20 values remain unverified in the simulator.
 
-Viewport buttons 0–6 preview the same source membership as export. **Off** restores only objects hidden by the
+Viewport buttons 0–6 preview the same object membership as export (whole objects only; dropped loose pieces are
+counted in the panel and removed at export). **Off** restores only objects hidden by the
 filter. A saved filter is cleared before export candidates are collected. **Refresh LOD Counts** caches object
-counts and cut-offs; refresh after editing geometry or marks. **Print LOD Settings / XML** prints only the XML
+counts, cut-offs, estimated glTF vertex counts (accounting for UV/normal corner splits, piece dropping, and shared
+instances), High quotas, and per-LOD hints in the **Quota and Hints** subpanel (**Largest Contributors**, **Loose
+Pieces Below Cut-off**, and **Near Cut-off (Mark Candidates)**, each with a **Select** button); refresh after
+editing geometry or marks. **Print LOD Settings / XML** prints only the XML
 entries for written LODs, for maintainer review without modifying any model XML.
 
 The export driver calls `lod_model.build_plan` once, then `begin_export` for each nonempty LOD up to LOD06. The shared

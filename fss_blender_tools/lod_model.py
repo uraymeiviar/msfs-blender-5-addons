@@ -90,6 +90,271 @@ def mesh_pieces(evaluated_obj, mesh, scale):
     return n_comps, comp, (maxs - mins).max(axis=1)
 
 
+def _is_auto_smooth(modifier):
+    group = getattr(modifier, 'node_group', None)
+    return (modifier.type == 'NODES' and group is not None
+            and (group.name == 'Smooth by Angle' or group.name.startswith('Auto Smooth')))
+
+
+def _estimate_mesh_pieces(evaluated_obj, mesh, scale):
+    """Per-piece world sizes and estimated glTF vertex counts for one evaluated mesh.
+
+    Counts unique combinations of material primitive, position, corner normal, UV maps
+    (up to 2) and active colour attribute per corner, matching glTF attribute splitting.
+    """
+    n_verts = len(mesh.vertices)
+    n_polys = len(mesh.polygons)
+    n_loops = len(mesh.loops)
+    if not n_verts or not n_polys or not n_loops:
+        return 0, None, None, None
+    n_comps, comp, piece_sizes = mesh_pieces(evaluated_obj, mesh, scale)
+    co = np.empty(n_verts * 3, dtype=np.float32)
+    mesh.vertices.foreach_get('co', co)
+    co = co.reshape(-1, 3)
+
+    loop_starts = np.empty(n_polys, dtype=np.int32)
+    mesh.polygons.foreach_get('loop_start', loop_starts)
+    loop_ends = np.append(loop_starts[1:], n_loops)
+    poly_mats = np.empty(n_polys, dtype=np.int32)
+    mesh.polygons.foreach_get('material_index', poly_mats)
+    n_slots = max(1, len(evaluated_obj.material_slots))
+    poly_mats = np.clip(poly_mats, 0, n_slots - 1)
+    loop_mats = np.repeat(poly_mats, loop_ends - loop_starts)
+
+    v_idx = np.empty(n_loops, dtype=np.int32)
+    mesh.loops.foreach_get('vertex_index', v_idx)
+    no = np.empty(n_loops * 3, dtype=np.float32)
+    mesh.corner_normals.foreach_get('vector', no)
+    no = np.round(no.reshape(-1, 3), 4)
+
+    cols = [loop_mats[:, None].astype(np.float32), co[v_idx], no]
+    for uv_layer in list(mesh.uv_layers)[:2]:
+        uv = np.empty(n_loops * 2, dtype=np.float32)
+        uv_layer.uv.foreach_get('vector', uv)
+        cols.append(np.round(uv.reshape(-1, 2), 5))
+    color = mesh.color_attributes.active_color
+    if color is not None:
+        c_vals = np.empty(len(color.data) * 4, dtype=np.float32)
+        color.data.foreach_get('color', c_vals)
+        c_vals = c_vals.reshape(-1, 4)
+        cols.append(np.round(c_vals[v_idx] if color.domain == 'POINT' else c_vals, 4))
+
+    arr = np.ascontiguousarray(np.hstack(cols))
+    void_view = arr.view(np.dtype((np.void, arr.dtype.itemsize * arr.shape[1])))
+    _, uniq_loop_idx = np.unique(void_view, return_index=True)
+    uniq_v_idx = v_idx[uniq_loop_idx]
+    piece_gltf_verts = np.bincount(comp[uniq_v_idx], minlength=n_comps)
+    piece_blender_verts = np.bincount(comp, minlength=n_comps)
+    return n_comps, piece_sizes, piece_gltf_verts, piece_blender_verts
+
+
+def estimate_scene_stats(context, plan=None):
+    """Evaluate meshes once and compute per-LOD vertex estimates, quotas, and artist hints.
+
+    Uses the same `plan` from `build_plan` as the viewport filter and export (decision 15).
+    """
+    from . import merge
+    if plan is None:
+        plan = build_plan(context, context.scene.fss_lod_settings.preview_target)
+    scene = context.scene
+    depsgraph = context.evaluated_depsgraph_get()
+    scale = scene.unit_settings.scale_length
+    objects_by_name = {obj.name: obj for obj in context.view_layer.objects}
+    parts_by_name = {part.name: part for part in plan['parts']}
+
+    merge_settings = getattr(scene, 'fss_merge', None)
+    merge_enabled = bool(merge_settings and merge_settings.enabled)
+    skip_tags = set(tags.parse_tag_list(merge_settings.skip_tags)) if merge_settings else set()
+    groups = (merge.plan(scene, lambda o: o.name in parts_by_name, skip_tags)
+              if merge_enabled else [])
+    member_to_group = {}
+    for group in groups:
+        if not group.root_reason:
+            for member in group.members:
+                member_to_group[member.name] = group.root.name
+
+    mesh_data = {}
+    instance_keys = {}
+    for part in plan['parts']:
+        obj = objects_by_name.get(part.name)
+        if obj is None or obj.type != 'MESH':
+            continue
+        mods = list(obj.modifiers)
+        can_instance = (
+            obj.name not in member_to_group
+            and obj.data is not None
+            and obj.data.users > 1
+            and obj.data.library is None
+            and obj.data.shape_keys is None
+            and not obj.data.has_custom_normals
+            and (not mods or (len(mods) == 1 and _is_auto_smooth(mods[0]) and mods[0].show_viewport))
+        )
+        if can_instance:
+            instance_keys[obj.name] = (
+                obj.data.name,
+                tuple(slot.material.name if slot.material else '' for slot in obj.material_slots),
+            )
+        evaluated = obj.evaluated_get(depsgraph)
+        mesh = evaluated.to_mesh()
+        try:
+            if mesh is None:
+                continue
+            n_comps, piece_sizes, piece_gltf_verts, piece_blender_verts = _estimate_mesh_pieces(
+                evaluated, mesh, scale
+            )
+        finally:
+            if mesh is not None:
+                evaluated.to_mesh_clear()
+        if n_comps > 0:
+            can_drop_pieces = (
+                n_comps > 1
+                and not part.keep
+                and (obj.data.shape_keys is None or len(obj.data.shape_keys.key_blocks) <= 1)
+                and not any(m.type == 'ARMATURE' for m in obj.modifiers)
+            )
+            mesh_data[obj.name] = (
+                n_comps,
+                piece_sizes,
+                piece_gltf_verts,
+                piece_blender_verts,
+                can_drop_pieces,
+            )
+
+    # Identify ancestors of Keep objects so near-cutoff hints skip protected parts
+    protected_by_level = []
+    for level in range(7):
+        prot = set()
+        for part in plan['parts']:
+            if not part.keep:
+                continue
+            blocked = (part.hide_from and level >= part.hide_from) or level < part.show_from
+            for _, hide, show in part.outside_ancestors:
+                blocked = blocked or (hide and level >= hide) or level < show
+            parent = parts_by_name.get(part.parent)
+            ancestors = {part.name}
+            while parent is not None and parent.name not in ancestors:
+                ancestors.add(parent.name)
+                blocked = blocked or (parent.hide_from and level >= parent.hide_from) or level < parent.show_from
+                parent = parts_by_name.get(parent.parent)
+            if not blocked:
+                prot.update(ancestors)
+        protected_by_level.append(prot)
+
+    lod_stats = []
+    for level in range(7):
+        decision = plan['decisions'][level]
+        cutoff = decision.cutoff
+        intended = plan['table'][level]
+        quota = lod_rules.max_vertex_count(intended)
+        forced = plan['model_type'] == 'INTERIOR' and level == 0
+
+        seen_instances = set()
+        total_vertices = 0
+        total_dropped_pieces = 0
+        total_dropped_vertices = 0
+        contributor_verts = {}
+        obj_kept_verts = {}
+        loose_hints = []
+
+        for name in decision.present:
+            if name not in mesh_data:
+                continue
+            n_comps, piece_sizes, piece_gltf_verts, _piece_blender_verts, can_drop = mesh_data[name]
+            if level > 0 and can_drop and piece_sizes is not None:
+                small = piece_sizes < cutoff
+                n_small = int(small.sum())
+                dropped_v = int(piece_gltf_verts[small].sum())
+                kept_v = int(piece_gltf_verts[~small].sum())
+            else:
+                n_small = 0
+                dropped_v = 0
+                kept_v = int(piece_gltf_verts.sum())
+
+            if n_small:
+                total_dropped_pieces += n_small
+                total_dropped_vertices += dropped_v
+                loose_hints.append((name, n_small, dropped_v, cutoff))
+
+            # Shared instanced meshes without piece dropping count once in stored glTF accessors
+            counted_v = kept_v
+            if not n_small and name in instance_keys:
+                ikey = instance_keys[name]
+                if ikey in seen_instances:
+                    counted_v = 0
+                else:
+                    seen_instances.add(ikey)
+
+            total_vertices += counted_v
+            obj_kept_verts[name] = kept_v
+            owner = member_to_group.get(name, name)
+            contributor_verts[owner] = contributor_verts.get(owner, 0) + counted_v
+
+        # Subtree kept vertices for near-cutoff Auto candidates
+        subtree_verts = {}
+
+        def get_subtree_verts(name):
+            if name not in subtree_verts:
+                part = parts_by_name[name]
+                total = obj_kept_verts.get(name, 0)
+                for child in objects_by_name[name].children:
+                    if child.name in decision.present and child.name in parts_by_name:
+                        total += get_subtree_verts(child.name)
+                subtree_verts[name] = total
+            return subtree_verts[name]
+
+        near_hints = []
+        if level > 0 and cutoff > 0 and cutoff < float('inf'):
+            protected = protected_by_level[level]
+            next_cutoff = (
+                plan['decisions'][level + 1].cutoff
+                if level + 1 < 7 and plan['decisions'][level + 1].cutoff < float('inf')
+                else cutoff * 3.0
+            )
+            upper_bound = max(cutoff * 2.5, next_cutoff)
+            candidates = {}
+            for name in decision.present:
+                part = parts_by_name[name]
+                if part.hide_from or part.show_from or part.keep or name in protected:
+                    continue
+                if cutoff <= part.size <= upper_bound:
+                    sv = get_subtree_verts(name)
+                    if sv > 0:
+                        candidates[name] = (part.size, sv)
+            for name, (psize, sv) in candidates.items():
+                parent_name = parts_by_name[name].parent
+                if parent_name in candidates and candidates[parent_name][1] == sv:
+                    continue
+                near_hints.append((name, psize, sv))
+
+        contributors = [
+            (owner, v, owner.startswith(merge.PREFIX))
+            for owner, v in sorted(contributor_verts.items(), key=lambda item: -item[1])
+            if v > 0
+        ][:10]
+        loose_hints.sort(key=lambda item: (-item[2], -item[1]))
+        near_hints.sort(key=lambda item: (-item[2], item[1]))
+
+        required = (lod_rules.lowest_screen_size_from_vcount(total_vertices)
+                    if plan['target'] == 'fs24' else 0.0)
+        over = (plan['target'] == 'fs24' and not forced and total_vertices > quota)
+        lod_stats.append({
+            'level': level,
+            'vertices': total_vertices,
+            'quota': quota,
+            'percent': (100.0 * total_vertices / quota) if quota > 0 else 0.0,
+            'over': over,
+            'forced': forced,
+            'required_min_size': required,
+            'dropped_pieces': total_dropped_pieces,
+            'dropped_vertices': total_dropped_vertices,
+            'contributors': contributors,
+            'loose_pieces': loose_hints[:10],
+            'near_cutoff': near_hints[:10],
+        })
+
+    return {'plan': plan, 'lods': lod_stats}
+
+
 def build_plan(context, target='fs24', reference=None):
     """Capture the unfiltered visible source set, before exporter duplication/merge.
 

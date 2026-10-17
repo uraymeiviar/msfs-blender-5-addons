@@ -124,6 +124,21 @@ def _fs20_table_changed(settings, context):
     _settings_changed(settings, context)
 
 
+class FSS_LodHintItem(bpy.types.PropertyGroup):
+    lod_level: bpy.props.IntProperty()
+    kind: bpy.props.EnumProperty(items=[
+        ('CONTRIBUTOR', 'Largest Contributor', ''),
+        ('LOOSE_PIECES', 'Loose Pieces Below Cut-off', ''),
+        ('NEAR_CUTOFF', 'Near Cut-off', ''),
+    ])
+    object_name: bpy.props.StringProperty()
+    vertices: bpy.props.IntProperty()
+    pieces: bpy.props.IntProperty()
+    size_m: bpy.props.FloatProperty()
+    cutoff_m: bpy.props.FloatProperty()
+    is_merge_group: bpy.props.BoolProperty()
+
+
 class FSS_LodSettings(bpy.types.PropertyGroup):
     model_type: bpy.props.EnumProperty(name='Model Type', default='EXTERIOR', update=_settings_changed,
         items=[('EXTERIOR', 'Exterior part', ''), ('INTERIOR', 'Interior', ''), ('SCENERY', 'Scenery', '')])
@@ -147,21 +162,63 @@ class FSS_LodSettings(bpy.types.PropertyGroup):
     cutoffs: bpy.props.FloatVectorProperty(size=7, options={'SKIP_SAVE'})
     resolved_table: bpy.props.FloatVectorProperty(size=7, options={'SKIP_SAVE'})
     write_count: bpy.props.IntProperty(options={'SKIP_SAVE'})
+    vertex_estimates: bpy.props.IntVectorProperty(size=7, options={'SKIP_SAVE'})
+    quotas: bpy.props.IntVectorProperty(size=7, options={'SKIP_SAVE'})
+    quota_percents: bpy.props.FloatVectorProperty(size=7, options={'SKIP_SAVE'})
+    over_quota: bpy.props.BoolVectorProperty(size=7, options={'SKIP_SAVE'})
+    dropped_pieces: bpy.props.IntVectorProperty(size=7, options={'SKIP_SAVE'})
+    dropped_vertices: bpy.props.IntVectorProperty(size=7, options={'SKIP_SAVE'})
+    hints: bpy.props.CollectionProperty(type=FSS_LodHintItem, options={'SKIP_SAVE'})
+    inspect_lod: bpy.props.IntProperty(name='Inspect LOD', default=0, min=0, max=6, options={'SKIP_SAVE'})
 
 
 class FSS_OT_LodRefresh(bpy.types.Operator):
     bl_idname = 'fss.lod_refresh'
     bl_label = 'Refresh LOD Counts'
-    bl_description = 'Evaluate source bounds and cache per-LOD object counts and size cut-offs'
+    bl_description = 'Evaluate source bounds, loose pieces, vertex estimates, quotas and hints'
 
     def execute(self, context):
         settings = context.scene.fss_lod_settings
         try:
-            plan = lod_model.build_plan(context, settings.preview_target)
+            stats = lod_model.estimate_scene_stats(context)
+            plan = stats['plan']
             settings.counts = [len(d.present) for d in plan['decisions']]
             settings.cutoffs = [d.cutoff for d in plan['decisions']]
             settings.resolved_table = plan['table']
             settings.write_count = plan['write_count']
+            settings.vertex_estimates = [s['vertices'] for s in stats['lods']]
+            settings.quotas = [s['quota'] for s in stats['lods']]
+            settings.quota_percents = [s['percent'] for s in stats['lods']]
+            settings.over_quota = [s['over'] for s in stats['lods']]
+            settings.dropped_pieces = [s['dropped_pieces'] for s in stats['lods']]
+            settings.dropped_vertices = [s['dropped_vertices'] for s in stats['lods']]
+            settings.hints.clear()
+            for s in stats['lods'][:plan['write_count']]:
+                level = s['level']
+                for obj_name, verts, is_group in s['contributors']:
+                    item = settings.hints.add()
+                    item.lod_level = level
+                    item.kind = 'CONTRIBUTOR'
+                    item.object_name = obj_name
+                    item.vertices = verts
+                    item.is_merge_group = is_group
+                for obj_name, n_pieces, verts, cutoff in s['loose_pieces']:
+                    item = settings.hints.add()
+                    item.lod_level = level
+                    item.kind = 'LOOSE_PIECES'
+                    item.object_name = obj_name
+                    item.pieces = n_pieces
+                    item.vertices = verts
+                    item.cutoff_m = cutoff
+                for obj_name, size_m, verts in s['near_cutoff']:
+                    item = settings.hints.add()
+                    item.lod_level = level
+                    item.kind = 'NEAR_CUTOFF'
+                    item.object_name = obj_name
+                    item.size_m = size_m
+                    item.vertices = verts
+            if settings.inspect_lod >= settings.write_count:
+                settings.inspect_lod = max(0, settings.write_count - 1)
             settings.scanned = True
             for warning in plan['decisions'][0].warnings:
                 self.report({'WARNING'}, warning)
@@ -172,6 +229,37 @@ class FSS_OT_LodRefresh(bpy.types.Operator):
             return {'CANCELLED'}
         finally:
             apply_viewport_lod(context)
+        return {'FINISHED'}
+
+
+class FSS_OT_LodSelectHint(bpy.types.Operator):
+    bl_idname = 'fss.lod_select_hint'
+    bl_label = 'Select'
+    bl_description = 'Select this object or merge group root in the 3D View (Shift: add to selection)'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    object_name: bpy.props.StringProperty(name='Object')
+    extend: bpy.props.BoolProperty(options={'SKIP_SAVE'})
+
+    def invoke(self, context, event):
+        self.extend = event.shift
+        return self.execute(context)
+
+    def execute(self, context):
+        view_layer = context.view_layer
+        obj = view_layer.objects.get(self.object_name)
+        if obj is None:
+            self.report({'WARNING'}, f'Object {self.object_name} not found in view layer')
+            return {'CANCELLED'}
+        if not obj.visible_get(view_layer=view_layer):
+            self.report({'WARNING'}, f'{self.object_name} is currently hidden in the viewport')
+            return {'CANCELLED'}
+        if not self.extend:
+            for other in context.selected_objects:
+                other.select_set(False)
+        obj.select_set(True)
+        view_layer.objects.active = obj
+        self.report({'INFO'}, f'Selected {self.object_name}')
         return {'FINISHED'}
 
 
@@ -311,10 +399,111 @@ class FSS_PT_Lod(bpy.types.Panel):
         if settings.scanned:
             layout.label(text='Cached source counts — Refresh after editing')
             for level in range(settings.write_count):
-                layout.label(text=f'LOD{level:02}: {settings.counts[level]} objects; '
-                                  f'cut-off {settings.cutoffs[level]:.4g} m')
+                text = f'LOD{level:02}: {settings.counts[level]} obj'
+                if settings.dropped_pieces[level]:
+                    text += f', -{settings.dropped_pieces[level]} pcs'
+                text += f'; cut-off {settings.cutoffs[level]:.4g} m'
+                layout.label(text=text)
             if settings.write_count < 7:
                 layout.label(text=f'LOD{settings.write_count:02}: not written, no objects', icon='INFO')
+
+
+class FSS_PT_LodQuotaHints(bpy.types.Panel):
+    bl_idname = 'FSS_PT_lod_quota_hints'
+    bl_label = 'Quota and Hints'
+    bl_parent_id = 'FSS_PT_lod'
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'FSS Tools'
+
+    def draw(self, context):
+        layout = self.layout
+        settings = context.scene.fss_lod_settings
+        if not settings.scanned:
+            layout.label(text='Click Refresh LOD Counts to compute estimates', icon='INFO')
+            return
+        layout.label(text='Vertex estimates (per material/UV/normal corner, High quota):')
+        col = layout.column(align=True)
+        for level in range(settings.write_count):
+            verts = settings.vertex_estimates[level]
+            quota = settings.quotas[level]
+            pct = settings.quota_percents[level]
+            over = settings.over_quota[level]
+            forced = settings.model_type == 'INTERIOR' and level == 0
+            row = col.row(align=True)
+            if settings.preview_target == 'fs20':
+                row.label(text=f'_LOD{level:02}  ~{verts:,} vtx (FS20: no vertex curve)')
+            elif forced:
+                row.label(text=f'_LOD{level:02}  ~{verts:,} / {quota:,}  {pct:.0f}%  FORCED')
+            elif over:
+                row.alert = True
+                row.label(text=f'_LOD{level:02}  ~{verts:,} / {quota:,}  {pct:.0f}%  OVER', icon='ERROR')
+            else:
+                row.label(text=f'_LOD{level:02}  ~{verts:,} / {quota:,}  {pct:.0f}%', icon='CHECKMARK')
+            if settings.dropped_pieces[level]:
+                sub = col.row(align=True)
+                sub.enabled = False
+                sub.label(text=f'    -{settings.dropped_pieces[level]:,} loose pieces '
+                               f'(~{settings.dropped_vertices[level]:,} vtx) dropped at export')
+
+        layout.separator()
+        layout.label(text='Hints for LOD:')
+        sel_row = layout.row(align=True)
+        active_lod = (context.scene.fss_viewport_lod
+                      if 0 <= context.scene.fss_viewport_lod < settings.write_count
+                      else min(settings.inspect_lod, max(0, settings.write_count - 1)))
+        for level in range(settings.write_count):
+            op = sel_row.operator('fss.lod_inspect_level', text=str(level), depress=(level == active_lod))
+            op.level = level
+
+        lod_hints = [h for h in settings.hints if h.lod_level == active_lod]
+        contributors = [h for h in lod_hints if h.kind == 'CONTRIBUTOR'][:5]
+        loose = [h for h in lod_hints if h.kind == 'LOOSE_PIECES'][:5]
+        near = [h for h in lod_hints if h.kind == 'NEAR_CUTOFF'][:5]
+
+        box = layout.box()
+        box.label(text=f'Largest contributors in _LOD{active_lod:02}:', icon='MESH_DATA')
+        if contributors:
+            for h in contributors:
+                r = box.row(align=True)
+                r.label(text=f'{h.object_name}: ~{h.vertices:,} vtx')
+                r.operator('fss.lod_select_hint', text='', icon='RESTRICT_SELECT_OFF').object_name = h.object_name
+        else:
+            box.label(text='None')
+
+        if active_lod > 0:
+            box = layout.box()
+            box.label(text=f'Loose pieces below {settings.cutoffs[active_lod]:.4g} m (dropped at export):',
+                      icon='MOD_EXPLODE')
+            if loose:
+                for h in loose:
+                    r = box.row(align=True)
+                    r.label(text=f'{h.object_name}: {h.pieces:,} pcs, ~{h.vertices:,} vtx')
+                    r.operator('fss.lod_select_hint', text='', icon='RESTRICT_SELECT_OFF').object_name = h.object_name
+            else:
+                box.label(text='None')
+
+            box = layout.box()
+            box.label(text=f'Near cut-off ({settings.cutoffs[active_lod]:.4g} m, candidates to hide):',
+                      icon='FILTER')
+            if near:
+                for h in near:
+                    r = box.row(align=True)
+                    r.label(text=f'{h.object_name} ({h.size_m:.3g} m): ~{h.vertices:,} vtx')
+                    r.operator('fss.lod_select_hint', text='', icon='RESTRICT_SELECT_OFF').object_name = h.object_name
+            else:
+                box.label(text='None')
+
+
+class FSS_OT_LodInspectLevel(bpy.types.Operator):
+    bl_idname = 'fss.lod_inspect_level'
+    bl_label = 'Inspect LOD Hints'
+    bl_description = 'Show Quota and Hints details for this LOD level'
+    level: bpy.props.IntProperty(min=0, max=6, default=0)
+
+    def execute(self, context):
+        context.scene.fss_lod_settings.inspect_lod = self.level
+        return {'FINISHED'}
 
 
 class FSS_PT_LodExport(bpy.types.Panel):
@@ -357,8 +546,9 @@ class FSS_PT_LodExport(bpy.types.Panel):
         layout.operator('fss.lod_print_settings', icon='CONSOLE')
 
 
-CLASSES = (FSS_LodSettings, FSS_OT_LodRefresh, FSS_OT_SetObjectLod, FSS_OT_SetViewportLod, FSS_OT_LodPrintSettings,
-           FSS_OT_LodEditTable, FSS_PT_Lod, FSS_PT_LodExport)
+CLASSES = (FSS_LodHintItem, FSS_LodSettings, FSS_OT_LodRefresh, FSS_OT_LodSelectHint, FSS_OT_LodInspectLevel,
+           FSS_OT_SetObjectLod, FSS_OT_SetViewportLod, FSS_OT_LodPrintSettings,
+           FSS_OT_LodEditTable, FSS_PT_Lod, FSS_PT_LodQuotaHints, FSS_PT_LodExport)
 
 
 def register():
