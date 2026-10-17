@@ -109,6 +109,29 @@ class LodRulesTest(unittest.TestCase):
         self.assertEqual(lod.written_lod_count(decisions), 2)
         self.assertTrue(decisions[4].present)
 
+    def test_screen_ratio_and_lod_selection(self):
+        import math
+        fov_90 = math.radians(90.0)
+        # At 90 deg vertical FOV, tan(fov/2) = 1.0, so ratio = radius / distance = (0.5 * diameter) / distance
+        self.assertAlmostEqual(lod.screen_ratio(4.0, 2.0, fov_90), 1.0)
+        self.assertAlmostEqual(lod.screen_ratio(4.0, 4.0, fov_90), 0.5)
+        self.assertEqual(lod.screen_ratio(4.0, 0.0, fov_90), 10.0)
+        self.assertEqual(lod.screen_ratio(0.0, 2.0, fov_90), 0.0)
+
+        table = lod.DEFAULT_MIN_SIZES
+        self.assertEqual(lod.lod_from_screen_ratio(1.2, table, 7), 0)
+        self.assertEqual(lod.lod_from_screen_ratio(1.0, table, 7), 0)
+        self.assertEqual(lod.lod_from_screen_ratio(0.8, table, 7), 1)
+        self.assertEqual(lod.lod_from_screen_ratio(0.6, table, 7), 2)
+        self.assertEqual(lod.lod_from_screen_ratio(0.4, table, 7), 3)
+        self.assertEqual(lod.lod_from_screen_ratio(0.1, table, 7), 4)
+        self.assertEqual(lod.lod_from_screen_ratio(0.06, table, 7), 5)
+        self.assertEqual(lod.lod_from_screen_ratio(0.02, table, 7), 6)
+        self.assertEqual(lod.lod_from_screen_ratio(0.002, table, 7), 6)
+        # Interior with write_count=6 clamps to LOD05
+        self.assertEqual(lod.lod_from_screen_ratio(0.0001, table, 6), 5)
+
 
 if __name__ == '__main__':
     unittest.main()
+

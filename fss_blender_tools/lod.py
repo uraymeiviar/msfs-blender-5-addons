@@ -1,13 +1,37 @@
 """Object visibility marks, scene LOD settings and explicit viewport preview."""
 
+import math
+
 import blf
 import bpy
+from mathutils import Vector
 
 from . import lod_model, lod_rules
 
 LOD_KEY = lod_model.HIDE_KEY
 LOD_HIDDEN_KEY = lod_model.HIDDEN_KEY
+_ORTHO_FAKE_FOV = math.radians(1.0)
+_AUTO_INTERVAL = 0.15
 _text_handle = None
+_auto_state = {
+    'plan': None,
+    'scene_name': None,
+    'center': None,
+    'applied_level': None,
+    'last_ratio': 0.0,
+    'region_3d': None,
+    'last_view_matrix': None,
+    'last_window_matrix': None,
+}
+
+
+def invalidate_auto_plan():
+    _auto_state['plan'] = None
+    _auto_state['scene_name'] = None
+    _auto_state['center'] = None
+    _auto_state['applied_level'] = None
+    _auto_state['last_view_matrix'] = None
+    _auto_state['last_window_matrix'] = None
 
 
 def _editable(obj):
@@ -66,8 +90,155 @@ def apply_marks(objects, mode, level):
     return changed, len(clamped)
 
 
+def _find_region_3d(context=None):
+    ctx = context or bpy.context
+    region_3d = getattr(ctx, 'region_data', None)
+    if region_3d is not None:
+        return region_3d
+    space = getattr(ctx, 'space_data', None)
+    if space is not None and getattr(space, 'type', None) == 'VIEW_3D' and getattr(space, 'region_3d', None) is not None:
+        return space.region_3d
+    wm = getattr(ctx, 'window_manager', None)
+    if wm is not None:
+        for window in wm.windows:
+            for area in window.screen.areas:
+                if area.type == 'VIEW_3D' and area.spaces.active and area.spaces.active.region_3d:
+                    return area.spaces.active.region_3d
+    return _auto_state.get('region_3d')
+
+
+def viewport_fov_and_location(region_3d):
+    """Return (vertical_fov_radians, camera_world_location) from a 3D viewport region.
+
+    Follows lod_tools_msfs_2024/lod_camera.py for perspective and orthographic views.
+    """
+    m = region_3d.window_matrix
+    try:
+        m11 = float(m[1][1])
+    except (IndexError, TypeError, ValueError):
+        return None, None
+    if abs(m11) <= 1e-12:
+        return None, None
+    if region_3d.is_perspective:
+        fov_y = 2.0 * math.atan(1.0 / m11)
+        cam_pos = region_3d.view_matrix.inverted().translation.copy()
+        return fov_y, cam_pos
+    ortho_height = 2.0 / m11
+    virtual_distance = ortho_height / (2.0 * math.tan(_ORTHO_FAKE_FOV / 2.0))
+    forward = region_3d.view_rotation @ Vector((0.0, 0.0, -1.0))
+    cam_pos = region_3d.view_location - forward * virtual_distance
+    return _ORTHO_FAKE_FOV, cam_pos
+
+
+def _apply_plan_level(context, plan, level):
+    scene = context.scene
+    lod_model.restore_filter(context)
+    scene.fss_lod_settings.preview_error = ''
+    present = plan['decisions'][level].present if level < plan['write_count'] else set()
+    if level >= plan['write_count']:
+        scene.fss_lod_settings.preview_error = f'LOD{level:02}: not written (first empty LOD{plan["write_count"]:02})'
+    for obj in context.view_layer.objects:
+        if obj.name not in present and obj.visible_get(view_layer=context.view_layer):
+            obj[LOD_HIDDEN_KEY] = True
+            obj.hide_set(True, view_layer=context.view_layer)
+    wm = getattr(context, 'window_manager', None)
+    if wm is not None:
+        for window in wm.windows:
+            for area in window.screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
+
+
+def _ensure_auto_plan(context):
+    scene = context.scene
+    if _auto_state['plan'] is None or _auto_state['scene_name'] != scene.name:
+        plan = lod_model.build_plan(context, scene.fss_lod_settings.preview_target)
+        bounds = plan['bounds']
+        center = (Vector(tuple(0.5 * (lo + hi) for lo, hi in zip(*bounds)))
+                  if bounds is not None else Vector((0.0, 0.0, 0.0)))
+        _auto_state['plan'] = plan
+        _auto_state['scene_name'] = scene.name
+        _auto_state['center'] = center
+        _auto_state['applied_level'] = None
+    return _auto_state['plan'], _auto_state['center']
+
+
+def update_auto_viewport_lod(context=None, region_3d=None, force=False):
+    """Compute bounding-sphere screen ratio from the 3D viewport and apply the filter only when the LOD changes."""
+    ctx = context or bpy.context
+    scene = getattr(ctx, 'scene', None)
+    if scene is None or not getattr(scene, 'fss_viewport_lod_auto', False):
+        return False
+    r3d = region_3d or _find_region_3d(ctx)
+    if r3d is None:
+        return False
+    if not force and _auto_state['plan'] is not None and _auto_state['scene_name'] == scene.name:
+        if (_auto_state['last_view_matrix'] is not None
+                and _auto_state['last_window_matrix'] is not None
+                and r3d.view_matrix == _auto_state['last_view_matrix']
+                and r3d.window_matrix == _auto_state['last_window_matrix']):
+            return False
+    fov_y, cam_pos = viewport_fov_and_location(r3d)
+    if fov_y is None or cam_pos is None:
+        return False
+    try:
+        plan, center = _ensure_auto_plan(ctx)
+    except ValueError as error:
+        lod_model.restore_filter(ctx)
+        scene.fss_lod_settings.preview_error = str(error)
+        return False
+    _auto_state['last_view_matrix'] = r3d.view_matrix.copy()
+    _auto_state['last_window_matrix'] = r3d.window_matrix.copy()
+    scale = scene.unit_settings.scale_length
+    distance = (cam_pos * scale - center).length
+    ratio = lod_rules.screen_ratio(plan['diameter'], distance, fov_y)
+    level = lod_rules.lod_from_screen_ratio(ratio, plan['table'], plan['write_count'])
+    _auto_state['last_ratio'] = ratio
+    if not force and _auto_state['applied_level'] == level and scene.fss_viewport_lod == level:
+        return False
+    scene.fss_viewport_lod = level
+    _auto_state['applied_level'] = level
+    _apply_plan_level(ctx, plan, level)
+    return True
+
+
+def _auto_viewport_timer():
+    ctx = bpy.context
+    scene = getattr(ctx, 'scene', None)
+    if scene is None or not getattr(scene, 'fss_viewport_lod_auto', False):
+        return None
+    try:
+        update_auto_viewport_lod(ctx)
+    except Exception:
+        return None
+    return _AUTO_INTERVAL
+
+
+def _start_auto_timer():
+    if not bpy.app.timers.is_registered(_auto_viewport_timer):
+        bpy.app.timers.register(_auto_viewport_timer, first_interval=_AUTO_INTERVAL)
+
+
+def _stop_auto_timer():
+    invalidate_auto_plan()
+    _auto_state['region_3d'] = None
+    if bpy.app.timers.is_registered(_auto_viewport_timer):
+        try:
+            bpy.app.timers.unregister(_auto_viewport_timer)
+        except ValueError:
+            pass
+
+
 def apply_viewport_lod(context):
     scene = context.scene
+    invalidate_auto_plan()
+    if getattr(scene, 'fss_viewport_lod_auto', False):
+        if update_auto_viewport_lod(context, force=True):
+            return
+        if scene.fss_lod_settings.preview_error:
+            return
+        if scene.fss_viewport_lod < 0:
+            scene.fss_viewport_lod = 0
     level = scene.fss_viewport_lod
     lod_model.restore_filter(context)
     if level < 0:
@@ -78,28 +249,23 @@ def apply_viewport_lod(context):
     except ValueError as error:
         scene.fss_lod_settings.preview_error = str(error)
         return
-    scene.fss_lod_settings.preview_error = ''
-    present = plan['decisions'][level].present if level < plan['write_count'] else set()
-    if level >= plan['write_count']:
-        scene.fss_lod_settings.preview_error = f'LOD{level:02}: not written (first empty LOD{plan["write_count"]:02})'
-    for obj in context.view_layer.objects:
-        if obj.name not in present and obj.visible_get(view_layer=context.view_layer):
-            obj[LOD_HIDDEN_KEY] = True
-            obj.hide_set(True, view_layer=context.view_layer)
-    for window in context.window_manager.windows:
-        for area in window.screen.areas:
-            if area.type == 'VIEW_3D':
-                area.tag_redraw()
+    _apply_plan_level(context, plan, level)
 
 
 def _draw_viewport_lod_text():
     context = bpy.context
     if not context.space_data or not context.space_data.overlay.show_overlays:
         return
+    is_auto = getattr(context.scene, 'fss_viewport_lod_auto', False)
     level = context.scene.fss_viewport_lod
-    if level < 0:
+    if not is_auto and level < 0:
         return
-    text = context.scene.fss_lod_settings.preview_error or f'Filtered by LOD{level}'
+    if context.scene.fss_lod_settings.preview_error:
+        text = context.scene.fss_lod_settings.preview_error
+    elif is_auto:
+        text = f'Auto LOD{max(0, level)} ({_auto_state["last_ratio"]:.1%})'
+    else:
+        text = f'Filtered by LOD{level}'
     blf.size(0, 13 * context.preferences.system.ui_scale)
     blf.position(0, 16, 16, 0)
     blf.color(0, 1.0, .78, .25, 1.0)
@@ -108,7 +274,10 @@ def _draw_viewport_lod_text():
 
 def _settings_changed(settings, context):
     settings.scanned = False
-    if context and context.scene and context.scene.fss_viewport_lod >= 0:
+    invalidate_auto_plan()
+    if context and context.scene and (
+        context.scene.fss_viewport_lod >= 0 or getattr(context.scene, 'fss_viewport_lod_auto', False)
+    ):
         apply_viewport_lod(context)
 
 
@@ -287,13 +456,21 @@ class FSS_OT_SetObjectLod(bpy.types.Operator):
 class FSS_OT_SetViewportLod(bpy.types.Operator):
     bl_idname = 'fss.set_viewport_lod'
     bl_label = 'Viewport LOD Filter'
-    bl_description = 'Preview export membership; Off restores only objects hidden by this filter'
+    bl_description = 'Preview export membership; Auto picks LOD by viewport screen size; Off restores hidden objects'
     bl_options = {'REGISTER', 'UNDO'}
-    level: bpy.props.IntProperty(min=-1, max=6, default=-1)
+    level: bpy.props.IntProperty(min=-2, max=6, default=-1)
 
     def execute(self, context):
-        context.scene.fss_viewport_lod = self.level
-        apply_viewport_lod(context)
+        if self.level == -2:
+            context.scene.fss_viewport_lod_auto = True
+            _auto_state['region_3d'] = _find_region_3d(context)
+            apply_viewport_lod(context)
+            _start_auto_timer()
+        else:
+            context.scene.fss_viewport_lod_auto = False
+            _stop_auto_timer()
+            context.scene.fss_viewport_lod = self.level
+            apply_viewport_lod(context)
         error = context.scene.fss_lod_settings.preview_error
         if error:
             self.report({'WARNING'}, error)
@@ -389,9 +566,16 @@ class FSS_PT_Lod(bpy.types.Panel):
                 op.mode, op.level = mode, level
         layout.label(text='Viewport LOD')
         row = layout.row(align=True)
-        for level in range(-1, 7):
-            row.operator('fss.set_viewport_lod', text='Off' if level < 0 else str(level),
+        is_auto = getattr(context.scene, 'fss_viewport_lod_auto', False)
+        row.operator('fss.set_viewport_lod', text='Off',
+                     depress=not is_auto and context.scene.fss_viewport_lod < 0).level = -1
+        row.operator('fss.set_viewport_lod', text='Auto', depress=is_auto).level = -2
+        for level in range(7):
+            row.operator('fss.set_viewport_lod', text=str(level),
                          depress=context.scene.fss_viewport_lod == level).level = level
+        if is_auto and not context.scene.fss_lod_settings.preview_error:
+            lvl = max(0, context.scene.fss_viewport_lod)
+            layout.label(text=f'Auto: LOD{lvl:02} (screen ratio {_auto_state["last_ratio"]:.1%})', icon='VIEWZOOM')
         if context.scene.fss_lod_settings.preview_error:
             layout.label(text=context.scene.fss_lod_settings.preview_error, icon='ERROR')
         layout.operator('fss.lod_refresh', icon='FILE_REFRESH')
@@ -557,6 +741,7 @@ def register():
         bpy.utils.register_class(cls)
     bpy.types.Scene.fss_lod_settings = bpy.props.PointerProperty(type=FSS_LodSettings)
     bpy.types.Scene.fss_viewport_lod = bpy.props.IntProperty(default=-1, min=-1, max=6)
+    bpy.types.Scene.fss_viewport_lod_auto = bpy.props.BoolProperty(default=False, options={'SKIP_SAVE'})
     bpy.types.Scene.fss_lod_export_level = bpy.props.IntProperty(default=-1, min=-1, max=6, options={'SKIP_SAVE'})
     if not bpy.app.background:
         _text_handle = bpy.types.SpaceView3D.draw_handler_add(_draw_viewport_lod_text, (), 'WINDOW', 'POST_PIXEL')
@@ -564,10 +749,11 @@ def register():
 
 def unregister():
     global _text_handle
+    _stop_auto_timer()
     if _text_handle is not None:
         bpy.types.SpaceView3D.draw_handler_remove(_text_handle, 'WINDOW')
         _text_handle = None
-    for name in ('fss_lod_settings', 'fss_viewport_lod', 'fss_lod_export_level'):
+    for name in ('fss_lod_settings', 'fss_viewport_lod', 'fss_viewport_lod_auto', 'fss_lod_export_level'):
         delattr(bpy.types.Scene, name)
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)

@@ -160,3 +160,33 @@ the stored glTF count; MSFS's treatment of seams and instances is unverified.
 def written_lod_count(decisions):
     """Stop at the first empty LOD, even if later visible-from marks restore parts."""
     return next((level for level, decision in enumerate(decisions) if not decision.present), len(decisions))
+
+
+def screen_ratio(diameter, distance, fov_y):
+    """Vertical screen-height ratio of a bounding sphere (1.0 = 100%).
+
+    Matches .Get Vertical Screen Ratio in lod_tools_msfs_2024:
+    radius / (distance * tan(fov_y / 2)), clamped to 10.0.
+    """
+    if diameter <= 0:
+        return 0.0
+    if distance <= 0 or fov_y <= 0:
+        return 10.0
+    tan_half = math.tan(0.5 * fov_y)
+    if tan_half <= 0:
+        return 10.0
+    return min(10.0, (0.5 * diameter) / (distance * tan_half))
+
+
+def lod_from_screen_ratio(ratio, table, write_count=7):
+    """Pick the active LOD level from a vertical screen ratio and minSize table.
+
+    Matches .lod_index_switch in lod_tools_msfs_2024: selects the first written LOD
+    whose minSize <= ratio, clamping to the last written LOD when smaller.
+    """
+    count = max(1, min(len(table), write_count))
+    for level in range(count):
+        if ratio >= table[level]:
+            return level
+    return count - 1
+
