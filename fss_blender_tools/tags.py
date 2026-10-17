@@ -65,6 +65,14 @@ def set_skip_tags(scene, skip_tags):
         bpy.ops.fss.merge_refresh()
 
 
+def get_keep_tags(scene):
+    return parse_tag_list(scene.fss_lod_settings.keep_tags)
+
+
+def set_keep_tags(scene, values):
+    scene.fss_lod_settings.keep_tags = SEPARATOR.join(dict.fromkeys(values))
+
+
 class FSS_OT_TagAdd(bpy.types.Operator):
     bl_idname = "fss.tag_add"
     bl_label = "Add Tag"
@@ -167,6 +175,21 @@ class FSS_OT_TagToggleSkipMerge(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class FSS_OT_TagToggleKeep(bpy.types.Operator):
+    bl_idname = 'fss.tag_toggle_keep'
+    bl_label = 'Keep Tag in LODs'
+    bl_description = 'Keep tagged objects and their Auto ancestor chains against size culling'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    tag: bpy.props.StringProperty(name='Tag')
+
+    def execute(self, context):
+        current = get_keep_tags(context.scene)
+        set_keep_tags(context.scene, [tag for tag in current if tag != self.tag]
+                      if self.tag in current else current + [self.tag])
+        return {'FINISHED'}
+
+
 class FSS_OT_TagRename(bpy.types.Operator):
     bl_idname = "fss.tag_rename"
     bl_label = "Rename Tag"
@@ -194,6 +217,9 @@ class FSS_OT_TagRename(bpy.types.Operator):
         skip_tags = get_skip_tags(context.scene)
         if self.tag in skip_tags:
             set_skip_tags(context.scene, [new_tags[0] if tag == self.tag else tag for tag in skip_tags])
+        keep_tags = get_keep_tags(context.scene)
+        if self.tag in keep_tags:
+            set_keep_tags(context.scene, [new_tags[0] if tag == self.tag else tag for tag in keep_tags])
         self.report({'INFO'}, f"Renamed {self.tag} to {new_tags[0]} on {count} object(s)")
         return {'FINISHED'}
 
@@ -218,6 +244,7 @@ class FSS_OT_TagDelete(bpy.types.Operator):
         skip_tags = get_skip_tags(context.scene)
         if self.tag in skip_tags:
             set_skip_tags(context.scene, [tag for tag in skip_tags if tag != self.tag])
+        set_keep_tags(context.scene, [tag for tag in get_keep_tags(context.scene) if tag != self.tag])
         self.report({'INFO'}, f"Removed {self.tag} from {count} object(s)")
         return {'FINISHED'}
 
@@ -262,6 +289,7 @@ class FSS_PT_Tags(bpy.types.Panel):
         counts = tag_counts()
         if counts:
             skip_tags = set(get_skip_tags(scene))
+            keep_tags = set(get_keep_tags(scene))
             column = layout.column(align=True)
             for tag in sorted(counts):
                 skipped = tag in skip_tags
@@ -300,6 +328,7 @@ class FSS_PT_Tags(bpy.types.Panel):
                     depress=skipped,
                 )
                 op.tag = tag
+                tag_row.operator('fss.tag_toggle_keep', text='Keep', depress=tag in keep_tags).tag = tag
                 tag_row.operator(FSS_OT_TagRename.bl_idname, text="", icon='GREASEPENCIL').tag = tag
                 tag_row.operator(FSS_OT_TagDelete.bl_idname, text="", icon='TRASH').tag = tag
         else:
@@ -311,6 +340,7 @@ CLASSES = (
     FSS_OT_TagRemove,
     FSS_OT_TagSelect,
     FSS_OT_TagToggleSkipMerge,
+    FSS_OT_TagToggleKeep,
     FSS_OT_TagRename,
     FSS_OT_TagDelete,
     FSS_PT_Tags,

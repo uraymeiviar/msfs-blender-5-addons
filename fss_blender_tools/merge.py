@@ -21,7 +21,7 @@ import sys
 import bpy
 import numpy as np
 
-from . import tags
+from . import lod_model, tags
 
 # "@" keeps the marker from clashing with real node names and is stripped before the glTF is written
 PREFIX = "@MERGE_"
@@ -434,7 +434,7 @@ class glTF2ExportUserExtension:
     def pre_export_hook(self, export_settings):
         context = bpy.context
         settings = getattr(context.scene, "fss_merge", None)
-        if settings is None or not settings.enabled:
+        if settings is None:
             return
 
         def log(message, warning, detail=False):
@@ -464,6 +464,9 @@ class glTF2ExportUserExtension:
                 return False
             return True
 
+        lod_model.cull_export(context, exported, log)
+        if not settings.enabled:
+            return
         roots = [obj for obj in context.scene.objects if exported(obj) and is_merge_root(obj)]
         if not roots:
             return
@@ -473,6 +476,7 @@ class glTF2ExportUserExtension:
                 "MSFS 2024 multi-exporter or a background export", warning=True)
             return
         merged, created = run(context, exported, selected_export, log)
+        lod_model.record_merge(created)
         log(f"{merged} merge group(s) merged, {len(created)} object(s) created for the export", warning=False)
 
 

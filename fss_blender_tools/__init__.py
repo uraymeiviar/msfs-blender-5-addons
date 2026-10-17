@@ -8,7 +8,7 @@ bl_info = {
     "author": "Flight Sim Studio",
     "description": "Authoring checks and helpers for MSFS aircraft (tools, empty bounds, lod, tags, merge tree, checks)",
     "blender": (5, 2, 0),
-    "version": (0, 10, 1),
+    "version": (0, 11, 0),
     "location": "3D View > Sidebar > FSS Tools",
     "category": "Object",
 }
@@ -17,13 +17,15 @@ if "name_check" in locals():
     import importlib
     tools = importlib.reload(tools)
     empty_bounds = importlib.reload(empty_bounds)
+    lod_rules = importlib.reload(lod_rules)
+    lod_model = importlib.reload(lod_model)
     lod = importlib.reload(lod)
     tags = importlib.reload(tags)
     merge = importlib.reload(merge)
     name_check = importlib.reload(name_check)
     checks = importlib.reload(checks)
 else:
-    from . import checks, empty_bounds, lod, merge, name_check, tags, tools
+    from . import checks, empty_bounds, lod_rules, lod_model, lod, merge, name_check, tags, tools
 
 MODULES = (tools, empty_bounds, lod, tags, merge, name_check, checks)
 

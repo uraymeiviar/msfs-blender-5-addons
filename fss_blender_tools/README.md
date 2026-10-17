@@ -10,8 +10,8 @@ repository are in [../AGENTS.md](../AGENTS.md).
 | :--- | :--- | :--- |
 | `tools.py` | **Tools** | Scene helpers: **Add Empty Parent** (Manual / Suffix / Prefix naming rules), **Origin to Bounding Box** (minimum-volume OBB orientation with 8 corners, 6 face centers and 12 edge centers) |
 | `empty_bounds.py` | **Empty Bounds** | Draws the bounds of empties' subtrees (`All` / `Selected` / `Off`, `In Front`) and a clickable hierarchy text in the viewport |
-| `lod.py` | **LOD** | Explicit per-object LOD level marking (`[6][5][4][3][2][1][0]`, stored as `fss_lod`, default `0`) with top-down parent clamping and viewport LOD filter |
-| `tags.py` | **Tags** | Generic object tags (`fss_tags`, semicolon-separated), per-row `[-]`/`[+]` assignment, selection, and per-tag skip-merge toggle |
+| `lod.py`, `lod_model.py`, `lod_rules.py` | **LOD** | Auto size culling, hidden-from / visible-from / Keep marks, scene export settings, and viewport membership preview |
+| `tags.py` | **Tags** | Generic object tags (`fss_tags`, semicolon-separated), per-row `[-]`/`[+]` assignment, selection, and per-tag skip-merge and Keep toggles |
 | `merge.py` | **Merge Tree** | Export-time merge groups (`@MERGE_<name>` / `@NOMERGE_<name>`), New Merge Group, tree preview and console details |
 | `checks.py`, `name_check.py` | **Checks** | **Scan Names** (lists object and bone names that break FSS naming rules and renames them in batch; `@MERGE_` / `@NOMERGE_` allowed) and **Fix Broken Bone Parents** |
 
@@ -46,6 +46,44 @@ as its own object.
   on the console; per-node details stay in the export log.
 - **Known trap:** the merge does not read the model XML. A node the XML refers to (a screen, a clickspot) is merged
   away unless it is tagged, marked `@NOMERGE_`, or kept for another reason.
+
+## LOD Marks and Size Culling
+
+The deploy script chooses whether LODs are written: a LOD deploy script writes `_LOD00` up to the last non-empty
+LOD; the existing single-file deploy is unchanged and ignores marks. Migrating a model means deploying it with the
+LOD script under a name without `-LOD00` and updating its model XML `<LODS>` entries.
+
+Unmarked objects use Auto. `fss_lod = n` means **hidden from LOD n**, with no conversion of existing marks.
+`fss_lod_show_from = n` means visible from n; `fss_lod_keep = 1` means Keep. Assignment clears the other own
+mark properties. A tag's Keep toggle has the same size protection as an object's Keep mark.
+
+A parent's visibility interval limits its descendants. Keep protects its Auto ancestor chain against size culling;
+other small children can still disappear. An explicit hidden ancestor wins, with a **Keep under hidden ancestor**
+warning. Animated, skinned and Don't Merge objects follow the same visibility rules.
+
+Part size is the largest dimension of the evaluated subtree's world bounding box in metres. The automatic
+reference diameter is the diagonal of the world bounding box enclosing the LOD00 source set; a scene can supply
+an explicit reference diameter instead. For LOD k above zero, Auto parts disappear below
+`reference diameter * pixel threshold / (minSize[k-1] * screen height)`.
+**Only the XML minSize table affects size culling. Vertex counts never affect membership.**
+
+The default exterior table is 100, 75, 55, 35, 8, 5, 1 percent. Settings store ratios (1 means 100 percent).
+An interior's derived table needs a positive exterior diameter saved in the scene. Missing it stops export with
+**exterior diameter missing**. Editing an explicit interior table removes that requirement. Interior LOD06 has
+no objects and is not written. The first empty LOD ends the list; later visible-from objects produce a warning,
+not more files. FS20 has its own table, initially following FS24, with its second-to-last entry at least 1 percent;
+FS20 values remain unverified in the simulator.
+
+Viewport buttons 0–6 preview the same source membership as export. **Off** restores only objects hidden by the
+filter. A saved filter is cleared before export candidates are collected. **Refresh LOD Counts** caches object
+counts and cut-offs; refresh after editing geometry or marks. **Print LOD Settings / XML** prints only the XML
+entries for written LODs, for maintainer review without modifying any model XML.
+
+The export driver calls `lod_model.build_plan` once, then `begin_export` for each nonempty LOD up to LOD06. The shared
+pre-export hook culls before merging, even when Merge on Export is disabled. The driver starts each export from
+an intact source scene and calls `report_file` on the written glTF. Console counts sum distinct POSITION accessor
+counts (stored geometry, instances counted once). Quotas and effective-minSize warnings use the High SDK curve;
+MSFS's actual counting of seam splits and instances remains unverified. No polygon reduction is performed.
 
 ## Testing
 
