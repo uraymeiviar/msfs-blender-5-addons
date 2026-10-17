@@ -70,6 +70,13 @@ that same cut-off are also dropped before `@MERGE_` groups run; `Keep` on an obj
 pieces, and skinned or shape-keyed meshes keep all of their pieces.
 **Only the XML minSize table affects size culling. Vertex counts never affect membership.**
 
+**Export Settings** present this in physical sizes: the model diameter measured by **Refresh LOD Counts** (or an
+**Override Diameter** for parts merged into a bigger model), one field **LODnn hides parts smaller than** for the
+lowest-detail LOD (LOD06, interiors LOD05), and the resulting size below which each LOD hides parts, with the
+objects and pieces hidden after a Refresh. All cut-offs scale together, so the field stores the pixel threshold
+(the inverse of the formula above) and the export is unchanged. The minSize tables, screen height and pixel
+threshold are under **Advanced**.
+
 The default exterior table is 100, 75, 55, 35, 8, 5, 1 percent. Settings store ratios (1 means 100 percent).
 An interior's derived table needs a positive exterior diameter saved in the scene. Missing it stops export with
 **exterior diameter missing**. Editing an explicit interior table removes that requirement. Interior LOD06 has

@@ -293,6 +293,60 @@ def _fs20_table_changed(settings, context):
     _settings_changed(settings, context)
 
 
+def last_lod(settings):
+    """The lowest-detail LOD the export can write: interiors stop at LOD05 (decision 16)."""
+    return 5 if settings.model_type == 'INTERIOR' else 6
+
+
+def cutoff_context(settings):
+    """(diameter, minSize table) behind the size cut-offs, or (None, reason) when they cannot be computed yet.
+
+    Uses the same inputs as lod_model.build_plan: the override diameter, else the diameter measured at the last
+    Refresh, and the minSize table of the preview target.
+    """
+    measured = settings.measured_diameter
+    diameter = settings.reference_size or measured
+    if diameter <= 0 or (settings.model_type == 'INTERIOR' and measured <= 0):
+        return None, 'Press Refresh LOD Counts to measure the model'
+    target = settings.preview_target
+    explicit = getattr(settings, 'explicit_' + target) or (target == 'fs20' and settings.explicit_fs24)
+    try:
+        table = lod_rules.min_sizes(settings.model_type, explicit, getattr(settings, 'min_sizes_' + target),
+                                    measured or diameter, settings.exterior_diameter, target)
+    except ValueError as error:
+        return None, str(error)
+    return (diameter, table), ''
+
+
+def cutoff_for_level(settings, inputs, level):
+    """Parts smaller than this (metres) are hidden from LOD level; same formula as lod_rules.decide."""
+    diameter, table = inputs
+    upper = table[level - 1]
+    return diameter * settings.pixel_threshold / (upper * settings.screen_height) if upper > 0 else math.inf
+
+
+def format_length(metres):
+    if not math.isfinite(metres):
+        return 'everything'
+    return f'{metres * 100:.1f} cm' if metres < 1 else f'{metres:.2f} m'
+
+
+def _get_lowest_cutoff(settings):
+    inputs, _reason = cutoff_context(settings)
+    return cutoff_for_level(settings, inputs, last_lod(settings)) if inputs else 0.0
+
+
+def _set_lowest_cutoff(settings, value):
+    inputs, _reason = cutoff_context(settings)
+    if not inputs or value <= 0:
+        return
+    diameter, table = inputs
+    # Inverse of the cut-off formula; written directly so dragging does not re-plan the scene on every step
+    settings['pixel_threshold'] = value * table[last_lod(settings) - 1] * settings.screen_height / diameter
+    settings.scanned = False
+    invalidate_auto_plan()
+
+
 class FSS_LodHintItem(bpy.types.PropertyGroup):
     lod_level: bpy.props.IntProperty()
     kind: bpy.props.EnumProperty(items=[
@@ -318,8 +372,16 @@ class FSS_LodSettings(bpy.types.PropertyGroup):
     explicit_fs24: bpy.props.BoolProperty(default=False)
     explicit_fs20: bpy.props.BoolProperty(default=False)
     exterior_diameter: bpy.props.FloatProperty(name='Exterior Diameter (m)', min=0, update=_settings_changed)
-    reference_size: bpy.props.FloatProperty(name='Reference Diameter (m)', min=0, update=_settings_changed,
-        description='0 computes a sphere enclosing LOD00; otherwise use this diameter in metres')
+    reference_size: bpy.props.FloatProperty(name='Override Diameter', min=0, subtype='DISTANCE', unit='LENGTH',
+        update=_settings_changed,
+        description='0 uses the measured model diameter; set the diameter of the whole model when this .blend is '
+                    'merged into a bigger one at runtime (wings, winglets)')
+    measured_diameter: bpy.props.FloatProperty(name='Measured Diameter', min=0, subtype='DISTANCE', unit='LENGTH',
+        description='Diameter of the sphere enclosing LOD00, measured by the last Refresh LOD Counts')
+    lowest_cutoff: bpy.props.FloatProperty(name='Smallest Part Kept', min=0, subtype='DISTANCE', unit='LENGTH',
+        get=_get_lowest_cutoff, set=_set_lowest_cutoff, precision=1, step=10,
+        description='Parts smaller than this are hidden from the lowest-detail LOD; every other LOD hides '
+                    'proportionally smaller parts')
     screen_height: bpy.props.IntProperty(name='Screen Height (px)', default=1440, min=1, update=_settings_changed)
     pixel_threshold: bpy.props.FloatProperty(name='Pixel Threshold', default=2, min=0, update=_settings_changed)
     keep_tags: bpy.props.StringProperty(name='Keep Tags', update=_settings_changed)
@@ -355,6 +417,7 @@ class FSS_OT_LodRefresh(bpy.types.Operator):
             settings.cutoffs = [d.cutoff for d in plan['decisions']]
             settings.resolved_table = plan['table']
             settings.write_count = plan['write_count']
+            settings.measured_diameter = plan['own_diameter']
             settings.vertex_estimates = [s['vertices'] for s in stats['lods']]
             settings.quotas = [s['quota'] for s in stats['lods']]
             settings.quota_percents = [s['percent'] for s in stats['lods']]
@@ -586,7 +649,8 @@ class FSS_PT_Lod(bpy.types.Panel):
                 text = f'LOD{level:02}: {settings.counts[level]} obj'
                 if settings.dropped_pieces[level]:
                     text += f', -{settings.dropped_pieces[level]} pcs'
-                text += f'; cut-off {settings.cutoffs[level]:.4g} m'
+                if level:
+                    text += f'; hides < {format_length(settings.cutoffs[level])}'
                 layout.label(text=text)
             if settings.write_count < 7:
                 layout.label(text=f'LOD{settings.write_count:02}: not written, no objects', icon='INFO')
@@ -703,16 +767,53 @@ class FSS_PT_LodExport(bpy.types.Panel):
         layout = self.layout
         settings = context.scene.fss_lod_settings
         layout.prop(settings, 'model_type')
-        layout.prop(settings, 'preview_target')
+        if settings.measured_diameter > 0:
+            layout.label(text=f'Model diameter: {format_length(settings.measured_diameter)} (measured at Refresh)')
+        else:
+            layout.label(text='Model diameter: not measured yet, press Refresh LOD Counts', icon='INFO')
+        layout.prop(settings, 'reference_size')
         if settings.model_type == 'INTERIOR':
             layout.prop(settings, 'exterior_diameter')
             target = settings.preview_target
             explicit = getattr(settings, 'explicit_' + target) or (target == 'fs20' and settings.explicit_fs24)
             if not explicit and settings.exterior_diameter <= 0:
                 layout.label(text='exterior diameter missing', icon='ERROR')
-        layout.prop(settings, 'reference_size')
+
+        inputs, reason = cutoff_context(settings)
+        last = last_lod(settings)
+        if not inputs:
+            layout.label(text=reason, icon='INFO')
+        else:
+            layout.prop(settings, 'lowest_cutoff', text=f'LOD{last:02} hides parts smaller than')
+            box = layout.box()
+            box.label(text='Hidden parts, smaller than:')
+            for level in range(1, last + 1):
+                text = f'LOD{level:02}:  {format_length(cutoff_for_level(settings, inputs, level))}'
+                if settings.scanned and level < settings.write_count:
+                    text += f'   ({settings.counts[0] - settings.counts[level]} objects'
+                    if settings.dropped_pieces[level]:
+                        text += f', {settings.dropped_pieces[level]} pieces'
+                    text += ')'
+                box.label(text=text)
+        layout.operator('fss.lod_print_settings', icon='CONSOLE')
+
+
+class FSS_PT_LodExportAdvanced(bpy.types.Panel):
+    bl_idname = 'FSS_PT_lod_export_advanced'
+    bl_label = 'Advanced'
+    bl_parent_id = 'FSS_PT_lod_export'
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'FSS Tools'
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        settings = context.scene.fss_lod_settings
+        layout.prop(settings, 'preview_target')
         layout.prop(settings, 'screen_height')
         layout.prop(settings, 'pixel_threshold')
+        layout.label(text='The size above is this threshold in pixels at this screen height')
         layout.label(text='Vertex reports: High; counts do not affect culling')
         for target in ('fs24', 'fs20'):
             layout.label(text='FS20 minSize (unverified)' if target == 'fs20' else 'FS24 minSize')
@@ -727,12 +828,11 @@ class FSS_PT_LodExport(bpy.types.Panel):
             else:
                 for level in range(7):
                     layout.prop(settings, 'min_sizes_' + target, index=level, text=f'LOD{level:02}')
-        layout.operator('fss.lod_print_settings', icon='CONSOLE')
 
 
 CLASSES = (FSS_LodHintItem, FSS_LodSettings, FSS_OT_LodRefresh, FSS_OT_LodSelectHint, FSS_OT_LodInspectLevel,
            FSS_OT_SetObjectLod, FSS_OT_SetViewportLod, FSS_OT_LodPrintSettings,
-           FSS_OT_LodEditTable, FSS_PT_Lod, FSS_PT_LodQuotaHints, FSS_PT_LodExport)
+           FSS_OT_LodEditTable, FSS_PT_Lod, FSS_PT_LodQuotaHints, FSS_PT_LodExport, FSS_PT_LodExportAdvanced)
 
 
 def register():
