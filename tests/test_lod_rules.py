@@ -45,7 +45,7 @@ class LodRulesTest(unittest.TestCase):
                  lod.Part('above', None, cutoff * 1.001),
                  lod.Part('small_parent_large_subtree', None, 1),
                  lod.Part('large_child', 'small_parent_large_subtree', 1)]
-        result = self.decide(parts)
+        result = self.decide(parts, threshold=2.0)
         self.assertEqual(result.by_size, {'below'})
         self.assertEqual(len(result.present), 4)
 

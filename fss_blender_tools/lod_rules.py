@@ -69,7 +69,7 @@ class Decision:
 
 
 def decide(parts, level, diameter, table,
-           screen_height=1440, threshold=2.0, model_type='EXTERIOR'):
+           screen_height=1440, threshold=4.0, model_type='EXTERIOR'):
     """Cull whole subtrees, preserving only Auto ancestor chains of Keep objects.
 
 Explicit visibility intervals always win over Keep. A parent's exclusion reason

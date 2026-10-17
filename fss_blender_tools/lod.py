@@ -383,7 +383,7 @@ class FSS_LodSettings(bpy.types.PropertyGroup):
         description='Parts smaller than this are hidden from the lowest-detail LOD; every other LOD hides '
                     'proportionally smaller parts')
     screen_height: bpy.props.IntProperty(name='Screen Height (px)', default=1440, min=1, update=_settings_changed)
-    pixel_threshold: bpy.props.FloatProperty(name='Pixel Threshold', default=2, min=0, update=_settings_changed)
+    pixel_threshold: bpy.props.FloatProperty(name='Pixel Threshold', default=4, min=0, update=_settings_changed)
     keep_tags: bpy.props.StringProperty(name='Keep Tags', update=_settings_changed)
     preview_target: bpy.props.EnumProperty(name='Preview Target', default='fs24', update=_settings_changed,
         items=[('fs24', 'MSFS 2024', ''), ('fs20', 'MSFS 2020 (unverified)', '')])
