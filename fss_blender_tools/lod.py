@@ -163,6 +163,15 @@ def _ensure_auto_plan(context):
     return _auto_state['plan'], _auto_state['center']
 
 
+def simulated_min_sizes(settings, plan):
+    """minSize per LOD as MSFS applies it (vertex curve included) once Refresh has counted the vertices; the XML
+    table before that, and for fs20, which has no vertex curve."""
+    if not settings.scanned or plan['target'] != 'fs24':
+        return plan['table']
+    return lod_rules.effective_min_sizes(plan['table'], list(settings.vertex_estimates), settings.msfs_vertex_factor,
+                                         plan['write_count'])
+
+
 def update_auto_viewport_lod(context=None, region_3d=None, force=False):
     """Compute bounding-sphere screen ratio from the 3D viewport and apply the filter only when the LOD changes."""
     ctx = context or bpy.context
@@ -192,7 +201,8 @@ def update_auto_viewport_lod(context=None, region_3d=None, force=False):
     scale = scene.unit_settings.scale_length
     distance = (cam_pos * scale - center).length
     ratio = lod_rules.screen_ratio(plan['diameter'], distance, fov_y)
-    level = lod_rules.lod_from_screen_ratio(ratio, plan['table'], plan['write_count'])
+    level = lod_rules.lod_from_screen_ratio(ratio, simulated_min_sizes(scene.fss_lod_settings, plan),
+                                            plan['write_count'])
     _auto_state['last_ratio'] = ratio
     if not force and _auto_state['applied_level'] == level and scene.fss_viewport_lod == level:
         return False
@@ -384,6 +394,10 @@ class FSS_LodSettings(bpy.types.PropertyGroup):
                     'proportionally smaller parts')
     screen_height: bpy.props.IntProperty(name='Screen Height (px)', default=1440, min=1, update=_settings_changed)
     pixel_threshold: bpy.props.FloatProperty(name='Pixel Threshold', default=4, min=0, update=_settings_changed)
+    msfs_vertex_factor: bpy.props.FloatProperty(name='MSFS Vertex Factor', default=1.15, min=0.5, max=2.0,
+        description='MSFS counts vertices differently from the export: measured 0.98 to 1.22 times the file count '
+                    '(E2 cockpit). Applied to the vertex estimate (about 5 % above the file) to predict from which '
+                    'screen size MSFS shows each LOD')
     keep_tags: bpy.props.StringProperty(name='Keep Tags', update=_settings_changed)
     preview_target: bpy.props.EnumProperty(name='Preview Target', default='fs24', update=_settings_changed,
         items=[('fs24', 'MSFS 2024', ''), ('fs20', 'MSFS 2020 (unverified)', '')])
@@ -671,23 +685,26 @@ class FSS_PT_LodQuotaHints(bpy.types.Panel):
             layout.label(text='Click Refresh LOD Counts to compute estimates', icon='INFO')
             return
         layout.label(text='Vertex estimates (per material/UV/normal corner, High quota):')
+        layout.label(text='MSFS from: where MSFS shows the LOD (minSize or vertex curve, whichever is larger)')
+        effective = lod_rules.effective_min_sizes(settings.resolved_table, list(settings.vertex_estimates),
+                                                  settings.msfs_vertex_factor, settings.write_count)
         col = layout.column(align=True)
         for level in range(settings.write_count):
             verts = settings.vertex_estimates[level]
             quota = settings.quotas[level]
             pct = settings.quota_percents[level]
             over = settings.over_quota[level]
-            forced = settings.model_type == 'INTERIOR' and level == 0
             row = col.row(align=True)
             if settings.preview_target == 'fs20':
                 row.label(text=f'_LOD{level:02}  ~{verts:,} vtx (FS20: no vertex curve)')
-            elif forced:
-                row.label(text=f'_LOD{level:02}  ~{verts:,} / {quota:,}  {pct:.0f}%  FORCED')
-            elif over:
+                continue
+            fallback = '  (fallback: last LOD)' if level == settings.write_count - 1 else ''
+            text = f'_LOD{level:02}  ~{verts:,} / {quota:,}  {pct:.0f}%  MSFS from {effective[level]:.1%}{fallback}'
+            if over:
                 row.alert = True
-                row.label(text=f'_LOD{level:02}  ~{verts:,} / {quota:,}  {pct:.0f}%  OVER', icon='ERROR')
+                row.label(text=text, icon='ERROR')
             else:
-                row.label(text=f'_LOD{level:02}  ~{verts:,} / {quota:,}  {pct:.0f}%', icon='CHECKMARK')
+                row.label(text=text, icon='CHECKMARK')
             if settings.dropped_pieces[level]:
                 sub = col.row(align=True)
                 sub.enabled = False
@@ -814,6 +831,7 @@ class FSS_PT_LodExportAdvanced(bpy.types.Panel):
         layout.prop(settings, 'screen_height')
         layout.prop(settings, 'pixel_threshold')
         layout.label(text='The size above is this threshold in pixels at this screen height')
+        layout.prop(settings, 'msfs_vertex_factor')
         layout.label(text='Vertex reports: High; counts do not affect culling')
         for target in ('fs24', 'fs20'):
             layout.label(text='FS20 minSize (unverified)' if target == 'fs20' else 'FS24 minSize')

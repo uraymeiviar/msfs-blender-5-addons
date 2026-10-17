@@ -372,7 +372,20 @@ evaluated geometry in metres, and a part includes all of its exported descendant
     for obj in objects:
         evaluated = obj.evaluated_get(depsgraph)
         points = []
-        if evaluated.type in {'MESH', 'CURVE', 'SURFACE', 'FONT', 'META', 'VOLUME'}:
+        if evaluated.type == 'MESH':
+            # The exported mesh, not bound_box: Geometry Nodes output that to_mesh() drops (instances, curves) still
+            # widens bound_box, up to 1 m on E2 cockpit parts, which made the diameter 6 % too large
+            mesh = evaluated.to_mesh()
+            try:
+                if mesh is not None and len(mesh.vertices):
+                    co = np.empty(len(mesh.vertices) * 3)
+                    mesh.vertices.foreach_get('co', co)
+                    world = np.array(evaluated.matrix_world)
+                    co = (co.reshape(-1, 3) @ world[:3, :3].T + world[:3, 3]) * scale
+                    points = [tuple(co.min(0)), tuple(co.max(0))]
+            finally:
+                evaluated.to_mesh_clear()
+        elif evaluated.type in {'CURVE', 'SURFACE', 'FONT', 'META', 'VOLUME'}:
             points = [tuple((evaluated.matrix_world @ Vector(corner)) * scale)
                       for corner in evaluated.bound_box]
         own_bounds[obj] = _bounds(points)

@@ -132,6 +132,20 @@ class LodRulesTest(unittest.TestCase):
         self.assertEqual(lod.lod_from_screen_ratio(0.0001, table, 6), 5)
 
 
+    def test_effective_min_sizes_match_msfs_debug_lods(self):
+        # MSFS 2024 DevMode Debug LODs, E2 cockpit, Objects Level of Detail 100: vertex count (Lv) and MinSize
+        measured = [(1301804, 2.2783), (297763, 1.0913), (255253, 1.0105), (197011, 0.7880), (3099, 0.0124)]
+        table = [1.0, 0.0698, 0.0512, 0.0326, 0.00745]
+        effective = lod.effective_min_sizes(table, [v for v, _ in measured], 1.0, 5)
+        for (vertices, expected), value in zip(measured, effective):
+            self.assertAlmostEqual(value, expected, places=3, msg=vertices)
+        # The XML value wins where it is larger than what the vertex count needs
+        self.assertEqual(lod.effective_min_sizes([0.5], [3000], 1.0, 1), [0.5])
+        # Selection with effective values: at 34 % only the light last LOD qualifies
+        self.assertEqual(lod.lod_from_screen_ratio(0.3444, effective, 5), 4)
+        self.assertEqual(lod.lod_from_screen_ratio(1.1445, effective, 5), 1)
+        self.assertEqual(lod.lod_from_screen_ratio(3.3861, effective, 5), 0)
+
 if __name__ == '__main__':
     unittest.main()
 

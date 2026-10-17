@@ -178,6 +178,16 @@ def screen_ratio(diameter, distance, fov_y):
     return min(10.0, (0.5 * diameter) / (distance * tan_half))
 
 
+def effective_min_sizes(table, vertex_counts, factor=1.0, write_count=7):
+    """Screen size from which MSFS shows each written LOD: the larger of its minSize and the size its vertex count
+    needs on the curve (measured in DevMode Debug LODs at Objects Level of Detail 100). vertex_counts are scaled by
+    factor to MSFS's own count, which differs from the exported file. The last LOD stays MSFS's fallback (see
+    lod_from_screen_ratio)."""
+    count = max(1, min(len(table), write_count))
+    return [max(table[level], lowest_screen_size_from_vcount(int(vertex_counts[level] * factor)))
+            for level in range(count)]
+
+
 def lod_from_screen_ratio(ratio, table, write_count=7):
     """Pick the active LOD level from a vertical screen ratio and minSize table.
 
