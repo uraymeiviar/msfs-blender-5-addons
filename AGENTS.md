@@ -97,6 +97,11 @@ tools\deploy.bat -Addons fss_blender_tools
   `parent_type = 'OBJECT'` and `parent_bone = ""` (Blender's Ctrl+P does).
 - **Names:** Blender appends `.001` when a name is taken; in the multi-exporter, names come from
   `msfs_original_name`, in the plain exporter from the object names.
+- **Garbled home folder:** Blender creates `.thumbnails/` under its home folder. Started with a broken environment
+  (a `HOME` / `USERPROFILE` value in the wrong encoding, or one set relative to the current folder), it creates
+  folders with garbage names in the current folder, here the repository root (seen on 20261017: 23 of them). Start
+  Blender with the normal user environment, or from a scratch folder; after a test run, check that `ls` of the
+  repository root shows only the known folders, and remove leftover empty ones.
 - **Batch files:** on machines with `NoDefaultCurrentDirectoryInExePath` set, run `.bat` files by full path, or with
   `cmd /c "set NoDefaultCurrentDirectoryInExePath=&& ..."`.
 
