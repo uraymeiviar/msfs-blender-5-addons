@@ -363,6 +363,7 @@ class FSS_LodHintItem(bpy.types.PropertyGroup):
         ('CONTRIBUTOR', 'Largest Contributor', ''),
         ('LOOSE_PIECES', 'Loose Pieces Below Cut-off', ''),
         ('NEAR_CUTOFF', 'Near Cut-off', ''),
+        ('FAR_NODE', 'Origin Outside the Geometry', ''),
     ])
     object_name: bpy.props.StringProperty()
     vertices: bpy.props.IntProperty()
@@ -387,7 +388,10 @@ class FSS_LodSettings(bpy.types.PropertyGroup):
         description='0 uses the measured model diameter; set the diameter of the whole model when this .blend is '
                     'merged into a bigger one at runtime (wings, winglets)')
     measured_diameter: bpy.props.FloatProperty(name='Measured Diameter', min=0, subtype='DISTANCE', unit='LENGTH',
-        description='Diameter of the sphere enclosing LOD00, measured by the last Refresh LOD Counts')
+        description='Diameter of the sphere MSFS uses for LOD selection: LOD00 geometry and every object origin, '
+                    'measured by the last Refresh LOD Counts')
+    mesh_diameter: bpy.props.FloatProperty(name='Geometry Diameter', min=0, subtype='DISTANCE', unit='LENGTH',
+        description='Diameter of the sphere enclosing LOD00 geometry only, measured by the last Refresh LOD Counts')
     lowest_cutoff: bpy.props.FloatProperty(name='Smallest Part Kept', min=0, subtype='DISTANCE', unit='LENGTH',
         get=_get_lowest_cutoff, set=_set_lowest_cutoff, precision=1, step=10,
         description='Parts smaller than this are hidden from the lowest-detail LOD; every other LOD hides '
@@ -432,6 +436,7 @@ class FSS_OT_LodRefresh(bpy.types.Operator):
             settings.resolved_table = plan['table']
             settings.write_count = plan['write_count']
             settings.measured_diameter = plan['own_diameter']
+            settings.mesh_diameter = plan['mesh_diameter']
             settings.vertex_estimates = [s['vertices'] for s in stats['lods']]
             settings.quotas = [s['quota'] for s in stats['lods']]
             settings.quota_percents = [s['percent'] for s in stats['lods']]
@@ -439,6 +444,12 @@ class FSS_OT_LodRefresh(bpy.types.Operator):
             settings.dropped_pieces = [s['dropped_pieces'] for s in stats['lods']]
             settings.dropped_vertices = [s['dropped_vertices'] for s in stats['lods']]
             settings.hints.clear()
+            for obj_name, outside in plan['far_nodes']:
+                item = settings.hints.add()
+                item.lod_level = 0
+                item.kind = 'FAR_NODE'
+                item.object_name = obj_name
+                item.size_m = outside
             for s in stats['lods'][:plan['write_count']]:
                 level = s['level']
                 for obj_name, verts, is_group in s['contributors']:
@@ -786,6 +797,18 @@ class FSS_PT_LodExport(bpy.types.Panel):
         layout.prop(settings, 'model_type')
         if settings.measured_diameter > 0:
             layout.label(text=f'Model diameter: {format_length(settings.measured_diameter)} (measured at Refresh)')
+            far = [h for h in settings.hints if h.kind == 'FAR_NODE']
+            if far:
+                # MSFS's LOD sphere encloses every node: far origins move and enlarge it, so LODs switch elsewhere
+                box = layout.box()
+                box.label(text=f'{len(far)} origins outside the geometry: LOD sphere '
+                               f'{format_length(settings.mesh_diameter)} -> {format_length(settings.measured_diameter)}',
+                          icon='ERROR')
+                for h in far[:5]:
+                    r = box.row(align=True)
+                    r.label(text=f'{h.object_name}: {format_length(h.size_m)} outside')
+                    r.operator('fss.lod_select_hint', text='', icon='RESTRICT_SELECT_OFF').object_name = h.object_name
+                box.label(text='Move these origins into the geometry, or the empties out of this model')
         else:
             layout.label(text='Model diameter: not measured yet, press Refresh LOD Counts', icon='INFO')
         layout.prop(settings, 'reference_size')

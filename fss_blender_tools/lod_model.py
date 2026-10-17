@@ -49,6 +49,30 @@ def _diameter(bound):
     return (Vector(bound[1]) - Vector(bound[0])).length if bound is not None else 0.0
 
 
+FAR_NODE_MARGIN = 0.05  # metres outside the mesh box before a node position is reported
+
+
+def _node_positions(obj, scale):
+    """World positions (m) of the glTF nodes an object exports: its origin, plus the bone heads of an armature."""
+    points = [tuple(obj.matrix_world.translation * scale)]
+    if obj.type == 'ARMATURE':
+        points += [tuple((obj.matrix_world @ bone.head) * scale) for bone in obj.pose.bones]
+    return points
+
+
+def _far_nodes(positions, mesh_bounds):
+    """(object name, metres outside the mesh box) for node positions beyond FAR_NODE_MARGIN, farthest first."""
+    if mesh_bounds is None:
+        return []
+    lo, hi = Vector(mesh_bounds[0]), Vector(mesh_bounds[1])
+    far = []
+    for name, points in positions.items():
+        outside = max(Vector([max(lo[i] - p[i], p[i] - hi[i], 0.0) for i in range(3)]).length for p in points)
+        if outside > FAR_NODE_MARGIN:
+            far.append((name, outside))
+    return sorted(far, key=lambda item: -item[1])
+
+
 def mesh_pieces(evaluated_obj, mesh, scale):
     """Connected components of an evaluated mesh and their largest world dimensions in metres.
 
@@ -417,7 +441,11 @@ evaluated geometry in metres, and a part includes all of its exported descendant
                                    tuple(outside)))
     initial = lod_rules.decide(parts, 0, 0, lod_rules.DEFAULT_MIN_SIZES)
     lod0_bounds = _union([own_bounds[obj] for obj in objects if obj.name in initial.present])
-    own_diameter = _diameter(lod0_bounds)
+    # MSFS's LOD sphere also encloses every node position (measured, journal Session 17): one far origin moves
+    # the sphere centre and enlarges it for every LOD
+    positions = {obj.name: _node_positions(obj, scale) for obj in objects if obj.name in initial.present}
+    sphere_bounds = _union([lod0_bounds] + [_bounds(points) for points in positions.values()])
+    own_diameter = _diameter(sphere_bounds)
     diameter = reference if reference is not None else (settings.reference_size or own_diameter)
     table = lod_rules.min_sizes(settings.model_type,
                                (settings.explicit_fs20 or settings.explicit_fs24) if target == 'fs20'
@@ -429,7 +457,8 @@ evaluated geometry in metres, and a part includes all of its exported descendant
                                 model_type=settings.model_type) for level in range(7)]
     return {'parts': parts, 'decisions': decisions, 'diameter': diameter, 'own_diameter': own_diameter,
             'table': table, 'target': target, 'model_type': settings.model_type,
-            'bounds': lod0_bounds, 'write_count': lod_rules.written_lod_count(decisions)}
+            'bounds': sphere_bounds, 'mesh_diameter': _diameter(lod0_bounds),
+            'far_nodes': _far_nodes(positions, lod0_bounds), 'write_count': lod_rules.written_lod_count(decisions)}
 
 
 def begin_export(context, plan, level):
