@@ -206,7 +206,11 @@ class glTF2ExportUserExtension:
     # (see instancing.py); restored after the export
     def pre_export_hook(self, export_settings):
         from . import instancing
+        from .io.exp import gltf_exporter_patches
         self._instancing = instancing.prepare(export_settings)
+        # Throwaway objects only (their changes are discarded): one scene evaluation instead of one per object
+        gltf_exporter_patches.assign_linked_materials(
+            obj for obj in bpy.context.scene.objects if bpy.app.background or "msfs_original_name" in obj)
         hook = getattr(self._impl, "pre_export_hook", None)
         if hook:
             hook(export_settings)

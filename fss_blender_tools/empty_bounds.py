@@ -437,7 +437,9 @@ def register():
     )
     for cls in CLASSES:
         bpy.utils.register_class(cls)
-    bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph_update)
+    # Background Blender draws nothing; the handler only cost time there (25 s per cockpit export)
+    if not bpy.app.background:
+        bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph_update)
     for handlers in (bpy.app.handlers.frame_change_post, bpy.app.handlers.load_post, bpy.app.handlers.undo_post,
                      bpy.app.handlers.redo_post):
         handlers.append(_on_reset)

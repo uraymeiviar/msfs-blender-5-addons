@@ -545,6 +545,41 @@ def msfs_gather_mesh(vnode, blender_object, export_settings):
     finally:
         for index, material in swapped:
             blender_object.data.materials[index] = material
+
+
+def assign_linked_materials(objects):
+    """
+    The same fix as msfs_gather_mesh, done once for all throwaway objects before the gather: each swap in
+    msfs_gather_mesh changes mesh data, so Khronos' next evaluated_depsgraph_get() re-evaluates the whole scene
+    (589 objects of the E2 cockpit took 171 s). Only for objects whose changes are discarded after the export
+    (multi-exporter duplicates, background runs), so nothing is restored. A mesh shared by several objects is changed
+    only where every user shows the same material in that slot; other objects keep the per-object path.
+    """
+    changes = {}
+    for obj in objects:
+        if obj.type != "MESH" or not obj.modifiers or obj.data.library is not None:
+            continue
+        materials = obj.data.materials
+        for index, slot in enumerate(obj.material_slots):
+            if slot.link == "OBJECT" and index < len(materials) and materials[index] != slot.material:
+                changes.setdefault(obj.data, {}).setdefault(index, set()).add(slot.material)
+    users_of = {}
+    if changes:
+        for obj in bpy.data.objects:
+            if obj.data in changes:
+                users_of.setdefault(obj.data, []).append(obj)
+    assigned = 0
+    for mesh, slots in changes.items():
+        users = users_of[mesh]
+        for index, wanted in slots.items():
+            if len(wanted) != 1:
+                continue
+            material = next(iter(wanted))
+            if all(index < len(user.material_slots) and user.material_slots[index].material == material
+                   for user in users):
+                mesh.materials[index] = material
+                assigned += 1
+    return assigned
 # endregion
 
 
