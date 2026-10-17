@@ -183,7 +183,9 @@ class _Buffer:
 
     def __init__(self):
         self.positions, self.loop_starts, self.vertex_indices, self.material_indices = [], [], [], []
-        self.normals, self.uvs, self.colors = [], {}, []
+        # UV maps by position, not by name: MSFS materials address them by index (texCoord 0, 1), and members
+        # may name the same map differently. uv_names counts the corners using each name at each position.
+        self.normals, self.uvs, self.uv_names, self.colors = [], {}, {}, []
         self.vertex_count = self.loop_count = 0
         self.has_color = False
 
@@ -210,9 +212,11 @@ class _Buffer:
         lengths = np.linalg.norm(normals, axis=1, keepdims=True)
         self.normals.append((normals / np.where(lengths > 0, lengths, 1)).astype(np.float32))
 
-        for layer in mesh.uv_layers:
+        for index, layer in enumerate(mesh.uv_layers):
             values = _read(layer.uv, "vector", len(mesh.loops), 2, np.float32).reshape(-1, 2)[loops]
-            self.uvs.setdefault(layer.name, {})[len(self.positions) - 1] = values
+            self.uvs.setdefault(index, {})[len(self.positions) - 1] = values
+            names = self.uv_names.setdefault(index, {})
+            names[layer.name] = names.get(layer.name, 0) + len(loops)
 
         color = mesh.color_attributes.active_color
         if color is not None:
@@ -241,8 +245,10 @@ class _Buffer:
             mesh.materials.append(material)
         mesh.update(calc_edges=True)
 
-        for layer_name, parts in self.uvs.items():
-            layer = mesh.uv_layers.new(name=layer_name)
+        for index in sorted(self.uvs):
+            parts = self.uvs[index]
+            names = self.uv_names[index]
+            layer = mesh.uv_layers.new(name=max(names, key=names.get))
             values = np.concatenate([parts.get(index, np.zeros((len(self.normals[index]), 2), dtype=np.float32))
                                      for index in range(len(self.positions))])
             layer.uv.foreach_set("vector", values.ravel())
@@ -286,7 +292,7 @@ def merge_group(group, context, log):
     depsgraph = context.evaluated_depsgraph_get()
     inverse = root.matrix_world.inverted()
 
-    materials, material_users, kinds, uv_names = [], {}, {}, []
+    materials, material_users, kinds, uv_slots = [], {}, {}, []
     buffers = {}
 
     def to_global(material):
@@ -308,9 +314,7 @@ def merge_group(group, context, log):
             slot_globals = np.array([to_global(slots[i]) if i in used else 0 for i in range(len(slots))],
                                     dtype=np.int32)
             face_kinds = np.array([_material_kind(slots[i]) for i in face_materials])
-            for name in (layer.name for layer in mesh.uv_layers):
-                if name not in uv_names:
-                    uv_names.append(name)
+            _add_uv_names(uv_slots, mesh)
             for material in {slots[i] for i in used}:
                 source = source_material(material)
                 material_users.setdefault(source.name if source else "(none)", []).append(logical_name(obj))
@@ -385,9 +389,12 @@ def merge_group(group, context, log):
     if len(kinds) > 1:
         log(f"{root_name}: opaque and transparent parts found; transparent parts exported separately as "
             f"{target}_TRANSPARENT", warning=True)
-    if len(uv_names) > 2:
-        log(f"{root_name}: {len(uv_names)} UV map names ({', '.join(uv_names)}); the exporter keeps only two",
-            warning=True)
+    if len(uv_slots) > 2:
+        log(f"{root_name}: {len(uv_slots)} UV maps; the exporter keeps only two", warning=True)
+    for index, names in enumerate(uv_slots):
+        if len(names) > 1:
+            log(f"{root_name}: UV map {index + 1} is named differently by its members ({', '.join(names)}); "
+                f"merged by position", warning=True)
     return new_objects
 
 
@@ -482,7 +489,7 @@ class glTF2ExportUserExtension:
 
 def _group_summary(group):
     """Counts shown in the Merge Groups tree, from the original objects (no evaluation, cheap)."""
-    materials, kinds, uv_names = [], set(), []
+    materials, kinds, uv_slots = [], set(), []
     for obj in group.members:
         for slot in obj.material_slots:
             material = source_material(slot.material)
@@ -490,13 +497,20 @@ def _group_summary(group):
                 materials.append(material)
                 kinds.add(_material_kind(material))
         if obj.type == 'MESH':
-            for layer in obj.data.uv_layers:
-                if layer.name not in uv_names:
-                    uv_names.append(layer.name)
+            _add_uv_names(uv_slots, obj.data)
     reasons = {}
     for _obj, reason in group.skipped:
         reasons[reason] = reasons.get(reason, 0) + 1
-    return materials, kinds, uv_names, reasons
+    return materials, kinds, ["/".join(names) for names in uv_slots], reasons
+
+
+def _add_uv_names(uv_slots, mesh):
+    """Adds the mesh's UV map names to uv_slots, a list of name lists by map position."""
+    for index, layer in enumerate(mesh.uv_layers):
+        if index == len(uv_slots):
+            uv_slots.append([])
+        if layer.name not in uv_slots[index]:
+            uv_slots[index].append(layer.name)
 
 
 def _on_tree_active(settings, context):
@@ -711,7 +725,7 @@ class FSS_PT_Merge(bpy.types.Panel):
                 if item.transparent:
                     column.label(text=f"Transparent parts become {item.name}_TRANSPARENT", icon='ERROR')
                 if item.uv_names:
-                    uv_icon = 'ERROR' if item.uv_names.count(",") >= 2 else 'GROUP_UVS'
+                    uv_icon = 'ERROR' if item.uv_names.count(",") >= 2 or "/" in item.uv_names else 'GROUP_UVS'
                     column.label(text=f"UV maps: {item.uv_names}", icon=uv_icon)
                 column.label(text=f"Kept separate: {item.kept}", icon='OUTLINER_OB_GROUP_INSTANCE')
                 if item.reasons:
