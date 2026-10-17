@@ -25,7 +25,7 @@ install them into their own Blender.
   release comes in as a per-file three-way merge of the fork's change (old release to new release), committed as
   `merge: Asobo exporter <version>` with the hand-resolved conflicts listed (see commit ab96b86 for 8.4.1).
 - Keep FSS changes in FSS-owned modules so those merges stay small: `instancing.py`, `migration.py`,
-  `legacy_normals.py`, `msfs2020_target.py`, `io/exp/gltf_exporter_patches.py`, and marked spots in
+  `legacy_normals.py`, `msfs2020_target.py`, `fss_workflow_ui.py`, `io/exp/gltf_exporter_patches.py`, and marked spots in
   `io/exp/multi_export.py`.
 - Line endings differ between Asobo's files and checkouts with `core.autocrlf`; normalize before merging, or a merge
   shows whole files as conflicts.

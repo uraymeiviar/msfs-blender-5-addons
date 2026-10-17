@@ -54,10 +54,20 @@ class MSFS2024AddonPrefs(bpy.types.AddonPreferences):
         soft_max=20000.0,
     )  # type: ignore
 
+    show_asobo_export_workflow: bpy.props.BoolProperty(
+        name="Show Asobo export workflow",
+        description=(
+            "Show the Asobo Multi-Exporter Hierarchy tab, LOD Tools panel, and settings "
+            "that FSS deploy scripts override"
+        ),
+        default=False,
+    )  # type: ignore
+
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "make_relative_on_save")
         layout.prop(self, "msfs2020_emissive_reference")
+        layout.prop(self, "show_asobo_export_workflow")
 
 def get_addon_prefs():
     addon_name = __package__
@@ -96,6 +106,8 @@ def register():
     # After the MSFS 2024 registration: only adds what MSFS 2024 does not define
     from . import msfs2020_target
     msfs2020_target.register_target()
+    from . import fss_workflow_ui
+    fss_workflow_ui.register_workflow_ui()
     from io_scene_gltf2_msfs_fss.blender import msfs_handlers
     if not msfs_handlers.are_handlers_disabled():
         # disabled during during subprocess export
@@ -107,6 +119,8 @@ def unregister():
         bpy.utils.unregister_class(MSFS2024AddonPrefs)
     except:
         pass
+    from . import fss_workflow_ui
+    fss_workflow_ui.unregister_workflow_ui()
     from . import msfs2020_target
     msfs2020_target.unregister_target()
     RG.unregister()
