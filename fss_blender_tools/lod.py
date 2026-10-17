@@ -320,7 +320,7 @@ def _draw_lod_sphere():
     settings = context.scene.fss_lod_settings
     scale = context.scene.unit_settings.scale_length
     lo, hi = Vector(settings.sphere_box[:3]) / scale, Vector(settings.sphere_box[3:]) / scale
-    center, radius = (lo + hi) / 2, (hi - lo).length / 2
+    center, radius = (lo + hi) / 2, (settings.lod_diameter or settings.measured_diameter) / 2 / scale
     axes = [Vector(axis) for axis in ((1, 0, 0), (0, 1, 0), (0, 0, 1))]
     groups = [(_SPHERE_COLOR, 2.0, _box_lines(lo, hi)),
               (_SPHERE_COLOR, 1.0, [p for u, v in ((0, 1), (0, 2), (1, 2))
@@ -360,7 +360,9 @@ def _draw_lod_sphere_labels():
     if position is not None:
         blf.position(0, position.x + 8, position.y + 4, 0)
         blf.color(0, *_SPHERE_COLOR)
-        blf.draw(0, f'LOD sphere centre, radius {format_length(settings.measured_diameter / 2)}')
+        radius = (settings.lod_diameter or settings.measured_diameter) / 2
+        padded = ' (padded)' if settings.lod_diameter > settings.measured_diameter + .01 else ''
+        blf.draw(0, f'LOD sphere centre, radius {format_length(radius)}{padded}')
     for h in _sphere_faces(settings):
         position = location_3d_to_region_2d(context.region, context.region_data, Vector(h.point) / scale)
         if position is None:
@@ -368,6 +370,11 @@ def _draw_lod_sphere_labels():
         blf.position(0, position.x + 8, position.y + 4, 0)
         blf.color(0, *(_ORIGIN_COLOR if h.from_origin else _VERTEX_COLOR))
         blf.draw(0, f'{h.face} {h.object_name} ({"origin" if h.from_origin else "vertex"})')
+
+
+def _reference_changed(settings, context):
+    settings.lod_diameter = 0.0
+    _settings_changed(settings, context)
 
 
 def _settings_changed(settings, context):
@@ -399,18 +406,18 @@ def last_lod(settings):
 def cutoff_context(settings):
     """(diameter, minSize table) behind the size cut-offs, or (None, reason) when they cannot be computed yet.
 
-    Uses the same inputs as lod_model.build_plan: the override diameter, else the diameter measured at the last
-    Refresh, and the minSize table of the preview target.
+    Uses the same inputs as lod_model.build_plan: the LOD sphere diameter MSFS will use (padded or measured) from
+    the last Refresh, and the minSize table of the preview target.
     """
     measured = settings.measured_diameter
-    diameter = settings.reference_size or measured
+    diameter = settings.lod_diameter or max(settings.reference_size, measured)
     if diameter <= 0 or (settings.model_type == 'INTERIOR' and measured <= 0):
         return None, 'Press Refresh LOD Counts to measure the model'
     target = settings.preview_target
     explicit = getattr(settings, 'explicit_' + target) or (target == 'fs20' and settings.explicit_fs24)
     try:
         table = lod_rules.min_sizes(settings.model_type, explicit, getattr(settings, 'min_sizes_' + target),
-                                    measured or diameter, settings.exterior_diameter, target)
+                                    diameter, settings.exterior_diameter, target)
     except ValueError as error:
         return None, str(error)
     return (diameter, table), ''
@@ -475,10 +482,13 @@ class FSS_LodSettings(bpy.types.PropertyGroup):
     explicit_fs24: bpy.props.BoolProperty(default=False)
     explicit_fs20: bpy.props.BoolProperty(default=False)
     exterior_diameter: bpy.props.FloatProperty(name='Exterior Diameter (m)', min=0, update=_settings_changed)
-    reference_size: bpy.props.FloatProperty(name='Override Diameter', min=0, subtype='DISTANCE', unit='LENGTH',
-        update=_settings_changed,
-        description='0 uses the measured model diameter; set the diameter of the whole model when this .blend is '
-                    'merged into a bigger one at runtime (wings, winglets)')
+    reference_size: bpy.props.FloatProperty(name='LOD Sphere Diameter', min=0, subtype='DISTANCE', unit='LENGTH',
+        update=_reference_changed,
+        description='0 uses the measured LOD sphere. A larger value pads the sphere MSFS uses for LOD selection to '
+                    'this diameter around the geometry centre at export (invisible corner points): MSFS sees the '
+                    'model larger, so every LOD holds to a larger distance. Tables, cut-offs and viewport LOD use it')
+    lod_diameter: bpy.props.FloatProperty(name='LOD Sphere', min=0, subtype='DISTANCE', unit='LENGTH',
+        description='Diameter of the sphere MSFS will use after export (padded or measured), from the last Refresh')
     measured_diameter: bpy.props.FloatProperty(name='Measured Diameter', min=0, subtype='DISTANCE', unit='LENGTH',
         description='Diameter of the sphere MSFS uses for LOD selection: LOD00 geometry and every object origin, '
                     'measured by the last Refresh LOD Counts')
@@ -532,6 +542,7 @@ class FSS_OT_LodRefresh(bpy.types.Operator):
             settings.write_count = plan['write_count']
             settings.measured_diameter = plan['own_diameter']
             settings.mesh_diameter = plan['mesh_diameter']
+            settings.lod_diameter = plan['diameter']
             if plan['bounds'] is not None:
                 settings.sphere_box = (*plan['bounds'][0], *plan['bounds'][1])
                 settings.mesh_box = (*plan['mesh_bounds'][0], *plan['mesh_bounds'][1])
@@ -927,6 +938,18 @@ class FSS_PT_LodExport(bpy.types.Panel):
         else:
             layout.label(text='Model diameter: not measured yet, press Refresh LOD Counts', icon='INFO')
         layout.prop(settings, 'reference_size')
+        if settings.reference_size > 0 and settings.measured_diameter > 0:
+            if settings.reference_size <= settings.mesh_diameter:
+                layout.label(text=f'Not larger than the geometry sphere ({format_length(settings.mesh_diameter)}): '
+                                  f'no padding', icon='ERROR')
+            elif not settings.lod_diameter:
+                layout.label(text='Press Refresh LOD Counts to apply', icon='INFO')
+            elif settings.lod_diameter > settings.reference_size + .01:
+                layout.label(text=f'Origins outside the padding: MSFS uses {format_length(settings.lod_diameter)}',
+                             icon='ERROR')
+            else:
+                layout.label(text=f'Export pads the LOD sphere: MSFS sees the model '
+                                  f'{settings.lod_diameter / settings.mesh_diameter:.2f}x larger', icon='INFO')
         if settings.model_type == 'INTERIOR':
             layout.prop(settings, 'exterior_diameter')
             target = settings.preview_target

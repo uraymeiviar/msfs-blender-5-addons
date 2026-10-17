@@ -50,6 +50,16 @@ def _diameter(bound):
 
 
 FAR_NODE_MARGIN = 0.05  # metres outside the mesh box before a node position is reported
+PADDING_NAME = 'FSS_LOD_PADDING'
+PADDING_TRIANGLE = 0.001  # metres, leg length of the corner triangles
+
+
+def _sphere_diameter(bound, coords):
+    """MSFS's LOD sphere (measured, journal Session 19): centred on the box, radius to the farthest point."""
+    if bound is None:
+        return 0.0
+    center = (np.array(bound[0]) + np.array(bound[1])) / 2
+    return 2.0 * max(float(np.sqrt(((c - center) ** 2).sum(1)).max()) for c in coords if len(c))
 
 
 def _node_positions(obj, scale):
@@ -401,6 +411,7 @@ evaluated geometry in metres, and a part includes all of its exported descendant
     scale = scene.unit_settings.scale_length
     own_bounds = {}
     own_points = {}
+    own_coords = {}
     for obj in objects:
         evaluated = obj.evaluated_get(depsgraph)
         points = []
@@ -416,6 +427,7 @@ evaluated geometry in metres, and a part includes all of its exported descendant
                     co = (co.reshape(-1, 3) @ world[:3, :3].T + world[:3, 3]) * scale
                     # The extreme vertex per box face (their bound is the mesh bound), to show which vertex sets it
                     points = [tuple(map(float, co[pick(co[:, i])])) for i in range(3) for pick in (np.argmin, np.argmax)]
+                    own_coords[obj] = co
             finally:
                 evaluated.to_mesh_clear()
         elif evaluated.type in {'CURVE', 'SURFACE', 'FONT', 'META', 'VOLUME'}:
@@ -423,6 +435,8 @@ evaluated geometry in metres, and a part includes all of its exported descendant
                       for corner in evaluated.bound_box]
         own_points[obj] = points
         own_bounds[obj] = _bounds(points)
+        if obj not in own_coords and points:
+            own_coords[obj] = np.array(points)
     subtree = {}
 
     def bounds(obj):
@@ -456,21 +470,39 @@ evaluated geometry in metres, and a part includes all of its exported descendant
     # the sphere centre and enlarges it for every LOD
     positions = {obj.name: _node_positions(obj, scale) for obj in present}
     sphere_bounds = _union([lod0_bounds] + [_bounds(points) for points in positions.values()])
-    own_diameter = _diameter(sphere_bounds)
+    coords = [own_coords[obj] for obj in present if obj in own_coords]
+    own_diameter = _sphere_diameter(sphere_bounds, coords + [np.array(points) for points in positions.values()])
     candidates = ([(obj.name, 'vertex', point) for obj in present for point in own_points[obj]]
                   + [(name, 'origin', point) for name, points in positions.items() for point in points])
-    diameter = reference if reference is not None else (settings.reference_size or own_diameter)
+    # The LOD sphere diameter pads MSFS's sphere at export (decision 31): a box around the geometry centre whose
+    # corners lie on that sphere. Origins inside the box no longer matter; one outside still widens the sphere.
+    mesh_diameter = _sphere_diameter(lod0_bounds, coords)
+    padding = None
+    if reference is not None:
+        diameter = reference
+    elif settings.reference_size > mesh_diameter and lod0_bounds is not None:
+        lo, hi = Vector(lod0_bounds[0]), Vector(lod0_bounds[1])
+        half = (hi - lo) / 2 if (hi - lo).length > 0 else Vector((1.0, 1.0, 1.0))
+        half *= settings.reference_size / 2 / half.length
+        padding = (tuple((lo + hi) / 2), tuple(half))
+        corners = [tuple(Vector(padding[0]) + Vector((sx * half.x, sy * half.y, sz * half.z)))
+                   for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)]
+        sphere_bounds = _union([sphere_bounds, _bounds(corners)])
+        diameter = _sphere_diameter(sphere_bounds, coords + [np.array(points) for points in positions.values()]
+                                    + [np.array(corners)])
+    else:
+        diameter = own_diameter
     table = lod_rules.min_sizes(settings.model_type,
                                (settings.explicit_fs20 or settings.explicit_fs24) if target == 'fs20'
                                else settings.explicit_fs24,
                                settings.min_sizes_fs20 if target == 'fs20' else settings.min_sizes_fs24,
-                               own_diameter, settings.exterior_diameter, target)
+                               diameter, settings.exterior_diameter, target)
     decisions = [lod_rules.decide(parts, level, diameter, table,
                                 screen_height=settings.screen_height, threshold=settings.pixel_threshold,
                                 model_type=settings.model_type) for level in range(7)]
     return {'parts': parts, 'decisions': decisions, 'diameter': diameter, 'own_diameter': own_diameter,
             'table': table, 'target': target, 'model_type': settings.model_type,
-            'bounds': sphere_bounds, 'mesh_bounds': lod0_bounds, 'mesh_diameter': _diameter(lod0_bounds),
+            'bounds': sphere_bounds, 'mesh_bounds': lod0_bounds, 'mesh_diameter': mesh_diameter, 'padding': padding,
             'extremes': _box_extremes(candidates) if candidates else [],
             'far_nodes': _far_nodes(positions, lod0_bounds), 'write_count': lod_rules.written_lod_count(decisions)}
 
@@ -492,6 +524,33 @@ def begin_export(context, plan, level):
             if obj.name in absent:
                 obj.hide_set(True, view_layer=view_layer)
         view_layer.update()
+    if plan.get('padding'):
+        add_padding(context, plan['padding'])
+
+
+def add_padding(context, padding):
+    """Pad MSFS's LOD sphere (decision 31): eight tiny invisible triangles at the corners of the padding box, no
+    surface around the model and no collision tag (journal Session 19). The driver reloads the source .blend
+    before every LOD, so the object never reaches the artist's file."""
+    scale = context.scene.unit_settings.scale_length
+    center, half = Vector(padding[0]) / scale, Vector(padding[1]) / scale
+    leg = PADDING_TRIANGLE / scale
+    vertices, faces = [], []
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            for sz in (-1, 1):
+                corner = Vector((sx * half.x, sy * half.y, sz * half.z))
+                faces.append((len(vertices), len(vertices) + 1, len(vertices) + 2))
+                vertices += [corner, corner - Vector((sx * leg, 0, 0)), corner - Vector((0, sy * leg, 0))]
+    mesh = bpy.data.meshes.new(PADDING_NAME)
+    mesh.from_pydata(vertices, [], faces)
+    material = bpy.data.materials.new(PADDING_NAME)
+    material.msfs_material_type = 'msfs_invisible'
+    mesh.materials.append(material)
+    obj = bpy.data.objects.new(PADDING_NAME, mesh)
+    obj.location = center
+    context.scene.collection.objects.link(obj)
+    context.view_layer.update()
 
 
 def end_export(context):
@@ -580,6 +639,8 @@ def cull_export(context, exported, log):
     kept = []
     for obj in candidates:
         name = obj.get('msfs_original_name', obj.name)
+        if name == PADDING_NAME:
+            continue
         if name not in decision.present:
             obj.select_set(False)
             obj.hide_set(True)
