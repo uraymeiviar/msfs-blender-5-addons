@@ -16,7 +16,7 @@ A = dict(objects='', out='results2', soft='30', thr='1.25', method='ANGLE_BASED'
          tree='0', visibility='0', borders='0', strips='0', frames='0', tree_faces='512', phase='benchmark', keep_trials='0',
          shape_accept='0', shape_p95='1.10', shape_max='1.5', shape_tiny='0.001', shape_planar='1.02', shape_planar_deg='10.0',
          fold_rule='0', fold_angle='45.0', fold_conformal='1.05', fold_max='1.5', fold_border_fix='0',
-         wall_cuts='0', straighten='0', align='0')
+         wall_cuts='0', straighten='0', align='0', frame_protect='0')
 for i in range(0, len(argv), 2):
     A[argv[i].lstrip('-')] = argv[i + 1]
 if 'shape' in A and 'shape_accept' not in [argv[i].lstrip('-') for i in range(0, len(argv), 2)]:
@@ -37,6 +37,12 @@ if 'align_islands' in A and 'align' not in [argv[i].lstrip('-') for i in range(0
     A['align'] = A['align_islands']
 if 'alignment' in A and 'align' not in [argv[i].lstrip('-') for i in range(0, len(argv), 2)]:
     A['align'] = A['alignment']
+if 'protect_frames' in A and 'frame_protect' not in [argv[i].lstrip('-') for i in range(0, len(argv), 2)]:
+    A['frame_protect'] = A['protect_frames']
+if 'frame_protection' in A and 'frame_protect' not in [argv[i].lstrip('-') for i in range(0, len(argv), 2)]:
+    A['frame_protect'] = A['frame_protection']
+if 'protect_folded_frames' in A and 'frame_protect' not in [argv[i].lstrip('-') for i in range(0, len(argv), 2)]:
+    A['frame_protect'] = A['protect_folded_frames']
 if A['phase'] not in ('benchmark', 'seams'):
     raise ValueError('--phase must be benchmark or seams')
 if A['phase'] == 'seams':
@@ -880,6 +886,9 @@ def run_proto2(obj):
     st.update(smooth_moved=moved, smooth_reverted_faces=reverted_faces, smooth_rounds=rounds, smooth_full_revert=full_revert)
     tm['smooth'] = time.perf_counter() - t
 
+    wall_box_charts = set()
+    wall_box_faces = set()
+
     # Round 5 Package 7: wall corner cuts (Session 7 item 1)
     if A['wall_cuts'] == '1':
         t_wc = time.perf_counter()
@@ -932,21 +941,25 @@ def run_proto2(obj):
                     seam[e] = True
                     bm.edges[e].seam = True
                 wall_cuts_applied += 1
+                wall_box_faces.update(fl)
                 sub_comps = components(fl, lambda e: not forced[e] and e not in corner_edges)
                 if len(sub_comps) > 1:
                     for i, pc in enumerate(sub_comps):
                         pc = sorted(pc)
                         if i == 0:
                             charts[c] = set(pc); fc[pc] = c; verified[c] = d_new
+                            wall_box_charts.add(c)
                             if A['keep_trials'] == '1':
                                 chart_uv[c] = (tuple(pc), U[np.searchsorted(fl, pc)])
                         else:
                             new_c = nid[0]; nid[0] += 1
                             charts[new_c] = set(pc); fc[pc] = new_c; verified[new_c] = d_new
+                            wall_box_charts.add(new_c)
                             if A['keep_trials'] == '1':
                                 chart_uv[new_c] = (tuple(pc), U[np.searchsorted(fl, pc)])
                 else:
                     verified[c] = d_new
+                    wall_box_charts.add(c)
                     if A['keep_trials'] == '1':
                         chart_uv[c] = (tuple(fl), U)
             else:
@@ -1133,9 +1146,12 @@ def run_proto2(obj):
         c_, s_ = np.cos(ang), np.sin(ang)
         x = H[None, :, 0] * c_[:, None] + H[None, :, 1] * s_[:, None]; y = -H[None, :, 0] * s_[:, None] + H[None, :, 1] * c_[:, None]
         return float(a / max(((x.max(1) - x.min(1)) * (y.max(1) - y.min(1))).min(), 1e-30))
-    fills_before = []
+    frame_protected_skipped = 0
     for c in list(charts.keys()):
         if time.perf_counter() - T0 > BUDGET * 2.5: break
+        if A['frame_protect'] == '1' and (c in wall_box_charts or bool(charts[c] & wall_box_faces)):
+            frame_protected_skipped += 1
+            continue
         fl = sorted(charts[c]); S = charts[c]
         if len(fl) < 8: continue
         bed = list(set(e for f in fl for e in face_edges[f] if sum(1 for x in e_faces[e] if x in S) == 1))
@@ -1240,7 +1256,8 @@ def run_proto2(obj):
                 charts[nid[0]] = set(pc); fc[pc] = nid[0]; per[nid[0]] = (d1, m1, False); nid[0] += 1
         if k == 1: ring_ok += 1
         else: frame_ok += 1
-    st.update(ringframe_tried=ring_tried, ring_cut_ok=ring_ok, frame_cut_ok=frame_ok)
+    st.update(ringframe_tried=ring_tried, ring_cut_ok=ring_ok, frame_cut_ok=frame_ok,
+              frame_protected_skipped=frame_protected_skipped)
     tm['ringframe'] = time.perf_counter() - t
 
     # Round 5 Package 8: straightening (quad strips and grids)
@@ -1302,13 +1319,14 @@ def run_proto2(obj):
         pack()
     tm['pack'] = time.perf_counter() - t
     bpy.ops.object.mode_set(mode='OBJECT')
-    st['options'] = {k: A[k] for k in ('tree', 'visibility', 'borders', 'strips', 'frames', 'tree_faces', 'keep_trials', 'shape_accept', 'fold_rule', 'fold_border_fix', 'wall_cuts', 'straighten', 'align')}
+    st['options'] = {k: A[k] for k in ('tree', 'visibility', 'borders', 'strips', 'frames', 'tree_faces', 'keep_trials', 'shape_accept', 'fold_rule', 'fold_border_fix', 'wall_cuts', 'straighten', 'align', 'frame_protect')}
     st.update(stats); st['stage_time'] = tm; st['time'] = time.perf_counter() - T0
     st.update(method=METHOD, soft_deg=float(A['soft']), thr=THR, shape_accept=A['shape_accept'],
               shape_p95=SHAPE_P95, shape_max=SHAPE_MAX, shape_tiny=SHAPE_TINY, shape_planar=SHAPE_PLANAR,
               fold_rule=A['fold_rule'], fold_angle=FOLD_ANGLE, fold_conformal=FOLD_CONFORMAL,
               fold_border_fix=A['fold_border_fix'],
-              wall_cuts=A['wall_cuts'], straighten=A['straighten'], align=A['align'])
+              wall_cuts=A['wall_cuts'], straighten=A['straighten'], align=A['align'],
+              frame_protect=A['frame_protect'])
     return TAG, st
 
 

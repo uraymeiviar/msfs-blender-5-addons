@@ -396,3 +396,70 @@ assert all(r['artist_seam_crossed_edges']==0 and r['offseam_split_edges']==0 and
 Package 2 validated all ten objects with zero seam crossings and zero off-seam
 cuts. Shape distortion, overlap, winding, texel quality and algorithm comparisons
 remain Package 3 work; a consistent seam map alone does not certify those properties.
+
+## 10. Round 5 Candidates Reproduction (Package 10)
+
+Round 5 Package 10 combines the prototype features developed in Packages 4 through 9
+into two candidate unwrap pipelines evaluated across all 17 objects (7 original cockpit
+components in `work3.blend` and 10 reference objects in `references.blend`).
+
+### Candidate Configurations
+
+All runs execute using `tests/uv_prototype/proto_blender_v5.py` with Blender 5.2.2 LTS
+in background mode (`-b`), evaluated via `uvmetrics.py` and `evaluate3_extra.py`.
+
+- **Candidate C1 (Wall Cuts + Frame Protection + Alignment):**
+  ```powershell
+  --keep_trials 1 --wall_cuts 1 --frame_protect 1 --frames 1 --align 1 --straighten 0 --shape_accept 0 --fold_rule 0 --fold_border_fix 0
+  ```
+- **Candidate C2 (Wall Cuts + Fold Rule + Fold Border Fix + Frame Protection + Alignment):**
+  ```powershell
+  --keep_trials 1 --wall_cuts 1 --fold_rule 1 --fold_border_fix 1 --frame_protect 1 --frames 1 --keep_trials 1 --align 1 --straighten 0 --shape_accept 0
+  ```
+
+### Switch Roles & Behavior
+
+| Switch | Default | Role in Code |
+| :--- | :---: | :--- |
+| `--keep_trials 1` | `0` | Preserves accepted per-chart unwrap coordinates; avoids bounding-box solver divergence and spurious repair splits. |
+| `--wall_cuts 1` | `0` | Detects recessed wall loops and bevels at planar boundaries, cutting 45° corner miters to fold walls outward as opened boxes. |
+| `--frame_protect 1` | `0` | Shields accepted wall-box charts from subsequent round-3/4 `ringframe` multi-hole lattice cutting, preserving large open frames intact. |
+| `--frames 1` | `0` | Enables Codex's round-4 frame weighting and multi-hole Dijkstra cuts on non-protected charts (prevents excessive cuts on ribbed floor plates). |
+| `--align 1` | `0` | Post-processes 2D island orientations by rotating dominant boundary edges to cardinal UV axes (0°, 90°, 180°, 270°). |
+| `--fold_rule 1` | `0` | Checks dihedral angles across candidate merges (>45°); rejects merges that introduce severe conformal distortion across hard folds. |
+| `--fold_border_fix 1` | `0` | Selectively unseams flat/smooth edges across rejected fold boundaries while keeping steep edges and normal splits as seams. |
+| `--straighten 0` | `0` | Stays disabled (ineffective on non-developable surfaces; caused triangle overlaps on `LEVER_FLAP_LOCK`). |
+| `--shape_accept 0` | `0` | Stays disabled pending size-dependent limits (Decision 39; fixed 1.10 threshold over-fragments small control knobs). |
+
+### Reproduction Commands
+
+Execute serially from the scratch working directory (e.g. `tests/_work/uv_shape/`),
+ensuring no other Blender instances are running:
+
+```powershell
+$B = "D:\fss-e2\tools\blender\blender.exe"
+$O_ORIG = "W_AUDIO_L_VOLUME_KNOB,W_TRIM_PANEL,W_LEVER_FLAP_LOCK,W_@MERGE_PEDESTAL_SHELL,W_COCKPIT_SHELL_L,W_COCKPIT_SHELL_FLOOR,W_OVERHEAD_SHELL"
+$O_REFS = "W_COCKPIT_REAR_OBS_SEAT_MOUNTING_FRAME,W_CIRCUIT_BREAKER_COVER_L,W_POWERPLANT_COVER_L,W_LEVER_FLAP,W_DISC_HANDLE_AILERON,W_EFB_HINGE_ARM_1,W_EFB_HINGE_CLAMP_ROTATOR,W_CCD_LEFT_ROTARY_OUTER,W_B_GS_AFCS_AP_BUTTON,W_EFB_HINGE_ROTATOR_2"
+
+# 1. Run Candidate C1 on original 7 objects and 10 reference objects
+& $B -b work3.blend --python proto_blender_v5.py -- --objects $O_ORIG --out candidate_c1 --tag c1 --tree 1 --visibility 1 --borders 1 --strips 1 --frames 1 --keep_trials 1 --wall_cuts 1 --frame_protect 1 --align 1 --straighten 0 --shape_accept 0 --fold_rule 0 --fold_border_fix 0
+& $B -b references.blend --python proto_blender_v5.py -- --objects $O_REFS --out candidate_c1 --tag c1 --tree 1 --visibility 1 --borders 1 --strips 1 --frames 1 --keep_trials 1 --wall_cuts 1 --frame_protect 1 --align 1 --straighten 0 --shape_accept 0 --fold_rule 0 --fold_border_fix 0
+
+# 2. Run Candidate C2 on original 7 objects and 10 reference objects
+& $B -b work3.blend --python proto_blender_v5.py -- --objects $O_ORIG --out candidate_c2 --tag c2 --tree 1 --visibility 1 --borders 1 --strips 1 --frames 1 --keep_trials 1 --wall_cuts 1 --frame_protect 1 --align 1 --straighten 0 --shape_accept 0 --fold_rule 1 --fold_border_fix 1
+& $B -b references.blend --python proto_blender_v5.py -- --objects $O_REFS --out candidate_c2 --tag c2 --tree 1 --visibility 1 --borders 1 --strips 1 --frames 1 --keep_trials 1 --wall_cuts 1 --frame_protect 1 --align 1 --straighten 0 --shape_accept 0 --fold_rule 1 --fold_border_fix 1
+```
+
+### Side-by-Side Image Generation
+
+To visually compare candidate UV unwraps against artist UV layouts without packer bias,
+repack the artist UVs (`__existing.npz`) using Blender's identical concave packing operator
+(`average_islands_scale()` followed by `pack_islands(shape_method='CONCAVE', margin=0.004, rotate_method='CARDINAL')`),
+then render the resulting UV meshes side-by-side using `matplotlib`:
+
+```powershell
+# In the venv:
+.\venv\Scripts\python.exe -I repack_artist_uvs.py
+.\venv\Scripts\python.exe -I generate_side_by_side_images.py
+```
+
