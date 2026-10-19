@@ -229,6 +229,8 @@ distortion in the stage log is not the final packed global area-distortion metri
 
 ## 8. Round 5 packing prototype (`pack_grid.py`)
 
+> **Corrected on 20261019 (journal Session 16):** the Blender comparison now keeps islands intact, uses the same margin and packs into one square (`scale=True`); `GridPacker1Tile` is the grid packer in one square for comparison; coarse masks are max-pooled; oversized islands shrink the whole set uniformly. The Session 15 numbers are superseded.
+
 `pack_grid.py` is the standalone research prototype for Phase 3 (packing across material texture sets),
 implementing coarse-to-fine nesting, directional alignment, density scaling, and stacking units.
 

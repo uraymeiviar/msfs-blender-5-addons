@@ -156,6 +156,16 @@ def scale_islands(islands, resolution, ppm, density_factors):
     return scaled
 
 
+def coarse_mask(mask_fine, S):
+    """Max-pool a fine mask into S x S cells: a cell is occupied if any of its pixels is. Islands are placed at cell
+    origins, so the fine mask's pixel (y, x) lands exactly in coarse cell (y // S, x // S): no pixel can be lost."""
+    h, w = mask_fine.shape
+    hc, wc = -(-h // S), -(-w // S)
+    padded = np.zeros((hc * S, wc * S), dtype=bool)
+    padded[:h, :w] = mask_fine
+    return padded.reshape(hc, S, wc, S).any(axis=(1, 3)).astype(np.uint8)
+
+
 def rasterize_island(uv_triangles, angle, R_res, r_margin):
     """Rasterize 2D island triangles into a binary mask with dilation."""
     ca, sa = np.cos(angle), np.sin(angle)
@@ -182,7 +192,7 @@ def rasterize_island(uv_triangles, angle, R_res, r_margin):
 
 
 def pack_grid(islands, resolution=4096, margin_px=8, overflow_mode='tiles',
-              directional_objs=None, coarse_step=None):
+              directional_objs=None, coarse_step=None, max_tiles=16):
     """
     Coarse-to-fine grid packer.
     Returns:
@@ -192,12 +202,14 @@ def pack_grid(islands, resolution=4096, margin_px=8, overflow_mode='tiles',
     """
     if directional_objs is None:
         directional_objs = set()
+    # Work on copies: the caller's islands are reused by the other packers and must keep their scale
+    islands = [dict(isl, uv=isl['uv'].copy()) for isl in islands]
 
     t_start = time.perf_counter()
 
     R = resolution
     M = margin_px
-    r_dil = max(1, M // 2)
+    r_dil = -(-M // 2) + 1
 
     if coarse_step is None:
         # Coarse step: choose so coarse grid is approx 1024 x 1024
@@ -260,20 +272,20 @@ def pack_grid(islands, resolution=4096, margin_px=8, overflow_mode='tiles',
 
     scale_loss = 0.0
 
-    # Pre-check: if any single island exceeds full tile dimensions, it must be scaled to fit
+    # Pre-check: an island larger than a tile forces ONE uniform scale for the whole set (decision 13: density goes
+    # below the target only uniformly, and is reported), never a shrink of that island alone
+    scale_needed = 1.0
     for u in pack_units:
         pts = u['rep']['uv'].reshape(-1, 2) * R
         p_span = pts.max(0) - pts.min(0)
-        h_req = int(np.ceil((p_span[1] + 2 * r_dil + 2) / S))
-        w_req = int(np.ceil((p_span[0] + 2 * r_dil + 2) / S))
-        min_dim = min(h_req, w_req)
-        max_dim = max(h_req, w_req)
-        if min_dim > GC_H or min_dim > GC_W or max_dim > max(GC_H, GC_W):
-            scale_needed = (min(GC_H, GC_W) / max_dim) * 0.95
+        longest = max(p_span) + 2 * r_dil + 2 + S
+        if longest > R:
+            scale_needed = min(scale_needed, (R - 2 * r_dil - 2 - S) / max(p_span) * 0.98)
+    if scale_needed < 1.0:
+        for u in pack_units:
             for m in u['members']:
                 m['uv'] = m['uv'] * scale_needed
-                m['target_d'] = m['target_d'] * (scale_needed ** 2)
-            scale_loss = max(scale_loss, 1.0 - (scale_needed ** 2))
+        scale_loss = 1.0 - scale_needed ** 2
 
     for u_idx, unit in enumerate(pack_units):
         rep = unit['rep']
@@ -300,14 +312,8 @@ def pack_grid(islands, resolution=4096, margin_px=8, overflow_mode='tiles',
                 # Macro stage: 2D FFT convolution
                 for ang in angles:
                     rot_uv, mask_fine, offset_fine, (w_f, h_f) = rasterize_island(rep['uv'], ang, R, r_dil)
-                    hc = int(np.ceil(h_f / S))
-                    wc = int(np.ceil(w_f / S))
-                    im_mask = Image.fromarray(mask_fine)
-                    im_coarse = im_mask.resize((wc, hc), resample=Image.NEAREST)
-                    mask_c = (np.array(im_coarse) > 0).astype(np.uint8)
-                    if S > 1:
-                        mask_c = binary_dilation(mask_c > 0, iterations=1).astype(np.uint8)
-                        hc, wc = mask_c.shape
+                    mask_c = coarse_mask(mask_fine, S)
+                    hc, wc = mask_c.shape
                     if hc > GC_H or wc > GC_W:
                         continue
 
@@ -332,14 +338,8 @@ def pack_grid(islands, resolution=4096, margin_px=8, overflow_mode='tiles',
                 # Micro / standard stage: Skyline search with candidate steps
                 for ang in angles:
                     rot_uv, mask_fine, offset_fine, (w_f, h_f) = rasterize_island(rep['uv'], ang, R, r_dil)
-                    hc = int(np.ceil(h_f / S))
-                    wc = int(np.ceil(w_f / S))
-                    im_mask = Image.fromarray(mask_fine)
-                    im_coarse = im_mask.resize((wc, hc), resample=Image.NEAREST)
-                    mask_c = (np.array(im_coarse) > 0).astype(np.uint8)
-                    if S > 1:
-                        mask_c = binary_dilation(mask_c > 0, iterations=1).astype(np.uint8)
-                        hc, wc = mask_c.shape
+                    mask_c = coarse_mask(mask_fine, S)
+                    hc, wc = mask_c.shape
                     if hc > GC_H or wc > GC_W:
                         continue
 
@@ -399,10 +399,12 @@ def pack_grid(islands, resolution=4096, margin_px=8, overflow_mode='tiles',
                 placed = True
             else:
                 # Does not fit in current tile!
-                if overflow_mode == 'tiles' and len(tile['placed_items']) > 0 and len(tiles) < 16:
+                if overflow_mode == 'tiles' and len(tile['placed_items']) > 0 and len(tiles) < max_tiles:
                     # Start new tile
                     tiles.append(new_tile())
                     tile_idx = len(tiles) - 1
+                elif max_tiles == 1:
+                    return None, None, {'fits': False}
                 else:
                     # In 'scale' mode or island exceeds empty tile: place on tile extending bounds
                     rot_uv, mask_fine, offset_fine, (w_f, h_f) = rasterize_island(rep['uv'], 0.0, R, r_dil)
@@ -463,6 +465,32 @@ def pack_grid(islands, resolution=4096, margin_px=8, overflow_mode='tiles',
     }
 
     return final_uvs, tile_idxs, stats
+
+
+def pack_grid_one_tile(islands, resolution, margin_px, directional_objs, steps=0.96):
+    """Largest uniform scale (<= 1) at which the grid packer fits the whole set into one tile, so its density can be
+    compared with Blender's Pack Islands (scale=True), which always packs into one square. Starts from an area bound
+    and shrinks by `steps` until the set fits. Returns (final_uvs, stats) with stats['scale'] the uniform factor."""
+    import copy
+    area = sum(isl['a2'] for isl in islands)
+    # Not capped at 1: Blender (scale=True) also scales up to fill the square, so both report the largest scale
+    s = (0.85 / max(area, 1e-12)) ** 0.5
+    t0 = time.perf_counter()
+    tries = 0
+    while True:
+        tries += 1
+        trial = copy.deepcopy(islands)
+        for isl in trial:
+            isl['uv'] = isl['uv'] * s
+            isl['a2'] = isl['a2'] * s * s
+        uvs, _, stats = pack_grid(trial, resolution=resolution, margin_px=margin_px, overflow_mode='tiles',
+                                  directional_objs=directional_objs, max_tiles=1)
+        if uvs is not None and stats['tiles_count'] == 1 and stats['scale_loss'] == 0.0:
+            stats['scale'] = s
+            stats['tries'] = tries
+            stats['run_time_s'] = time.perf_counter() - t0
+            return uvs, stats
+        s *= steps
 
 
 def sat_tri_tri(TA, TB, eps=1e-6):
@@ -708,11 +736,12 @@ def run_blender_pack_comparison(scaled_islands, resolution, margin_px, out_dir):
     all_uvs = []; all_tris = []; all_pts = []
     v_off = 0
     for isl in scaled_islands:
-        flat_uv = isl['uv'].reshape(-1, 2)
-        flat_p = np.pad(flat_uv, ((0, 0), (0, 1)))
-        flat_t = np.arange(len(flat_p)).reshape(-1, 3) + v_off
+        # One vertex per distinct UV inside the island: the island stays one connected UV island for Blender
+        uniq, inverse = np.unique(np.round(isl['uv'].reshape(-1, 2), 12), axis=0, return_inverse=True)
+        flat_p = np.pad(uniq, ((0, 0), (0, 1)))
+        flat_t = inverse.reshape(-1, 3) + v_off
         v_off += len(flat_p)
-        all_uvs.append(flat_uv)
+        all_uvs.append(isl['uv'].reshape(-1, 2))
         all_pts.append(flat_p)
         all_tris.append(flat_t)
 
@@ -724,7 +753,7 @@ def run_blender_pack_comparison(scaled_islands, resolution, margin_px, out_dir):
     npz_out = os.path.join(out_dir, '_blender_pack_out.npz')
     np.savez(npz_in, UV=U, P=P, T=T)
 
-    margin_frac = float(margin_px) / float(resolution)
+    margin_frac = float(margin_px) / float(resolution) / 2.0
 
     blender_py = f"""
 import bpy, numpy as np, time
@@ -743,7 +772,7 @@ ob.select_set(True)
 bpy.ops.object.mode_set(mode='EDIT')
 bpy.ops.mesh.select_all(action='SELECT')
 t0 = time.perf_counter()
-bpy.ops.uv.pack_islands(udim_source='CLOSEST_UDIM', rotate=True, rotate_method='ANY', scale=False,
+bpy.ops.uv.pack_islands(udim_source='CLOSEST_UDIM', rotate=True, rotate_method='ANY', scale=True,
                         merge_overlap=False, margin_method='FRACTION', margin={margin_frac},
                         pin=False, shape_method='CONCAVE')
 dt = time.perf_counter() - t0
@@ -933,6 +962,20 @@ def main():
                 directional_objs, stats['tiles_count'], stats['scale_loss'], stats['run_time_s']
             )
             mat_results['GridPacker'] = metrics_grid
+            # Same set in one square with one uniform scale: comparable with Blender's Pack Islands
+            one_uvs, one_stats = pack_grid_one_tile(scaled_islands, args.resolution, args.margin, directional_objs)
+            metrics_one = compute_pack_metrics(
+                one_uvs, scaled_islands, args.resolution, args.margin,
+                directional_objs, 1, 1.0 - one_stats['scale'] ** 2, one_stats['run_time_s']
+            )
+            metrics_one['uniform_scale'] = one_stats['scale']
+            mat_results['GridPacker1Tile'] = metrics_one
+            print(f"GridPacker one tile: scale {one_stats['scale']:.3f} ({one_stats['tries']} tries, {one_stats['run_time_s']:.1f} s), "
+                  f"min distance {metrics_one['min_distance_px']:.2f} px, violations {metrics_one['margin_violations']}, "
+                  f"overlaps {metrics_one['overlaps']}")
+            if args.save_png and mat_name == 'Cockpit_STD':
+                png_path = os.path.join(args.out, f'{mat_name}__GridPacker1Tile_{args.resolution}_{args.margin}px.png')
+                render_layout_png(one_uvs, png_path, f'Grid Packer, one tile: {mat_name} ({args.resolution}x{args.resolution}, {args.margin}px)')
             print(f"GridPacker completed in {metrics_grid['run_time_s']:.2f} s")
             print(f"   Share of square: {metrics_grid['share_of_square']*100:.2f}% (tiles: {metrics_grid['tiles_count']})")
             print(f"   Smallest distance: {metrics_grid['min_distance_px']:.2f} px (margin violations: {metrics_grid['margin_violations']})")
@@ -949,16 +992,17 @@ def main():
             print("\n>>> Running Blender Pack Islands...")
             try:
                 b_uvs, b_dt = run_blender_pack_comparison(scaled_islands, args.resolution, args.margin, args.out)
-                # Compute bounding box and tile count
-                all_b_uv = np.concatenate(b_uvs, 0)
-                max_u = all_b_uv[:, :, 0].max(); max_v = all_b_uv[:, :, 1].max()
-                b_tiles = int(np.ceil(max_u)) * int(np.ceil(max_v))
-                b_tiles = max(1, b_tiles)
-
+                # Blender packs into one square with a uniform scale (scale=True): report that scale as the density
+                # it reaches, the same measure as the grid packer's one-tile search below
+                a_in = sum(isl['a2'] for isl in scaled_islands)
+                a_out = sum(float(np.abs(um.tri_area2_signed(uv)).sum()) for uv in b_uvs)
+                b_scale = (a_out / a_in) ** 0.5 if a_in > 0 else 1.0
+                b_tiles = 1
                 metrics_blender = compute_pack_metrics(
                     b_uvs, scaled_islands, args.resolution, args.margin,
-                    directional_objs, b_tiles, 0.0, b_dt
+                    directional_objs, b_tiles, 1.0 - b_scale ** 2, b_dt
                 )
+                metrics_blender['uniform_scale'] = b_scale
                 mat_results['BlenderPack'] = metrics_blender
                 print(f"Blender completed in {metrics_blender['run_time_s']:.2f} s")
                 print(f"   Share of square: {metrics_blender['share_of_square']*100:.2f}% (tiles: {b_tiles})")
