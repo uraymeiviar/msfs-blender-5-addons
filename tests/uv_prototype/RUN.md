@@ -21,6 +21,7 @@ Current set for round 3:
 | `evaluate3.py` | venv | all metrics + PNGs (`metrics.json`, `png\`) |
 | `evaluate3_extra.py` | venv | imported by `evaluate3.py`: artist-seam crossing/following, texel density |
 | `uvmetrics.py` | both | numpy metrics, imported by the Blender scripts and by the evaluators |
+| `pack_grid.py` | venv / both | Phase 3 packing prototype: density scaling, directional rotation, stacking, coarse-to-fine FFT/skyline nesting, comparisons |
 
 Not needed for round 3, keep only for history: `proto_blender.py` (v1), `prep.py`, `prep2.py`,
 `evaluate.py`, `evaluate2.py` (`evaluate3.py` is a generated copy of it and no longer imports it),
@@ -225,3 +226,57 @@ later smoothing, repair and frame cuts. `extraV` in evaluator console text is
 total UV splitting; use JSON `render_extra_vs_normals` for the 5% pass criterion.
 Timings are single runs, not statistical performance guarantees. A smaller chart
 distortion in the stage log is not the final packed global area-distortion metric.
+
+## 8. Round 5 packing prototype (`pack_grid.py`)
+
+`pack_grid.py` is the standalone research prototype for Phase 3 (packing across material texture sets),
+implementing coarse-to-fine nesting, directional alignment, density scaling, and stacking units.
+
+### Features
+1. **Density Scaling:** Reads `pixels_per_metre` and per-object `density_factors` from JSON config (`pack_config.json`).
+   Target UV area = `3D_area * (PPM / Resolution)^2 * density_factor`.
+2. **Directional Constraint:** Objects marked as directional are restricted to rotations of 0° or 180° only.
+3. **Stacking Units:** Identical islands from Mirror modifiers or shared mesh datablocks are grouped, packed as single
+   units, and exempted from overlap penalties.
+4. **Coarse-to-Fine Grid Packing:**
+   - Half-margin dilation on rasterized island masks.
+   - 2D FFT convolution for placing top concave islands into matching cavities.
+   - Skyline packing with lowest-horizon cavity filling for small and medium islands.
+5. **Overflow Handling:** Multi-tile mode (`--overflow tiles`) and uniform shrink mode (`--overflow scale`).
+6. **Triple Comparison:** Compares GridPacker against Blender's native `pack_islands` (concave) and `xatlas`.
+7. **Comprehensive Metrics:** Share of square, min distance, margin violations, SAT triangle overlaps, texel density
+   deviation, directional rotation check, mip-level merge survival (levels 1-4), texture memory, and run time.
+
+### Commands
+
+Run in the venv from the prototype working directory (e.g. `tests/_work/uv_packing/`):
+
+```powershell
+# 1. Synthetic stacking unit verification
+.\venv\Scripts\python.exe pack_grid.py --test_stacking
+
+# 2. Benchmark runs across texture sets
+# 4K @ 8px margin
+.\venv\Scripts\python.exe pack_grid.py --resolution 4096 --margin 8 --overflow tiles --compare all --out pack_output_4096_8px
+
+# 4K @ 4px margin
+.\venv\Scripts\python.exe pack_grid.py --resolution 4096 --margin 4 --overflow tiles --compare all --out pack_output_4096_4px
+
+# 8K @ 8px margin
+.\venv\Scripts\python.exe pack_grid.py --resolution 8192 --margin 8 --overflow tiles --compare all --out pack_output_8192_8px
+
+# 8K @ 16px margin
+.\venv\Scripts\python.exe pack_grid.py --resolution 8192 --margin 16 --overflow tiles --compare all --out pack_output_8192_16px
+```
+
+### Options
+- `--results`: Path to directory containing `W_*__proto3.npz` files (default `results3\`).
+- `--config`: Path to packing configuration JSON (default `pack_config.json`).
+- `--resolution`: 4096 or 8192 (default 4096).
+- `--margin`: Margin in pixels, e.g. 4, 8, 16 (default 8).
+- `--overflow`: `tiles` (UDIM/multi-tile) or `scale` (shrink to fit single tile).
+- `--set`: Specific texture set name or `all` (default `all`).
+- `--compare`: Methods to run: `all`, `grid`, `blender`, `xatlas`, or `none`.
+- `--save_png`: Save UV layout visualization PNGs (default True).
+- `--test_stacking`: Execute synthetic stacking unit assertion test.
+

@@ -1,0 +1,10 @@
+{
+  "pixels_per_metre": 2048.0,
+  "density_factors": {
+    "OVERHEAD_SHELL": 0.5,
+    "TRIM_PANEL": 2.0
+  },
+  "directional_objects": [
+    "TRIM_PANEL"
+  ]
+}
