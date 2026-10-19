@@ -16,7 +16,7 @@ A = dict(objects='', out='results2', soft='30', thr='1.25', method='ANGLE_BASED'
          tree='0', visibility='0', borders='0', strips='0', frames='0', tree_faces='512', phase='benchmark', keep_trials='0',
          shape_accept='0', shape_p95='1.10', shape_max='1.5', shape_tiny='0.001', shape_planar='1.02', shape_planar_deg='10.0',
          fold_rule='0', fold_angle='45.0', fold_conformal='1.05', fold_max='1.5',
-         wall_cuts='0')
+         wall_cuts='0', straighten='0')
 for i in range(0, len(argv), 2):
     A[argv[i].lstrip('-')] = argv[i + 1]
 if 'shape' in A and 'shape_accept' not in [argv[i].lstrip('-') for i in range(0, len(argv), 2)]:
@@ -27,6 +27,8 @@ if 'walls' in A and 'wall_cuts' not in [argv[i].lstrip('-') for i in range(0, le
     A['wall_cuts'] = A['walls']
 if 'wall_corner_cuts' in A and 'wall_cuts' not in [argv[i].lstrip('-') for i in range(0, len(argv), 2)]:
     A['wall_cuts'] = A['wall_corner_cuts']
+if 'straighten_strips' in A and 'straighten' not in [argv[i].lstrip('-') for i in range(0, len(argv), 2)]:
+    A['straighten'] = A['straighten_strips']
 if A['phase'] not in ('benchmark', 'seams'):
     raise ValueError('--phase must be benchmark or seams')
 if A['phase'] == 'seams':
@@ -112,6 +114,160 @@ def export_split_mesh(obj, path):
     Ts = np.array([[v.index for v in f.verts] for f in bm.faces])
     np.savez(path, Ps=Ps, Ts=Ts, orig=orig)
     bm.free()
+
+
+def straighten_quad_strip_faces(fl, bm, V, FV, edge_dihedral, U_curr, seam):
+    """Straighten an island if it is a quad strip or grid (Follow Active Quads equivalent).
+    Recovers quads from triangle pairs, computes arc-length rectangular grid, and returns U_new.
+    """
+    if len(fl) % 2 != 0:
+        return None
+
+    edge_fl_faces = {}
+    for f in fl:
+        for e in bm.faces[f].edges:
+            edge_fl_faces.setdefault(e.index, []).append(f)
+
+    diag_cands = []
+    for e_idx, tris in edge_fl_faces.items():
+        if len(tris) == 2 and not seam[e_idx]:
+            t0, t1 = tris
+            ang = edge_dihedral[e_idx]
+            if ang < math.radians(60.0):
+                e_verts = [v.index for v in bm.edges[e_idx].verts]
+                v0, v1 = e_verts[0], e_verts[1]
+                t0_v = list(FV[t0]); t1_v = list(FV[t1])
+                opp0 = [v for v in t0_v if v != v0 and v != v1][0]
+                opp1 = [v for v in t1_v if v != v0 and v != v1][0]
+                cos_a = math.cos(ang)
+                diag_cands.append((cos_a, e_idx, t0, t1, v0, v1, opp0, opp1))
+
+    diag_cands.sort(key=lambda x: x[0], reverse=True)
+    used_tris = set()
+    quads = []
+    for cos_a, e_idx, t0, t1, v0, v1, opp0, opp1 in diag_cands:
+        if t0 not in used_tris and t1 not in used_tris:
+            used_tris.add(t0); used_tris.add(t1)
+            t0_v = list(FV[t0])
+            i0 = t0_v.index(v0)
+            if t0_v[(i0 + 1) % 3] == opp0:
+                cyc = [v0, opp0, v1, opp1]
+            else:
+                cyc = [v0, opp1, v1, opp0]
+            quads.append((cyc, t0, t1))
+
+    if len(used_tris) != len(fl) or not quads:
+        return None
+
+    n_quads = len(quads)
+    if n_quads == 1:
+        cyc, t0, t1 = quads[0]
+        d01 = np.linalg.norm(V[cyc[1]] - V[cyc[0]])
+        d23 = np.linalg.norm(V[cyc[3]] - V[cyc[2]])
+        d12 = np.linalg.norm(V[cyc[2]] - V[cyc[1]])
+        d30 = np.linalg.norm(V[cyc[0]] - V[cyc[3]])
+        w = 0.5 * (d01 + d23)
+        h = 0.5 * (d12 + d30)
+        vert_uv = {
+            cyc[0]: np.array([0.0, 0.0]),
+            cyc[1]: np.array([w, 0.0]),
+            cyc[2]: np.array([w, h]),
+            cyc[3]: np.array([0.0, h])
+        }
+        U_new = np.zeros_like(U_curr)
+        for i, f in enumerate(fl):
+            for j, l in enumerate(bm.faces[f].loops):
+                U_new[i, j] = vert_uv[l.vert.index]
+        return U_new
+
+    quad_edges = []
+    for cyc, _, _ in quads:
+        edges = [
+            tuple(sorted((cyc[0], cyc[1]))),
+            tuple(sorted((cyc[1], cyc[2]))),
+            tuple(sorted((cyc[2], cyc[3]))),
+            tuple(sorted((cyc[3], cyc[0])))
+        ]
+        quad_edges.append(edges)
+
+    e_to_q = {}
+    for qi, edges in enumerate(quad_edges):
+        for ed in edges:
+            e_to_q.setdefault(ed, []).append(qi)
+
+    bm.edges.ensure_lookup_table()
+    q_adj = {}
+    for ed, q_list in e_to_q.items():
+        if len(q_list) == 2:
+            v0, v1 = bm.verts[ed[0]], bm.verts[ed[1]]
+            e_obj = bm.edges.get((v0, v1))
+            if e_obj is not None and seam[e_obj.index]:
+                continue
+            q_adj.setdefault(q_list[0], []).append((q_list[1], ed))
+            q_adj.setdefault(q_list[1], []).append((q_list[0], ed))
+        elif len(q_list) > 2:
+            return None
+
+    deg1 = [q for q, nb in q_adj.items() if len(nb) == 1]
+    deg2 = [q for q, nb in q_adj.items() if len(nb) == 2]
+
+    # Open 1xM quad strip
+    if len(deg1) == 2 and len(deg1) + len(deg2) == n_quads:
+        ordered_q = [deg1[0]]
+        curr = deg1[0]; prev = None
+        while True:
+            nxt = [q for q, ed in q_adj[curr] if q != prev]
+            if not nxt: break
+            prev = curr; curr = nxt[0]
+            ordered_q.append(curr)
+            if curr == deg1[1]: break
+
+        shared_rung = list(set(quad_edges[ordered_q[0]]) & set(quad_edges[ordered_q[1]]))[0]
+        cyc0 = quads[ordered_q[0]][0]
+        for i in range(4):
+            ed = tuple(sorted((cyc0[i], cyc0[(i+1)%4])))
+            if ed == shared_rung:
+                railA = [cyc0[(i-1)%4], cyc0[i]]
+                railB = [cyc0[(i+2)%4], cyc0[(i+1)%4]]
+                break
+
+        for step in range(1, len(ordered_q)):
+            qi = ordered_q[step]
+            cyc = quads[qi][0]
+            lastA = railA[-1]; lastB = railB[-1]
+            rem = [v for v in cyc if v != lastA and v != lastB]
+            if len(rem) != 2: return None
+            if tuple(sorted((lastA, rem[0]))) in quad_edges[qi]:
+                nextA = rem[0]; nextB = rem[1]
+            else:
+                nextA = rem[1]; nextB = rem[0]
+            railA.append(nextA); railB.append(nextB)
+
+        L_A = [np.linalg.norm(V[railA[k+1]] - V[railA[k]]) for k in range(len(railA)-1)]
+        L_B = [np.linalg.norm(V[railB[k+1]] - V[railB[k]]) for k in range(len(railA)-1)]
+        W = [np.linalg.norm(V[railB[k]] - V[railA[k]]) for k in range(len(railA))]
+        W_mean = float(np.mean(W))
+
+        U_coords = [0.0]
+        for k in range(len(L_A)):
+            U_coords.append(U_coords[-1] + 0.5 * (L_A[k] + L_B[k]))
+
+        U_new = np.zeros_like(U_curr)
+        for step, qi in enumerate(ordered_q):
+            cyc, t0, t1 = quads[qi]
+            q_v_uv = {
+                railA[step]: np.array([U_coords[step], 0.0]),
+                railA[step+1]: np.array([U_coords[step+1], 0.0]),
+                railB[step+1]: np.array([U_coords[step+1], W_mean]),
+                railB[step]: np.array([U_coords[step], W_mean])
+            }
+            for f_idx in [t0, t1]:
+                i = fl.index(f_idx)
+                for j, l in enumerate(bm.faces[f_idx].loops):
+                    U_new[i, j] = q_v_uv[l.vert.index]
+        return U_new
+
+    return None
 
 
 def run_smart(obj, angle):
@@ -1001,6 +1157,40 @@ def run_proto2(obj):
     st.update(ringframe_tried=ring_tried, ring_cut_ok=ring_ok, frame_cut_ok=frame_ok)
     tm['ringframe'] = time.perf_counter() - t
 
+    # Round 5 Package 8: straightening (quad strips and grids)
+    if A['straighten'] == '1':
+        t_st = time.perf_counter()
+        straight_tried = straight_ok = 0
+        for c in list(charts.keys()):
+            fl = sorted(charts[c])
+            if len(fl) % 2 != 0:
+                continue
+            U_curr = read_uv(fl)
+            U_new = straighten_quad_strip_faces(fl, bm, V, FV, edge_dihedral, U_curr, seam)
+            if U_new is None:
+                continue
+            straight_tried += 1
+            fl_ = um.flipped_count(U_new) > 0
+            ov_pairs = len(um.overlap_pairs(U_new))
+            if fl_ or ov_pairs > 0:
+                continue
+            m_old = um.shape_metrics(V, FV[fl], U_curr)['object']
+            m_new = um.shape_metrics(V, FV[fl], U_new)['object']
+            c_p95_old, c_p95_new = m_old['conformal']['p95'], m_new['conformal']['p95']
+            c_max_old, c_max_new = m_old['conformal']['max'], m_new['conformal']['max']
+            d_old, d_new = m_old['area_distortion']['mean'], m_new['area_distortion']['mean']
+            se_old, se_new = m_old['straight_edges']['preserved_fraction'], m_new['straight_edges']['preserved_fraction']
+            se_ok = (se_old is None) or (se_new is not None and se_new >= se_old - 1e-4)
+            if (c_p95_new <= max(c_p95_old, 1.05) + 1e-4 and
+                c_max_new <= max(c_max_old, 1.5) + 1e-4 and
+                d_new <= max(THR, d_old * 1.05) and se_ok):
+                write_uv(fl, U_new)
+                straight_ok += 1
+                if A['keep_trials'] == '1':
+                    chart_uv[c] = (tuple(fl), U_new)
+        st.update(straighten_tried=straight_tried, straighten_ok=straight_ok)
+        tm['straighten'] = time.perf_counter() - t_st
+
     t = time.perf_counter()
     bm = bmesh.from_edit_mesh(me)
     for f in bm.faces: f.select = True
@@ -1011,12 +1201,12 @@ def run_proto2(obj):
         pack()
     tm['pack'] = time.perf_counter() - t
     bpy.ops.object.mode_set(mode='OBJECT')
-    st['options'] = {k: A[k] for k in ('tree', 'visibility', 'borders', 'strips', 'frames', 'tree_faces', 'keep_trials', 'shape_accept', 'fold_rule', 'wall_cuts')}
+    st['options'] = {k: A[k] for k in ('tree', 'visibility', 'borders', 'strips', 'frames', 'tree_faces', 'keep_trials', 'shape_accept', 'fold_rule', 'wall_cuts', 'straighten')}
     st.update(stats); st['stage_time'] = tm; st['time'] = time.perf_counter() - T0
     st.update(method=METHOD, soft_deg=float(A['soft']), thr=THR, shape_accept=A['shape_accept'],
               shape_p95=SHAPE_P95, shape_max=SHAPE_MAX, shape_tiny=SHAPE_TINY, shape_planar=SHAPE_PLANAR,
               fold_rule=A['fold_rule'], fold_angle=FOLD_ANGLE, fold_conformal=FOLD_CONFORMAL,
-              wall_cuts=A['wall_cuts'])
+              wall_cuts=A['wall_cuts'], straighten=A['straighten'])
     return TAG, st
 
 
