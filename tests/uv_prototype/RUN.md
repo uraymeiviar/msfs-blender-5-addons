@@ -282,3 +282,117 @@ Run in the venv from the prototype working directory (e.g. `tests/_work/uv_packi
 - `--save_png`: Save UV layout visualization PNGs (default True).
 - `--test_stacking`: Execute synthetic stacking unit assertion test.
 
+
+## 9. Round 5 artist reference set (Package 2)
+
+These ten additional objects supplement the original seven. Use the first UV layer,
+unchanged, as `existing`; seam consistency is verified but UV aesthetic quality and
+artist authorship are not certified. Reasons describe the intended coverage.
+
+| Object | Triangles | UV islands | Interior artist seam edges | Selection reason |
+| :--- | ---: | ---: | ---: | :--- |
+| `B_GS_AFCS_AP_BUTTON` | 110 | 1 | 16 | Small button; single-chart control reference. |
+| `CCD_LEFT_ROTARY_OUTER` | 1290 | 5 | 261 | Rotary control; curved control candidate with dense shading splits. |
+| `CIRCUIT_BREAKER_COVER_L` | 889 | 5 | 100 | Panel/cover; test a larger cover with five charts. |
+| `COCKPIT_REAR_OBS_SEAT_MOUNTING_FRAME` | 904 | 6 | 66 | Mounting frame; test long frame boundaries and multiple charts. |
+| `DISC_HANDLE_AILERON` | 660 | 11 | 183 | Handle; more fragmented eleven-chart reference. |
+| `EFB_HINGE_ARM_1` | 760 | 7 | 123 | Hinge arm; elongated mechanical part and seven charts. |
+| `EFB_HINGE_CLAMP_ROTATOR` | 252 | 6 | 114 | Clamp/rotator; compact part with many normal splits. |
+| `EFB_HINGE_ROTATOR_2` | 684 | 4 | 132 | Second curved mechanical candidate; four charts, no modifiers. |
+| `LEVER_FLAP` | 734 | 2 | 75 | Lever; few UV charts despite many triangles, including border seams. |
+| `POWERPLANT_COVER_L` | 556 | 3 | 57 | Second cover; different three-chart topology and normal splits. |
+
+Run from `tests/_work/uv_shape/` only. Copy `prep3.py`, `proto_blender_v3.py`,
+`uvmetrics.py`, and `evaluate3_extra.py` from `tests/uv_prototype/` into this folder.
+Copy the source `C:\Users\uray\Downloads\E2_190_COCKPIT2.blend` here as
+`E2_COCKPIT2_copy.blend`; open only that copy. Use the local venv for validation
+(NumPy required); never install packages globally. All outputs below are scratch.
+
+Save the following as `prepare_references.py` in the work folder. It runs the
+unchanged prep3 evaluation/world-transform/triangulation pipeline, then loads only
+the two export function definitions from proto3: no optimization or packing runs.
+It writes `work3.blend`, `objects_info3.json`, ten `__existing.npz` files and their
+`__seams.npy` and `__nsplit_T.npy` sidecars in `reference_results/`. The arrays use
+the same P/T/UV/mat schema as the original seven. `extra.time=0` is a placeholder
+for existing UVs, not an observed runtime. Source mesh names and first UV-layer
+names are saved in `source_metadata.json`.
+
+```python
+import ast, json, os, runpy, sys
+from pathlib import Path
+import bpy, bmesh
+import numpy as np
+HERE = Path(__file__).resolve().parent
+os.chdir(HERE)
+names = ['COCKPIT_REAR_OBS_SEAT_MOUNTING_FRAME', 'CIRCUIT_BREAKER_COVER_L', 'POWERPLANT_COVER_L', 'LEVER_FLAP', 'DISC_HANDLE_AILERON', 'EFB_HINGE_ARM_1', 'EFB_HINGE_CLAMP_ROTATOR', 'CCD_LEFT_ROTARY_OUTER', 'B_GS_AFCS_AP_BUTTON', 'EFB_HINGE_ROTATOR_2']
+metadata = {}
+for name in names:
+    obj = bpy.data.objects[name]
+    metadata[name] = dict(mesh=obj.data.name, uv_layer=obj.data.uv_layers[0].name, dimensions=list(obj.dimensions))
+assert len({v['mesh'] for v in metadata.values()}) == len(names)
+sys.argv = ['prep3.py', '--'] + names
+runpy.run_path(str(HERE / 'prep3.py'), run_name='__main__')
+functions = ast.parse((HERE / 'proto_blender_v3.py').read_text())
+functions.body = [n for n in functions.body if isinstance(n, ast.FunctionDef) and n.name in ('export', 'export_seams_nsplit')]
+exec(compile(functions, 'proto_blender_v3.py', 'exec'))
+out = HERE / 'reference_results'
+out.mkdir(exist_ok=True)
+for name in names:
+    obj = bpy.data.objects['W_' + name]
+    assert obj.data.uv_layers[0].name == metadata[name]['uv_layer']
+    export(obj, obj.data.uv_layers[0].name, str(out / (obj.name + '__existing.npz')), dict(time=0, method='existing', **metadata[name]))
+    export_seams_nsplit(obj, str(out), obj.name)
+(out / 'source_metadata.json').write_text(json.dumps(metadata, indent=2))
+print('REFERENCE_EXPORT_OK', len(names))
+
+
+```
+
+With no other Blender running, execute serially from the work folder:
+
+```powershell
+if (Get-Process blender -ErrorAction SilentlyContinue) { throw 'Blender already running' }
+& 'D:\fss-e2\tools\blender\blender.exe' -b E2_COCKPIT2_copy.blend --python-exit-code 1 --python prepare_references.py
+if ($LASTEXITCODE -ne 0) { throw 'Reference preparation failed' }
+Copy-Item work3.blend references.blend
+```
+
+`references.blend` is the prepared reference set for subsequent proto3/proto4 runs;
+its objects are prefixed `W_`. Keep this separate from the original-seven prepared
+mesh. Use a clean `reference_results/` directory for recreation so stale rejected
+candidates cannot enter the dataset. Check the repository root for stray thumbnail
+folders after Blender exits (the known thumbnail warning may occur in scratch).
+
+Save the following as `validate_references.py` in the work folder and run
+`& .\venv\Scripts\python.exe -I validate_references.py`. This uses exact UV
+endpoint equality, stronger than the source survey's 1e-6 tolerance. It requires
+positive manifold artist seams, no crossed artist seam edges (including stubs),
+and no extra UV cuts across unmarked manifold edges. Boundary seams are excluded
+from the interior-edge count. It writes `reference_results/validation.json`.
+
+```python
+import sys, json
+from pathlib import Path
+import numpy as np
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import uvmetrics as um
+from evaluate3_extra import artist_texel
+rows=[]
+for p in sorted(Path('reference_results').glob('*__existing.npz')):
+    d=np.load(p, allow_pickle=False); P,T,UV=(d[k] for k in ('P','T','UV'))
+    assert np.isfinite(P).all() and np.isfinite(UV).all()
+    assert T.min()>=0 and T.max()<len(P)
+    labels=um._uv_topology(T,UV)[-1]
+    seams=np.load(p.parent/(p.name.replace('__existing.npz','__seams.npy')))
+    r=artist_texel(P,T,UV,labels,seams)
+    r.update(name=p.name.split('__')[0], vertices=len(P), triangles=len(T), islands=int(labels.max()+1))
+    rows.append(r)
+Path('reference_results/validation.json').write_text(json.dumps(rows,indent=2))
+for r in rows: print(r['name'],r['triangles'],r['islands'],r['artist_seam_edges'],r['artist_seam_crossed_edges'],r['offseam_split_edges'])
+assert all(r['artist_seam_crossed_edges']==0 and r['offseam_split_edges']==0 and r['artist_seam_edges']>0 for r in rows)
+
+```
+
+Package 2 validated all ten objects with zero seam crossings and zero off-seam
+cuts. Shape distortion, overlap, winding, texel quality and algorithm comparisons
+remain Package 3 work; a consistent seam map alone does not certify those properties.
