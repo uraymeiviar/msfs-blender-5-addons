@@ -1,7 +1,7 @@
 # Agent Guide: MSFS Blender Add-ons (FSS)
 
 Onboarding for AI agents and developers working in this repository. User-facing documentation is in
-[README.md](README.md); the FSS add-on's design is in [fss_blender_tools/README.md](fss_blender_tools/README.md).
+[docs/user/](docs/user/) (artist guide) and [README.md](README.md); the FSS add-on's design is in [fss_blender_tools/README.md](fss_blender_tools/README.md).
 
 ## What This Repository Is
 
@@ -105,20 +105,21 @@ tools\deploy.bat -Addons fss_blender_tools
 - **Batch files:** on machines with `NoDefaultCurrentDirectoryInExePath` set, run `.bat` files by full path, or with
   `cmd /c "set NoDefaultCurrentDirectoryInExePath=&& ..."`.
 
-## Where Decisions Are Recorded
+## Where Documentation and Decisions Live
 
-New work is recorded in this repository's task journals, `docs/journal/<yyyymmdd>.<topic>.md`, starting with
-[docs/journal/20261010.automated-lod-generation.md](docs/journal/20261010.automated-lod-generation.md) (LOD export:
-design, decisions, progress, handoffs). Journals are append-only: add `## Session <N>: <Title>` at the bottom and never
-rewrite an earlier, committed session. Read only the journal of your task, latest session first. Record decisions,
-runtime behaviour and what was verified, not machine-local files. Commit journal updates together with the work.
+This repository is the single source of truth for the add-ons and their documentation.
 
-Testing in an aircraft repository happens on the E2 testbed (`D:ss-e2`, not under git; back up a file into its
+| What | Where | Audience |
+| :--- | :--- | :--- |
+| Artist guide (how to use the panels and the exporter) | [docs/user/](docs/user/) | artists; deployed with the add-ons into each portable target's `docs` folder |
+| Task journals (design, decisions, progress, hand-offs) | [docs/journal/](docs/journal/), index in [docs/journal/README.md](docs/journal/README.md) | developers and agents |
+| Design of the FSS tools | [fss_blender_tools/README.md](fss_blender_tools/README.md) | developers and agents |
+| Working rules | this file | developers and agents |
+
+- **Journals:** `docs/journal/<yyyymmdd>.<topic>.md`. Journals are append-only: add `## Session <N>: <Title>` at the bottom and never rewrite an earlier, committed session. Read only the journal of your task, latest session first. Record decisions, runtime behaviour and what was verified, not machine-local files. Commit journal updates together with the work.
+- **Artist guide:** when a change alters what an artist sees or does (a panel, a button, a mark, an export behaviour), update `docs/user/` in the same commit. Describe only what exists; design and rationale belong in the journals.
+- The journals on the exporter conversion, the wish-list, Empty Bounds, Name Check, and Tags and Merge were started in the FSS aircraft repository (`codes/wasm/doc/journal/`) and moved here on 20261019; the copies there end with a pointer session. That repository keeps its own authoring guide (`doc/msfs-authoring/`) for aircraft-specific workflow.
+
+Testing in an aircraft repository happens on the E2 testbed (`D:\fss-e2`, not under git; back up a file into its
 `codes/wasm/.cache/backup/` before editing it). The FSS aircraft repository (E1) receives add-on updates only when the
 maintainer asks.
-
-Earlier rationale is in the FSS aircraft repository's task journals (`codes/wasm/doc/journal/`):
-`20261002.msfs2024-blender5-exporter-conversion.md` (exporter port and fixes),
-`20261010.fss-blender-tools-wishlist.md` (planned tools), `20261014.fss-blender-tools-tags-and-merge.md` (tags,
-merge groups, checks), `20261011.fss-blender-tools-name-check.md` (name check), and the authoring guide
-`doc/msfs-authoring/`.

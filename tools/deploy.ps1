@@ -5,8 +5,9 @@ Copies the add-ons of this repository into the Blender installs listed in deploy
 .DESCRIPTION
 Targets come from deploy.local.json at the repository root (git-ignored, one per machine; see
 deploy.local.json.example). Two target types:
-  portable  the tools\blender folder of an FSS aircraft repository: add-ons go to 5.2\scripts\addons_core, and the
-            commit line of FSS-ADDONS-VERSION.txt is updated to this repository's HEAD.
+  portable  the tools\blender folder of an FSS aircraft repository: add-ons go to 5.2\scripts\addons_core, the
+            artist guide (docs\user) goes to docs, and the commit line of FSS-ADDONS-VERSION.txt is updated to this
+            repository's HEAD.
   user      a Blender user add-on folder, for example %APPDATA%\Blender Foundation\Blender\5.2\scripts\addons.
 
 Safety:
@@ -49,9 +50,10 @@ $settings = Get-Content -LiteralPath $Config -Raw | ConvertFrom-Json
 if (-not $Addons) { $Addons = @($settings.addons) }
 
 $head = (git -C $repo rev-parse HEAD).Trim()
-$dirty = git -C $repo status --porcelain -- $Addons
+$guide = Join-Path $repo "docs\user"
+$dirty = git -C $repo status --porcelain -- $Addons "docs/user"
 if ($dirty -and -not $Force) {
-    Write-Host "Uncommitted changes in the add-ons; commit them first, or deploy anyway with -Force:"
+    Write-Host "Uncommitted changes in the add-ons or the artist guide; commit them first, or deploy anyway with -Force:"
     $dirty | ForEach-Object { Write-Host "  $_" }
     exit 1
 }
@@ -123,6 +125,31 @@ foreach ($target in $settings.targets) {
             if ((Read-Normalized (Join-Path $source $relative)) -ne (Read-Normalized (Join-Path $destination $relative))) {
                 Write-Host "   $($addon): copy check FAILED for $relative"
                 $failures++
+            }
+        }
+    }
+
+    if ($target.type -eq "portable" -and (Test-Path -LiteralPath $guide)) {
+        # The artist guide matches the deployed add-ons, so it travels with them
+        $docs = Join-Path $path "docs"
+        $changed = @()
+        foreach ($file in Get-SourceFiles $guide) {
+            $relative = $file.FullName.Substring($guide.Length + 1)
+            $other = Join-Path $docs $relative
+            if (-not (Test-Path -LiteralPath $other) -or (Read-Normalized $file.FullName) -ne (Read-Normalized $other)) {
+                $changed += $relative
+            }
+        }
+        if (-not $changed) {
+            Write-Host "   docs (artist guide): up to date"
+        } else {
+            Write-Host ("   docs (artist guide): {0} file(s) to copy: {1}" -f $changed.Count, ($changed -join ", "))
+            if (-not $DryRun) {
+                foreach ($relative in $changed) {
+                    $other = Join-Path $docs $relative
+                    New-Item -ItemType Directory -Force -Path (Split-Path $other -Parent) | Out-Null
+                    Copy-Item -LiteralPath (Join-Path $guide $relative) -Destination $other -Force
+                }
             }
         }
     }
