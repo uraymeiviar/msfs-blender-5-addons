@@ -1,6 +1,6 @@
 # The FSS Exporter
 
-[Repository Root](../../README.md) / [User Guide](README.md) / **exporter.md**
+[Artist Guide](README.md) / **exporter.md**
 ***
 
 The add-on **Microsoft Flight Simulator 2020 + 2024: glTF Extension (FSS)** exports glTF for **MSFS 2024** and **MSFS 2020** from the same Blender install. It is the Asobo MSFS 2024 exporter with the FSS MSFS 2020 exporter built in. Do not enable the separate `io_scene_gltf2_msfs_2024` or `io_scene_gltf2_msfs_2020` add-ons next to it.

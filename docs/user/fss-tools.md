@@ -1,6 +1,6 @@
 # FSS Tools Panels
 
-[Repository Root](../../README.md) / [User Guide](README.md) / **fss-tools.md**
+[Artist Guide](README.md) / **fss-tools.md**
 ***
 
 All panels are in the 3D Viewport sidebar (`N`), tab **FSS Tools**. The **LOD** panel has its own page: [lod.md](lod.md).

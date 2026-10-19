@@ -1,6 +1,6 @@
 # FSS Blender Add-ons: Artist Guide
 
-[Repository Root](../../README.md) / **User Guide**
+**Artist Guide**
 ***
 
 This guide is for 3D artists who model and texture Flight Sim Studio (FSS) aircraft in Blender 5.2. It explains what each panel and button does, how to use it, and what to watch out for.
