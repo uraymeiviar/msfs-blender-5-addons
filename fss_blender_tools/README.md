@@ -13,6 +13,7 @@ repository are in [../AGENTS.md](../AGENTS.md).
 | `lod.py`, `lod_model.py`, `lod_rules.py` | **LOD** | Auto size culling (objects and loose mesh pieces), hidden-from / visible-from / Keep marks, Quota and Hints subpanel, scene export settings, and viewport membership preview |
 | `tags.py` | **Tags** | Generic object tags (`fss_tags`, semicolon-separated), per-row `[-]`/`[+]` assignment, selection, and per-tag skip-merge and Keep toggles |
 | `merge.py` | **Merge Tree** | Export-time merge groups (`@MERGE_<name>` / `@NOMERGE_<name>`), New Merge Group, tree preview and console details |
+| `uv_marks.py` | **UV Marks** | Authoring marks for the planned UV phases (nothing reads them yet): per-object texel density range (`fss_uv_density`, default 0.9 to 1.1, presets Lower 0.7 to 0.8 and Higher 1.5 to 1.65) and island direction (`fss_uv_direction`: Free, Upright, Flip, Quarter), inherited from the nearest marked ancestor; per-material island margin as a fraction of the UV square (`fss_uv_margin`, default 0.002) |
 | `checks.py`, `name_check.py` | **Checks** | **Scan Names** (lists object and bone names that break FSS naming rules and renames them in batch; `@MERGE_` / `@NOMERGE_` allowed) and **Fix Broken Bone Parents** |
 
 ## Tags
