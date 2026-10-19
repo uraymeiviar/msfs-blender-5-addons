@@ -15,13 +15,18 @@ A = dict(objects='', out='results2', soft='30', thr='1.25', method='ANGLE_BASED'
          worst='2.0', ms_iter='50', forced_seams='1', forced_nsplit='0', only_smart='0', fill_min='0.5', fill_gain='1.25',
          tree='0', visibility='0', borders='0', strips='0', frames='0', tree_faces='512', phase='benchmark', keep_trials='0',
          shape_accept='0', shape_p95='1.10', shape_max='1.5', shape_tiny='0.001', shape_planar='1.02', shape_planar_deg='10.0',
-         fold_rule='0', fold_angle='45.0', fold_conformal='1.05', fold_max='1.5')
+         fold_rule='0', fold_angle='45.0', fold_conformal='1.05', fold_max='1.5',
+         wall_cuts='0')
 for i in range(0, len(argv), 2):
     A[argv[i].lstrip('-')] = argv[i + 1]
 if 'shape' in A and 'shape_accept' not in [argv[i].lstrip('-') for i in range(0, len(argv), 2)]:
     A['shape_accept'] = A['shape']
 if 'fold' in A and 'fold_rule' not in [argv[i].lstrip('-') for i in range(0, len(argv), 2)]:
     A['fold_rule'] = A['fold']
+if 'walls' in A and 'wall_cuts' not in [argv[i].lstrip('-') for i in range(0, len(argv), 2)]:
+    A['wall_cuts'] = A['walls']
+if 'wall_corner_cuts' in A and 'wall_cuts' not in [argv[i].lstrip('-') for i in range(0, len(argv), 2)]:
+    A['wall_cuts'] = A['wall_corner_cuts']
 if A['phase'] not in ('benchmark', 'seams'):
     raise ValueError('--phase must be benchmark or seams')
 if A['phase'] == 'seams':
@@ -633,6 +638,115 @@ def run_proto2(obj):
     st.update(smooth_moved=moved, smooth_reverted_faces=reverted_faces, smooth_rounds=rounds, smooth_full_revert=full_revert)
     tm['smooth'] = time.perf_counter() - t
 
+    # Round 5 Package 7: wall corner cuts (Session 7 item 1)
+    if A['wall_cuts'] == '1':
+        t_wc = time.perf_counter()
+        wall_charts_tried = wall_cuts_applied = wall_fallback_applied = 0
+        for c in list(charts.keys()):
+            if c not in charts: continue
+            fl = sorted(charts[c])
+            if len(fl) < 12: continue
+            w = area3[fl]
+            W_tot = w.sum()
+            if W_tot <= 0: continue
+            FN_c = FN[fl]
+            M = (FN_c * w[:, None]).T @ FN_c
+            evals, axes = np.linalg.eigh(M)
+            dom = axes[:, -1]
+            if evals[-1] - evals[-2] <= 1e-12 * W_tot:
+                dom = FN_c[int(np.argmax(w))]
+            dots = np.abs(FN_c @ dom)
+            angs = np.degrees(np.arccos(np.clip(dots, -1.0, 1.0)))
+            planar_faces = [fl[i] for i in range(len(fl)) if angs[i] <= 15.0]
+            wall_faces = [fl[i] for i in range(len(fl)) if angs[i] > 60.0]
+            if area3[planar_faces].sum() < 0.4 * W_tot or not wall_faces:
+                continue
+            wall_charts_tried += 1
+            fl_set = set(fl)
+            corner_edges = []
+            for f in wall_faces:
+                for e in face_edges[f]:
+                    if forced[e]: continue
+                    ef = e_faces[e]
+                    if len(ef) != 2: continue
+                    f0, f1 = ef[0], ef[1]
+                    if f0 not in fl_set or f1 not in fl_set: continue
+                    ang = np.degrees(edge_dihedral[e])
+                    if ang > 45.0:
+                        corner_edges.append(e)
+            corner_edges = list(set(corner_edges))
+            if not corner_edges:
+                continue
+            d_old = verified.get(c, 1e9)
+            select_unwrap(fl, set_edges=corner_edges)
+            U = read_uv(fl)
+            d_new, dmax_new, ov_new = measure(fl, U)
+            shape_ok = True
+            if A['shape_accept'] == '1':
+                shape_ok, _, _, _ = check_shape_island(fl, U, ov_new)
+            accepted = (not ov_new) and (shape_ok if A['shape_accept'] == '1' else d_new <= max(THR, d_old * 1.05))
+            if accepted:
+                for e in corner_edges:
+                    seam[e] = True
+                    bm.edges[e].seam = True
+                wall_cuts_applied += 1
+                sub_comps = components(fl, lambda e: not forced[e] and e not in corner_edges)
+                if len(sub_comps) > 1:
+                    for i, pc in enumerate(sub_comps):
+                        pc = sorted(pc)
+                        if i == 0:
+                            charts[c] = set(pc); fc[pc] = c; verified[c] = d_new
+                            if A['keep_trials'] == '1':
+                                chart_uv[c] = (tuple(pc), U[np.searchsorted(fl, pc)])
+                        else:
+                            new_c = nid[0]; nid[0] += 1
+                            charts[new_c] = set(pc); fc[pc] = new_c; verified[new_c] = d_new
+                            if A['keep_trials'] == '1':
+                                chart_uv[new_c] = (tuple(pc), U[np.searchsorted(fl, pc)])
+                else:
+                    verified[c] = d_new
+                    if A['keep_trials'] == '1':
+                        chart_uv[c] = (tuple(fl), U)
+            else:
+                wall_set = set(wall_faces)
+                hinge_edges = []
+                for f in wall_faces:
+                    for e in face_edges[f]:
+                        if forced[e]: continue
+                        ef = e_faces[e]
+                        if len(ef) != 2: continue
+                        f0, f1 = ef[0], ef[1]
+                        if f0 in fl_set and f1 in fl_set:
+                            if (f0 in wall_set) != (f1 in wall_set):
+                                hinge_edges.append(e)
+                hinge_edges = list(set(hinge_edges))
+                all_cuts = set(corner_edges) | set(hinge_edges)
+                for e in all_cuts:
+                    seam[e] = True
+                    bm.edges[e].seam = True
+                sub_comps = components(fl, lambda e: not forced[e] and e not in all_cuts)
+                if len(sub_comps) > 1:
+                    wall_fallback_applied += 1
+                    for i, pc in enumerate(sub_comps):
+                        pc = sorted(pc)
+                        select_unwrap(pc)
+                        U_pc = read_uv(pc)
+                        d_pc, _, o_pc = measure(pc, U_pc)
+                        if i == 0:
+                            charts[c] = set(pc); fc[pc] = c; verified[c] = d_pc
+                            if A['keep_trials'] == '1':
+                                chart_uv[c] = (tuple(pc), U_pc)
+                        else:
+                            new_c = nid[0]; nid[0] += 1
+                            charts[new_c] = set(pc); fc[pc] = new_c; verified[new_c] = d_pc
+                            if A['keep_trials'] == '1':
+                                chart_uv[new_c] = (tuple(pc), U_pc)
+                else:
+                    restore_seams(corner_edges)
+        st.update(wall_charts_tried=wall_charts_tried, wall_cuts_applied=wall_cuts_applied,
+                  wall_fallback_applied=wall_fallback_applied)
+        tm['wall_cuts'] = time.perf_counter() - t_wc
+
     # final unwrap of all charts at once (seams exactly at chart borders), compare with accepted trials
     t = time.perf_counter()
     recompute_seams()
@@ -897,11 +1011,12 @@ def run_proto2(obj):
         pack()
     tm['pack'] = time.perf_counter() - t
     bpy.ops.object.mode_set(mode='OBJECT')
-    st['options'] = {k: A[k] for k in ('tree', 'visibility', 'borders', 'strips', 'frames', 'tree_faces', 'keep_trials', 'shape_accept', 'fold_rule')}
+    st['options'] = {k: A[k] for k in ('tree', 'visibility', 'borders', 'strips', 'frames', 'tree_faces', 'keep_trials', 'shape_accept', 'fold_rule', 'wall_cuts')}
     st.update(stats); st['stage_time'] = tm; st['time'] = time.perf_counter() - T0
     st.update(method=METHOD, soft_deg=float(A['soft']), thr=THR, shape_accept=A['shape_accept'],
               shape_p95=SHAPE_P95, shape_max=SHAPE_MAX, shape_tiny=SHAPE_TINY, shape_planar=SHAPE_PLANAR,
-              fold_rule=A['fold_rule'], fold_angle=FOLD_ANGLE, fold_conformal=FOLD_CONFORMAL)
+              fold_rule=A['fold_rule'], fold_angle=FOLD_ANGLE, fold_conformal=FOLD_CONFORMAL,
+              wall_cuts=A['wall_cuts'])
     return TAG, st
 
 
