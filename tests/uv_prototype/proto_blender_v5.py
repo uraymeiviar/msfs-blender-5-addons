@@ -14,11 +14,14 @@ A = dict(objects='', out='results2', soft='30', thr='1.25', method='ANGLE_BASED'
          skip_smart='0', min_split='12', tries='4', tag='proto4', strip_k='0.0075', strip_area='0.001',
          worst='2.0', ms_iter='50', forced_seams='1', forced_nsplit='0', only_smart='0', fill_min='0.5', fill_gain='1.25',
          tree='0', visibility='0', borders='0', strips='0', frames='0', tree_faces='512', phase='benchmark', keep_trials='0',
-         shape_accept='0', shape_p95='1.10', shape_max='1.5', shape_tiny='0.001', shape_planar='1.02', shape_planar_deg='10.0')
+         shape_accept='0', shape_p95='1.10', shape_max='1.5', shape_tiny='0.001', shape_planar='1.02', shape_planar_deg='10.0',
+         fold_rule='0', fold_angle='45.0', fold_conformal='1.05', fold_max='1.5')
 for i in range(0, len(argv), 2):
     A[argv[i].lstrip('-')] = argv[i + 1]
 if 'shape' in A and 'shape_accept' not in [argv[i].lstrip('-') for i in range(0, len(argv), 2)]:
     A['shape_accept'] = A['shape']
+if 'fold' in A and 'fold_rule' not in [argv[i].lstrip('-') for i in range(0, len(argv), 2)]:
+    A['fold_rule'] = A['fold']
 if A['phase'] not in ('benchmark', 'seams'):
     raise ValueError('--phase must be benchmark or seams')
 if A['phase'] == 'seams':
@@ -30,6 +33,8 @@ STRIP_K = float(A['strip_k']); STRIP_AREA = float(A['strip_area']); WORST = floa
 SHAPE_P95 = float(A['shape_p95']); SHAPE_MAX = float(A['shape_max'])
 SHAPE_TINY = float(A['shape_tiny']); SHAPE_PLANAR = float(A['shape_planar'])
 SHAPE_PLANAR_DEG = float(A['shape_planar_deg'])
+FOLD_ANGLE = float(A['fold_angle']); FOLD_RAD = math.radians(FOLD_ANGLE)
+FOLD_CONFORMAL = float(A['fold_conformal']); FOLD_MAX = float(A['fold_max'])
 
 
 def set_active(obj):
@@ -181,9 +186,13 @@ def run_proto2(obj):
                 concave = e.calc_face_angle_signed(0.0) < -1e-5
                 cut_cost[e.index] *= (.35 if concave else 1.0) * (.25 + .75 * exposure[ef].mean()) * loop_cost[e.index]
     soft = np.zeros(nE, bool)
+    edge_dihedral = np.zeros(nE, np.float64)
     for e in bm.edges:
-        if not forced[e.index] and e.calc_face_angle(0.0) > SOFT:
-            soft[e.index] = True
+        if len(e_faces[e.index]) == 2:
+            ang = e.calc_face_angle(0.0)
+            edge_dihedral[e.index] = ang
+            if not forced[e.index] and ang > SOFT:
+                soft[e.index] = True
     st = dict(n_forced_manifold=int(sum(1 for e in range(nE) if forced[e] and len(e_faces[e]) == 2)),
               forced_why=why, n_soft=int(soft.sum()))
 
@@ -226,7 +235,7 @@ def run_proto2(obj):
 
     prev_sel = [set()]
     stats = dict(trials=0, trial_time=0.0)
-    rej = dict(dist=0, ov=0, ov_flip=0, ov_pair=0); last_flip = [False]
+    rej = dict(dist=0, ov=0, ov_flip=0, ov_pair=0, fold=0); last_flip = [False]
 
     def select_unwrap(fl, clear_edges=(), set_edges=()):
         nonlocal bm
@@ -264,9 +273,7 @@ def run_proto2(obj):
         ov = fl_ or len(um.overlap_pairs(U)) > 0
         return d, dmax, ov
 
-    def check_shape_island(fl, U, ov):
-        if ov:
-            return False, None, None, None
+    def compute_conformal(fl, U):
         P3 = P3all[fl]
         e1 = P3[:, 1] - P3[:, 0]
         e2 = P3[:, 2] - P3[:, 0]
@@ -275,7 +282,7 @@ def run_proto2(obj):
         L_sq = np.maximum.reduce([np.sum(e1**2, axis=1), np.sum(e2**2, axis=1), np.sum((e2 - e1)**2, axis=1)])
         valid = cross_len > 1e-12 * L_sq
         if not np.any(valid):
-            return False, None, None, None
+            return valid, np.array([]), np.array([])
         length = np.linalg.norm(e1[valid], axis=1)
         h = cross_len[valid] / length
         x = np.einsum('ij,ij->i', e1[valid], e2[valid]) / length
@@ -292,6 +299,14 @@ def run_proto2(obj):
         collapsed = uv_area == 0
         conformal[collapsed] = np.inf
         w = cross_len[valid] / 2.0
+        return valid, conformal, w
+
+    def check_shape_island(fl, U, ov):
+        if ov:
+            return False, None, None, None
+        valid, conformal, w = compute_conformal(fl, U)
+        if len(conformal) == 0:
+            return False, None, None, None
         W = w.sum()
         if W <= 0:
             return False, None, None, None
@@ -325,6 +340,36 @@ def run_proto2(obj):
                     return False, c_p95, c_max, planar_c
         return True, c_p95, c_max, planar_c
 
+    def check_fold_sides(fl, U, sides_faces, cleared_edges):
+        if not any(edge_dihedral[e] > FOLD_RAD for e in cleared_edges):
+            return True
+        valid, conformal, w = compute_conformal(fl, U)
+        if len(conformal) == 0:
+            return False
+        fl_valid = np.array(fl)[valid]
+        face_map = {f: i for i, f in enumerate(fl_valid)}
+        for side in sides_faces:
+            idxs = [face_map[f] for f in side if f in face_map]
+            if not idxs:
+                continue
+            c_s = conformal[idxs]
+            w_s = w[idxs]
+            W_s = w_s.sum()
+            if W_s <= 0:
+                continue
+            order = np.argsort(c_s, kind='stable')
+            cum = np.cumsum(w_s[order])
+            idx = min(int(np.searchsorted(cum, 0.95 * cum[-1])), len(order) - 1)
+            c_p95 = c_s[order[idx]]
+            if c_p95 > FOLD_CONFORMAL:
+                return False
+            non_tiny = w_s >= (SHAPE_TINY * W_s)
+            if np.any(non_tiny):
+                c_max = np.max(c_s[non_tiny])
+                if c_max > FOLD_MAX:
+                    return False
+        return True
+
     chart_uv = {}
     last_trial = [None]
 
@@ -340,7 +385,7 @@ def run_proto2(obj):
         if A['keep_trials'] == '1':
             last_trial[0] = (tuple(sorted(fl)), U[np.argsort(fl)].copy(), d, ov, shape_ok)
         stats['trials'] += 1; stats['trial_time'] += time.perf_counter() - t0
-        return d, ov, shape_ok
+        return d, ov, shape_ok, U
 
     def restore_seams(edges):
         bm.edges.ensure_lookup_table()
@@ -362,15 +407,18 @@ def run_proto2(obj):
     def try_merge(c, cands, ed):
         for d in cands:
             fs = charts[d] | charts[c]
-            dist, ov, shape_ok = trial(fs, ed[d])
+            dist, ov, shape_ok, U = trial(fs, ed[d])
+            fold_ok = True
+            if A['fold_rule'] == '1':
+                fold_ok = check_fold_sides(list(fs), U, [charts[c], charts[d]], ed[d])
             if A['shape_accept'] == '1':
-                accepted = shape_ok and not ov
+                accepted = shape_ok and fold_ok and not ov
             else:
                 limit = THR
                 if strip_mode and A['strips'] == '1':
                     fraction = area3[list(charts[c])].sum() / max(A_tot, 1e-30)
                     limit += .10 * max(0.0, 1.0 - fraction / STRIP_AREA)
-                accepted = dist <= limit and not ov
+                accepted = (dist <= limit) and fold_ok and not ov
             if accepted:
                 charts[d] = fs; fc[list(charts[c])] = d; del charts[c]; verified.pop(c, None); verified[d] = dist
                 if A['keep_trials'] == '1' and last_trial[0]:
@@ -378,7 +426,7 @@ def run_proto2(obj):
                     chart_uv[d] = (last_trial[0][0], last_trial[0][1])
                 for e in ed[d]: seam[e] = False
                 return True
-            rej['dist' if (not shape_ok if A['shape_accept'] == '1' else dist > THR) else 'ov'] += 1
+            rej['dist' if (not shape_ok if A['shape_accept'] == '1' else dist > THR) else ('fold' if not fold_ok else 'ov')] += 1
             if ov: rej['ov_flip' if last_flip[0] else 'ov_pair'] += 1
             restore_seams(ed[d])
         return False
@@ -388,7 +436,7 @@ def run_proto2(obj):
     for cid in list(charts.keys()):
         fs = list(charts[cid])
         if len(fs) < MIN_SPLIT: continue
-        d, ov, shape_ok = trial(fs)
+        d, ov, shape_ok, U = trial(fs)
         accepted = (shape_ok and not ov) if A['shape_accept'] == '1' else (d <= THR and not ov)
         if accepted:
             verified[cid] = d
@@ -447,9 +495,16 @@ def run_proto2(obj):
             valid = True
             cand_results = []
             for group in groups:
-                d, ov, shape_ok = trial(sorted(group), cuts)
+                d, ov, shape_ok, U = trial(sorted(group), cuts)
                 tree_trials += 1
                 bad = (not shape_ok or ov) if A['shape_accept'] == '1' else (ov or d > THR)
+                if not bad and A['fold_rule'] == '1':
+                    group_set = set(group)
+                    group_children = [c_fs for c_fs, _ in children if c_fs & group_set]
+                    if len(group_children) > 1:
+                        group_cuts = [e for e in cuts if e_faces[e][0] in group_set and e_faces[e][1] in group_set]
+                        if not check_fold_sides(sorted(group), U, group_children, group_cuts):
+                            bad = True
                 if bad:
                     valid = False
                     break
@@ -559,7 +614,7 @@ def run_proto2(obj):
         bad = []
         for c in changed:
             if c not in charts or not charts[c]: continue
-            d, ov, shape_ok = trial(charts[c])
+            d, ov, shape_ok, U = trial(charts[c])
             accepted = (shape_ok and not ov) if A['shape_accept'] == '1' else (d <= THR and not ov)
             if accepted:
                 verified[c] = d
@@ -842,10 +897,11 @@ def run_proto2(obj):
         pack()
     tm['pack'] = time.perf_counter() - t
     bpy.ops.object.mode_set(mode='OBJECT')
-    st['options'] = {k: A[k] for k in ('tree', 'visibility', 'borders', 'strips', 'frames', 'tree_faces', 'keep_trials', 'shape_accept')}
+    st['options'] = {k: A[k] for k in ('tree', 'visibility', 'borders', 'strips', 'frames', 'tree_faces', 'keep_trials', 'shape_accept', 'fold_rule')}
     st.update(stats); st['stage_time'] = tm; st['time'] = time.perf_counter() - T0
     st.update(method=METHOD, soft_deg=float(A['soft']), thr=THR, shape_accept=A['shape_accept'],
-              shape_p95=SHAPE_P95, shape_max=SHAPE_MAX, shape_tiny=SHAPE_TINY, shape_planar=SHAPE_PLANAR)
+              shape_p95=SHAPE_P95, shape_max=SHAPE_MAX, shape_tiny=SHAPE_TINY, shape_planar=SHAPE_PLANAR,
+              fold_rule=A['fold_rule'], fold_angle=FOLD_ANGLE, fold_conformal=FOLD_CONFORMAL)
     return TAG, st
 
 
