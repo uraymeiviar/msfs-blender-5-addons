@@ -166,3 +166,62 @@ Metric definitions (`uvmetrics.py`, `evaluate3.py`, `evaluate3_extra.py`):
 - `xatlas_run.py` requires `__splitmesh.npz` from the `proto_blender_v2.py` run. `repack_blender.py` requires both `__xatlas.npz` and `__xatlascut.npz`, and the `fss_nsplit` attribute in `work3.blend`.
 - `evaluate3.py` skips any file whose name contains `splitmesh` or `xatlascut` (so `xatlascut_bpack` is not evaluated). It takes P/T from the first npz of each object; every method must share the same triangulation.
 - The Blender scripts assume Blender 5.2 operator signatures (`unwrap` method `MINIMUM_STRETCH` / `margin_method`, `pack_islands(shape_method=...)`, `Mesh.corner_normals`) and the UV select sync toggle.
+
+## 7. Round 4 auto-seam experiments
+
+`proto_blender_v4.py` is an opt-in research harness derived from round 3. It is
+not an installed add-on and does not save a `.blend`. Copy it with the baseline
+helpers into `tests/_work/uv_prototype/` before running. Use the same `work3.blend`,
+venv, Blender executable, seven objects and evaluator as above. No packages are
+installed into Blender. No external algorithm source was copied.
+
+Independent switches (each takes `0` or `1`, default `0`):
+
+| Switch | Experiment | Limits |
+| :--- | :--- | :--- |
+| `--tree 1` | Binary normal-cluster tree inside loose/forced-cut components; compare verified parent against child chart count; centroid median breaks normal ties | Parent trials capped by `--tree_faces 512`; this is bounded tree search, not a global optimum. Baseline strip absorption remains after the tree. |
+| `--visibility 1` | Length weighted by three-ray outward AO, signed concavity and edge-chain continuation; expensive cuts are preferred for merging away | AO is object self-occlusion, not visibility from pilot cameras. It cannot measure actual cockpit back sides or scene occluders. |
+| `--borders 1` | Replace local two-edge boundary paths by a lower-cost path weighted by collinear continuation; baseline unwrap/overlap re-verification remains | Local triangle moves, not arbitrary global seam rerouting; triangulated edge chains approximate original loops. |
+| `--strips 1` | Increase trial mean-distortion allowance by up to 0.10 as strip area decreases below `strip_area` of total object area | Artist/material cuts remain forced. Final acceptance must still use the object-level pass criteria. |
+| `--frames 1` | Add paths from every inner boundary to the largest boundary with turn/continuation penalties; try one, two and four starts per hole | Reject candidates whose worst distortion exceeds the old chart's; not a guarantee that every lattice is decomposed. |
+
+The baseline angle, worst-triangle repair, overlap predicate, density normalization,
+and packing settings are retained. Flags can interact; a single passing case does
+not validate a switch for other objects. Consult the appended journal results before
+adopting any output. All switches remain off unless explicitly requested.
+
+PowerShell example, from the scratch folder:
+
+```powershell
+$uvObjects = 'W_AUDIO_L_VOLUME_KNOB,W_TRIM_PANEL,W_LEVER_FLAP_LOCK,W_@MERGE_PEDESTAL_SHELL,W_COCKPIT_SHELL_L,W_COCKPIT_SHELL_FLOOR,W_OVERHEAD_SHELL'
+if (Get-Process blender -ErrorAction SilentlyContinue) { throw 'Close Blender first' }
+& 'D:\fss-e2\tools\blender\blender.exe' -b work3.blend --python-exit-code 1 --python proto_blender_v4.py -- --objects $uvObjects --out results3 --skip_smart 1 --tag tree --tree 1
+& .\venv\Scripts\python.exe -I -u evaluate3.py results3 tree
+```
+
+Run each switch with its own tag, serially; never run another Blender alongside it.
+Do not run evaluation concurrently with timed Blender benchmarks. The all-switch
+combination adds `--tree 1 --visibility 1 --borders 1 --strips 1 --frames 1` and uses
+`--tag all`. The `--tag` names are arbitrary evaluator method names.
+
+`--phase benchmark` (default) explicitly creates a temporary UV map for measurement,
+normalizes density and packs with the baseline packer. It exports the `.npz`, seam
+proposal and stage log. This combined *benchmark* is not the eventual UI pipeline.
+
+`--phase seams` skips packing, emits `<object>__<tag>_proposal.npy` (vertex pairs),
+marks generated edges with the boolean `fss_auto_seam` attribute in memory, then
+removes the temporary UV layer and asserts every original UV map is unchanged.
+The scratch mesh's `fss_seam` attribute is the immutable artist mask; existing
+automatic seams are replaced on rerun. No `.blend` is saved in either mode.
+The seam-only log and timing are separate from benchmark timings.
+
+This harness still requires `prep3.py`'s evaluated, triangulated, world-space
+meshes for apples-to-apples baseline comparison. It does **not** validate the
+future original-datablock/Mirror/Array workflow, scene-camera visibility, material
+texture-set packing, or Substance Painter appearance.
+
+Read strip counts as the counts immediately before/after strip absorption, before
+later smoothing, repair and frame cuts. `extraV` in evaluator console text is
+total UV splitting; use JSON `render_extra_vs_normals` for the 5% pass criterion.
+Timings are single runs, not statistical performance guarantees. A smaller chart
+distortion in the stage log is not the final packed global area-distortion metric.
