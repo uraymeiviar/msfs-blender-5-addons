@@ -257,16 +257,8 @@ def run_proto2(obj):
         ov = fl_ or len(um.overlap_pairs(U)) > 0
         return d, dmax, ov
 
-    accepted_uv = {}
-
-    def uv_key(fl):
-        faces = tuple(sorted(fl))
-        fs = set(faces)
-        # Face membership alone is insufficient: artist slits and tree cuts matter.
-        internal = tuple(sorted(e for e in {e for f in faces for e in face_edges[f]}
-                                if len(e_faces[e]) == 2 and all(f in fs for f in e_faces[e])
-                                and bm.edges[e].seam))
-        return faces, internal
+    chart_uv = {}
+    last_trial = [None]
 
     def trial(faces, clear_edges=()):
         t0 = time.perf_counter()
@@ -274,8 +266,8 @@ def run_proto2(obj):
         select_unwrap(fl, clear_edges)
         U = read_uv(fl)
         d, dmax, ov = measure(fl, U)
-        if A['keep_trials'] == '1' and not ov and d <= THR:
-            accepted_uv[uv_key(fl)] = U[np.argsort(fl)].copy()
+        if A['keep_trials'] == '1':
+            last_trial[0] = (tuple(sorted(fl)), U[np.argsort(fl)].copy(), d, ov)
         stats['trials'] += 1; stats['trial_time'] += time.perf_counter() - t0
         return d, ov
 
@@ -306,6 +298,9 @@ def run_proto2(obj):
                 limit += .10 * max(0.0, 1.0 - fraction / STRIP_AREA)
             if dist <= limit and not ov:
                 charts[d] = fs; fc[list(charts[c])] = d; del charts[c]; verified.pop(c, None); verified[d] = dist
+                if A['keep_trials'] == '1' and last_trial[0]:
+                    chart_uv.pop(c, None)
+                    chart_uv[d] = (last_trial[0][0], last_trial[0][1])
                 for e in ed[d]: seam[e] = False
                 return True
             rej['dist' if dist > THR else 'ov'] += 1
@@ -320,7 +315,10 @@ def run_proto2(obj):
         if len(fs) < MIN_SPLIT: continue
         d, ov = trial(fs)
         if d <= THR and not ov:
-            verified[cid] = d; continue
+            verified[cid] = d
+            if A['keep_trials'] == '1' and last_trial[0]:
+                chart_uv[cid] = (last_trial[0][0], last_trial[0][1])
+            continue
         cen = P3all[fs].mean(1); w = area3[fs] + 1e-30
         mu = (cen * w[:, None]).sum(0) / w.sum()
         C = ((cen - mu) * w[:, None]).T @ (cen - mu)
@@ -332,6 +330,7 @@ def run_proto2(obj):
         if len(sub) <= 1: continue
         n_split += 1
         del charts[cid]
+        chart_uv.pop(cid, None)
         for s in sub:
             charts[nid[0]] = set(s); fc[s] = nid[0]; nid[0] += 1
     st['seed_charts_split'] = n_split; st['charts_after_split'] = len(charts)
@@ -348,7 +347,8 @@ def run_proto2(obj):
         def solve(ids):
             nonlocal tree_trials
             if len(ids) == 1:
-                return [leaf_faces[ids[0]]]
+                c = ids[0]
+                return [(leaf_faces[c], chart_uv.get(c))]
             centers = np.array([P3all[list(leaf_faces[c])].mean((0, 1)) for c in ids])
             normals = np.array([FN[list(leaf_faces[c])].mean(0) for c in ids])
             axis = int(np.argmax(np.ptp(normals, axis=0)))
@@ -358,7 +358,7 @@ def run_proto2(obj):
             order_ids = [ids[i] for i in np.argsort(values, kind='stable')]
             middle = len(ids) // 2
             children = solve(order_ids[:middle]) + solve(order_ids[middle:])
-            fs = set().union(*children)
+            fs = set().union(*[c_fs for c_fs, _ in children])
             if len(fs) > int(A['tree_faces']) or time.perf_counter() - T0 > BUDGET:
                 return children
             # A parent may have several components after clustering. Count the
@@ -369,19 +369,28 @@ def run_proto2(obj):
             cuts = [e for e in range(nE) if not forced[e] and len(e_faces[e]) == 2
                     and all(f in fs for f in e_faces[e])]
             valid = True
+            cand_results = []
             for group in groups:
                 d, ov = trial(sorted(group), cuts)
                 tree_trials += 1
                 if ov or d > THR:
                     valid = False
                     break
+                if A['keep_trials'] == '1' and last_trial[0]:
+                    cand_results.append((set(group), (last_trial[0][0], last_trial[0][1])))
+                else:
+                    cand_results.append((set(group), None))
             restore_seams(cuts)
-            return [set(g) for g in groups] if valid else children
+            return cand_results if valid else children
         roots = components(range(nF), lambda e: not forced[e])
         solution = []
         for root in roots:
             solution.extend(solve(sorted(set(int(fc[f]) for f in root))))
-        charts = {i: fs for i, fs in enumerate(solution)}
+        charts = {i: fs for i, (fs, _) in enumerate(solution)}
+        if A['keep_trials'] == '1':
+            chart_uv = {i: u for i, (_, u) in enumerate(solution) if u is not None}
+        else:
+            chart_uv = {}
         for c, fs in charts.items(): fc[list(fs)] = c
         nid[0] = len(charts); verified.clear(); recompute_seams()
         st['tree_parent_trials'] = tree_trials
@@ -435,6 +444,7 @@ def run_proto2(obj):
     # smoothing with re-verification
     t = time.perf_counter()
     fc0 = fc.copy(); verified0 = dict(verified); charts0 = {k: set(v) for k, v in charts.items()}
+    chart_uv0 = {k: (v[0], v[1].copy()) for k, v in chart_uv.items()}
     moved = 0
     for it in range(5):
         ch = 0
@@ -473,7 +483,10 @@ def run_proto2(obj):
         for c in changed:
             if c not in charts or not charts[c]: continue
             d, ov = trial(charts[c])
-            if d <= THR and not ov: verified[c] = d
+            if d <= THR and not ov:
+                verified[c] = d
+                if A['keep_trials'] == '1' and last_trial[0]:
+                    chart_uv[c] = (last_trial[0][0], last_trial[0][1])
             else: bad.append(c)
         changed = set()
         for c in bad:
@@ -482,7 +495,7 @@ def run_proto2(obj):
                 charts[new].discard(f); charts[old].add(f); fc[f] = old; reverted_faces += 1
                 changed.update([old, new])
     if changed:  # still unverified after 4 rounds: drop smoothing entirely
-        fc = fc0; charts = charts0; verified = verified0; full_revert = True
+        fc = fc0; charts = charts0; verified = verified0; chart_uv = chart_uv0; full_revert = True
     charts = {k: v for k, v in charts.items() if v}
     st.update(smooth_moved=moved, smooth_reverted_faces=reverted_faces, smooth_rounds=rounds, smooth_full_revert=full_revert)
     tm['smooth'] = time.perf_counter() - t
@@ -493,16 +506,15 @@ def run_proto2(obj):
     allf = list(range(nF))
     if A['keep_trials'] == '1':
         reused = missing = 0
-        for faces in charts.values():
+        for c, faces in charts.items():
             fl = sorted(faces)
-            saved = accepted_uv.get(uv_key(fl))
-            if saved is None:
-                # Small seeds and changed/unverified charts have no accepted trial.
+            entry = chart_uv.get(c)
+            if entry is not None and entry[0] == tuple(fl):
+                write_uv(fl, entry[1])
+                reused += 1
+            else:
                 select_unwrap(fl)
                 missing += 1
-            else:
-                write_uv(fl, saved)
-                reused += 1
         st.update(trial_uv_reused=reused, trial_uv_missing=missing)
     else:
         select_unwrap(allf)
