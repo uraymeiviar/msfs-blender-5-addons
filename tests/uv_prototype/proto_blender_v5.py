@@ -15,20 +15,28 @@ A = dict(objects='', out='results2', soft='30', thr='1.25', method='ANGLE_BASED'
          worst='2.0', ms_iter='50', forced_seams='1', forced_nsplit='0', only_smart='0', fill_min='0.5', fill_gain='1.25',
          tree='0', visibility='0', borders='0', strips='0', frames='0', tree_faces='512', phase='benchmark', keep_trials='0',
          shape_accept='0', shape_p95='1.10', shape_max='1.5', shape_tiny='0.001', shape_planar='1.02', shape_planar_deg='10.0',
-         fold_rule='0', fold_angle='45.0', fold_conformal='1.05', fold_max='1.5',
-         wall_cuts='0', straighten='0')
+         fold_rule='0', fold_angle='45.0', fold_conformal='1.05', fold_max='1.5', fold_border_fix='0',
+         wall_cuts='0', straighten='0', align='0')
 for i in range(0, len(argv), 2):
     A[argv[i].lstrip('-')] = argv[i + 1]
 if 'shape' in A and 'shape_accept' not in [argv[i].lstrip('-') for i in range(0, len(argv), 2)]:
     A['shape_accept'] = A['shape']
 if 'fold' in A and 'fold_rule' not in [argv[i].lstrip('-') for i in range(0, len(argv), 2)]:
     A['fold_rule'] = A['fold']
+if 'fold_fix' in A and 'fold_border_fix' not in [argv[i].lstrip('-') for i in range(0, len(argv), 2)]:
+    A['fold_border_fix'] = A['fold_fix']
+if 'fold_selective' in A and 'fold_border_fix' not in [argv[i].lstrip('-') for i in range(0, len(argv), 2)]:
+    A['fold_border_fix'] = A['fold_selective']
 if 'walls' in A and 'wall_cuts' not in [argv[i].lstrip('-') for i in range(0, len(argv), 2)]:
     A['wall_cuts'] = A['walls']
 if 'wall_corner_cuts' in A and 'wall_cuts' not in [argv[i].lstrip('-') for i in range(0, len(argv), 2)]:
     A['wall_cuts'] = A['wall_corner_cuts']
 if 'straighten_strips' in A and 'straighten' not in [argv[i].lstrip('-') for i in range(0, len(argv), 2)]:
     A['straighten'] = A['straighten_strips']
+if 'align_islands' in A and 'align' not in [argv[i].lstrip('-') for i in range(0, len(argv), 2)]:
+    A['align'] = A['align_islands']
+if 'alignment' in A and 'align' not in [argv[i].lstrip('-') for i in range(0, len(argv), 2)]:
+    A['align'] = A['alignment']
 if A['phase'] not in ('benchmark', 'seams'):
     raise ValueError('--phase must be benchmark or seams')
 if A['phase'] == 'seams':
@@ -69,7 +77,8 @@ def export(obj, layer, path, extra):
 
 def pack():
     bpy.ops.uv.average_islands_scale()
-    bpy.ops.uv.pack_islands(udim_source='CLOSEST_UDIM', rotate=True, rotate_method='ANY', scale=True,
+    rot_method = 'CARDINAL' if A['align'] == '1' else 'ANY'
+    bpy.ops.uv.pack_islands(udim_source='CLOSEST_UDIM', rotate=True, rotate_method=rot_method, scale=True,
                             merge_overlap=False, margin_method='FRACTION', margin=MARGIN, pin=False,
                             shape_method='CONCAVE')
 
@@ -270,6 +279,41 @@ def straighten_quad_strip_faces(fl, bm, V, FV, edge_dihedral, U_curr, seam):
     return None
 
 
+def align_island_uv(U):
+    """Rotate island UV coordinates so its minimum-area bounding box edges follow U and V."""
+    pts = U.reshape(-1, 2)
+    p = np.unique(np.round(pts, 9), axis=0)
+    if len(p) < 3:
+        return U.copy()
+    p = p[np.lexsort((p[:, 1], p[:, 0]))]
+    def half(P):
+        h = []
+        for q in P:
+            while len(h) >= 2 and ((h[-1][0] - h[-2][0]) * (q[1] - h[-2][1]) - (h[-1][1] - h[-2][1]) * (q[0] - h[-2][0])) <= 0:
+                h.pop()
+            h.append(q)
+        return h
+    H = np.array(half(p)[:-1] + half(p[::-1])[:-1])
+    if len(H) < 3:
+        return U.copy()
+    e = np.roll(H, -1, 0) - H
+    ang = np.arctan2(e[:, 1], e[:, 0])
+    c_, s_ = np.cos(ang), np.sin(ang)
+    x = H[None, :, 0] * c_[:, None] + H[None, :, 1] * s_[:, None]
+    y = -H[None, :, 0] * s_[:, None] + H[None, :, 1] * c_[:, None]
+    dx = x.max(1) - x.min(1)
+    dy = y.max(1) - y.min(1)
+    areas = dx * dy
+    best_idx = int(np.argmin(areas))
+    best_ang = ang[best_idx]
+    if dx[best_idx] < dy[best_idx]:
+        best_ang += math.pi / 2.0
+    cen = pts.mean(0)
+    ca, sa = math.cos(-best_ang), math.sin(-best_ang)
+    R = np.array([[ca, -sa], [sa, ca]])
+    return np.einsum('ij,fkj->fki', R, U - cen) + cen
+
+
 def run_smart(obj, angle):
     me = obj.data
     name = 'smart%d' % angle
@@ -310,6 +354,11 @@ def run_proto2(obj):
     e_verts = np.array([[v.index for v in e.verts] for e in bm.edges])
     face_edges = [[e.index for e in f.edges] for f in bm.faces]
     forced, why = forced_flags_bm(bm)
+    lay_nsplit = bm.edges.layers.int.get('fss_nsplit')
+    is_nsplit = np.zeros(nE, bool)
+    if lay_nsplit is not None:
+        for e in bm.edges:
+            is_nsplit[e.index] = bool(e[lay_nsplit])
     # Geometry-only cut cost. AO is sampled in object/world coordinates of the
     # prepared mesh; it is not a cockpit camera visibility measurement.
     cut_cost = e_len.copy()
@@ -386,10 +435,12 @@ def run_proto2(obj):
     seam = np.zeros(nE, bool)
     verified = {}
 
+    internal_seams = set()
+
     def recompute_seams():
         for e in range(nE):
             ef = e_faces[e]
-            seam[e] = forced[e] or (len(ef) == 2 and fc[ef[0]] != fc[ef[1]])
+            seam[e] = forced[e] or (e in internal_seams) or (len(ef) == 2 and fc[ef[0]] != fc[ef[1]])
         bm.edges.ensure_lookup_table()
         for e in bm.edges:
             e.seam = bool(seam[e.index])
@@ -534,10 +585,10 @@ def run_proto2(obj):
     chart_uv = {}
     last_trial = [None]
 
-    def trial(faces, clear_edges=()):
+    def trial(faces, clear_edges=(), set_edges=()):
         t0 = time.perf_counter()
         fl = list(faces)
-        select_unwrap(fl, clear_edges)
+        select_unwrap(fl, clear_edges, set_edges)
         U = read_uv(fl)
         d, dmax, ov = measure(fl, U)
         shape_ok = True
@@ -587,6 +638,24 @@ def run_proto2(obj):
                     chart_uv[d] = (last_trial[0][0], last_trial[0][1])
                 for e in ed[d]: seam[e] = False
                 return True
+
+            if A['fold_border_fix'] == '1' and not fold_ok:
+                steep_split = [e for e in ed[d] if edge_dihedral[e] > FOLD_RAD or is_nsplit[e]]
+                smooth_e = [e for e in ed[d] if e not in steep_split]
+                if smooth_e and steep_split:
+                    dist2, ov2, shape_ok2, U2 = trial(fs, clear_edges=smooth_e, set_edges=steep_split)
+                    acc2 = (shape_ok2 and not ov2) if A['shape_accept'] == '1' else (dist2 <= limit and not ov2)
+                    if acc2:
+                        charts[d] = fs; fc[list(charts[c])] = d; del charts[c]; verified.pop(c, None); verified[d] = dist2
+                        if A['keep_trials'] == '1' and last_trial[0]:
+                            chart_uv.pop(c, None)
+                            chart_uv[d] = (last_trial[0][0], last_trial[0][1])
+                        for e in steep_split:
+                            internal_seams.add(e); seam[e] = True; bm.edges[e].seam = True
+                        for e in smooth_e:
+                            internal_seams.discard(e); seam[e] = False; bm.edges[e].seam = False
+                        return True
+
             rej['dist' if (not shape_ok if A['shape_accept'] == '1' else dist > THR) else ('fold' if not fold_ok else 'ov')] += 1
             if ov: rej['ov_flip' if last_flip[0] else 'ov_pair'] += 1
             restore_seams(ed[d])
@@ -665,7 +734,24 @@ def run_proto2(obj):
                     if len(group_children) > 1:
                         group_cuts = [e for e in cuts if e_faces[e][0] in group_set and e_faces[e][1] in group_set]
                         if not check_fold_sides(sorted(group), U, group_children, group_cuts):
-                            bad = True
+                            if A['fold_border_fix'] == '1':
+                                steep_split = [e for e in group_cuts if edge_dihedral[e] > FOLD_RAD or is_nsplit[e]]
+                                smooth_cuts = [e for e in group_cuts if e not in steep_split]
+                                if smooth_cuts and steep_split:
+                                    d2, ov2, shape_ok2, U2 = trial(sorted(group), clear_edges=smooth_cuts, set_edges=steep_split)
+                                    bad2 = (not shape_ok2 or ov2) if A['shape_accept'] == '1' else (ov2 or d2 > THR)
+                                    if bad2:
+                                        bad = True
+                                    else:
+                                        for e in steep_split:
+                                            internal_seams.add(e)
+                                        for e in smooth_cuts:
+                                            internal_seams.discard(e)
+                                        U = U2
+                                else:
+                                    bad = True
+                            else:
+                                bad = True
                 if bad:
                     valid = False
                     break
@@ -1191,6 +1277,21 @@ def run_proto2(obj):
         st.update(straighten_tried=straight_tried, straighten_ok=straight_ok)
         tm['straighten'] = time.perf_counter() - t_st
 
+    # Round 5 Package 9: alignment (rotate islands so main axis follows U or V)
+    if A['align'] == '1':
+        t_al = time.perf_counter()
+        align_count = 0
+        for c in list(charts.keys()):
+            fl = sorted(charts[c])
+            U_curr = read_uv(fl)
+            U_rot = align_island_uv(U_curr)
+            write_uv(fl, U_rot)
+            align_count += 1
+            if A['keep_trials'] == '1':
+                chart_uv[c] = (tuple(fl), U_rot)
+        st.update(align_islands_count=align_count)
+        tm['align'] = time.perf_counter() - t_al
+
     t = time.perf_counter()
     bm = bmesh.from_edit_mesh(me)
     for f in bm.faces: f.select = True
@@ -1201,12 +1302,13 @@ def run_proto2(obj):
         pack()
     tm['pack'] = time.perf_counter() - t
     bpy.ops.object.mode_set(mode='OBJECT')
-    st['options'] = {k: A[k] for k in ('tree', 'visibility', 'borders', 'strips', 'frames', 'tree_faces', 'keep_trials', 'shape_accept', 'fold_rule', 'wall_cuts', 'straighten')}
+    st['options'] = {k: A[k] for k in ('tree', 'visibility', 'borders', 'strips', 'frames', 'tree_faces', 'keep_trials', 'shape_accept', 'fold_rule', 'fold_border_fix', 'wall_cuts', 'straighten', 'align')}
     st.update(stats); st['stage_time'] = tm; st['time'] = time.perf_counter() - T0
     st.update(method=METHOD, soft_deg=float(A['soft']), thr=THR, shape_accept=A['shape_accept'],
               shape_p95=SHAPE_P95, shape_max=SHAPE_MAX, shape_tiny=SHAPE_TINY, shape_planar=SHAPE_PLANAR,
               fold_rule=A['fold_rule'], fold_angle=FOLD_ANGLE, fold_conformal=FOLD_CONFORMAL,
-              wall_cuts=A['wall_cuts'], straighten=A['straighten'])
+              fold_border_fix=A['fold_border_fix'],
+              wall_cuts=A['wall_cuts'], straighten=A['straighten'], align=A['align'])
     return TAG, st
 
 
