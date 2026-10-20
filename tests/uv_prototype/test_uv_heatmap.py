@@ -407,7 +407,10 @@ def test_opaque_surface_shader():
     view = Matrix.Translation((0, 0, -3.0))
 
     shader = uv_heatmap._heatmap_shader()
-    batch = batch_for_shader(shader, 'TRIS', {'pos': pos, 'nor': nor, 'color': col})
+    glyph_texture = uv_heatmap._glyphs()
+    uvs = np.zeros((len(pos), 2), np.float32)
+    batch = batch_for_shader(shader, 'TRIS', {'pos': pos, 'nor': nor, 'color': col, 'uv': uvs})
+    bpy.context.scene.fss_uv_heatmap_grid = False
     size = 64
     off = gpu.types.GPUOffScreen(size, size)
     try:
@@ -418,10 +421,10 @@ def test_opaque_surface_shader():
                 gpu.state.depth_test_set('LESS_EQUAL')
                 gpu.state.depth_mask_set(True)
                 shader.bind()
+                uv_heatmap._bind_surface_shader(shader, bpy.context.scene, glyph_texture)
                 shader.uniform_float('mvp', proj @ view)
                 shader.uniform_float('normal_matrix', view.inverted_safe().transposed())
                 shader.uniform_float('opacity', opacity)
-                shader.uniform_float('base_grey', uv_heatmap.BASE_GREY)
                 batch.draw(shader)
                 gpu.state.depth_test_set('NONE')
                 return np.array(fb.read_color(size // 2, size // 2, 1, 1, 4, 0, 'FLOAT').to_list()).ravel()
@@ -435,6 +438,60 @@ def test_opaque_surface_shader():
     finally:
         off.free()
     print(f"  -> PASS: near plane wins ({np.round(full[:3], 3)}), opacity mixes with grey ({np.round(half[:3], 3)}).")
+
+
+def test_uv_grid_and_labels(image_path=None):
+    """The UV grid draws dark cell borders and a label per cell; stretched UVs stretch the cells with them."""
+    print("Test 10b: UV grid and cell labels (offscreen)...")
+    import math
+    import gpu
+    from mathutils import Matrix
+    from gpu_extras.batch import batch_for_shader
+    gpu.init()
+    # a 2 x 1 plane whose UVs fill the square: its cells come out twice as wide as high (stretched)
+    pos = np.array([(-2, -1, 0), (2, -1, 0), (2, 1, 0), (-2, -1, 0), (2, 1, 0), (-2, 1, 0)], np.float32)
+    uvs = np.array([(0, 0), (1, 0), (1, 1), (0, 0), (1, 1), (0, 1)], np.float32)
+    nor = np.tile([0.0, 0.0, 1.0], (6, 1)).astype(np.float32)
+    col = np.tile([0.92, 0.92, 0.92, 1.0], (6, 1)).astype(np.float32)
+    shader = uv_heatmap._heatmap_shader()
+    glyph_texture = uv_heatmap._glyphs()
+    batch = batch_for_shader(shader, 'TRIS', {'pos': pos, 'nor': nor, 'color': col, 'uv': uvs})
+    scene = bpy.context.scene
+    scene.fss_uv_heatmap_grid = True
+    scene.fss_uv_heatmap_grid_cells = '8'
+    scene.fss_uv_heatmap_grid_labels = True
+    t = 1.0 / math.tan(math.radians(30))
+    proj = Matrix(((t / 2, 0, 0, 0), (0, t, 0, 0), (0, 0, -1.002, -0.02), (0, 0, -1, 0)))  # 2:1 viewport
+    view = Matrix.Translation((0, 0, -1.8))
+    W, H = 768, 384
+    off = gpu.types.GPUOffScreen(W, H)
+    try:
+        with off.bind():
+            fb = gpu.state.active_framebuffer_get()
+            fb.clear(color=(0, 0, 0, 1), depth=1.0)
+            gpu.state.depth_test_set('LESS_EQUAL')
+            shader.bind()
+            uv_heatmap._bind_surface_shader(shader, scene, glyph_texture)
+            shader.uniform_float('mvp', proj @ view)
+            shader.uniform_float('normal_matrix', view.inverted_safe().transposed())
+            batch.draw(shader)
+            gpu.state.depth_test_set('NONE')
+            px = np.array(fb.read_color(0, 0, W, H, 4, 0, 'FLOAT').to_list(), np.float32).reshape(H, W, 4)
+    finally:
+        off.free()
+        scene.fss_uv_heatmap_grid = False
+    lum = px[..., :3].mean(-1)
+    dark = lum < 0.3
+    lit = lum > 0.5
+    assert lit.sum() > W * H * 0.3, "the plane must be drawn"
+    assert dark[H // 2].sum() >= 7, "the grid must cross the middle row with its cell borders"
+    if image_path:
+        img = bpy.data.images.new('uv_grid_test', W, H)
+        img.pixels.foreach_set(px.ravel())
+        img.filepath_raw = image_path
+        img.file_format = 'PNG'
+        img.save()
+    print("  -> PASS: cell borders drawn" + (f", image {image_path}" if image_path else "") + ".")
 
 
 def test_distribution_chart():
@@ -538,6 +595,7 @@ def run_all_tests():
     test_uvmetrics_parity_on_trim_panel()
     test_overhead_shell_performance()
     test_opaque_surface_shader()
+    test_uv_grid_and_labels()
     test_distribution_chart()
     test_updates_after_uv_change()
     test_wire_display_takeover()

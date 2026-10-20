@@ -87,6 +87,7 @@ The **UV Heatmap** panel (sidebar `N` > **FSS Tools** > **UV Heatmap**) displays
 - Switch between **Distortion** and **Density** modes.
 - The heatmap updates by itself when an object's UVs or geometry change (after an unwrap, as soon as you leave Edit Mode), and when the selection changes. Moving an object keeps its colours on it. Click **Refresh** after changing an object's scale or materials, or whenever the colours look out of date.
 - **Opacity** sets how strongly the heatmap colours cover the plain grey shading of the surface (0.3 to 1.0).
+- **UV Grid** draws a grid in UV space over the heatmap (8, 16, 32 or 64 cells across the UV square), with a label in each cell (column letter, row number, for example B7). Good UVs give square cells with upright labels; stretched UVs stretch the cells and their labels the same way, and the labels show where each part of the texture ends up. Labels appear when cells are large enough on screen to read; zoom in, or choose fewer cells.
 - While the heatmap is on, its objects are shown with **Display As: Wire** and the heatmap draws their surface itself. Their own display setting comes back when the heatmap is off, when you deselect them, and before the file is saved.
 
 ### How to Read the Colours

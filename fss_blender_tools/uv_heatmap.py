@@ -207,7 +207,7 @@ def measures_to_colors(shape, rel_density, is_degenerate, mode):
 class ObjectHeatmapCache:
     """Cached geometry, measures, and GPU batches for a single mesh object."""
 
-    def __init__(self, obj_name, P_local, tri_measures, rel_density, colors_shape, colors_density):
+    def __init__(self, obj_name, P_local, tri_measures, rel_density, colors_shape, colors_density, uv=None):
         self.obj_name = obj_name
         self.n_tris = len(P_local)
         # object space: the surface is drawn with the object's current matrix, so it follows moves
@@ -217,6 +217,8 @@ class ObjectHeatmapCache:
         nor = np.cross(e1, e2)
         nor /= np.maximum(np.linalg.norm(nor, axis=1, keepdims=True), 1e-30)
         self.nor = np.repeat(nor, 3, axis=0).astype(np.float32)  # flat shading: the face normal at every corner
+        # UVs per corner, for the optional UV grid and cell labels
+        self.uv = (uv.reshape(-1, 2) if uv is not None else np.zeros((len(self.pos), 2))).astype(np.float32)
         self.colors_shape = np.repeat(colors_shape, 3, axis=0).astype(np.float32)
         self.colors_density = np.repeat(colors_density, 3, axis=0).astype(np.float32)
         self.area3 = tri_measures['area3']
@@ -230,13 +232,111 @@ class ObjectHeatmapCache:
             return None
         if mode not in self.batches:
             colors = self.colors_shape if mode == 'SHAPE' else self.colors_density
-            self.batches[mode] = batch_for_shader(shader, 'TRIS', {'pos': self.pos, 'nor': self.nor, 'color': colors})
+            self.batches[mode] = batch_for_shader(shader, 'TRIS', {'pos': self.pos, 'nor': self.nor, 'color': colors,
+                                                                   'uv': self.uv})
         return self.batches[mode]
 
 
+GLYPHS = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+GLYPH_PX = 32  # height of one glyph cell in the label texture
+_glyph_texture = None
+
+_FRAGMENT = '''
+int glyph_of(int slot, int col, int row) {
+    /* label of a cell: column letters (A..Z, AA..) then row number from 1; -1 past its end */
+    int n_letters = col < 26 ? 1 : 2;
+    int r = row + 1;
+    int n_digits = r < 10 ? 1 : 2;
+    if (slot < n_letters) {
+        if (n_letters == 1) return 10 + col;
+        return slot == 0 ? 10 + (col / 26 - 1) : 10 + (col - (col / 26) * 26);
+    }
+    int d = slot - n_letters;
+    if (d >= n_digits) return -1;
+    if (n_digits == 1) return r;
+    return d == 0 ? r / 10 : r - (r / 10) * 10;
+}
+
+void main() {
+    float shade = 0.7 + 0.3 * abs(normalize(v_nor).z);
+    vec3 c = mix(vec3(base_grey), v_color.rgb, opacity);
+    if (grid_cells > 0.0) {
+        vec2 g = v_uv * grid_cells;
+        vec2 cell = floor(g);
+        vec2 f = g - cell;
+        vec2 w = max(fwidth(g), vec2(1e-6));
+        vec2 d = min(f, 1.0 - f) / w;            /* distance to the nearest cell border, in pixels */
+        float line = 1.0 - clamp(min(d.x, d.y) - 0.5, 0.0, 1.0);
+        c = mix(c, vec3(0.08), 0.85 * line);
+        float cell_px = 1.0 / max(w.x, w.y);      /* a cell's size on screen */
+        if (show_labels > 0.5 && cell_px > 22.0) {   /* labels fade in from 22 to 34 px cells */
+            float gh = 0.26;                       /* glyph height as a share of the cell */
+            float gw = gh * 0.62;
+            vec2 q = (f - vec2(0.07, 1.0 - 0.07 - gh)) / vec2(gw, gh);
+            if (q.y >= 0.0 && q.y < 1.0 && q.x >= 0.0 && q.x < 4.0) {
+                int slot = int(floor(q.x));
+                int col = int(mod(cell.x, grid_cells));
+                int row = int(mod(cell.y, grid_cells));
+                int glyph = glyph_of(slot, col, row);
+                if (glyph >= 0) {
+                    vec2 t = vec2((float(glyph) + fract(q.x)) / float(n_glyphs), q.y);
+                    /* the texture is shrunk on screen without mipmaps: take the strongest of a few taps so thin
+                       strokes do not fade */
+                    vec2 dx = dFdx(t) * 0.35;
+                    vec2 dy = dFdy(t) * 0.35;
+                    /* keep every tap inside this glyph's slot, so no sliver of the neighbour shows */
+                    float lo = (float(glyph) + 0.04) / float(n_glyphs);
+                    float hi = (float(glyph) + 0.96) / float(n_glyphs);
+                    vec2 b0 = vec2(lo, 0.0);
+                    vec2 b1 = vec2(hi, 1.0);
+                    float a = max(max(texture(glyphs, clamp(t + dx, b0, b1)).r, texture(glyphs, clamp(t - dx, b0, b1)).r),
+                                  max(texture(glyphs, clamp(t + dy, b0, b1)).r, texture(glyphs, clamp(t - dy, b0, b1)).r));
+                    a = smoothstep(0.15, 0.55, max(a, texture(glyphs, clamp(t, b0, b1)).r));
+                    float fade = clamp((cell_px - 22.0) / 12.0, 0.0, 1.0);
+                    c = mix(c, vec3(0.05), 0.9 * a * fade);
+                }
+            }
+        }
+    }
+    FragColor = vec4(c * shade, 1.0);
+}
+'''
+
+
+def _glyphs():
+    """Texture with the label characters side by side, drawn once with blf (needs a GPU context)."""
+    global _glyph_texture
+    if _glyph_texture is None:
+        from mathutils import Matrix
+        h = GLYPH_PX
+        w = int(h * 0.62)
+        size = (w * len(GLYPHS), h)
+        off = gpu.types.GPUOffScreen(*size)
+        try:
+            with off.bind():
+                fb = gpu.state.active_framebuffer_get()
+                fb.clear(color=(0.0, 0.0, 0.0, 1.0))
+                with gpu.matrix.push_pop():
+                    gpu.matrix.load_identity()
+                    gpu.matrix.load_projection_matrix(Matrix(((2.0 / size[0], 0, 0, -1), (0, 2.0 / size[1], 0, -1),
+                                                              (0, 0, 1, 0), (0, 0, 0, 1))))
+                    blf.size(0, int(h * 0.8))
+                    blf.color(0, 1.0, 1.0, 1.0, 1.0)
+                    for i, ch in enumerate(GLYPHS):
+                        cw = blf.dimensions(0, ch)[0]
+                        for dx, dy in ((0, 0), (1, 0), (0, 1), (1, 1)):  # drawn four times, shifted: bold
+                            blf.position(0, i * w + (w - cw) / 2 + dx, h * 0.16 + dy, 0)
+                            blf.draw(0, ch)
+                pixels = fb.read_color(0, 0, size[0], size[1], 4, 0, 'FLOAT')
+        finally:
+            off.free()
+        _glyph_texture = gpu.types.GPUTexture(size, format='RGBA16F', data=pixels)
+    return _glyph_texture
+
+
 def _heatmap_shader():
-    """Opaque surface shader: heat colour mixed with grey by the opacity, lit by a headlight; created on first use
-    (needs a GPU context)."""
+    """Opaque surface shader: heat colour mixed with grey by the opacity, lit by a headlight, with an optional UV
+    grid and cell labels; created on first use (needs a GPU context)."""
     global _shader
     if _shader is None:
         info = gpu.types.GPUShaderCreateInfo()
@@ -244,21 +344,37 @@ def _heatmap_shader():
         info.push_constant('MAT4', 'normal_matrix')
         info.push_constant('FLOAT', 'opacity')
         info.push_constant('FLOAT', 'base_grey')
+        info.push_constant('FLOAT', 'grid_cells')   # 0 = no grid
+        info.push_constant('FLOAT', 'show_labels')
+        info.push_constant('INT', 'n_glyphs')
+        info.sampler(0, 'FLOAT_2D', 'glyphs')
         info.vertex_in(0, 'VEC3', 'pos')
         info.vertex_in(1, 'VEC3', 'nor')
         info.vertex_in(2, 'VEC4', 'color')
+        info.vertex_in(3, 'VEC2', 'uv')
         iface = gpu.types.GPUStageInterfaceInfo('fss_uv_heatmap_iface')
         iface.smooth('VEC4', 'v_color')
         iface.smooth('VEC3', 'v_nor')
+        iface.smooth('VEC2', 'v_uv')
         info.vertex_out(iface)
         info.fragment_out(0, 'VEC4', 'FragColor')
         info.vertex_source('void main() { gl_Position = mvp * vec4(pos, 1.0); '
-                           'v_nor = (normal_matrix * vec4(nor, 0.0)).xyz; v_color = color; }')
-        info.fragment_source('void main() { float shade = 0.7 + 0.3 * abs(normalize(v_nor).z); '
-                             'vec3 c = mix(vec3(base_grey), v_color.rgb, opacity) * shade; '
-                             'FragColor = vec4(c, 1.0); }')
+                           'v_nor = (normal_matrix * vec4(nor, 0.0)).xyz; v_color = color; v_uv = uv; }')
+        info.fragment_source(_FRAGMENT)
         _shader = gpu.shader.create_from_info(info)
     return _shader
+
+
+def _bind_surface_shader(shader, scene, glyph_texture):
+    """Uniforms shared by every object of one draw. The glyph texture is made before any framebuffer is bound
+    (_glyphs draws offscreen itself)."""
+    shader.uniform_float('opacity', scene.fss_uv_heatmap_opacity)
+    shader.uniform_float('base_grey', BASE_GREY)
+    cells = float(scene.fss_uv_heatmap_grid_cells) if scene.fss_uv_heatmap_grid else 0.0
+    shader.uniform_float('grid_cells', cells)
+    shader.uniform_float('show_labels', 1.0 if scene.fss_uv_heatmap_grid_labels else 0.0)
+    shader.uniform_int('n_glyphs', len(GLYPHS))
+    shader.uniform_sampler('glyphs', glyph_texture)
 
 
 def _view_layers():
@@ -521,7 +637,7 @@ def update_heatmap_cache(context, refresh=True):
         _cache[name] = ObjectHeatmapCache(
             name, item['P_local'], m, rel_d,
             measures_to_colors(m['shape'], rel_d, m['is_degenerate'], 'SHAPE'),
-            measures_to_colors(m['shape'], rel_d, m['is_degenerate'], 'DENSITY'))
+            measures_to_colors(m['shape'], rel_d, m['is_degenerate'], 'DENSITY'), item['U'])
 
     # Legend statistics over the selected objects shown
     entries = [_cache[obj.name] for obj in selected if obj.name in _cache]
@@ -769,6 +885,7 @@ def _draw_viewport_heatmap():
 
     mode = context.scene.fss_uv_heatmap_mode
     shader = _heatmap_shader()
+    glyph_texture = _glyphs()
     region = context.region_data
     objects = context.view_layer.objects
 
@@ -777,8 +894,7 @@ def _draw_viewport_heatmap():
     gpu.state.depth_mask_set(True)
     try:
         shader.bind()
-        shader.uniform_float('opacity', context.scene.fss_uv_heatmap_opacity)
-        shader.uniform_float('base_grey', BASE_GREY)
+        _bind_surface_shader(shader, context.scene, glyph_texture)
         for name in selected_mesh_names:
             entry = _cache.get(name)
             obj = objects.get(name)
@@ -918,6 +1034,12 @@ class FSS_PT_UvHeatmap(bpy.types.Panel):
             row = layout.row(align=True)
             row.prop(scene, 'fss_uv_heatmap_mode', expand=True)
             layout.prop(scene, 'fss_uv_heatmap_opacity', slider=True)
+            row = layout.row(align=True)
+            row.prop(scene, 'fss_uv_heatmap_grid', text='UV Grid', toggle=True)
+            sub = row.row(align=True)
+            sub.enabled = scene.fss_uv_heatmap_grid
+            sub.prop(scene, 'fss_uv_heatmap_grid_cells', text='')
+            sub.prop(scene, 'fss_uv_heatmap_grid_labels', text='', icon='FONT_DATA')
 
             stats = _global_stats
             box = layout.box()
@@ -975,6 +1097,16 @@ def register():
         update=_on_mode_change,
     )
 
+    bpy.types.Scene.fss_uv_heatmap_grid = bpy.props.BoolProperty(
+        name='UV Grid', default=False, options={'SKIP_SAVE'}, update=_on_mode_change,
+        description='Draw a grid in UV space over the heatmap: stretched UVs show as stretched cells')
+    bpy.types.Scene.fss_uv_heatmap_grid_cells = bpy.props.EnumProperty(
+        name='Cells', default='16', options={'SKIP_SAVE'}, update=_on_mode_change,
+        description='Number of grid cells across the UV square',
+        items=[('8', '8 x 8', ''), ('16', '16 x 16', ''), ('32', '32 x 32', ''), ('64', '64 x 64', '')])
+    bpy.types.Scene.fss_uv_heatmap_grid_labels = bpy.props.BoolProperty(
+        name='Cell Labels', default=True, options={'SKIP_SAVE'}, update=_on_mode_change,
+        description='Label each grid cell (column letter, row number) so you can see where a cell ends up')
     bpy.types.Scene.fss_uv_heatmap_opacity = bpy.props.FloatProperty(
         name='Opacity', default=ALPHA, min=0.3, max=1.0, precision=2, options={'SKIP_SAVE'},
         description='How strongly the heatmap colours cover the plain grey shading of the surface',
@@ -1000,7 +1132,8 @@ def register():
 
 
 def unregister():
-    global _draw_view_handle, _draw_pixel_handle, _shader, _previews, _chart_key
+    global _draw_view_handle, _draw_pixel_handle, _shader, _previews, _chart_key, _glyph_texture
+    _glyph_texture = None
     if _previews is not None:
         bpy.utils.previews.remove(_previews)
         _previews = None
@@ -1026,7 +1159,8 @@ def unregister():
     clear_cache()
     _shader = None
 
-    for prop in ('fss_uv_heatmap_show', 'fss_uv_heatmap_mode', 'fss_uv_heatmap_opacity'):
+    for prop in ('fss_uv_heatmap_show', 'fss_uv_heatmap_mode', 'fss_uv_heatmap_opacity', 'fss_uv_heatmap_grid',
+                 'fss_uv_heatmap_grid_cells', 'fss_uv_heatmap_grid_labels'):
         if hasattr(bpy.types.Scene, prop):
             delattr(bpy.types.Scene, prop)
 
