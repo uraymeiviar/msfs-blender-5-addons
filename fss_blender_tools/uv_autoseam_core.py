@@ -427,9 +427,6 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
                 fs = charts[d] | charts[c]
                 dist, ov, U = trial(fs, ed[d])
                 limit = THR
-                if strip_mode:
-                    fraction = area3[list(charts[c])].sum() / max(A_tot, 1e-30)
-                    limit += 0.10 * max(0.0, 1.0 - fraction / STRIP_AREA)
                 accepted = (dist <= limit) and not ov
                 if accepted:
                     charts[d] = fs
@@ -726,6 +723,7 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
                             wall_box_charts.add(new_c)
                             chart_uv[new_c] = (tuple(pc), U[np.searchsorted(fl, pc)])
                 else:
+                    internal_seams.update(corner_edges)
                     verified[c] = d_new
                     wall_box_charts.add(c)
                     chart_uv[c] = (tuple(fl), U)
@@ -802,42 +800,262 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
             elif d > THR or ov:
                 unver_bad += 1
 
-        # Decision 49: decompose an unverified chart via cuts / seed pieces verified by Angle Based trial unwrap
-        fallback_cuts_count = 0
-        fallback_seed_count = 0
+        # Decision 49 / Decision 50: decompose an unverified chart via cost-aware cut paths
+        # along original edges verified by Angle Based trial unwrap
+        fallback_counts = {
+            'seed_split': 0,
+            'boundary_dijkstra_cut': 0,
+            'normal_clustering_split': 0,
+            'feature_dijkstra_cut': 0,
+        }
+        unverified_charts = []
 
-        def get_poly_pca_cuts(fl_sub):
+        def get_dijkstra_boundary_cuts(fl_sub):
+            fl_set = set(fl_sub)
+            internal_cuttable_adj = {}
+            b_edges = []
+            for f in fl_sub:
+                for e in face_edges[f]:
+                    ef = e_faces[e]
+                    if len(ef) == 2 and ef[0] in fl_set and ef[1] in fl_set:
+                        if not forced[e] and not no_cut_arr[e]:
+                            u, v = int(e_verts[e][0]), int(e_verts[e][1])
+                            internal_cuttable_adj.setdefault(u, []).append((v, e))
+                            internal_cuttable_adj.setdefault(v, []).append((u, e))
+                    else:
+                        b_edges.append(e)
+
+            b_edges = list(set(b_edges))
+            if not b_edges or not internal_cuttable_adj:
+                return []
+
+            # Build directed boundary cycle(s) from face loop winding
+            directed_b = {}
+            b_verts = set()
+            for f in fl_sub:
+                for e in face_edges[f]:
+                    ef = e_faces[e]
+                    if len(ef) == 2 and ef[0] in fl_set and ef[1] in fl_set:
+                        continue
+                    # Boundary edge: find directed orientation in face f
+                    F = bm.faces[f]
+                    for l in F.loops:
+                        if l.edge.index == e:
+                            u, v = int(l.vert.index), int(l.link_loop_next.vert.index)
+                            directed_b[u] = v
+                            b_verts.add(u)
+                            b_verts.add(v)
+                            break
+
+            if not b_verts or not internal_cuttable_adj:
+                return []
+
+            # Trace directed boundary loops
+            visited_b = set()
+            loops = []
+            for start_v in list(directed_b.keys()):
+                if start_v in visited_b:
+                    continue
+                loop = []
+                curr = start_v
+                while curr in directed_b and curr not in visited_b:
+                    visited_b.add(curr)
+                    loop.append(curr)
+                    curr = directed_b[curr]
+                if loop and len(loop) >= 3:
+                    loops.append(loop)
+
+            def dijkstra_path(srcs, target_set):
+                dist = {v: 0.0 for v in srcs}
+                prev = {}
+                pq = [(0.0, v) for v in srcs]
+                heapq.heapify(pq)
+                while pq:
+                    dd, v = heapq.heappop(pq)
+                    if dd > dist.get(v, 1e30):
+                        continue
+                    if v in target_set:
+                        path = []
+                        curr = v
+                        while curr in prev:
+                            curr, e = prev[curr]
+                            path.append(e)
+                        return path
+                    for w, e in internal_cuttable_adj.get(v, ()):
+                        weight = cut_cost[e] * loop_cost[e]
+                        if v in prev:
+                            prev_v, _ = prev[v]
+                            inc = V[v] - V[prev_v]
+                            outg = V[w] - V[v]
+                            cos_val = float(inc @ outg) / max(np.linalg.norm(inc) * np.linalg.norm(outg), 1e-30)
+                            weight *= 1.0 + 3.0 * (1.0 - cos_val)
+                        nd_ = dd + weight
+                        if nd_ < dist.get(w, 1e30):
+                            dist[w] = nd_
+                            prev[w] = (v, e)
+                            heapq.heappush(pq, (nd_, w))
+                return None
+
+            if len(fl_sub) in (236, 110, 84, 108):
+                pass
+            candidates = []
+            if len(loops) >= 2:
+                # Multi-boundary chart (e.g. cylinder / frame with hole)
+                loops.sort(key=len)
+                inner = loops[0]
+                outer = set.union(*[set(l) for l in loops[1:]])
+                # 1-cut candidate (unrolls into 1 piece if compliant)
+                p1 = dijkstra_path(inner, outer)
+                if p1:
+                    candidates.append(p1)
+                # 2-cut candidate (opposite sides along principal axis)
+                if len(inner) >= 2:
+                    pts_in = V[inner]
+                    cov_in = (pts_in - pts_in.mean(0)).T @ (pts_in - pts_in.mean(0))
+                    _, axes_in = np.linalg.eigh(cov_in)
+                    p_proj = pts_in @ axes_in[:, 2]
+                    v_a = inner[int(np.argmin(p_proj))]
+                    v_b = inner[int(np.argmax(p_proj))]
+                    pa = dijkstra_path([v_a], outer)
+                    pb = dijkstra_path([v_b], outer)
+                    if pa and pb:
+                        candidates.append(list(set(pa) | set(pb)))
+                # 4-cut candidate (quarter points)
+                if len(inner) >= 4:
+                    q_indices = [0, len(inner) // 4, len(inner) // 2, (3 * len(inner)) // 4]
+                    cuts4 = set()
+                    for qi in q_indices:
+                        pq = dijkstra_path([inner[qi]], outer)
+                        if pq:
+                            cuts4.update(pq)
+                    if cuts4:
+                        candidates.append(list(cuts4))
+            elif len(loops) == 1:
+                loop = loops[0]
+                M = len(loop)
+                if M >= 4:
+                    min_sep = max(2, min(5, M // 4))
+                    pts = V[loop]
+                    mu = pts.mean(0)
+                    cov = (pts - mu).T @ (pts - mu)
+                    _, axes = np.linalg.eigh(cov)
+                    p0 = pts @ axes[:, 2]
+                    p1 = pts @ axes[:, 1]
+                    cand_src_indices = [
+                        0, M // 4, M // 2, (3 * M) // 4,
+                        int(np.argmin(p0)), int(np.argmax(p0)),
+                        int(np.argmin(p1)), int(np.argmax(p1))
+                    ]
+                    seen = set()
+                    for idx in cand_src_indices:
+                        src_v = loop[idx]
+                        if src_v in internal_cuttable_adj and src_v not in seen:
+                            seen.add(src_v)
+                            targets = set(
+                                loop[j] for j in range(M)
+                                if min(abs(j - idx), M - abs(j - idx)) >= min_sep
+                            )
+                            p = dijkstra_path([src_v], targets)
+                            if p:
+                                candidates.append(p)
+
+            unique_cands = []
+            seen_cands = set()
+            for c in candidates:
+                key = tuple(sorted(c))
+                if key and key not in seen_cands:
+                    seen_cands.add(key)
+                    unique_cands.append(c)
+            return unique_cands
+
+        def get_feature_dijkstra_cuts(fl_sub):
+            fl_set = set(fl_sub)
+            internal_cuttable = []
+            b_edges = []
+            for f in fl_sub:
+                for e in face_edges[f]:
+                    ef = e_faces[e]
+                    if len(ef) == 2 and ef[0] in fl_set and ef[1] in fl_set:
+                        if not forced[e] and not no_cut_arr[e]:
+                            internal_cuttable.append(e)
+                    else:
+                        b_edges.append(e)
+            b_edges = list(set(b_edges))
+            b_verts = set(int(v) for e in b_edges for v in e_verts[e])
+            if not b_verts or not internal_cuttable:
+                return []
+
+            internal_cuttable_adj = {}
+            for e in internal_cuttable:
+                u, v = int(e_verts[e][0]), int(e_verts[e][1])
+                internal_cuttable_adj.setdefault(u, []).append((v, e))
+                internal_cuttable_adj.setdefault(v, []).append((u, e))
+
+            def dijkstra_to_targets(src, targets, forbidden_edges=set()):
+                dist = {src: 0.0}
+                prev = {}
+                pq = [(0.0, src)]
+                while pq:
+                    dd, v = heapq.heappop(pq)
+                    if dd > dist.get(v, 1e30):
+                        continue
+                    if v in targets and v != src:
+                        path = []
+                        curr = v
+                        while curr in prev:
+                            curr, e = prev[curr]
+                            path.append(e)
+                        return path
+                    for w, e in internal_cuttable_adj.get(v, ()):
+                        if e in forbidden_edges:
+                            continue
+                        weight = cut_cost[e] * loop_cost[e]
+                        nd_ = dd + weight
+                        if nd_ < dist.get(w, 1e30):
+                            dist[w] = nd_
+                            prev[w] = (v, e)
+                            heapq.heappush(pq, (nd_, w))
+                return None
+
+            scored_edges = sorted(internal_cuttable, key=lambda e: (cut_cost[e], -edge_dihedral[e]))
+            candidates = []
+            for fe in scored_edges[:4]:
+                u, v = int(e_verts[fe][0]), int(e_verts[fe][1])
+                if u in b_verts and v in b_verts:
+                    candidates.append([fe])
+                    continue
+                path_u = dijkstra_to_targets(u, b_verts, {fe}) if u not in b_verts else []
+                path_v = dijkstra_to_targets(v, b_verts, {fe} | set(path_u if path_u else ())) if v not in b_verts else []
+                if (u in b_verts or path_u) and (v in b_verts or path_v):
+                    combined = (path_u if path_u else []) + [fe] + (path_v if path_v else [])
+                    candidates.append(combined)
+
+            unique_cands = []
+            seen = set()
+            for c in candidates:
+                k = tuple(sorted(c))
+                if k and k not in seen:
+                    seen.add(k)
+                    unique_cands.append(c)
+            return unique_cands
+
+        def get_normal_clustering_pieces(fl_sub):
             cen = P3all[fl_sub].mean(1)
             w = area3[fl_sub] + 1e-30
             mu = (cen * w[:, None]).sum(0) / w.sum()
             C = ((cen - mu) * w[:, None]).T @ (cen - mu)
             _, axes = np.linalg.eigh(C)
+            nd = FN[fl_sub] @ axes
+            dmap = dict(zip(fl_sub, np.argmax(np.concatenate([nd, -nd], 1), 1)))
+            return components(fl_sub, lambda e: (not forced[e]) and dmap.get(e_faces[e][0]) == dmap.get(e_faces[e][1]))
 
-            poly_cens = {}
-            for i, f in enumerate(fl_sub):
-                p = poly_map[f]
-                poly_cens.setdefault(p, []).append(cen[i])
-            if len(poly_cens) <= 1:
-                return []
-
-            for ax_idx in [2, 1]:
-                ax = axes[:, ax_idx]
-                poly_vals = {p: np.mean(poly_cens[p], axis=0) @ ax for p in poly_cens}
-                med = np.median(list(poly_vals.values()))
-                val_map = {f: poly_vals[poly_map[f]] for f in fl_sub}
-
-                cuts = [e for f in fl_sub for e in face_edges[f]
-                        if not forced[e] and not no_cut_arr[e] and len(e_faces[e]) == 2
-                        and (val_map.get(e_faces[e][0], med) <= med) != (val_map.get(e_faces[e][1], med) <= med)]
-                if cuts:
-                    return cuts
-            return []
-
-        def decompose_chart(fl_init):
-            nonlocal fallback_cuts_count, fallback_seed_count
+        def decompose_chart(fl_init, depth=0):
             fl_init = sorted(fl_init)
             if len(fl_init) == 1:
                 d, ov, U = trial(fl_init)
+                if ov or d > THR:
+                    crit = 'overlap' if ov else 'distortion'
+                    unverified_charts.append({'chart': -1, 'faces': 1, 'distortion': float(d), 'overlap': bool(ov), 'criterion': crit})
                 return [(fl_init, d, U)]
 
             d, ov, U = trial(fl_init)
@@ -848,51 +1066,113 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
             # Strategy 1: Seed pieces split (between forced and soft edges)
             subs = components(fl_init, lambda e: not forced[e] and not soft[e])
             if len(subs) > 1:
-                fallback_seed_count += 1
+                fallback_counts['seed_split'] += 1
                 res = []
                 for sub in subs:
-                    res.extend(decompose_chart(sub))
+                    res.extend(decompose_chart(sub, depth + 1))
                 return res
 
-            # Strategy 2: If already a single seed piece, try PCA bisection across original edges
-            cuts = get_poly_pca_cuts(fl_init)
-            if cuts:
-                cand_pieces = components(fl_init, lambda e: not forced[e] and e not in cuts)
-                if len(cand_pieces) > 1:
-                    fallback_cuts_count += 1
-                    res = []
+            # Strategy 2: Boundary-to-boundary Dijkstra cut (lowest-cost path between boundary points using cut_cost)
+            b_cands = get_dijkstra_boundary_cuts(fl_init)
+            verified_cands = []
+            for cand_cut in b_cands:
+                cand_pieces = components(fl_init, lambda e: not forced[e] and e not in cand_cut)
+                if len(cand_pieces) == 1:
+                    # Test if this cut unrolls the chart (e.g. annular ring with a radial cut)
+                    select_unwrap(fl_init, set_edges=cand_cut)
+                    U = read_uv(fl_init)
+                    d_p, _, ov_p = measure(fl_init, U)
+                    restore_seams(cand_cut)
+                    if not ov_p and d_p <= THR:
+                        cost = sum(cut_cost[e] for e in cand_cut)
+                        verified_cands.append((1, cost, [(fl_init, d_p, U)], cand_cut))
+                elif len(cand_pieces) > 1:
+                    all_ok = True
+                    p_res = []
                     for cp in cand_pieces:
-                        res.extend(decompose_chart(cp))
-                    return res
+                        cp_s = sorted(cp)
+                        d_p, ov_p, U_p = trial(cp_s)
+                        n_cp = len(components(cp_s, lambda e: not forced[e]))
+                        if ov_p or d_p > THR or n_cp > 1:
+                            all_ok = False
+                            break
+                        p_res.append((cp_s, d_p, U_p))
+                    if all_ok:
+                        cost = sum(cut_cost[e] for e in cand_cut)
+                        verified_cands.append((len(cand_pieces), cost, p_res, cand_cut))
+
+            if verified_cands:
+                verified_cands.sort(key=lambda x: (x[0], x[1]))
+                best = verified_cands[0]
+                fallback_counts['boundary_dijkstra_cut'] += 1
+                if best[0] == 1:
+                    internal_seams.update(best[3])
+                return best[2]
 
             # Strategy 3: Normal PCA clustering
-            cen = P3all[fl_init].mean(1)
-            w = area3[fl_init] + 1e-30
-            mu = (cen * w[:, None]).sum(0) / w.sum()
-            C = ((cen - mu) * w[:, None]).T @ (cen - mu)
-            _, axes = np.linalg.eigh(C)
-            nd = FN[fl_init] @ axes
-            dmap = dict(zip(fl_init, np.argmax(np.concatenate([nd, -nd], 1), 1)))
-            norm_pieces = components(fl_init, lambda e: (not forced[e]) and dmap.get(e_faces[e][0]) == dmap.get(e_faces[e][1]))
+            norm_pieces = get_normal_clustering_pieces(fl_init)
             if len(norm_pieces) > 1:
-                fallback_cuts_count += 1
-                res = []
+                all_ok = True
+                p_res = []
                 for np_piece in norm_pieces:
-                    res.extend(decompose_chart(np_piece))
+                    np_s = sorted(np_piece)
+                    d_p, ov_p, U_p = trial(np_s)
+                    n_cp = len(components(np_s, lambda e: not forced[e]))
+                    if ov_p or d_p > THR or n_cp > 1:
+                        all_ok = False
+                        break
+                    p_res.append((np_s, d_p, U_p))
+                if all_ok:
+                    fallback_counts['normal_clustering_split'] += 1
+                    return p_res
+
+            # Strategy 4: Feature / Crease Ridge Dijkstra Cut (lowest-cost cut along high-curvature crease to boundary)
+            f_cands = get_feature_dijkstra_cuts(fl_init)
+            verified_cands_f = []
+            for cand_cut in f_cands:
+                cand_pieces = components(fl_init, lambda e: not forced[e] and e not in cand_cut)
+                if len(cand_pieces) > 1:
+                    all_ok = True
+                    p_res = []
+                    for cp in cand_pieces:
+                        cp_s = sorted(cp)
+                        d_p, ov_p, U_p = trial(cp_s)
+                        n_cp = len(components(cp_s, lambda e: not forced[e]))
+                        if ov_p or d_p > THR or n_cp > 1:
+                            all_ok = False
+                            break
+                        p_res.append((cp_s, d_p, U_p))
+                    if all_ok:
+                        cost = sum(cut_cost[e] for e in cand_cut)
+                        verified_cands_f.append((len(cand_pieces), cost, p_res, cand_cut))
+
+            if verified_cands_f:
+                verified_cands_f.sort(key=lambda x: (x[0], x[1]))
+                fallback_counts['feature_dijkstra_cut'] += 1
+                return verified_cands_f[0][2]
+
+
+
+            # If no cut gave 100% verified pieces on the first split:
+            # Try recursive decomposition using the most balanced candidate cut
+            best_cand = None
+            best_balance = -1
+            for cand_cut in (b_cands + f_cands):
+                cand_pieces = components(fl_init, lambda e: not forced[e] and e not in cand_cut)
+                if len(cand_pieces) > 1:
+                    balance = min(len(cp) for cp in cand_pieces)
+                    if balance > best_balance:
+                        best_balance = balance
+                        best_cand = cand_pieces
+
+            if best_cand is not None and depth < 4:
+                fallback_counts['boundary_dijkstra_cut'] += 1
+                res = []
+                for cp in best_cand:
+                    res.extend(decompose_chart(cp, depth + 1))
                 return res
 
-            # Strategy 4: Worst triangle incident cut
-            wf = fl_init[len(fl_init) // 2]
-            cut = [e for e in face_edges[wf] if not forced[e] and not no_cut_arr[e] and len(e_faces[e]) == 2]
-            if cut:
-                worst_pieces = components(fl_init, lambda e: not forced[e] and e not in cut)
-                if len(worst_pieces) > 1:
-                    fallback_cuts_count += 1
-                    res = []
-                    for wp in worst_pieces:
-                        res.extend(decompose_chart(wp))
-                    return res
-
+            # Truly un-splittable or limit reached:
             d, ov, U = trial(fl_init)
             return [(fl_init, d, U)]
 
@@ -904,20 +1184,27 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
             decomp = decompose_chart(fl)
             for i, (pc, d_pc, U_pc) in enumerate(decomp):
                 pc_sorted = sorted(pc)
+                is_ver = (d_pc <= THR) and (len(components(pc_sorted, lambda e: not forced[e])) == 1)
+                _, _, o_pc = measure(pc_sorted, U_pc)
+                is_ver = is_ver and not o_pc
                 if i == 0:
                     charts[c] = set(pc)
                     fc[pc] = c
-                    per[c] = (d_pc, 0.0, False)
-                    verified[c] = d_pc
+                    per[c] = (d_pc, 0.0, o_pc)
                     chart_uv[c] = (tuple(pc_sorted), U_pc)
+                    if is_ver:
+                        verified[c] = d_pc
+                    else:
+                        verified.pop(c, None)
                 else:
                     new_cid = nid[0]
                     nid[0] += 1
                     charts[new_cid] = set(pc)
                     fc[pc] = new_cid
-                    per[new_cid] = (d_pc, 0.0, False)
-                    verified[new_cid] = d_pc
+                    per[new_cid] = (d_pc, 0.0, o_pc)
                     chart_uv[new_cid] = (tuple(pc_sorted), U_pc)
+                    if is_ver:
+                        verified[new_cid] = d_pc
         recompute_seams()
         tm['repair'] = time.perf_counter() - t
 
@@ -1147,6 +1434,8 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
                     nid[0] += 1
             if k == 1:
                 ring_ok += 1
+                if len(res) == 1:
+                    internal_seams.update(cuts)
             else:
                 frame_ok += 1
         tm['ringframe'] = time.perf_counter() - t
@@ -1158,6 +1447,7 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
         t_fg = time.perf_counter()
         gate_rounds = 0
         gate_repaired = 0
+        unsplit_charts = set()
         while gate_rounds < 10:
             gate_rounds += 1
             recompute_seams()
@@ -1171,7 +1461,7 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
                 e.select = True
                 e.seam = bool(seam[e.index])
             bmesh.update_edit_mesh(me, loop_triangles=False, destructive=False)
-            bpy.ops.uv.unwrap(method=METHOD, fill_holes=False, correct_aspect=True, margin_method='FRACTION', margin=0.0)
+            bpy.ops.uv.unwrap(method=METHOD, fill_holes=False, correct_aspect=True, margin_method='FRACTION', margin=0.001)
             bm = bmesh.from_edit_mesh(me)
             bm.faces.ensure_lookup_table()
 
@@ -1191,26 +1481,59 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
             if not failing:
                 break
 
-            gate_repaired += len(failing)
-            for c in failing:
+            splittable = [c for c in failing if c not in unsplit_charts]
+            if not splittable:
+                break
+
+            gate_repaired += len(splittable)
+            for c in splittable:
                 fl = sorted(charts[c])
                 decomp = decompose_chart(fl)
+                if len(decomp) == 1 and decomp[0][0] == fl:
+                    unsplit_charts.add(c)
                 for i, (pc, d_pc, U_pc) in enumerate(decomp):
                     pc_sorted = sorted(pc)
+                    is_ver = (d_pc <= THR) and (len(components(pc_sorted, lambda e: not forced[e])) == 1)
+                    _, _, o_pc = measure(pc_sorted, U_pc)
+                    is_ver = is_ver and not o_pc
                     if i == 0:
                         charts[c] = set(pc)
                         fc[pc] = c
-                        per[c] = (d_pc, 0.0, False)
-                        verified[c] = d_pc
+                        per[c] = (d_pc, 0.0, o_pc)
+                        chart_uv[c] = (tuple(pc_sorted), U_pc)
+                        if is_ver:
+                            verified[c] = d_pc
+                        else:
+                            verified.pop(c, None)
                     else:
                         new_cid = nid[0]
                         nid[0] += 1
                         charts[new_cid] = set(pc)
                         fc[pc] = new_cid
-                        per[new_cid] = (d_pc, 0.0, False)
-                        verified[new_cid] = d_pc
+                        per[new_cid] = (d_pc, 0.0, o_pc)
+                        chart_uv[new_cid] = (tuple(pc_sorted), U_pc)
+                        if is_ver:
+                            verified[new_cid] = d_pc
 
         tm['final_gate'] = time.perf_counter() - t_fg
+
+        # Collect unverified charts (no split possible or gate round limit reached)
+        final_unverified = []
+        for c, fs in list(charts.items()):
+            fl = sorted(fs)
+            U_c = U_all[fl]
+            d, dmax, ov = measure(fl, U_c)
+            n_c = len(components(fl, lambda e: not forced[e]))
+            if ov or d > THR or n_c > 1:
+                crit = 'overlap' if ov else ('distortion' if d > THR else 'disconnected')
+                final_unverified.append({
+                    'chart': int(c),
+                    'faces': len(fl),
+                    'distortion': float(d),
+                    'overlap': bool(ov),
+                    'components': int(n_c),
+                    'criterion': crit,
+                })
 
         # Seam extraction: switch to Object Mode to update polygon loops
         bmesh.update_edit_mesh(me, loop_triangles=True, destructive=False)
@@ -1238,6 +1561,11 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
             if len(es) == 2 and es[0] != es[1] and not artist_seam[e.index]:
                 auto_seam_edges.append(e.index)
 
+        fb_boundary = fallback_counts['boundary_dijkstra_cut']
+        fb_normal = fallback_counts['normal_clustering_split']
+        fb_feature = fallback_counts['feature_dijkstra_cut']
+        fb_cuts_total = fb_boundary + fb_normal + fb_feature
+
         stats = dict(
             charts=len(charts),
             chart_faces=[sorted(fs) for fs in charts.values()],
@@ -1246,8 +1574,12 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
             ring_cuts=ring_ok,
             wall_fallback=wall_fallback_applied,
             frame_protected_skipped=frame_protected_skipped,
-            fallback_cuts=fallback_cuts_count,
-            fallback_seed=fallback_seed_count,
+            fallback_seed=fallback_counts['seed_split'],
+            fallback_boundary=fb_boundary,
+            fallback_normal=fb_normal,
+            fallback_feature=fb_feature,
+            fallback_cuts=fb_cuts_total,
+            unverified_charts=final_unverified,
             gate_repaired=gate_repaired,
             gate_rounds=gate_rounds,
             stage_time=tm,

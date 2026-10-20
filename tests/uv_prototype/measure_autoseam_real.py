@@ -1,18 +1,19 @@
 """
-Runner and benchmark for real-mesh auto-seam proposal (Package 2c: Honest Checks & Seams as Contract).
+Runner and benchmark for real-mesh auto-seam proposal (Package 2d: Cost of the Contract).
 
 Runs propose(obj) from fss_blender_tools.uv_autoseam across:
-1. The 17 original objects from tests/_work/uv_autoseam/package2c/E2_COCKPIT2_copy.blend
+1. The 17 original objects from tests/_work/uv_autoseam/package2d/E2_COCKPIT2_copy.blend
 2. Mirror / Array objects from that file
 3. A synthetic shared-mesh case with non-uniform scale
 
 Verifies (Finish Line):
 - 0 diagonal splits in both layouts on all 22 objects
-- Round trip islands equal to the core's (by UV connectivity, with margin 0.001) on all 22
-- 0 intra-island overlaps in both layouts on all 22
-- Decision 49 fallback counts and island cost per object
-- Session 17 shape criteria evaluation
-- Complete object state restoration
+- Round trip islands equal to the core's intended charts (with margin 0.001) on all 22 objects
+- 0 intra-island overlaps in both layouts on all 22 objects
+- 0 unverified charts on all 22 objects (listed with faces and failing criterion)
+- 0 islands over shape limits in the round trip (d <= 1.25, 0 overlaps)
+- Cause of gate failures found and fixed
+- Targets: OVERHEAD_SHELL <= 2,000 islands and <= 200s; COCKPIT_REAR_WINDOW_HOLE_R_FRAME <= 12 islands
 """
 import importlib.util
 import json
@@ -39,7 +40,7 @@ import uv_autoseam
 import uvmetrics
 from evaluate3_extra import artist_texel
 
-WORK_DIR = REPO_ROOT / 'tests' / '_work' / 'uv_autoseam' / 'package2c'
+WORK_DIR = REPO_ROOT / 'tests' / '_work' / 'uv_autoseam' / 'package2d'
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 
 BLEND_PATH = WORK_DIR / 'E2_COCKPIT2_copy.blend'
@@ -55,15 +56,15 @@ if C1_SUMMARY_PATH.exists():
     except Exception as e:
         print(f"Warning: could not load C1 summary: {e}")
 
-PKG2B_SUMMARY_PATH = REPO_ROOT / 'tests' / '_work' / 'uv_autoseam' / 'package2b' / 'measure_real_summary.json'
-PKG2B_DATA = {}
-if PKG2B_SUMMARY_PATH.exists():
+S45_SUMMARY_PATH = REPO_ROOT / 'tests' / '_work' / 'uv_autoseam' / 'package2c' / 'measure_real_summary.json'
+S45_DATA = {}
+if S45_SUMMARY_PATH.exists():
     try:
-        with open(PKG2B_SUMMARY_PATH) as f:
+        with open(S45_SUMMARY_PATH) as f:
             data = json.load(f)
-            PKG2B_DATA = data.get('objects', {})
+            S45_DATA = data.get('objects', {})
     except Exception as e:
-        print(f"Warning: could not load Package 2b summary: {e}")
+        print(f"Warning: could not load Session 45 (Package 2c) summary: {e}")
 
 ORIGINAL_17 = [
     '@MERGE_PEDESTAL_SHELL',
@@ -89,12 +90,6 @@ MIRROR_ARRAY_CANDIDATES = [
     'COCKPIT_REAR_WINDOW_HOLE_R_FRAME',
     'COCKPIT_REAR_DOOR_VENT',
     'COCKPIT_CEILING_PANEL',
-]
-
-SPEED_TEST_OBJECTS = [
-    'TRIM_PANEL',
-    'COCKPIT_SHELL_FLOOR',
-    'OVERHEAD_SHELL',
 ]
 
 
@@ -201,18 +196,16 @@ def run_round_trip(o, prop_edges, rep):
     - Intra-island overlaps evaluated on work triangles with Blender UVs looked up by polygon and vertex
     - Extra vertices computed the same way for both layouts
     - Diagonal splits counted from actual UVs in both layouts
+    - Islands over shape limits (d > 1.25 or overlap) evaluated per island
     """
-    print("    [RT] A: copying mesh...", flush=True)
     orig_me = o.data
     copy_me = orig_me.copy()
     copy_me.name = f"__fss_rt_{orig_me.name}__"
 
-    print("    [RT] B: clearing and creating UVMap...", flush=True)
     while copy_me.uv_layers:
         copy_me.uv_layers.remove(copy_me.uv_layers[0])
     uvl = copy_me.uv_layers.new(name="UVMap")
 
-    print("    [RT] C: setting seams...", flush=True)
     orig_seams = np.zeros(len(copy_me.edges), bool)
     orig_me.edges.foreach_get('use_seam', orig_seams)
     for idx in prop_edges:
@@ -220,7 +213,6 @@ def run_round_trip(o, prop_edges, rep):
     for e, s in zip(copy_me.edges, orig_seams):
         e.use_seam = bool(s)
 
-    print("    [RT] D: creating temp scene...", flush=True)
     copy_obj = bpy.data.objects.new(f"__fss_rt_obj_{o.name}__", copy_me)
     orig_scene = bpy.context.scene
     temp_scene = bpy.data.scenes.new(f"__fss_rt_temp_{o.name}__")
@@ -231,15 +223,11 @@ def run_round_trip(o, prop_edges, rep):
         temp_scene.view_layers[0].objects.active = copy_obj
         copy_obj.select_set(True)
 
-        print("    [RT] E: entering edit mode and selecting...", flush=True)
         bpy.ops.object.mode_set(mode='EDIT')
         bpy.ops.mesh.select_all(action='SELECT')
-        print("    [RT] F: calling uv.unwrap...", flush=True)
         bpy.ops.uv.unwrap(method='ANGLE_BASED', fill_holes=False, correct_aspect=True, margin_method='FRACTION', margin=0.001)
-        print("    [RT] G: returning to object mode...", flush=True)
         bpy.ops.object.mode_set(mode='OBJECT')
 
-        print("    [RT] H: mapping Blender UVs to triangles...", flush=True)
         tri_to_orig_poly = rep['tri_to_orig_poly']
         T = rep['T']
         core_UV = rep['UV']
@@ -261,7 +249,6 @@ def run_round_trip(o, prop_edges, rep):
             for vi, v in enumerate(tri_verts):
                 blender_work_UV[ti, vi] = p_map.get(v, (0.0, 0.0))
 
-        print("    [RT] I: checking diagonal splits...", flush=True)
         edge_tris = {}
         for ti, tri in enumerate(T):
             for i in range(3):
@@ -290,7 +277,6 @@ def run_round_trip(o, prop_edges, rep):
                     if np.max(np.abs(ru0a - ru1a)) > 1e-6 or np.max(np.abs(ru0b - ru1b)) > 1e-6:
                         rt_diag_splits += 1
 
-        print("    [RT] J: checking RT islands...", flush=True)
         edge_polys = [[] for _ in copy_me.edges]
         for p in copy_me.polygons:
             for li in p.loop_indices:
@@ -321,7 +307,6 @@ def run_round_trip(o, prop_edges, rep):
             rt_groups.setdefault(find_rt(i), set()).add(i)
         rt_islands = [frozenset(s) for s in rt_groups.values()]
 
-        print("    [RT] K: checking Core islands...", flush=True)
         par_c = list(range(len(copy_me.polygons)))
 
         def find_c(x):
@@ -351,7 +336,6 @@ def run_round_trip(o, prop_edges, rep):
 
         islands_equal = (sorted([sorted(s) for s in rt_islands]) == sorted([sorted(s) for s in core_islands]))
 
-        print("    [RT] L: intra-island overlaps...", flush=True)
         poly_to_core_isl = {}
         for isl_idx, s in enumerate(core_islands):
             for p in s:
@@ -376,7 +360,6 @@ def run_round_trip(o, prop_edges, rep):
             if len(isl_tris) > 0:
                 rt_overlaps += len(uvmetrics.overlap_pairs(blender_work_UV[isl_tris]))
 
-        print("    [RT] M: extra vertices...", flush=True)
         NT = rep['NT']
         nv_n = int(len(np.unique(NT)))
         k2_c = np.concatenate([NT.reshape(-1, 1).astype(np.float64), core_UV.reshape(-1, 2)], 1)
@@ -384,13 +367,24 @@ def run_round_trip(o, prop_edges, rep):
         k2_rt = np.concatenate([NT.reshape(-1, 1).astype(np.float64), blender_work_UV.reshape(-1, 2)], 1)
         rt_extra = int(len(np.unique(k2_rt, axis=0))) - nv_n
 
-        print("    [RT] N: evaluate_shape on blender_work_UV...", flush=True)
         P = rep['P']
         SE = rep['SE']
         metrics = evaluate_shape(P, T, blender_work_UV, NT, SE, labels=rt_tri_labels)
         metrics['intra_overlaps'] = rt_overlaps
         metrics['render_extra_vs_normals'] = rt_extra
-        print("    [RT] O: evaluate_shape done!", flush=True)
+
+        # Check islands over shape limits in round trip (d > 1.25 or overlap)
+        rt_islands_over_shape_limit = 0
+        for isl_idx in range(len(rt_islands)):
+            isl_tris = np.where(rt_tri_labels == isl_idx)[0]
+            if len(isl_tris) > 0:
+                _, _, r = uvmetrics.area_distortion(P[T[isl_tris]], blender_work_UV[isl_tris])
+                fin = np.isfinite(r)
+                d_isl = float(r[fin].mean()) if np.any(fin) else 999.0
+                ov_isl = len(uvmetrics.overlap_pairs(blender_work_UV[isl_tris]))
+                if d_isl > 1.25 or ov_isl > 0:
+                    rt_islands_over_shape_limit += 1
+        metrics['islands_over_shape_limit'] = rt_islands_over_shape_limit
 
         return {
             'islands_equal': islands_equal,
@@ -402,6 +396,7 @@ def run_round_trip(o, prop_edges, rep):
             'core_overlaps': core_overlaps,
             'core_extra': core_extra,
             'core_tri_labels': core_tri_labels,
+            'islands_over_shape_limit': rt_islands_over_shape_limit,
             'metrics': metrics,
             'blender_UV': blender_work_UV,
         }
@@ -456,7 +451,7 @@ def main():
     mesh_cache = {}
 
     print(f"\n================================================================================")
-    print(f"RUNNING PACKAGE 2c: HONEST CHECKS & SEAMS AS CONTRACT ({len(all_objects)} objects)")
+    print(f"RUNNING PACKAGE 2d: COST OF THE CONTRACT ({len(all_objects)} objects)")
     print(f"================================================================================\n")
 
     for cat, o in all_objects:
@@ -467,41 +462,43 @@ def main():
         t_start = time.perf_counter()
 
         # Propose with temporary scene and measurement arrays
-        print(f"  -> calling propose...", flush=True)
         prop_edges, diag_cuts, rep = uv_autoseam.propose(
             o, cache=mesh_cache, measurement_arrays=True, use_temp_scene=True
         )
         elapsed = time.perf_counter() - t_start
-        print(f"  -> propose done in {elapsed:.2f}s", flush=True)
 
         # State restoration assertion
-        print(f"  -> asserting object restored...", flush=True)
         assert_object_restored(o, snap)
 
         # Execute Round Trip check on copy of original mesh
-        print(f"  -> calling run_round_trip...", flush=True)
         rt_result = run_round_trip(o, prop_edges, rep)
-        print(f"  -> run_round_trip done", flush=True)
 
         # Evaluate Core metrics (on rep['UV'])
-        print(f"  -> evaluating core metrics...", flush=True)
         core_met = evaluate_shape(rep['P'], rep['T'], rep['UV'], rep['NT'], rep['SE'], labels=rt_result['core_tri_labels'])
         core_met['time'] = rep['time']
         core_met['intra_overlaps'] = rt_result['core_overlaps']
         core_met['render_extra_vs_normals'] = rt_result['core_extra']
-        print(f"  -> core metrics evaluated", flush=True)
 
-        # Decision 49 stats from core
+        # Decision 49 / Cost-Aware stats from core
         stats = rep.get('stats', {})
         fb_cuts = stats.get('fallback_cuts', 0)
         fb_seed = stats.get('fallback_seed', 0)
+        fb_boundary = stats.get('fallback_boundary', 0)
+        fb_normal = stats.get('fallback_normal', 0)
+        fb_feature = stats.get('fallback_feature', 0)
+        unv_charts = stats.get('unverified_charts', [])
         gate_rep = stats.get('gate_repaired', 0)
         gate_rnd = stats.get('gate_rounds', 0)
 
         # Baseline comparisons
         c1_key = 'W_' + obj_name
         c1_ref = C1_DATA.get(c1_key, {}).get('c1')
-        s43_ref = PKG2B_DATA.get(obj_name)
+        s45_ref = S45_DATA.get(obj_name)
+
+        # Save proposed edges for reference / image generator
+        ref_dir = WORK_DIR / 'reference'
+        ref_dir.mkdir(parents=True, exist_ok=True)
+        np.save(ref_dir / f"W_{obj_name}__p2d_proposal.npy", np.array(prop_edges, dtype=np.int32))
 
         results[obj_name] = {
             'category': cat,
@@ -526,10 +523,14 @@ def main():
             'round_trip': rt_result,
             'fallback_cuts': fb_cuts,
             'fallback_seed': fb_seed,
+            'fallback_boundary': fb_boundary,
+            'fallback_normal': fb_normal,
+            'fallback_feature': fb_feature,
+            'unverified_charts': unv_charts,
             'gate_repaired': gate_rep,
             'gate_rounds': gate_rnd,
             'c1_metrics': c1_ref,
-            's43_metrics': s43_ref,
+            's45_metrics': s45_ref,
             'restore_pass': True,
         }
 
@@ -540,39 +541,14 @@ def main():
             f"islands(c/rt)={rt_result['core_charts_count']}/{rt_result['mesh_islands_count']}, "
             f"equal={rt_result['islands_equal']}, ov(c/rt)={core_met['intra_overlaps']}/{rt_m['intra_overlaps']}, "
             f"extra_v(c/rt)={core_met['render_extra_vs_normals']}/{rt_m['render_extra_vs_normals']}, "
-            f"fb_cuts={fb_cuts}, fb_seed={fb_seed}, gate_rep={gate_rep}"
+            f"fb_seed={fb_seed}, fb_boundary={fb_boundary}, fb_normal={fb_normal}, fb_feature={fb_feature}, "
+            f"gate_rep={gate_rep}, unverified={len(unv_charts)}"
         )
-
-    # Speed benchmark: measure with and without temporary scene on selected objects
-    print("\n--- Running Speed Benchmark (With vs Without Temporary Scene) ---")
-    speed_results = {}
-    for name in SPEED_TEST_OBJECTS:
-        o = bpy.data.objects.get(name)
-        if not o:
-            continue
-        print(f"Testing speed on {name}...", flush=True)
-
-        t0 = time.perf_counter()
-        _, _, rep_with = uv_autoseam.propose(o, measurement_arrays=False, use_temp_scene=True)
-        t_with = rep_with['time']
-
-        t0 = time.perf_counter()
-        _, _, rep_without = uv_autoseam.propose(o, measurement_arrays=False, use_temp_scene=False)
-        t_without = rep_without['time']
-
-        speedup = t_without / max(t_with, 1e-6)
-        speed_results[name] = {
-            'with_temp_scene': t_with,
-            'without_temp_scene': t_without,
-            'speedup': speedup,
-        }
-        print(f"  {name:22s}: with={t_with:.2f}s, without={t_without:.2f}s (speedup: {speedup:.2f}x)")
 
     # Save JSON summary
     json_path = WORK_DIR / 'measure_real_summary.json'
     summary_data = {
         'objects': results,
-        'speed_benchmark': speed_results,
     }
     with open(json_path, 'w') as f:
         json.dump(summary_data, f, indent=2, default=str)
@@ -580,14 +556,14 @@ def main():
 
     # Build Markdown Report
     md_lines = []
-    md_lines.append("# Package 2c: Seams as Contract, Honest Checks Report\n")
+    md_lines.append("# Package 2d: Cost of the Contract Report\n")
     md_lines.append(f"- **Date:** {time.strftime('%Y-%m-%d %H:%M:%S')}")
     md_lines.append(f"- **Blend file:** `{BLEND_PATH.name}`")
     md_lines.append(f"- **Total objects tested:** {len(all_objects)}\n")
 
-    md_lines.append("## Table 1: Mesh Topology, Diagonal Splits, Seams, Round Trip, and Core Time\n")
-    md_lines.append("| Object | Category | Modifiers | Topo Match | Faces (Orig/Tri) | Diagonals | Diag Splits (Core/RT) | Proposed Edges | Islands (Core/RT) | RT Equal? | Overlaps (Core/RT) | Core Time (s) |")
-    md_lines.append("| :--- | :--- | :--- | :---: | :---: | ---: | :---: | ---: | :---: | :---: | :---: | ---: |")
+    md_lines.append("## Table 1: Mesh Topology, Diagonal Splits, Seams, Round Trip, Unverified Charts, and Core Time\n")
+    md_lines.append("| Object | Category | Modifiers | Topo Match | Faces (Orig/Tri) | Diagonals | Diag Splits (Core/RT) | Proposed Edges | Islands (Core/RT) | RT Equal? | Overlaps (Core/RT) | Unverified Charts | Core Time (s) |")
+    md_lines.append("| :--- | :--- | :--- | :---: | :---: | ---: | :---: | ---: | :---: | :---: | :---: | :---: | ---: |")
 
     for name, r in results.items():
         mods = ", ".join(r['modifiers']) if r['modifiers'] else "none"
@@ -600,13 +576,15 @@ def main():
         diag_str = f"**{rt['core_diag_splits']} / {rt['rt_diag_splits']}**"
         isl_str = f"{rt['core_charts_count']} / {rt['mesh_islands_count']}"
         ov_str = f"{c_m['intra_overlaps']} / {rt_m['intra_overlaps']}"
+        unv_count = len(r['unverified_charts'])
+        unv_str = f"**{unv_count}**" if unv_count > 0 else "0"
         md_lines.append(
             f"| `{name}` | {r['category']} | {mods} | {topo} | {faces} | "
             f"{r['diagonals_total']:,} | {diag_str} | {r['proposed_edges_count']:,} | "
-            f"{isl_str} | **{rt_eq}** | {ov_str} | {r['core_time']:.2f} |"
+            f"{isl_str} | **{rt_eq}** | {ov_str} | {unv_str} | {r['core_time']:.2f} |"
         )
 
-    md_lines.append("\n## Table 2: Comparison against Candidate C1 and Session 43 (Package 2b)\n")
+    md_lines.append("\n## Table 2: Comparison against Candidate C1 and Session 45 (Package 2c)\n")
     md_lines.append("| Object | Variant | Islands | Conformal (mean/p95/max) | Planar Conf | Straight % | Intra Overlaps | Seam Cross | Extra Verts | Time (s) |")
     md_lines.append("| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | ---: |")
 
@@ -614,39 +592,39 @@ def main():
         rt_m = r['round_trip']['metrics']
         c_m = r['core_metrics']
         c1 = r['c1_metrics']
-        s43 = r.get('s43_metrics', {})
-        s43_rt = s43.get('round_trip', {}).get('metrics', {})
+        s45 = r.get('s45_metrics', {})
+        s45_rt = s45.get('round_trip', {}).get('metrics', {})
 
         st_rt = f"{rt_m['straight']:.1f}%" if rt_m['straight'] is not None else "n/a"
         pl_rt = f"{rt_m['planar_c']:.3f}" if rt_m['planar_c'] is not None else "n/a"
 
-        # Round-trip unwrap row (Package 2c)
+        # Round-trip unwrap row (Package 2d)
         md_lines.append(
-            f"| `{name}` | **Pkg 2c (Blender Unwrap)** | {rt_m['islands']:,} | "
+            f"| `{name}` | **Pkg 2d (Blender Unwrap RT)** | {rt_m['islands']:,} | "
             f"{rt_m['c_mean']:.3f}/{rt_m['c_p95']:.3f}/{rt_m['c_max']:.3f} | "
             f"{pl_rt} | {st_rt} | {rt_m['intra_overlaps']} | {rt_m['cross_outside_stubs']} | "
             f"{rt_m['render_extra_vs_normals']:,} | {r['core_time']:.2f} |"
         )
 
-        # Core layout row (Package 2c)
+        # Core layout row (Package 2d)
         st_c = f"{c_m['straight']:.1f}%" if c_m['straight'] is not None else "n/a"
         pl_c = f"{c_m['planar_c']:.3f}" if c_m['planar_c'] is not None else "n/a"
         md_lines.append(
-            f"| | Pkg 2c (Core Layout) | {c_m['islands']:,} | "
+            f"| | Pkg 2d (Core Layout) | {c_m['islands']:,} | "
             f"{c_m['c_mean']:.3f}/{c_m['c_p95']:.3f}/{c_m['c_max']:.3f} | "
             f"{pl_c} | {st_c} | {c_m['intra_overlaps']} | {c_m['cross_outside_stubs']} | "
             f"{c_m['render_extra_vs_normals']:,} | {c_m['time']:.2f} |"
         )
 
-        # Session 43 (Package 2b Blender Unwrap) row
-        if s43_rt:
-            st_s43 = f"{s43_rt['straight']:.1f}%" if s43_rt.get('straight') is not None else "n/a"
-            pl_s43 = f"{s43_rt['planar_c']:.3f}" if s43_rt.get('planar_c') is not None else "n/a"
+        # Session 45 (Package 2c Blender Unwrap) row
+        if s45_rt:
+            st_s45 = f"{s45_rt['straight']:.1f}%" if s45_rt.get('straight') is not None else "n/a"
+            pl_s45 = f"{s45_rt['planar_c']:.3f}" if s45_rt.get('planar_c') is not None else "n/a"
             md_lines.append(
-                f"| | Session 43 (Pkg 2b RT) | {s43_rt['islands']:,} | "
-                f"{s43_rt['c_mean']:.3f}/{s43_rt['c_p95']:.3f}/{s43_rt['c_max']:.3f} | "
-                f"{pl_s43} | {st_s43} | {s43_rt.get('intra_overlaps', 'n/a')} | {s43_rt.get('cross_outside_stubs', 'n/a')} | "
-                f"{s43_rt.get('render_extra_vs_normals', 'n/a')} | {s43.get('core_time', 0.0):.2f} |"
+                f"| | Session 45 (Pkg 2c RT) | {s45_rt['islands']:,} | "
+                f"{s45_rt['c_mean']:.3f}/{s45_rt['c_p95']:.3f}/{s45_rt['c_max']:.3f} | "
+                f"{pl_s45} | {st_s45} | {s45_rt.get('intra_overlaps', 'n/a')} | {s45_rt.get('cross_outside_stubs', 'n/a')} | "
+                f"{s45_rt.get('render_extra_vs_normals', 'n/a')} | {s45.get('core_time', 0.0):.2f} |"
             )
 
         # Candidate C1 row
@@ -660,25 +638,99 @@ def main():
                 f"{c1['render_extra_vs_normals']:,} | {c1['time']:.2f} |"
             )
 
-    md_lines.append("\n## Table 3: Decision 49 Fallbacks & Island Costs\n")
-    md_lines.append("| Object | Fallback Cuts | Fallback Seed | Gate Repaired | Gate Rounds | Islands (Pkg 2c) | Islands (C1) | Island Cost vs C1 |")
-    md_lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
+    md_lines.append("\n## Table 3: Decision 49 Cost-Aware Fallbacks & Island Costs\n")
+    md_lines.append("| Object | Seed Split | Boundary Dijkstra | Normal Clustering | Feature Dijkstra | Gate Repaired | Gate Rounds | Unverified Charts | Islands (Pkg 2d RT) | Islands (S45 RT) | Islands (C1) | Island Cost vs C1 |")
+    md_lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
 
     for name, r in results.items():
         c1 = r['c1_metrics']
         c1_isl = c1['islands'] if c1 else "n/a"
-        p2c_isl = r['round_trip']['core_charts_count']
-        diff_isl = f"{p2c_isl - c1_isl:+d}" if isinstance(c1_isl, int) else "n/a"
+        s45 = r.get('s45_metrics', {})
+        s45_isl = s45.get('round_trip', {}).get('mesh_islands_count', "n/a")
+        p2d_isl = r['round_trip']['mesh_islands_count']
+        diff_isl = f"{p2d_isl - c1_isl:+d}" if isinstance(c1_isl, int) else "n/a"
+        unv_count = len(r['unverified_charts'])
+        unv_str = f"**{unv_count}**" if unv_count > 0 else "0"
         md_lines.append(
-            f"| `{name}` | {r['fallback_cuts']} | {r['fallback_seed']} | "
-            f"{r['gate_repaired']} | {r['gate_rounds']} | **{p2c_isl}** | {c1_isl} | {diff_isl} |"
+            f"| `{name}` | {r['fallback_seed']} | {r['fallback_boundary']} | {r['fallback_normal']} | {r['fallback_feature']} | "
+            f"{r['gate_repaired']} | {r['gate_rounds']} | {unv_str} | **{p2d_isl}** | {s45_isl} | {c1_isl} | {diff_isl} |"
         )
 
-    md_lines.append("\n## Table 4: Trial Unwrap Speedup with Temporary Scene\n")
-    md_lines.append("| Object | Time with Temp Scene (s) | Time without Temp Scene (s) | Speedup Factor |")
-    md_lines.append("| :--- | :---: | :---: | :---: |")
-    for name, s in speed_results.items():
-        md_lines.append(f"| `{name}` | **{s['with_temp_scene']:.2f}** | {s['without_temp_scene']:.2f} | **{s['speedup']:.2f}x** |")
+    md_lines.append("\n## Table 4: Round-Trip Islands Over Shape Limits & Unverified Chart Details\n")
+    md_lines.append("| Object | RT Islands | Islands Over Shape Limits (d > 1.25 or ov > 0) | Unverified Count | Unverified Chart Details (faces, criterion) |")
+    md_lines.append("| :--- | :---: | :---: | :---: | :--- |")
+
+    total_unverified = 0
+    total_shape_violations = 0
+    total_diag_splits = 0
+    total_rt_overlaps = 0
+    all_equal = True
+
+    for name, r in results.items():
+        rt = r['round_trip']
+        rt_isl = rt['mesh_islands_count']
+        over_shape = rt.get('islands_over_shape_limit', 0)
+        unv_list = r['unverified_charts']
+        total_unverified += len(unv_list)
+        total_shape_violations += over_shape
+        total_diag_splits += rt['core_diag_splits'] + rt['rt_diag_splits']
+        total_rt_overlaps += rt['metrics']['intra_overlaps']
+        if not rt['islands_equal']:
+            all_equal = False
+
+        if unv_list:
+            details = "; ".join(f"Chart {u['chart']} ({u['faces']} faces, d={u['distortion']:.2f}, {u['criterion']})" for u in unv_list)
+        else:
+            details = "none"
+
+        md_lines.append(f"| `{name}` | {rt_isl} | **{over_shape}** | **{len(unv_list)}** | {details} |")
+
+    # Finish Line Verification
+    md_lines.append("\n## Finish Line Verification (Package 2d Contract)\n")
+    md_lines.append("| Criterion | Target | Status | Actual Result |")
+    md_lines.append("| :--- | :---: | :---: | :--- |")
+
+    # 1. Diagonal splits
+    diag_status = "**MET**" if total_diag_splits == 0 else "**NOT MET**"
+    md_lines.append(f"| **Diagonal splits in both layouts** | 0 on all 22 objects | {diag_status} | {total_diag_splits} splits |")
+
+    # 2. Round trip islands equal to core
+    eq_status = "**MET**" if all_equal else "**NOT MET**"
+    unequal_objs = [name for name, r in results.items() if not r['round_trip']['islands_equal']]
+    eq_detail = "Equal on all 22 objects" if all_equal else f"{len(unequal_objs)} differ: {', '.join(unequal_objs)}"
+    md_lines.append(f"| **Round trip islands equal to core** | Equal on all 22 objects | {eq_status} | {eq_detail} |")
+
+    # 3. Intra-island overlaps
+    ov_status = "**MET**" if total_rt_overlaps == 0 else "**NOT MET**"
+    ov_objs = [f"{name} ({r['round_trip']['metrics']['intra_overlaps']})" for name, r in results.items() if r['round_trip']['metrics']['intra_overlaps'] > 0]
+    ov_detail = "0 on all 22 objects" if total_rt_overlaps == 0 else f"{total_rt_overlaps} total in RT: {', '.join(ov_objs)}"
+    md_lines.append(f"| **Intra-island overlaps in RT** | 0 on all 22 objects | {ov_status} | {ov_detail} |")
+
+    # 4. Unverified charts
+    unv_status = "**MET**" if total_unverified == 0 else "**NOT MET**"
+    unv_objs = [f"{name} ({len(r['unverified_charts'])})" for name, r in results.items() if len(r['unverified_charts']) > 0]
+    unv_detail = "0 on all 22 objects" if total_unverified == 0 else f"{total_unverified} unverified: {', '.join(unv_objs)}"
+    md_lines.append(f"| **Unverified charts accepted** | 0 on all 22 objects | {unv_status} | {unv_detail} |")
+
+    # 5. Islands over shape limits in RT
+    shape_status = "**MET**" if total_shape_violations == 0 else "**NOT MET**"
+    shape_objs = [f"{name} ({r['round_trip'].get('islands_over_shape_limit', 0)})" for name, r in results.items() if r['round_trip'].get('islands_over_shape_limit', 0) > 0]
+    shape_detail = "0 on all 22 objects" if total_shape_violations == 0 else f"{total_shape_violations} over limit: {', '.join(shape_objs)}"
+    md_lines.append(f"| **Islands over shape limits in RT** | 0 on all 22 objects | {shape_status} | {shape_detail} |")
+
+    # 6. Overhead shell targets
+    oh = results.get('OVERHEAD_SHELL', {})
+    oh_isl = oh.get('round_trip', {}).get('mesh_islands_count', 9999)
+    oh_time = oh.get('core_time', 9999.0)
+    oh_rep = oh.get('gate_repaired', 9999)
+    oh_status = "**MET**" if (oh_isl <= 2000 and oh_time <= 200.0) else "**NOT MET**"
+    md_lines.append(f"| **OVERHEAD_SHELL targets** | <= 2,000 islands, <= 200 s | {oh_status} | {oh_isl} islands, {oh_time:.2f} s (gate repaired: {oh_rep}) |")
+
+    # 7. Rear window hole frame target
+    rw = results.get('COCKPIT_REAR_WINDOW_HOLE_R_FRAME', {})
+    rw_isl = rw.get('round_trip', {}).get('mesh_islands_count', 9999)
+    rw_status = "**MET**" if rw_isl <= 12 else "**NOT MET**"
+    md_lines.append(f"| **COCKPIT_REAR_WINDOW_HOLE_R_FRAME** | <= 12 islands | {rw_status} | {rw_isl} islands |")
 
     md_path = WORK_DIR / 'measure_real_report.md'
     with open(md_path, 'w') as f:
