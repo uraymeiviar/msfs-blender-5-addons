@@ -381,69 +381,99 @@ def test_overhead_shell_performance():
     print("  -> PASS: OVERHEAD_SHELL computed well under the 2.0 s limit.")
 
 
-def test_depth_bias_no_zfighting():
-    """The add-on's overlay shader compiles and wins against the surface it lies on (no z-fighting speckles)."""
-    print("Test 9: Overlay depth bias against z-fighting (offscreen)...")
+def test_opaque_surface_shader():
+    """The heatmap surface shader compiles, draws opaque colours, and hides its own back parts (depth write)."""
+    print("Test 9: Opaque heatmap surface shader (offscreen)...")
     import math
     import gpu
     from mathutils import Matrix
     from gpu_extras.batch import batch_for_shader
     gpu.init()  # background Blender: initialise the GPU module for offscreen drawing
 
-    # a tilted 2 m plane of 40 x 40 quads, seen at a grazing angle from 3 m (Blender's default clip range)
-    n = 40
-    g = np.linspace(-1.0, 1.0, n + 1)
-    quads = []
-    for i in range(n):
-        for j in range(n):
-            a, b, c, d = (g[i], g[j]), (g[i + 1], g[j]), (g[i + 1], g[j + 1]), (g[i], g[j + 1])
-            quads += [a, b, c, a, c, d]
-    xy = np.array(quads, np.float32)
-    pos = np.column_stack([xy[:, 0], xy[:, 1], 0.3 * xy[:, 0]]).astype(np.float32)
-    near, far, t = 0.01, 1000.0, 1.0 / math.tan(math.radians(25))
+    def plane(z, color):
+        pos = np.array([(-1, -1, z), (1, -1, z), (1, 1, z), (-1, -1, z), (1, 1, z), (-1, 1, z)], np.float32)
+        nor = np.tile([0.0, 0.0, 1.0], (6, 1)).astype(np.float32)
+        col = np.tile(color, (6, 1)).astype(np.float32)
+        return pos, nor, col
+
+    # the near plane (z = 0.2, red) is drawn first, the far plane (z = -0.2, blue) second: the near one must win
+    near_p, far_p = plane(0.2, [1.0, 0.0, 0.0, 1.0]), plane(-0.2, [0.0, 0.0, 1.0, 1.0])
+    pos = np.concatenate([near_p[0], far_p[0]])
+    nor = np.concatenate([near_p[1], far_p[1]])
+    col = np.concatenate([near_p[2], far_p[2]])
+    near, far, t = 0.01, 100.0, 1.0 / math.tan(math.radians(30))
     proj = Matrix(((t, 0, 0, 0), (0, t, 0, 0), (0, 0, (far + near) / (near - far), 2 * far * near / (near - far)),
                    (0, 0, -1, 0)))
-    view = Matrix.Translation((0, 0, -3.0)) @ Matrix.Rotation(math.radians(-70), 4, 'X')
-    mvp = proj @ view
+    view = Matrix.Translation((0, 0, -3.0))
 
-    surface_shader = gpu.shader.from_builtin('UNIFORM_COLOR')
-    heat = uv_heatmap._heatmap_shader()
-    surface = batch_for_shader(surface_shader, 'TRIS', {'pos': pos})
-    overlay = batch_for_shader(heat, 'TRIS', {'pos': pos, 'color': np.tile([1.0, 0.0, 0.0, 1.0], (len(pos), 1)).astype(np.float32)})
-
-    size = 256
+    shader = uv_heatmap._heatmap_shader()
+    batch = batch_for_shader(shader, 'TRIS', {'pos': pos, 'nor': nor, 'color': col})
+    size = 64
     off = gpu.types.GPUOffScreen(size, size)
     try:
-        def speckles(bias):
+        def centre_pixel(opacity):
             with off.bind():
                 fb = gpu.state.active_framebuffer_get()
                 fb.clear(color=(0, 0, 0, 1), depth=1.0)
-                with gpu.matrix.push_pop():
-                    gpu.matrix.load_matrix(view)
-                    gpu.matrix.load_projection_matrix(proj)
-                    gpu.state.depth_test_set('LESS_EQUAL')
-                    gpu.state.depth_mask_set(True)
-                    surface_shader.bind()
-                    surface_shader.uniform_float('color', (0.0, 1.0, 0.0, 1.0))
-                    surface.draw(surface_shader)
-                gpu.state.depth_mask_set(False)
-                heat.bind()
-                heat.uniform_float('mvp', mvp)
-                heat.uniform_float('depth_bias', bias)
-                overlay.draw(heat)
+                gpu.state.depth_test_set('LESS_EQUAL')
                 gpu.state.depth_mask_set(True)
+                shader.bind()
+                shader.uniform_float('mvp', proj @ view)
+                shader.uniform_float('normal_matrix', view.inverted_safe().transposed())
+                shader.uniform_float('opacity', opacity)
+                shader.uniform_float('base_grey', uv_heatmap.BASE_GREY)
+                batch.draw(shader)
                 gpu.state.depth_test_set('NONE')
-                px = np.array(fb.read_color(0, 0, size, size, 4, 0, 'FLOAT').to_list(), np.float32).reshape(-1, 4)
-            return int(np.count_nonzero(px[:, 1] > 0.5)), int(np.count_nonzero(px[:, 0] > 0.5))
+                return np.array(fb.read_color(size // 2, size // 2, 1, 1, 4, 0, 'FLOAT').to_list()).ravel()
 
-        lost, covered = speckles(uv_heatmap.DEPTH_BIAS)
-        assert covered > 1000, f"overlay not drawn ({covered} px)"
-        assert lost == 0, f"{lost} surface pixels show through the overlay (z-fighting) with DEPTH_BIAS"
-        lost0, _ = speckles(0.0)
+        full = centre_pixel(1.0)
+        assert full[0] > 0.95 and full[2] < 0.05, f"the near plane must hide the far one, got {full}"
+        half = centre_pixel(0.5)
+        expected = 0.5 * uv_heatmap.BASE_GREY + 0.5  # facing the camera: shade 1.0
+        assert abs(half[0] - expected) < 0.02 and abs(half[1] - 0.5 * uv_heatmap.BASE_GREY) < 0.02, \
+            f"opacity 0.5 must mix the colour with grey, got {half}"
     finally:
         off.free()
-    print(f"  -> PASS: {covered} px covered, 0 speckles with DEPTH_BIAS={uv_heatmap.DEPTH_BIAS} "
-          f"(without bias: {lost0} speckles).")
+    print(f"  -> PASS: near plane wins ({np.round(full[:3], 3)}), opacity mixes with grey ({np.round(half[:3], 3)}).")
+
+
+def test_wire_display_takeover():
+    """While shown, the heatmap's objects display as wire; their own display comes back afterwards."""
+    print("Test 10: Wire display takeover and restore...")
+    clean_scene()
+    obj = create_plane("Plane_Display", size=1.0)
+    other = create_plane("Plane_ArtistWire", size=1.0, location=(3, 0, 0))
+    obj.display_type = 'TEXTURED'
+    other.display_type = 'WIRE'  # the artist's own choice must be left alone
+    obj.select_set(True)
+    other.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    scene = bpy.context.scene
+
+    scene.fss_uv_heatmap_show = False
+    scene.fss_uv_heatmap_show = True  # the toggle's update callback takes the selection over
+    assert obj.display_type == 'WIRE', f"shown object should display as wire, got {obj.display_type}"
+
+    obj.select_set(False)
+    uv_heatmap._sync_display()
+    assert obj.display_type == 'TEXTURED', "a deselected object gets its own display back"
+    obj.select_set(True)
+    uv_heatmap._sync_display()
+    assert obj.display_type == 'WIRE'
+
+    uv_heatmap._on_save_pre(None)
+    assert obj.display_type == 'TEXTURED', "the saved file must not keep the wire display"
+    uv_heatmap._on_save_post(None)
+    assert obj.display_type == 'WIRE', "after saving, the heatmap takes the object over again"
+
+    # an undo that brings back a wire display after the heatmap was switched off is repaired
+    scene.fss_uv_heatmap_show = False
+    assert obj.display_type == 'TEXTURED', "switching off restores the display"
+    obj.display_type = 'WIRE'  # what an undo to an earlier step would bring back
+    uv_heatmap._on_undo_redo_post(None)
+    assert obj.display_type == 'TEXTURED', "after an undo the original display is restored"
+    assert other.display_type == 'WIRE', "an object the artist set to wire is never changed"
+    print("  -> PASS: wire while shown, restored on deselect, save, switch-off and undo; artist's wire kept.")
 
 
 def run_all_tests():
@@ -458,7 +488,8 @@ def run_all_tests():
     test_gltf_export_unchanged()
     test_uvmetrics_parity_on_trim_panel()
     test_overhead_shell_performance()
-    test_depth_bias_no_zfighting()
+    test_opaque_surface_shader()
+    test_wire_display_takeover()
     print("=" * 70)
     print("ALL UV HEATMAP TESTS PASSED SUCCESSFULLY.")
     print("=" * 70)

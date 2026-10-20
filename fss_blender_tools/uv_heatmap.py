@@ -35,12 +35,15 @@ COLOR_TEXT_MAIN = (1.0, 1.0, 1.0, 1.0)
 COLOR_TEXT_DIM = (0.78, 0.78, 0.78, 1.0)
 COLOR_TEXT_WARN = (1.0, 0.75, 0.25, 1.0)
 
-# Global caches and draw handles
-# Clip-space depth bias towards the camera, so the overlay wins against the surface it lies on (no z-fighting).
-# 1e-6 already removed every speckle in an offscreen test; a larger value lets the overlay show through surfaces
-# closer behind than about bias * distance² / (2 * clip start).
-DEPTH_BIAS = 5e-6
+# While the heatmap is shown, its objects are displayed as wire and the heatmap draws their surface itself, opaque and
+# lit, so there is no second surface to fight with (no z-fighting and no depth bias). The display type is the only
+# thing changed on the object; it is restored when the heatmap is off, the object is deselected, before saving, after
+# an undo, and when the add-on is disabled.
+BASE_GREY = 0.8
 _shader = None
+_display_original = {}  # obj_name -> display_type before the heatmap took it over (kept until another file loads)
+_display_active = set()  # obj names currently displayed as wire by the heatmap
+SYNC_INTERVAL = 0.25
 
 _cache = {}  # obj_name -> ObjectHeatmapCache
 _ref_cache = {}  # material name -> reference density of its texture set (all scene objects using it)
@@ -206,46 +209,128 @@ class ObjectHeatmapCache:
     def __init__(self, obj_name, P_local, tri_measures, rel_density, colors_shape, colors_density):
         self.obj_name = obj_name
         self.n_tris = len(P_local)
-        # object space: the overlay is drawn with the object's current matrix, so it follows moves
+        # object space: the surface is drawn with the object's current matrix, so it follows moves
         self.pos = P_local.reshape(-1, 3).astype(np.float32)
+        e1 = P_local[:, 1] - P_local[:, 0]
+        e2 = P_local[:, 2] - P_local[:, 0]
+        nor = np.cross(e1, e2)
+        nor /= np.maximum(np.linalg.norm(nor, axis=1, keepdims=True), 1e-30)
+        self.nor = np.repeat(nor, 3, axis=0).astype(np.float32)  # flat shading: the face normal at every corner
         self.colors_shape = np.repeat(colors_shape, 3, axis=0).astype(np.float32)
         self.colors_density = np.repeat(colors_density, 3, axis=0).astype(np.float32)
         self.area3 = tri_measures['area3']
         self.is_degenerate = tri_measures['is_degenerate']
         self.shape = tri_measures['shape']
         self.rel_density = rel_density
-        self.batches = {}  # (mode, opacity) -> GPUBatch
+        self.batches = {}  # mode -> GPUBatch
 
-    def get_batch(self, mode, shader, opacity=ALPHA):
+    def get_batch(self, mode, shader):
         if gpu is None or batch_for_shader is None:
             return None
-        key = (mode, round(opacity, 3))
-        if key not in self.batches:
-            colors = (self.colors_shape if mode == 'SHAPE' else self.colors_density).copy()
-            colors[:, 3] = opacity
-            self.batches.clear()
-            self.batches[key] = batch_for_shader(shader, 'TRIS', {'pos': self.pos, 'color': colors})
-        return self.batches[key]
+        if mode not in self.batches:
+            colors = self.colors_shape if mode == 'SHAPE' else self.colors_density
+            self.batches[mode] = batch_for_shader(shader, 'TRIS', {'pos': self.pos, 'nor': self.nor, 'color': colors})
+        return self.batches[mode]
 
 
 def _heatmap_shader():
-    """Per-vertex colour shader with a depth bias; created on first use (needs a GPU context)."""
+    """Opaque surface shader: heat colour mixed with grey by the opacity, lit by a headlight; created on first use
+    (needs a GPU context)."""
     global _shader
     if _shader is None:
         info = gpu.types.GPUShaderCreateInfo()
         info.push_constant('MAT4', 'mvp')
-        info.push_constant('FLOAT', 'depth_bias')
+        info.push_constant('MAT4', 'normal_matrix')
+        info.push_constant('FLOAT', 'opacity')
+        info.push_constant('FLOAT', 'base_grey')
         info.vertex_in(0, 'VEC3', 'pos')
-        info.vertex_in(1, 'VEC4', 'color')
+        info.vertex_in(1, 'VEC3', 'nor')
+        info.vertex_in(2, 'VEC4', 'color')
         iface = gpu.types.GPUStageInterfaceInfo('fss_uv_heatmap_iface')
         iface.smooth('VEC4', 'v_color')
+        iface.smooth('VEC3', 'v_nor')
         info.vertex_out(iface)
         info.fragment_out(0, 'VEC4', 'FragColor')
         info.vertex_source('void main() { gl_Position = mvp * vec4(pos, 1.0); '
-                           'gl_Position.z -= depth_bias * gl_Position.w; v_color = color; }')
-        info.fragment_source('void main() { FragColor = v_color; }')
+                           'v_nor = (normal_matrix * vec4(nor, 0.0)).xyz; v_color = color; }')
+        info.fragment_source('void main() { float shade = 0.35 + 0.65 * abs(normalize(v_nor).z); '
+                             'vec3 c = mix(vec3(base_grey), v_color.rgb, opacity) * shade; '
+                             'FragColor = vec4(c, 1.0); }')
         _shader = gpu.shader.create_from_info(info)
     return _shader
+
+
+def _heatmap_targets():
+    """Names of the objects the heatmap draws now: selected editable meshes with an active UV map, outside Edit Mode."""
+    context = bpy.context
+    scene = getattr(context, 'scene', None)
+    if scene is None or not getattr(scene, 'fss_uv_heatmap_show', False) or context.mode == 'EDIT_MESH':
+        return set()
+    return {obj.name for obj in context.selected_objects
+            if obj.type == 'MESH' and _editable(obj) and obj.data and obj.data.uv_layers.active is not None}
+
+
+def _sync_display():
+    """Display the heatmap's objects as wire, and give every other object back its own display type."""
+    wanted = _heatmap_targets()
+    for name in list(_display_original):
+        if name in wanted:
+            continue
+        obj = bpy.data.objects.get(name)
+        if obj is not None and obj.display_type == 'WIRE':
+            obj.display_type = _display_original[name]
+        _display_active.discard(name)
+    for name in wanted - _display_active:
+        obj = bpy.data.objects.get(name)
+        if obj is None:
+            continue
+        if name not in _display_original:
+            if obj.display_type in ('WIRE', 'BOUNDS'):
+                continue  # the artist's own choice: leave it alone
+            _display_original[name] = obj.display_type
+        obj.display_type = 'WIRE'
+        _display_active.add(name)
+
+
+def _sync_timer():
+    try:
+        _sync_display()
+    except (AttributeError, ReferenceError, RuntimeError):
+        pass  # no usable context right now (file loading, shutdown); try again next tick
+    return SYNC_INTERVAL if _display_active or _heatmap_targets() else None
+
+
+def _start_sync_timer():
+    if not bpy.app.timers.is_registered(_sync_timer):
+        bpy.app.timers.register(_sync_timer, first_interval=SYNC_INTERVAL)
+
+
+def _restore_all_display():
+    for name, display_type in _display_original.items():
+        obj = bpy.data.objects.get(name)
+        if obj is not None and obj.display_type == 'WIRE':
+            obj.display_type = display_type
+    _display_active.clear()
+
+
+@persistent
+def _on_save_pre(_dummy):
+    # the saved file never keeps the heatmap's wire display
+    _restore_all_display()
+
+
+@persistent
+def _on_save_post(_dummy):
+    _sync_display()
+
+
+@persistent
+def _on_undo_redo_post(_dummy):
+    # undo can bring back a wire display from an earlier step; restore it, or take it over again when shown
+    _display_active.clear()
+    _sync_display()
+    if _display_active:
+        _start_sync_timer()
 
 
 def tag_redraw():
@@ -265,8 +350,10 @@ def clear_cache():
 
 @persistent
 def _on_load_post(_dummy):
-    # cache keys are object names, which a newly loaded file may reuse
+    # cache keys are object names, which a newly loaded file may reuse; the file was saved without wire takeovers
     clear_cache()
+    _display_original.clear()
+    _display_active.clear()
 
 
 def _object_triangles(obj, depsgraph):
@@ -436,30 +523,30 @@ def _draw_viewport_heatmap():
         update_heatmap_cache(context, refresh=False)
 
     mode = context.scene.fss_uv_heatmap_mode
-    opacity = context.scene.fss_uv_heatmap_opacity
     shader = _heatmap_shader()
-    view_projection = context.region_data.perspective_matrix
+    region = context.region_data
     objects = context.view_layer.objects
 
+    # opaque surface with its own depth: the objects themselves are displayed as wire meanwhile (_sync_display)
     gpu.state.depth_test_set('LESS_EQUAL')
-    gpu.state.depth_mask_set(False)
-    gpu.state.blend_set('ALPHA')
+    gpu.state.depth_mask_set(True)
     try:
         shader.bind()
-        shader.uniform_float('depth_bias', DEPTH_BIAS)
+        shader.uniform_float('opacity', context.scene.fss_uv_heatmap_opacity)
+        shader.uniform_float('base_grey', BASE_GREY)
         for name in selected_mesh_names:
             entry = _cache.get(name)
             obj = objects.get(name)
             if entry is None or obj is None:
                 continue
-            batch = entry.get_batch(mode, shader, opacity)
+            batch = entry.get_batch(mode, shader)
             if batch is not None:
-                shader.uniform_float('mvp', view_projection @ obj.matrix_world)
+                shader.uniform_float('mvp', region.perspective_matrix @ obj.matrix_world)
+                shader.uniform_float('normal_matrix',
+                                     (region.view_matrix @ obj.matrix_world).inverted_safe().transposed())
                 batch.draw(shader)
     finally:
-        gpu.state.depth_mask_set(True)
         gpu.state.depth_test_set('NONE')
-        gpu.state.blend_set('NONE')
 
 
 def _draw_viewport_legend():
@@ -488,7 +575,7 @@ def _draw_viewport_legend():
     lines = []
 
     # Title & mode
-    mode_text = 'Shape (Conformal)' if mode == 'SHAPE' else 'Texel Density'
+    mode_text = 'Distortion' if mode == 'SHAPE' else 'Texel Density'
     lines.append((f'UV Heatmap: {mode_text}', COLOR_TEXT_MAIN, True))
 
     # Scale explanation
@@ -496,13 +583,13 @@ def _draw_viewport_legend():
         lines.append(('Scale: 1.0 (neutral) to 2.0+ (blue), grey = degenerate', COLOR_TEXT_DIM, False))
         s110 = stats.get('share_above_110', 0.0)
         s125 = stats.get('share_above_125', 0.0)
-        lines.append((f'Area > 1.10: {s110:.1%} | Area > 1.25: {s125:.1%}', COLOR_TEXT_MAIN, False))
+        lines.append((f'Surface over 1.10 (target): {s110:.1%} | over 1.25 (limit): {s125:.1%}', COLOR_TEXT_MAIN, False))
     else:
         lines.append(('Scale: 0.5 (red) - 1.0 (neutral) - 2.0 (blue) [log], grey = degenerate', COLOR_TEXT_DIM, False))
         s_out = stats.get('share_outside', 0.0)
         s_und = stats.get('share_under', 0.0)
         s_ovr = stats.get('share_over', 0.0)
-        lines.append((f'Area outside range: {s_out:.1%} (under: {s_und:.1%}, over: {s_ovr:.1%})', COLOR_TEXT_MAIN, False))
+        lines.append((f'Surface outside its density range: {s_out:.1%} (too low: {s_und:.1%}, too high: {s_ovr:.1%})', COLOR_TEXT_MAIN, False))
 
     # Degenerate info
     deg_cnt = stats.get('degenerate_count', 0)
@@ -538,6 +625,8 @@ def _on_toggle_show(self, context):
     """Callback when Show UV Heatmap toggle changes."""
     if self.fss_uv_heatmap_show:
         update_heatmap_cache(context)
+        _start_sync_timer()
+    _sync_display()
     tag_redraw()
 
 
@@ -588,11 +677,11 @@ class FSS_PT_UvHeatmap(bpy.types.Panel):
             box = layout.box()
             if stats.get('total_tris', 0) > 0:
                 if scene.fss_uv_heatmap_mode == 'SHAPE':
-                    box.label(text=f"Area > 1.10: {stats.get('share_above_110', 0.0):.1%}")
-                    box.label(text=f"Area > 1.25: {stats.get('share_above_125', 0.0):.1%}")
+                    box.label(text=f"Over 1.10 (target): {stats.get('share_above_110', 0.0):.1%} of surface")
+                    box.label(text=f"Over 1.25 (limit): {stats.get('share_above_125', 0.0):.1%} of surface")
                 else:
-                    box.label(text=f"Outside range: {stats.get('share_outside', 0.0):.1%}")
-                    box.label(text=f"  under: {stats.get('share_under', 0.0):.1%}, over: {stats.get('share_over', 0.0):.1%}")
+                    box.label(text=f"Outside density range: {stats.get('share_outside', 0.0):.1%} of surface")
+                    box.label(text=f"  too low: {stats.get('share_under', 0.0):.1%}, too high: {stats.get('share_over', 0.0):.1%}")
                 if stats.get('degenerate_count', 0) > 0:
                     box.label(text=f"Degenerate: {stats.get('share_degenerate', 0.0):.1%} ({stats.get('degenerate_count', 0)} tris)", icon='INFO')
             elif stats.get('skipped_no_uvs'):
@@ -623,7 +712,8 @@ def register():
     bpy.types.Scene.fss_uv_heatmap_mode = bpy.props.EnumProperty(
         name='Heatmap Mode',
         items=[
-            ('SHAPE', 'Shape', 'Conformal distortion (1.0 neutral, > 1.0 stretched or sheared)'),
+            ('SHAPE', 'Distortion', 'Distortion of each face\'s shape in the UVs (1.0 neutral, > 1.0 stretched or '
+                                    'sheared)'),
             ('DENSITY', 'Density', 'Texel density relative to material median and object range (0.5 red, 1.0 neutral, 2.0 blue)'),
         ],
         default='SHAPE',
@@ -633,12 +723,17 @@ def register():
 
     bpy.types.Scene.fss_uv_heatmap_opacity = bpy.props.FloatProperty(
         name='Opacity', default=ALPHA, min=0.3, max=1.0, precision=2, options={'SKIP_SAVE'},
-        description='Opacity of the heatmap over the viewport shading',
+        description='How strongly the heatmap colours cover the plain grey shading of the surface',
         update=_on_mode_change,
     )
 
-    if _on_load_post not in bpy.app.handlers.load_post:
-        bpy.app.handlers.load_post.append(_on_load_post)
+    for handlers, handler in ((bpy.app.handlers.load_post, _on_load_post),
+                              (bpy.app.handlers.save_pre, _on_save_pre),
+                              (bpy.app.handlers.save_post, _on_save_post),
+                              (bpy.app.handlers.undo_post, _on_undo_redo_post),
+                              (bpy.app.handlers.redo_post, _on_undo_redo_post)):
+        if handler not in handlers:
+            handlers.append(handler)
 
     if not bpy.app.background and gpu is not None:
         _draw_view_handle = bpy.types.SpaceView3D.draw_handler_add(
@@ -658,8 +753,16 @@ def unregister():
         bpy.types.SpaceView3D.draw_handler_remove(_draw_pixel_handle, 'WINDOW')
         _draw_pixel_handle = None
 
-    if _on_load_post in bpy.app.handlers.load_post:
-        bpy.app.handlers.load_post.remove(_on_load_post)
+    if bpy.app.timers.is_registered(_sync_timer):
+        bpy.app.timers.unregister(_sync_timer)
+    _restore_all_display()
+    for handlers, handler in ((bpy.app.handlers.load_post, _on_load_post),
+                              (bpy.app.handlers.save_pre, _on_save_pre),
+                              (bpy.app.handlers.save_post, _on_save_post),
+                              (bpy.app.handlers.undo_post, _on_undo_redo_post),
+                              (bpy.app.handlers.redo_post, _on_undo_redo_post)):
+        if handler in handlers:
+            handlers.remove(handler)
     clear_cache()
     _shader = None
 

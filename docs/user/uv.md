@@ -84,22 +84,23 @@ The **UV Heatmap** panel (sidebar `N` > **FSS Tools** > **UV Heatmap**) displays
 ### Turning It On
 
 - Click **Show UV Heatmap** in the panel to toggle the overlay on selected mesh objects.
-- Switch between **Shape** and **Density** modes.
+- Switch between **Distortion** and **Density** modes.
 - Click **Refresh** to recompute measures after editing UVs, scaling islands, or changing materials. Turning the heatmap on computes once; results are cached per object until you click Refresh. Moving an object keeps its colours on it; editing its UVs or scale needs a Refresh.
-- **Opacity** sets how strongly the colours cover the viewport shading (0.3 to 1.0).
+- **Opacity** sets how strongly the heatmap colours cover the plain grey shading of the surface (0.3 to 1.0).
+- While the heatmap is on, its objects are shown with **Display As: Wire** and the heatmap draws their surface itself. Their own display setting comes back when the heatmap is off, when you deselect them, and before the file is saved.
 
 ### How to Read the Colours
 
 The overlay uses a diverging colour scheme centred on **Neutral 1.0**:
 
 - **Neutral 1.0 (light grey / white):** ideal shape or within the authored density range.
-- **Above 1.0 (towards blue):** stretched or sheared triangles (in Shape mode); over-dense texture resolution (in Density mode).
+- **Above 1.0 (towards blue):** stretched or sheared triangles (in Distortion mode); over-dense texture resolution (in Density mode).
 - **Below 1.0 (towards red):** under-dense texture resolution (in Density mode).
 - **Grey:** degenerate triangles (zero 3D area or collapsed UVs).
 
 ### Modes
 
-1. **Shape (Conformal Distortion):**
+1. **Distortion:**
    - Measures the ratio of the larger to the smaller singular value of the affine 3D-to-UV mapping for each triangle (\(\sigma_1 / \sigma_2 \ge 1.0\)).
    - Completely independent of object scale.
    - Values scale from 1.0 (neutral) to 2.0+ (blue).
@@ -116,14 +117,14 @@ The overlay uses a diverging colour scheme centred on **Neutral 1.0**:
 
 A legend in the corner of the viewport displays:
 
-- The active mode (**Shape** or **Density**) and colour scale.
-- For Shape: percentage of 3D surface area above 1.10 and above 1.25.
-- For Density: percentage of 3D surface area outside the authored range (under-dense and over-dense).
+- The active mode (**Distortion** or **Density**) and colour scale.
+- For Distortion: the share of the selected objects' surface distorted more than **1.10** (our shape target) and more than **1.25** (the limit Auto Seam uses to accept an island).
+- For Density: the share of the surface outside its object's density range (too low and too high).
 - Degenerate face counts and area share.
 - Skipped objects: mesh objects without active UV maps are safely skipped and listed in the legend without interrupting the tool.
 
 ### Non-Destructive and Modifiers
 
-- **Purely visual overlay:** nothing is written to the mesh, object properties, or material datablocks. Exports are completely untouched.
+- **Non-destructive:** nothing is written to the mesh or the materials. The only setting changed is the object's **Display As**, temporarily (see above). Exports are untouched.
 - **Evaluated geometry:** the overlay evaluates the full modifier stack, displaying generated copies from **Mirror** and **Array** modifiers.
-- **Edit Mode:** the overlay is hidden automatically in Edit Mode because evaluated modifier meshes are not synced during live mesh editing. Switch back to Object Mode to review changes.
+- **Edit Mode:** the heatmap is hidden in Edit Mode, and the object shows its own display setting, because the mesh data are not synced during editing. Switch back to Object Mode to review changes.
