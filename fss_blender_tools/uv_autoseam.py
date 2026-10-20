@@ -27,6 +27,15 @@ except ImportError:
     def _editable(obj):
         return obj.library is None and obj.override_library is None
 
+try:
+    from .uv_marks import skip_autoseam
+except ImportError:
+    try:
+        from uv_marks import skip_autoseam
+    except ImportError:
+        def skip_autoseam(obj):
+            return False, None
+
 
 AUTO_SEAM_ATTR = 'fss_auto_seam'
 REPORT_TEXT_NAME = 'FSS Auto Seam Report'
@@ -797,14 +806,19 @@ def _gather_candidate_objects(context):
         elif len(obj.data.uv_layers) >= 8:
             skipped.append((obj.name, "no free UV map slot (limit 8)"))
         else:
-            mats = [slot.material for slot in obj.material_slots if slot.material is not None]
-            if not mats and obj.data and obj.data.materials:
-                mats = [m for m in obj.data.materials if m is not None]
-
-            if mats and all(_is_skip_material(m) for m in mats):
-                skipped.append((obj.name, "only decal, glass, invisible or occluder materials"))
+            is_skipped, source = skip_autoseam(obj)
+            if is_skipped:
+                reason = "marked Skip Auto Seam" if source == obj else f"marked Skip Auto Seam (from {source.name})"
+                skipped.append((obj.name, reason))
             else:
-                valid.append(obj)
+                mats = [slot.material for slot in obj.material_slots if slot.material is not None]
+                if not mats and obj.data and obj.data.materials:
+                    mats = [m for m in obj.data.materials if m is not None]
+
+                if mats and all(_is_skip_material(m) for m in mats):
+                    skipped.append((obj.name, "only decal, glass, invisible or occluder materials"))
+                else:
+                    valid.append(obj)
 
     mesh_to_objs = {}
     for obj in valid:

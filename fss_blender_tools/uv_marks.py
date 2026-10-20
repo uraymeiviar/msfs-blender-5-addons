@@ -11,6 +11,7 @@ from .tags import _editable
 
 DENSITY_KEY = 'fss_uv_density'  # [min, max] x the base texel density
 DIRECTION_KEY = 'fss_uv_direction'
+SKIP_AUTOSEAM_KEY = 'fss_uv_skip_autoseam'
 MARGIN_KEY = 'fss_uv_margin'  # on a material: island margin as a fraction of the UV square
 DEFAULT_DENSITY = (0.9, 1.1)
 DEFAULT_MARGIN = 0.002
@@ -55,6 +56,16 @@ def density(obj):
 
 def direction(obj):
     return _effective(obj, _own_direction, 'FREE')
+
+
+def _own_skip_autoseam(obj):
+    if SKIP_AUTOSEAM_KEY not in obj:
+        return None
+    return bool(obj[SKIP_AUTOSEAM_KEY])
+
+
+def skip_autoseam(obj):
+    return _effective(obj, _own_skip_autoseam, False)
 
 
 def margin(material):
@@ -139,6 +150,34 @@ class FSS_OT_UvSetDirection(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class FSS_OT_UvSetSkipAutoseam(bpy.types.Operator):
+    bl_idname = 'fss.uv_set_skip_autoseam'
+    bl_label = 'Skip Auto Seam'
+    bl_description = ('Mark the selected objects to be skipped by Auto Seam (e.g. fur, hair cards, wire bundles); '
+                      'their children inherit it unless marked themselves')
+    bl_options = {'REGISTER', 'UNDO'}
+
+    action: bpy.props.EnumProperty(items=[
+        ('SKIP', 'Skip', 'Mark selected objects to be skipped by Auto Seam'),
+        ('CLEAR', 'Clear', 'Remove the mark: inherit from parent, else default (process)'),
+    ], default='SKIP')
+
+    @classmethod
+    def poll(cls, context):
+        return bool(_selected(context))
+
+    def execute(self, context):
+        objects = _selected(context)
+        for obj in objects:
+            if self.action == 'CLEAR':
+                obj.pop(SKIP_AUTOSEAM_KEY, None)
+            else:
+                obj[SKIP_AUTOSEAM_KEY] = True
+        text = 'Cleared Skip Auto Seam mark' if self.action == 'CLEAR' else 'Set Skip Auto Seam'
+        self.report({'INFO'}, f'{text} on {len(objects)} object(s)')
+        return {'FINISHED'}
+
+
 class FSS_OT_UvSelectMarked(bpy.types.Operator):
     bl_idname = 'fss.uv_select_marked'
     bl_label = 'Select Marked'
@@ -147,7 +186,7 @@ class FSS_OT_UvSelectMarked(bpy.types.Operator):
 
     def execute(self, context):
         view_layer = context.view_layer
-        marked = [obj for obj in view_layer.objects if DENSITY_KEY in obj or DIRECTION_KEY in obj]
+        marked = [obj for obj in view_layer.objects if DENSITY_KEY in obj or DIRECTION_KEY in obj or SKIP_AUTOSEAM_KEY in obj]
         for obj in context.selected_objects:
             obj.select_set(False)
         for obj in marked:
@@ -193,6 +232,11 @@ class FSS_PT_UvMarks(bpy.types.Panel):
             box.label(text=f'Density {low:g} to {high:g} ({_source_text(obj, source)})')
             value, source = direction(obj)
             box.label(text=f'Direction {value.lower()} ({_source_text(obj, source)})')
+            is_skip, source = skip_autoseam(obj)
+            if is_skip:
+                box.label(text=f'Skip Auto Seam ({_source_text(obj, source)})')
+            else:
+                box.label(text=f'Auto Seam: process ({_source_text(obj, source)})')
 
         selected = _selected(context)
         box = layout.box()
@@ -209,6 +253,10 @@ class FSS_PT_UvMarks(bpy.types.Panel):
         row = box.row(align=True)
         for item in DIRECTIONS + [('CLEAR', 'Clear', '')]:
             row.operator(FSS_OT_UvSetDirection.bl_idname, text=item[1]).direction = item[0]
+        box.label(text='Auto Seam:')
+        row = box.row(align=True)
+        row.operator(FSS_OT_UvSetSkipAutoseam.bl_idname, text='Skip Auto Seam').action = 'SKIP'
+        row.operator(FSS_OT_UvSetSkipAutoseam.bl_idname, text='Clear').action = 'CLEAR'
         layout.operator(FSS_OT_UvSelectMarked.bl_idname, icon='RESTRICT_SELECT_OFF')
 
         materials = sorted({slot.material for obj in selected for slot in obj.material_slots if slot.material},
@@ -233,7 +281,7 @@ class FSS_PT_UvMarks(bpy.types.Panel):
             box.label(text=f'... and {len(materials) - 20} more')
 
 
-CLASSES = (FSS_OT_UvSetDensity, FSS_OT_UvSetDirection, FSS_OT_UvSelectMarked, FSS_OT_UvClearMargin, FSS_PT_UvMarks)
+CLASSES = (FSS_OT_UvSetDensity, FSS_OT_UvSetDirection, FSS_OT_UvSetSkipAutoseam, FSS_OT_UvSelectMarked, FSS_OT_UvClearMargin, FSS_PT_UvMarks)
 
 
 def register():

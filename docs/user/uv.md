@@ -37,6 +37,7 @@ The confirmation dialog and report list objects skipped by the tool, along with 
 | **no faces** | Meshes with zero polygons. |
 | **no free UV map slot** | Blender supports up to 8 UV maps. The tool needs one temporary slot for calculation. |
 | **only decal, glass, invisible or occluder materials** | Objects textured solely with decals, screen glass, windshields, collision boxes, or shadow occluders. Decals and projections rely on custom planar mapping, so automatic unwrapping is skipped. |
+| **marked Skip Auto Seam** | The object or one of its ancestors is marked **Skip Auto Seam** in the UV Marks panel (for example fur, hair cards, wire bundles, cables, or decal soups without decal materials). |
 
 An object with mixed materials (for example a cockpit shell with standard paint and decal details) is processed normally.
 
@@ -73,5 +74,55 @@ Repeated problems on one mesh are grouped into one line, with the count, the lar
 - **Modal interface:** Blender processes one mesh per step with progress shown in the status bar. The interface is blocked while a single mesh is calculated. Large shells (such as `OVERHEAD_SHELL`) can take 2 to 2.5 minutes to process. Press **Esc** to cancel between meshes (finished meshes keep their results).
 - **Modifiers:** seams are placed on the base mesh before **Mirror** and **Array** modifiers. The generated sides inherit the same seam positions.
 - **Object scale:** Blender's Angle-Based unwrap operates in object space. If an object has non-uniform scale (`1.0, 1.0, 2.0`), unwrap will stretch unless you apply scale (`Ctrl + A > Scale`).
-- **UV Marks panel:** density and direction marks in the **UV Marks** panel are for the coming packing step; they are not read by Auto Seam.
+- **UV Marks panel:** density and direction marks in the **UV Marks** panel are for the packing step and the UV Heatmap; the **Skip Auto Seam** mark in that panel tells Auto Seam to skip marked objects.
 - **Undo:** a full run on multiple objects reverts in a single undo step (`Ctrl + Z`).
+
+## UV Heatmap: Distortion and Texel Density
+
+The **UV Heatmap** panel (sidebar `N` > **FSS Tools** > **UV Heatmap**) displays a live per-face distortion overlay directly on the 3D surface in the viewport. It helps review UV quality, identify stretched charts, and verify texel density distribution before packing or texturing.
+
+### Turning It On
+
+- Click **Show UV Heatmap** in the panel to toggle the overlay on selected mesh objects.
+- Switch between **Shape** and **Density** modes.
+- Click **Refresh** to recompute measures after editing UVs, scaling islands, or changing materials. Turning the heatmap on computes once; results are cached per object until you click Refresh.
+
+### How to Read the Colours
+
+The overlay uses a diverging colour scheme centred on **Neutral 1.0**:
+
+- **Neutral 1.0 (light grey / white):** ideal shape or within the authored density range.
+- **Above 1.0 (towards blue):** stretched or sheared triangles (in Shape mode); over-dense texture resolution (in Density mode).
+- **Below 1.0 (towards red):** under-dense texture resolution (in Density mode).
+- **Grey:** degenerate triangles (zero 3D area or collapsed UVs).
+
+### Modes
+
+1. **Shape (Conformal Distortion):**
+   - Measures the ratio of the larger to the smaller singular value of the affine 3D-to-UV mapping for each triangle (\(\sigma_1 / \sigma_2 \ge 1.0\)).
+   - Completely independent of object scale.
+   - Values scale from 1.0 (neutral) to 2.0+ (blue).
+   - If an area shows dark blue, the geometry is distorted or sheared in UV space. Add manual seams across high-curvature areas to allow the island to relax flatter.
+2. **Density (Texel Density):**
+   - Measures the triangle's UV area / 3D area relative to the area-weighted median of all shown triangles sharing the same material (one atlas per material).
+   - Evaluated against the object's authored texel density range (set in the **UV Marks** panel, default 0.9 to 1.1):
+     - Inside the authored range: displays as neutral 1.0.
+     - Above the range: turns blue on a log scale up to 2.0x.
+     - Below the range: turns red on a log scale down to 0.5x.
+   - If an object is marked with a higher density preset (such as the glareshield at 1.5 to 1.65), it remains neutral when its density matches that authored target.
+
+### Viewport Legend
+
+A legend in the corner of the viewport displays:
+
+- The active mode (**Shape** or **Density**) and colour scale.
+- For Shape: percentage of 3D surface area above 1.10 and above 1.25.
+- For Density: percentage of 3D surface area outside the authored range (under-dense and over-dense).
+- Degenerate face counts and area share.
+- Skipped objects: mesh objects without active UV maps are safely skipped and listed in the legend without interrupting the tool.
+
+### Non-Destructive and Modifiers
+
+- **Purely visual overlay:** nothing is written to the mesh, object properties, or material datablocks. Exports are completely untouched.
+- **Evaluated geometry:** the overlay evaluates the full modifier stack, displaying generated copies from **Mirror** and **Array** modifiers.
+- **Edit Mode:** the overlay is hidden automatically in Edit Mode because evaluated modifier meshes are not synced during live mesh editing. Switch back to Object Mode to review changes.

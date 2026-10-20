@@ -107,9 +107,9 @@ Transparent materials (MSFS alpha mode Blend) never share a mesh with opaque one
 
 ## UV Marks
 
-Marks for the planned automatic UV unwrapping and packing. **Nothing reads these marks yet**; you can set them now so the models are ready. The panel is closed by default.
+Marks for automatic UV unwrapping, packing, and heatmap review. The panel is closed by default.
 
-- **Active object box:** the effective texel density range and island direction of the active object, and where each comes from: **own mark**, **from** an ancestor, or **default**. An object without its own mark takes the mark of its nearest marked parent (for example an empty that groups a door).
+- **Active object box:** the effective texel density range, island direction, and Skip Auto Seam mark of the active object, and where each comes from: **own mark**, **from** an ancestor, or **default**. An object without its own mark takes the mark of its nearest marked parent (for example an empty that groups a door).
 - **Texel density range (x base):** how sharp the object's texture should be compared with the base density, as a range the packer may choose from. Type **Min** and **Max** and press **Apply**, or use a preset:
   - **Lower:** 0.7 to 0.8, for parts that are hardly seen.
   - **Higher:** 1.5 to 1.65, for prominent parts such as the glareshield.
@@ -120,14 +120,19 @@ Marks for the planned automatic UV unwrapping and packing. **Nothing reads these
   - **Flip:** 0 or 180 degrees only.
   - **Quarter:** 90-degree steps only.
   - **Clear:** remove the mark.
-- **Select Marked:** select every visible object with its own density or direction mark.
+- **Auto Seam (Skip Auto Seam / Clear):** marks the selected objects to be skipped by Auto Seam (for example fur, hair cards, wire bundles, cables, or decal soups). Children inherit the skip mark unless cleared or marked themselves. **Clear** removes the mark.
+- **Select Marked:** select every visible object with its own density, direction, or skip mark.
 - **Texture sets:** one row per material of the selection (up to 20) with its **Margin**, the space around each island as a fraction of the UV square (default 0.002). The line below shows what that means in pixels at 4K and 8K, and warns when the margin is under 4 px at 2K (texture compression works in 4 x 4 pixel blocks, so smaller margins bleed). A material with its own margin shows an arrow button that returns it to the default.
 
-The density and direction buttons act on all selected objects. The **Min** and **Max** fields are not saved with the file.
+The density, direction, and skip buttons act on all selected objects. The **Min** and **Max** fields are not saved with the file.
 
 ## Auto Seam
 
 Automated UV seam proposal for hard-surface meshes. See [uv.md](uv.md) for the complete guide, workflow, readable reports, and limits.
+
+## UV Heatmap
+
+Viewport distortion overlay showing conformal shape distortion and relative texel density directly on 3D surfaces. See [uv.md](uv.md#uv-heatmap-distortion-and-texel-density) for the complete guide, color scale, and legend details.
 
 ## Checks
 

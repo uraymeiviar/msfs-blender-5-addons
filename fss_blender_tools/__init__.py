@@ -6,9 +6,9 @@ Independent of the Asobo add-ons and of _addons_common, so upstream merges into 
 bl_info = {
     "name": "FSS Blender Tools",
     "author": "Flight Sim Studio",
-    "description": "Authoring checks and helpers for MSFS aircraft (tools, empty bounds, lod, tags, merge tree, uv marks, uv auto seams, checks)",
+    "description": "Authoring checks and helpers for MSFS aircraft (tools, empty bounds, lod, tags, merge tree, uv marks, uv auto seams, uv heatmap, checks)",
     "blender": (5, 2, 0),
-    "version": (0, 21, 0),
+    "version": (0, 22, 0),
     "location": "3D View > Sidebar > FSS Tools",
     "category": "Object",
 }
@@ -24,12 +24,13 @@ if "name_check" in locals():
     merge = importlib.reload(merge)
     uv_marks = importlib.reload(uv_marks)
     uv_autoseam = importlib.reload(uv_autoseam)
+    uv_heatmap = importlib.reload(uv_heatmap)
     name_check = importlib.reload(name_check)
     checks = importlib.reload(checks)
 else:
-    from . import checks, empty_bounds, lod_rules, lod_model, lod, merge, name_check, tags, tools, uv_autoseam, uv_marks
+    from . import checks, empty_bounds, lod_rules, lod_model, lod, merge, name_check, tags, tools, uv_autoseam, uv_heatmap, uv_marks
 
-MODULES = (tools, empty_bounds, lod, tags, merge, uv_marks, uv_autoseam, name_check, checks)
+MODULES = (tools, empty_bounds, lod, tags, merge, uv_marks, uv_autoseam, uv_heatmap, name_check, checks)
 
 # The glTF exporter looks this name up on every enabled add-on: merge groups are merged in its pre-export hook
 glTF2ExportUserExtension = merge.glTF2ExportUserExtension
