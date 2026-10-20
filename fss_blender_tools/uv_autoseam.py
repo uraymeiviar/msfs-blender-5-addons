@@ -10,15 +10,16 @@ Provides operators to propose seams (modal and synchronous), clear auto seams,
 keep them as artist seams, and select auto or artist seams in Edit Mode.
 """
 import math
+import re
 import time
 import numpy as np
 import bpy
 import bmesh
 
 try:
-    from .uv_autoseam_core import propose_seams
+    from .uv_autoseam_core import propose_seams, _area_distortion, _overlap_pairs, _tri_area3
 except ImportError:
-    from uv_autoseam_core import propose_seams
+    from uv_autoseam_core import propose_seams, _area_distortion, _overlap_pairs, _tri_area3
 
 try:
     from .tags import _editable
@@ -29,6 +30,51 @@ except ImportError:
 
 AUTO_SEAM_ATTR = 'fss_auto_seam'
 REPORT_TEXT_NAME = 'FSS Auto Seam Report'
+
+SKIP_MATERIAL_CLASSES = {
+    'DECAL', 'DECAL_EM', 'DECAL_FROST', 'DECAL_BLEND',
+    'GLASS', 'WNDSHIELD', 'INVIS', 'OCCLUDER'
+}
+
+MSFS_SKIP_MATERIAL_TYPES = {
+    'msfs_decal',
+    'msfs_geo_decal',
+    'msfs_geo_decal_frosted',
+    'msfs_geo_decal_blendmasked',
+    'msfs_glass',
+    'msfs_windshield',
+    'msfs_invisible',
+    'msfs_environment_occluder',
+}
+
+
+def _is_skip_material(mat):
+    """Check if material belongs to decal, glass, invisible, or occluder classes.
+
+    Identified by:
+    1. Name class (decision 23): DECAL, DECAL_EM, DECAL_FROST, DECAL_BLEND,
+       GLASS, WNDSHIELD, INVIS, OCCLUDER.
+    2. MSFS material type registered by the exporter on the material.
+    """
+    if mat is None:
+        return False
+
+    name_upper = mat.name.upper()
+    for c in ('DECAL_EM', 'DECAL_FROST', 'DECAL_BLEND'):
+        if re.search(rf'(^|_){c}(_|\.|\d|$)', name_upper):
+            return True
+    tokens = set(re.split(r'[^A-Z0-9]+', name_upper))
+    for c in ('DECAL', 'GLASS', 'WNDSHIELD', 'INVIS', 'OCCLUDER'):
+        if c in tokens:
+            return True
+
+    mtype = getattr(mat, 'msfs_material_type', None)
+    if (mtype is None or mtype == 'NONE') and 'msfs_material_type' in mat:
+        mtype = mat['msfs_material_type']
+    if mtype in MSFS_SKIP_MATERIAL_TYPES:
+        return True
+
+    return False
 
 
 def get_shading_splits(obj):
@@ -139,19 +185,6 @@ def get_mesh_seam_masks(mesh):
 
 def get_mesh_seam_counts(mesh):
     """Return (auto_seam_count, artist_seam_count) for mesh."""
-    if bpy.context.mode == 'EDIT_MESH' and bpy.context.edit_object and bpy.context.edit_object.data == mesh:
-        bm = bmesh.from_edit_mesh(mesh)
-        layer = bm.edges.layers.bool.get(AUTO_SEAM_ATTR)
-        auto_cnt = 0
-        artist_cnt = 0
-        for e in bm.edges:
-            if e.seam:
-                if layer is not None and e[layer]:
-                    auto_cnt += 1
-                else:
-                    artist_cnt += 1
-        return auto_cnt, artist_cnt
-
     artist, auto = get_mesh_seam_masks(mesh)
     return int(np.count_nonzero(auto)), int(np.count_nonzero(artist))
 
@@ -244,14 +277,134 @@ def keep_as_artist_seams(mesh):
     return count
 
 
+def _evaluate_final_unwrap(orig_me, work_me, tri_to_orig_poly, eval_seams, temp_scene):
+    """Evaluate final unwrap on an isolated copy of orig_me to detect islands over limits."""
+    eval_me = orig_me.copy()
+    eval_me.name = f"__fss_autoseam_eval_{orig_me.name}__"
+    eval_obj = bpy.data.objects.new(f"__fss_autoseam_eval_{orig_me.name}__", eval_me)
+    eval_scene = bpy.data.scenes.new(f"__fss_autoseam_eval_scene_{orig_me.name}__")
+    eval_scene.collection.objects.link(eval_obj)
+    orig_win_scene = bpy.context.window.scene
+    bpy.context.window.scene = eval_scene
+    eval_scene.view_layers[0].objects.active = eval_obj
+    eval_obj.select_set(True)
+
+    try:
+        eval_me.edges.foreach_set('use_seam', eval_seams)
+
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_all(action='SELECT')
+        bpy.ops.uv.unwrap(method='ANGLE_BASED', fill_holes=False, correct_aspect=True, margin_method='FRACTION', margin=0.001)
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+        uv_data = eval_me.uv_layers.active.data
+        orig_poly_uv = {}
+        for p in eval_me.polygons:
+            pmap = {}
+            for li in p.loop_indices:
+                pmap[eval_me.loops[li].vertex_index] = uv_data[li].uv[:]
+            orig_poly_uv[p.index] = pmap
+
+        n_tri = len(work_me.polygons)
+        UV_eval = np.zeros((n_tri, 3, 2), dtype=np.float64)
+        for ti in range(n_tri):
+            pidx = tri_to_orig_poly[ti]
+            pmap = orig_poly_uv.get(pidx, {})
+            poly_v = work_me.polygons[ti].vertices
+            for vi in range(3):
+                UV_eval[ti, vi] = pmap.get(poly_v[vi], (0.0, 0.0))
+
+        P_tri = np.zeros(len(work_me.vertices) * 3, np.float64)
+        work_me.vertices.foreach_get('co', P_tri)
+        P_tri = P_tri.reshape(-1, 3)
+        T_tri = np.zeros(n_tri * 3, np.int64)
+        work_me.polygons.foreach_get('vertices', T_tri)
+        T_tri = T_tri.reshape(-1, 3)
+        area3_tri = _tri_area3(P_tri[T_tri])
+
+        par_orig = list(range(len(orig_me.polygons)))
+        def find_orig(x):
+            while par_orig[x] != x:
+                par_orig[x] = par_orig[par_orig[x]]
+                x = par_orig[x]
+            return x
+
+        edge_polys = [[] for _ in orig_me.edges]
+        for p in orig_me.polygons:
+            for li in p.loop_indices:
+                edge_polys[orig_me.loops[li].edge_index].append(p.index)
+
+        for e in orig_me.edges:
+            if not eval_seams[e.index]:
+                ep = edge_polys[e.index]
+                if len(ep) == 2:
+                    r0, r1 = find_orig(ep[0]), find_orig(ep[1])
+                    if r0 != r1:
+                        par_orig[r0] = r1
+
+        poly_groups = {}
+        for i in range(len(orig_me.polygons)):
+            poly_groups.setdefault(find_orig(i), []).append(i)
+
+        poly_to_isl = {}
+        for isl_idx, plist in enumerate(poly_groups.values()):
+            for p in plist:
+                poly_to_isl[p] = isl_idx
+
+        tri_isl = np.array([poly_to_isl[p] for p in tri_to_orig_poly], dtype=np.int64)
+
+        islands_over = []
+        for isl_idx, plist in enumerate(poly_groups.values()):
+            t_indices = np.where(tri_isl == isl_idx)[0]
+            if len(t_indices) == 0:
+                continue
+            U_isl = UV_eval[t_indices]
+            d, dmax, _ = _area_distortion(P_tri[T_tri[t_indices]], U_isl)
+            pairs = _overlap_pairs(U_isl)
+            non_sliver_ov = 0
+            if len(pairs) > 0:
+                a0 = area3_tri[t_indices[pairs[:, 0]]]
+                a1 = area3_tri[t_indices[pairs[:, 1]]]
+                sliver = (a0 < 1e-8) & (a1 < 1e-8)
+                non_sliver_ov = int(np.count_nonzero(~sliver))
+
+            if d > 1.25 or non_sliver_ov > 0:
+                islands_over.append({
+                    'island': isl_idx,
+                    'faces': len(plist),
+                    'distortion': float(d),
+                    'overlap': non_sliver_ov > 0,
+                    'overlap_pairs': non_sliver_ov,
+                })
+
+        return islands_over, len(poly_groups)
+
+    finally:
+        if bpy.context.object and bpy.context.object.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        if orig_win_scene and orig_win_scene.name in bpy.data.scenes:
+            bpy.context.window.scene = orig_win_scene
+        if eval_obj.name in eval_scene.collection.objects:
+            eval_scene.collection.objects.unlink(eval_obj)
+        if eval_obj.name in bpy.data.objects:
+            bpy.data.objects.remove(eval_obj, do_unlink=True)
+        if eval_me.name in bpy.data.meshes:
+            bpy.data.meshes.remove(eval_me, do_unlink=True)
+        if eval_scene.name in bpy.data.scenes:
+            bpy.data.scenes.remove(eval_scene)
+
+
 def write_report_text(mesh_reports, run_time):
     """Write or overwrite the text datablock 'FSS Auto Seam Report'.
 
-    One line per mesh:
-    objects using it, islands, extra vertices beyond shading splits, time,
-    unverified charts with face count and criterion, islands over the limits,
-    sliver overlaps, warnings (shared mesh scale, shading-split fallback).
-    Nothing is stored in object or mesh custom properties.
+    Readable report layout (Session 51):
+    - Summary at the top: meshes processed, total time, meshes needing attention.
+    - One short block per mesh, meshes needing attention first.
+    - Plain wording with what to do:
+      e.g. '1 island too stretched (7 faces): add a seam by hand'
+      e.g. '1 quad too distorted to flatten (2 faces): check the mesh'
+    - over_limits counts final-unwrap islands over the distortion limit or with
+      non-sliver overlaps, separately from unverified charts.
     """
     txt = bpy.data.texts.get(REPORT_TEXT_NAME)
     if txt is None:
@@ -259,35 +412,92 @@ def write_report_text(mesh_reports, run_time):
     else:
         txt.clear()
 
+    attention_reports = []
+    clean_reports = []
+    for r in mesh_reports:
+        unv = r.get('unverified_charts', [])
+        over = r.get('islands_over_limits', [])
+        warns = r.get('warnings', [])
+        if unv or over or warns:
+            attention_reports.append(r)
+        else:
+            clean_reports.append(r)
+
+    total_meshes = len(mesh_reports)
+    attention_count = len(attention_reports)
+    clean_count = len(clean_reports)
+
     lines = []
     lines.append(f"# FSS Auto Seam Report - {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    lines.append(f"# Total meshes processed: {len(mesh_reports)} in {run_time:.2f}s\n")
+    lines.append(f"# Meshes processed: {total_meshes} in {run_time:.2f}s")
+    lines.append(f"# Meshes needing attention: {attention_count} ({clean_count} clean)\n")
 
-    for r in mesh_reports:
+    def format_mesh_block(r, needs_attention):
         objs_str = ", ".join(r['objects'])
         mesh_name = r['mesh']
         islands = r['islands']
         extra_verts = r.get('extra_vertices_vs_shading', 0)
         t_core = r.get('time', 0.0)
-        unv_charts = r.get('unverified_charts', [])
-        if unv_charts:
-            unv_str = "; ".join(f"Chart {u['chart']} ({u['faces']} faces, d={u['distortion']:.2f}, {u['criterion']})" for u in unv_charts)
-        else:
-            unv_str = "none"
-        over_limits = len(unv_charts)
-        sliver_overlaps = r.get('sliver_overlaps', 0)
+        unv = r.get('unverified_charts', [])
+        over = r.get('islands_over_limits', [])
+        over_cnt = r.get('over_limits_count', len(over))
+        sliver_ov = r.get('sliver_overlaps', 0)
         warns = r.get('warnings', [])
-        warns_str = "; ".join(warns) if warns else "none"
 
-        line = (
-            f"Mesh '{mesh_name}' (objects: {objs_str}): "
-            f"islands={islands}, extra_verts={extra_verts}, time={t_core:.2f}s, "
-            f"unverified={unv_str}, over_limits={over_limits}, "
-            f"sliver_overlaps={sliver_overlaps}, warnings={warns_str}"
-        )
-        lines.append(line)
+        block_lines = []
+        if needs_attention:
+            block_lines.append(f"Mesh '{mesh_name}' (objects: {objs_str}) - NEEDS ATTENTION:")
+            for u in unv:
+                f_cnt = u.get('faces', 1)
+                d = u.get('distortion', 0.0)
+                if f_cnt == 2:
+                    block_lines.append(f"  - 1 quad too distorted to flatten (2 faces, d={d:.2f}): check the mesh")
+                elif f_cnt == 1:
+                    block_lines.append(f"  - 1 face too distorted to flatten (1 face, d={d:.2f}): check the mesh")
+                else:
+                    block_lines.append(f"  - 1 chart too distorted to flatten ({f_cnt} faces, d={d:.2f}): check the mesh")
 
-    txt.write("\n".join(lines) + "\n")
+            for isl in over:
+                f_cnt = isl.get('faces', 1)
+                has_ov = isl.get('overlap', False)
+                p_cnt = isl.get('overlap_pairs', 0)
+                d = isl.get('distortion', 0.0)
+                if has_ov:
+                    p_str = f"{p_cnt} pair" if p_cnt == 1 else f"{p_cnt} pairs"
+                    block_lines.append(f"  - 1 island has overlapping triangles ({p_str}, {f_cnt} faces): add a seam by hand")
+                elif d > 1.25:
+                    block_lines.append(f"  - 1 island too stretched ({f_cnt} faces, distortion {d:.2f}): add a seam by hand")
+
+            for w in warns:
+                block_lines.append(f"  - Warning: {w}")
+
+            if sliver_ov > 0:
+                block_lines.append(f"  - {sliver_ov} sliver overlap(s) ignored (< 1e-8 m²)")
+
+            block_lines.append(
+                f"  - islands={islands}, extra_verts={extra_verts}, time={t_core:.2f}s, "
+                f"over_limits={over_cnt}, unverified={len(unv)}"
+            )
+        else:
+            block_lines.append(f"Mesh '{mesh_name}' (objects: {objs_str}):")
+            if sliver_ov > 0:
+                block_lines.append(f"  - {sliver_ov} sliver overlap(s) ignored (< 1e-8 m²)")
+            block_lines.append(
+                f"  - islands={islands}, extra_verts={extra_verts}, time={t_core:.2f}s, "
+                f"over_limits=0, unverified=0 (ok)"
+            )
+
+        return "\n".join(block_lines)
+
+    for r in attention_reports:
+        lines.append(format_mesh_block(r, needs_attention=True))
+        lines.append("")
+
+    for r in clean_reports:
+        lines.append(format_mesh_block(r, needs_attention=False))
+        lines.append("")
+
+    txt.write("\n".join(lines).rstrip() + "\n")
 
 
 def propose(obj, cache=None, measurement_arrays=False, use_temp_scene=True, **kwargs):
@@ -477,6 +687,14 @@ def propose(obj, cache=None, measurement_arrays=False, use_temp_scene=True, **kw
         k2_c = np.concatenate([NT.reshape(-1, 1).astype(np.float64), stats['uv'].reshape(-1, 2)], 1)
         extra_verts = int(len(np.unique(k2_c, axis=0))) - nv_n
 
+        # Evaluate final unwrap on orig_me to detect islands over limits
+        eval_seams = orig_artist_seams.copy()
+        if proposed_orig_edges:
+            eval_seams[proposed_orig_edges] = True
+        islands_over, final_island_cnt = _evaluate_final_unwrap(
+            orig_me, work_me, tri_to_orig_poly, eval_seams, temp_scene
+        )
+
         report = {
             'object': obj.name,
             'mesh': orig_me.name,
@@ -497,6 +715,9 @@ def propose(obj, cache=None, measurement_arrays=False, use_temp_scene=True, **kw
             'stats': stats,
             'core_chart_polys': core_chart_polys,
             'tri_to_orig_poly': tri_to_orig_poly,
+            'islands_over_limits': islands_over,
+            'over_limits_count': len(islands_over),
+            'final_islands_count': final_island_cnt,
         }
 
         if measurement_arrays:
@@ -567,7 +788,14 @@ def _gather_candidate_objects(context):
         elif len(obj.data.uv_layers) >= 8:
             skipped.append((obj.name, "no free UV map slot (limit 8)"))
         else:
-            valid.append(obj)
+            mats = [slot.material for slot in obj.material_slots if slot.material is not None]
+            if not mats and obj.data and obj.data.materials:
+                mats = [m for m in obj.data.materials if m is not None]
+
+            if mats and all(_is_skip_material(m) for m in mats):
+                skipped.append((obj.name, "only decal, glass, invisible or occluder materials"))
+            else:
+                valid.append(obj)
 
     mesh_to_objs = {}
     for obj in valid:
@@ -656,10 +884,12 @@ class FSS_OT_UvProposeSeams(bpy.types.Operator):
         res = {
             'mesh': mesh.name,
             'objects': [o.name for o in obj_list],
-            'islands': rep['stats'].get('charts', len(rep.get('core_chart_polys', []))),
+            'islands': rep.get('final_islands_count', rep['stats'].get('charts', len(rep.get('core_chart_polys', [])))),
             'extra_vertices_vs_shading': rep.get('extra_vertices_vs_shading', 0),
             'time': rep.get('time', 0.0),
             'unverified_charts': rep['stats'].get('unverified_charts', []),
+            'islands_over_limits': rep.get('islands_over_limits', []),
+            'over_limits_count': rep.get('over_limits_count', len(rep.get('islands_over_limits', []))),
             'sliver_overlaps': rep['stats'].get('sliver_overlaps', 0),
             'warnings': rep.get('warnings', []),
         }
@@ -702,10 +932,15 @@ class FSS_OT_UvProposeSeams(bpy.types.Operator):
         write_report_text(mesh_reports, run_time)
         tot_islands = sum(r['islands'] for r in mesh_reports)
         tot_extra = sum(r['extra_vertices_vs_shading'] for r in mesh_reports)
+        attention_count = sum(
+            1 for r in mesh_reports
+            if r.get('unverified_charts') or r.get('islands_over_limits') or r.get('warnings')
+        )
+        attention_str = f" ({attention_count} need attention)" if attention_count > 0 else " (all clean)"
         self.report(
             {'INFO'},
             f"Auto-seam completed: {len(self._unique_meshes)} mesh(es), "
-            f"{tot_islands} islands (+{tot_extra} extra verts) in {run_time:.2f}s. "
+            f"{tot_islands} islands (+{tot_extra} extra verts) in {run_time:.2f}s{attention_str}. "
             f"See '{REPORT_TEXT_NAME}'."
         )
         return {'FINISHED'}
@@ -735,10 +970,15 @@ class FSS_OT_UvProposeSeams(bpy.types.Operator):
                 write_report_text(self._mesh_reports, run_time)
                 tot_islands = sum(r['islands'] for r in self._mesh_reports)
                 tot_extra = sum(r['extra_vertices_vs_shading'] for r in self._mesh_reports)
+                attention_count = sum(
+                    1 for r in self._mesh_reports
+                    if r.get('unverified_charts') or r.get('islands_over_limits') or r.get('warnings')
+                )
+                attention_str = f" ({attention_count} need attention)" if attention_count > 0 else " (all clean)"
                 self.report(
                     {'INFO'},
                     f"Auto-seam completed: {len(self._unique_meshes)} mesh(es), "
-                    f"{tot_islands} islands (+{tot_extra} extra verts) in {run_time:.2f}s. "
+                    f"{tot_islands} islands (+{tot_extra} extra verts) in {run_time:.2f}s{attention_str}. "
                     f"See '{REPORT_TEXT_NAME}'."
                 )
                 return {'FINISHED'}
@@ -871,8 +1111,11 @@ class FSS_PT_UvAutoSeam(bpy.types.Panel):
             box.label(text='Active object is not a mesh', icon='INFO')
         else:
             box.label(text=f"{obj.name} ({obj.data.name})", icon='MESH_DATA')
-            auto_cnt, artist_cnt = get_mesh_seam_counts(obj.data)
-            box.label(text=f"Auto seams: {auto_cnt} | Artist seams: {artist_cnt}")
+            if context.mode == 'OBJECT':
+                auto_cnt, artist_cnt = get_mesh_seam_counts(obj.data)
+                box.label(text=f"Auto seams: {auto_cnt} | Artist seams: {artist_cnt}")
+            else:
+                box.label(text="(Seam counts shown in Object Mode)")
 
         sel_meshes = {o.data for o in context.selected_objects if o.type == 'MESH' and _editable(o) and o.data}
         box = layout.box()
@@ -889,17 +1132,18 @@ class FSS_PT_UvAutoSeam(bpy.types.Panel):
 
         txt = bpy.data.texts.get(REPORT_TEXT_NAME)
         box = layout.box()
-        if txt is not None and len(txt.lines) > 1:
+        if txt is not None and len(txt.lines) > 2:
             box.label(text='Last Run Summary:', icon='TEXT')
-            shown = 0
-            for line in txt.lines[1:]:
-                body = line.body.strip()
-                if body and not body.startswith('#'):
-                    box.label(text=body[:50] + ('...' if len(body) > 50 else ''))
-                    shown += 1
-                    if shown >= 4:
-                        break
-            box.label(text=f"Full log: Text Editor > '{REPORT_TEXT_NAME}'", icon='INFO')
+            header_lines = [l.body.strip() for l in txt.lines if l.body.strip().startswith('#')]
+            for h in header_lines[1:]:
+                text = h.lstrip('#').strip()
+                if 'needing attention: 0' in text:
+                    box.label(text=text, icon='CHECKMARK')
+                elif 'needing attention:' in text:
+                    box.label(text=text, icon='ERROR')
+                else:
+                    box.label(text=text)
+            box.label(text=f"Full report: Text Editor > '{REPORT_TEXT_NAME}'", icon='INFO')
         else:
             box.label(text='No runs recorded yet', icon='INFO')
 

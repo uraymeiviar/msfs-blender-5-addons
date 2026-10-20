@@ -3,7 +3,7 @@
 [Artist Guide](README.md) / **fss-tools.md**
 ***
 
-All panels are in the 3D Viewport sidebar (`N`), tab **FSS Tools**. The **LOD** panel has its own page: [lod.md](lod.md).
+All panels are in the 3D Viewport sidebar (`N`), tab **FSS Tools**. The **LOD** and **Auto Seam** panels have their own pages: [lod.md](lod.md) and [uv.md](uv.md).
 
 ## Tools
 
@@ -124,6 +124,10 @@ Marks for the planned automatic UV unwrapping and packing. **Nothing reads these
 - **Texture sets:** one row per material of the selection (up to 20) with its **Margin**, the space around each island as a fraction of the UV square (default 0.002). The line below shows what that means in pixels at 4K and 8K, and warns when the margin is under 4 px at 2K (texture compression works in 4 x 4 pixel blocks, so smaller margins bleed). A material with its own margin shows an arrow button that returns it to the default.
 
 The density and direction buttons act on all selected objects. The **Min** and **Max** fields are not saved with the file.
+
+## Auto Seam
+
+Automated UV seam proposal for hard-surface meshes. See [uv.md](uv.md) for the complete guide, workflow, readable reports, and limits.
 
 ## Checks
 

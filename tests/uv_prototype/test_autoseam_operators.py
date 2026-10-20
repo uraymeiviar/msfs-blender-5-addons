@@ -1,7 +1,10 @@
 """
-Unit and integration tests for FSS Auto Seam operators and panel (Package 3).
+Unit and integration tests for FSS Auto Seam operators and panel (Package 3 & 4).
 
-Verifies (Session 48):
+To run:
+D:\fss-e2\tools\blender\blender.exe -b --factory-startup --python tests/uv_prototype/test_autoseam_operators.py
+
+Verifies:
 1. Artist seams unchanged after Propose, Clear, and a second Propose.
 2. A second Propose replaces only the automatic seams.
 3. After Keep as Artist Seams, a Propose keeps those seams.
@@ -9,6 +12,9 @@ Verifies (Session 48):
 5. Object state restored (mode, selection, active object, UV maps, scene).
 6. Export check with both exporters into a scratch folder:
    no fss_auto_seam in the glTF, counts equal to the scene without it.
+7. UV maps and coordinates unchanged after Propose.
+8. Decal and special material skip (decision 55).
+9. Readable report formatting, summary at top, and attention counts.
 """
 import json
 import os
@@ -20,14 +26,27 @@ import bpy
 import bmesh
 import numpy as np
 
+# If an addons_core copy was loaded during Blender startup, unregister and purge it
+if 'fss_blender_tools' in sys.modules:
+    try:
+        sys.modules['fss_blender_tools'].unregister()
+    except Exception:
+        pass
+    for mod in list(sys.modules.keys()):
+        if mod == 'fss_blender_tools' or mod.startswith('fss_blender_tools.'):
+            del sys.modules[mod]
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-if str(REPO_ROOT / 'fss_blender_tools') not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT / 'fss_blender_tools'))
+repo_root_str = str(REPO_ROOT)
+while repo_root_str in sys.path:
+    sys.path.remove(repo_root_str)
+sys.path.insert(0, repo_root_str)
 
 import fss_blender_tools
 from fss_blender_tools import uv_autoseam
+
+# Register repository add-on once at startup
+fss_blender_tools.register()
 
 SCRATCH_DIR = REPO_ROOT / 'tests' / '_work' / 'export_scratch'
 E2_BLEND = REPO_ROOT / 'tests' / '_work' / 'uv_autoseam' / 'package2d' / 'E2_COCKPIT2_copy.blend'
@@ -117,7 +136,6 @@ def test_shared_mesh_and_report():
     """Verify shared mesh is processed once and report text is created."""
     print("Test 2: Shared mesh processed once and report datablock...")
     bpy.ops.wm.read_homefile(use_empty=True)
-    fss_blender_tools.register()
 
     o1 = create_cube("Obj1")
     o2 = bpy.data.objects.new("Obj2", o1.data)
@@ -136,11 +154,15 @@ def test_shared_mesh_and_report():
     txt = bpy.data.texts[uv_autoseam.REPORT_TEXT_NAME]
     lines = [l.body.strip() for l in txt.lines if l.body.strip() and not l.body.strip().startswith('#')]
 
-    assert len(lines) == 1, f"Expected exactly 1 line for shared mesh in report, got {len(lines)}"
-    line = lines[0]
+    mesh_lines = [l for l in lines if l.startswith("Mesh '")]
+    assert len(mesh_lines) == 1, f"Expected exactly 1 mesh block in report, got {len(mesh_lines)}"
+    line = mesh_lines[0]
     assert f"Mesh '{o1.data.name}'" in line, f"Mesh name missing in report line: {line}"
     assert "Obj1" in line and "Obj2" in line, f"Objects using mesh missing in report line: {line}"
-    assert "islands=" in line and "extra_verts=" in line and "time=" in line, f"Missing metrics in report: {line}"
+
+    stat_lines = [l for l in lines if "islands=" in l]
+    assert len(stat_lines) == 1, f"Expected 1 stat line, got {len(stat_lines)}"
+    assert "extra_verts=" in stat_lines[0] and "time=" in stat_lines[0], f"Missing metrics in report: {stat_lines[0]}"
 
     # Check that fss_auto_seam attribute was written on mesh
     assert uv_autoseam.AUTO_SEAM_ATTR in o1.data.attributes, "fss_auto_seam attribute not written"
@@ -363,6 +385,7 @@ def test_export_check():
     gltf_2020_a = dir_a / 'cube_2020.gltf'
 
     # 1. Plain glTF (2020)
+    scene.msfs_fss_export_target = 'MSFS2020'
     bpy.ops.export_scene.gltf(
         filepath=str(gltf_2020_a),
         export_format='GLTF_SEPARATE',
@@ -401,6 +424,7 @@ def test_export_check():
     dir_b.mkdir(parents=True, exist_ok=True)
     gltf_2020_b = dir_b / 'cube_2020.gltf'
 
+    scene.msfs_fss_export_target = 'MSFS2020'
     bpy.ops.export_scene.gltf(
         filepath=str(gltf_2020_b),
         export_format='GLTF_SEPARATE',
@@ -411,6 +435,8 @@ def test_export_check():
 
     dir_2024_b = dir_b / 'msfs2024'
     dir_2024_b.mkdir(parents=True, exist_ok=True)
+    scene.msfs_export_mode = 'OBJECTS'
+    scene.msfs_fss_export_target = 'MSFS2024'
     for group in lod_groups.get_scene_lod_groups(scene):
         group.folder_path = str(dir_2024_b)
         group.enabled = True
@@ -433,18 +459,38 @@ def test_export_check():
     assert "fss_auto_seam" not in text_2020_a, "fss_auto_seam leaked into 2020 glTF"
     assert "fss_auto_seam" not in text_2024_a, "fss_auto_seam leaked into 2024 glTF"
 
-    # 2. Check counts equal between with and without fss_auto_seam
+    # 2. Check counts equal between with and without fss_auto_seam (Session 48 & Session 50 Finding 4)
+    def get_mesh_counts(gltf_data):
+        verts = 0
+        tris = 0
+        accessors = gltf_data.get('accessors', [])
+        for m in gltf_data.get('meshes', []):
+            for prim in m.get('primitives', []):
+                pos_idx = prim.get('attributes', {}).get('POSITION')
+                if pos_idx is not None and pos_idx < len(accessors):
+                    verts += accessors[pos_idx].get('count', 0)
+                ind_idx = prim.get('indices')
+                if ind_idx is not None and ind_idx < len(accessors):
+                    tris += accessors[ind_idx].get('count', 0) // 3
+        return verts, tris
+
     data_2020_a = json.loads(text_2020_a)
     data_2020_b = json.loads(text_2020_b)
+    verts_20a, tris_20a = get_mesh_counts(data_2020_a)
+    verts_20b, tris_20b = get_mesh_counts(data_2020_b)
+    assert verts_20a == verts_20b, f"2020 vertex count mismatch: {verts_20a} vs {verts_20b}"
+    assert tris_20a == tris_20b, f"2020 triangle count mismatch: {tris_20a} vs {tris_20b}"
     assert len(data_2020_a.get('nodes', [])) == len(data_2020_b.get('nodes', [])), "2020 node count mismatch"
     assert len(data_2020_a.get('meshes', [])) == len(data_2020_b.get('meshes', [])), "2020 mesh count mismatch"
-    assert len(data_2020_a.get('accessors', [])) == len(data_2020_b.get('accessors', [])), "2020 accessor count mismatch"
 
     data_2024_a = json.loads(text_2024_a)
     data_2024_b = json.loads(text_2024_b)
+    verts_24a, tris_24a = get_mesh_counts(data_2024_a)
+    verts_24b, tris_24b = get_mesh_counts(data_2024_b)
+    assert verts_24a == verts_24b, f"2024 vertex count mismatch: {verts_24a} vs {verts_24b}"
+    assert tris_24a == tris_24b, f"2024 triangle count mismatch: {tris_24a} vs {tris_24b}"
     assert len(data_2024_a.get('nodes', [])) == len(data_2024_b.get('nodes', [])), "2024 node count mismatch"
     assert len(data_2024_a.get('meshes', [])) == len(data_2024_b.get('meshes', [])), "2024 mesh count mismatch"
-    assert len(data_2024_a.get('accessors', [])) == len(data_2024_b.get('accessors', [])), "2024 accessor count mismatch"
 
     print("  -> PASS: fss_auto_seam does not appear in glTF; vertex and node counts equal.")
 
@@ -469,7 +515,8 @@ def test_e2_objects_run():
     # Verify all 3 objects received auto seams or report entries
     txt = bpy.data.texts[uv_autoseam.REPORT_TEXT_NAME]
     lines = [l.body.strip() for l in txt.lines if l.body.strip() and not l.body.strip().startswith('#')]
-    assert len(lines) == len(e2_objs), f"Expected {len(e2_objs)} lines in report, got {len(lines)}"
+    mesh_lines = [l for l in lines if l.startswith("Mesh '")]
+    assert len(mesh_lines) == len(e2_objs), f"Expected {len(e2_objs)} mesh blocks in report, got {len(mesh_lines)}"
 
     for o in e2_objs:
         auto_cnt, artist_cnt = uv_autoseam.get_mesh_seam_counts(o.data)
@@ -489,6 +536,218 @@ def test_e2_objects_run():
     print("  -> PASS: E2 objects processed and verified successfully.")
 
 
+def test_uv_maps_unchanged_after_propose():
+    """Verify that Propose leaves every UV map, active UV map, and UV coordinates unchanged."""
+    print("Test 10: UV maps and coordinates unchanged after propose...")
+    bpy.ops.wm.read_homefile(use_empty=True)
+
+    obj = create_cube("UVUnchangedTestObj")
+    me = obj.data
+
+    # Add 2 distinct UV maps with known coordinates
+    uv_layer1 = me.uv_layers.new(name="CustomUV1")
+    uv_layer2 = me.uv_layers.new(name="CustomUV2")
+    me.uv_layers.active_index = 1  # CustomUV2 active
+
+    # Assign custom identifiable UV coords
+    for i, loop in enumerate(me.loops):
+        uv_layer1.data[i].uv = (float(i) * 0.05, float(i) * 0.03)
+        uv_layer2.data[i].uv = (1.0 - float(i) * 0.02, 0.5 + float(i) * 0.01)
+
+    # Snapshot coordinates before propose
+    coords1_before = [tuple(d.uv) for d in uv_layer1.data]
+    coords2_before = [tuple(d.uv) for d in uv_layer2.data]
+    uv_names_before = [l.name for l in me.uv_layers]
+    active_index_before = me.uv_layers.active_index
+    active_name_before = me.uv_layers.active.name
+
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+
+    # Run Propose Seams
+    res = bpy.ops.fss.uv_propose_seams()
+    assert res == {'FINISHED'}, f"Propose failed: {res}"
+
+    # Verify counts and names
+    assert [l.name for l in me.uv_layers] == uv_names_before, "UV map names or count changed"
+    assert me.uv_layers.active_index == active_index_before, "Active UV layer index changed"
+    assert me.uv_layers.active.name == active_name_before, "Active UV layer changed"
+
+    # Verify coordinates bit-for-bit (max diff 0.0)
+    coords1_after = [tuple(d.uv) for d in uv_layer1.data]
+    coords2_after = [tuple(d.uv) for d in uv_layer2.data]
+    diff1 = max(abs(a[0] - b[0]) + abs(a[1] - b[1]) for a, b in zip(coords1_before, coords1_after))
+    diff2 = max(abs(a[0] - b[0]) + abs(a[1] - b[1]) for a, b in zip(coords2_before, coords2_after))
+    assert diff1 == 0.0, f"CustomUV1 coordinates changed: max diff {diff1}"
+    assert diff2 == 0.0, f"CustomUV2 coordinates changed: max diff {diff2}"
+
+    # Also verify after Edit Mode round trip (as maintainer did)
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.object.mode_set(mode='OBJECT')
+    coords1_edit = [tuple(d.uv) for d in me.uv_layers['CustomUV1'].data]
+    coords2_edit = [tuple(d.uv) for d in me.uv_layers['CustomUV2'].data]
+    diff_edit1 = max(abs(a[0] - b[0]) + abs(a[1] - b[1]) for a, b in zip(coords1_before, coords1_edit))
+    diff_edit2 = max(abs(a[0] - b[0]) + abs(a[1] - b[1]) for a, b in zip(coords2_before, coords2_edit))
+    assert diff_edit1 == 0.0, f"CustomUV1 coordinates changed after Edit mode round trip: max diff {diff_edit1}"
+    assert diff_edit2 == 0.0, f"CustomUV2 coordinates changed after Edit mode round trip: max diff {diff_edit2}"
+
+    print("  -> PASS: All UV maps, active UV map, and UV coordinates completely unchanged.")
+
+
+def test_decal_skip():
+    """Verify objects with only decal, glass, invis, or occluder materials are skipped."""
+    print("Test 11: Decal and special material skip (decision 55)...")
+    bpy.ops.wm.read_homefile(use_empty=True)
+
+    # 1. Name class tests (DECAL, DECAL_EM, DECAL_FROST, DECAL_BLEND, GLASS, WNDSHIELD, INVIS, OCCLUDER)
+    skip_names = [
+        "MAT_DECAL_TEST",
+        "EXT_DECAL_EM_LIGHT",
+        "WND_DECAL_FROST_01",
+        "PANEL_DECAL_BLEND",
+        "CABIN_GLASS",
+        "PILOT_WNDSHIELD",
+        "COLLIDER_INVIS",
+        "SHADOW_OCCLUDER",
+    ]
+    skip_objs = []
+    for name in skip_names:
+        obj = create_cube(f"Obj_{name}")
+        mat = bpy.data.materials.new(name)
+        obj.data.materials.append(mat)
+        skip_objs.append(obj)
+
+    # 2. MSFS material type tests (non-matching names, but msfs_material_type set)
+    msfs_types = [
+        "msfs_decal",
+        "msfs_geo_decal",
+        "msfs_geo_decal_frosted",
+        "msfs_geo_decal_blendmasked",
+        "msfs_glass",
+        "msfs_windshield",
+        "msfs_invisible",
+        "msfs_environment_occluder",
+    ]
+    for mtype in msfs_types:
+        obj = create_cube(f"Obj_Type_{mtype}")
+        mat = bpy.data.materials.new(f"CustomMat_{mtype}")
+        if hasattr(mat, 'msfs_material_type'):
+            try:
+                mat.msfs_material_type = mtype
+            except Exception:
+                pass
+        mat['msfs_material_type'] = mtype
+        obj.data.materials.append(mat)
+        skip_objs.append(obj)
+
+    # 3. Mixed materials object: has standard material and a decal material -> MUST NOT BE SKIPPED
+    obj_mixed = create_cube("Obj_Mixed")
+    mat_std = bpy.data.materials.new("MAT_COCKPIT_SHELL")
+    mat_decal = bpy.data.materials.new("DECAL_LABEL")
+    obj_mixed.data.materials.append(mat_std)
+    obj_mixed.data.materials.append(mat_decal)
+
+    # 4. Standard mesh with no materials -> MUST NOT BE SKIPPED
+    obj_nomat = create_cube("Obj_NoMat")
+
+    # Select all
+    all_objs = skip_objs + [obj_mixed, obj_nomat]
+    for o in all_objs:
+        o.select_set(True)
+
+    unique_meshes, mesh_to_objs, shared_meshes, replaced_meshes, skipped = (
+        uv_autoseam._gather_candidate_objects(bpy.context)
+    )
+
+    skip_dict = dict(skipped)
+    for o in skip_objs:
+        assert o.name in skip_dict, f"{o.name} was not skipped"
+        assert skip_dict[o.name] == "only decal, glass, invisible or occluder materials", (
+            f"Wrong skip reason for {o.name}: {skip_dict[o.name]}"
+        )
+
+    assert obj_mixed.name not in skip_dict, f"Mixed material object {obj_mixed.name} was incorrectly skipped"
+    assert obj_nomat.name not in skip_dict, f"No-material object {obj_nomat.name} was incorrectly skipped"
+    assert obj_mixed.data in unique_meshes, "obj_mixed mesh should be in unique_meshes"
+    assert obj_nomat.data in unique_meshes, "obj_nomat mesh should be in unique_meshes"
+    assert len(unique_meshes) == 2, f"Expected 2 processed meshes, got {len(unique_meshes)}"
+
+    print("  -> PASS: Decal skip correctly handles all 8 name classes, MSFS material types, and mixed materials.")
+
+
+def test_report_attention_counts():
+    """Verify readable report formatting, summary at top, and attention counts."""
+    print("Test 12: Report formatting and attention counts...")
+    bpy.ops.wm.read_homefile(use_empty=True)
+
+    # Synthetic mock mesh reports
+    mock_reports = [
+        {
+            'mesh': 'CleanMesh',
+            'objects': ['CleanObj'],
+            'islands': 4,
+            'extra_vertices_vs_shading': 0,
+            'time': 0.12,
+            'unverified_charts': [],
+            'islands_over_limits': [],
+            'over_limits_count': 0,
+            'sliver_overlaps': 0,
+            'warnings': [],
+        },
+        {
+            'mesh': 'AttentionMesh',
+            'objects': ['AttentionObj1', 'AttentionObj2'],
+            'islands': 8,
+            'extra_vertices_vs_shading': 14,
+            'time': 1.45,
+            'unverified_charts': [{'faces': 2, 'distortion': 2.37}],
+            'islands_over_limits': [{'faces': 43, 'distortion': 1.28, 'overlap': False}],
+            'over_limits_count': 1,
+            'sliver_overlaps': 2,
+            'warnings': ['Shading-split fallback: mesh normals have no split edges'],
+        },
+    ]
+
+    uv_autoseam.write_report_text(mock_reports, run_time=1.57)
+
+    txt = bpy.data.texts.get(uv_autoseam.REPORT_TEXT_NAME)
+    assert txt is not None, "Report text datablock not created"
+    text_content = txt.as_string()
+    lines = [l.strip() for l in text_content.splitlines() if l.strip()]
+
+    # 1. Summary at the top
+    assert lines[0].startswith("# FSS Auto Seam Report")
+    assert lines[1] == "# Meshes processed: 2 in 1.57s"
+    assert lines[2] == "# Meshes needing attention: 1 (1 clean)"
+
+    # 2. Meshes needing attention listed first
+    att_pos = -1
+    clean_pos = -1
+    for idx, l in enumerate(lines):
+        if "Mesh 'AttentionMesh'" in l:
+            att_pos = idx
+        elif "Mesh 'CleanMesh'" in l:
+            clean_pos = idx
+
+    assert att_pos != -1, "AttentionMesh not found in report"
+    assert clean_pos != -1, "CleanMesh not found in report"
+    assert att_pos < clean_pos, f"Meshes needing attention must come first: att_pos={att_pos}, clean_pos={clean_pos}"
+
+    # 3. Plain wording checks
+    assert any("1 quad too distorted to flatten (2 faces, d=2.37): check the mesh" in l for l in lines)
+    assert any("1 island too stretched (43 faces, distortion 1.28): add a seam by hand" in l for l in lines)
+    assert any("Warning: Shading-split fallback" in l for l in lines)
+    assert any("2 sliver overlap(s) ignored (< 1e-8 m²)" in l for l in lines)
+
+    # 4. over_limits counted separately from unverified
+    att_block = [l for l in lines[att_pos:clean_pos]]
+    stat_line = [l for l in att_block if "over_limits=" in l][0]
+    assert "over_limits=1" in stat_line
+    assert "unverified=1" in stat_line
+
+    print("  -> PASS: Report summary, attention ordering, plain wording, and separate over_limits verified.")
+
+
 def main():
     print("=" * 70)
     print("RUNNING FSS AUTO SEAM OPERATOR & EXPORT TESTS")
@@ -502,6 +761,9 @@ def main():
     test_state_restoration()
     test_e2_objects_run()
     test_export_check()
+    test_uv_maps_unchanged_after_propose()
+    test_decal_skip()
+    test_report_attention_counts()
     print("=" * 70)
     print("ALL TESTS PASSED SUCCESSFULLY.")
     print("=" * 70)

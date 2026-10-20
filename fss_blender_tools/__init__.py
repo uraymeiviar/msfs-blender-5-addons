@@ -6,9 +6,9 @@ Independent of the Asobo add-ons and of _addons_common, so upstream merges into 
 bl_info = {
     "name": "FSS Blender Tools",
     "author": "Flight Sim Studio",
-    "description": "Authoring checks and helpers for MSFS aircraft (tools, empty bounds, lod, tags, merge tree, uv marks, checks)",
+    "description": "Authoring checks and helpers for MSFS aircraft (tools, empty bounds, lod, tags, merge tree, uv marks, uv auto seams, checks)",
     "blender": (5, 2, 0),
-    "version": (0, 20, 0),
+    "version": (0, 21, 0),
     "location": "3D View > Sidebar > FSS Tools",
     "category": "Object",
 }

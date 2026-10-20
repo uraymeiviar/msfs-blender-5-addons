@@ -14,6 +14,7 @@ repository are in [../AGENTS.md](../AGENTS.md).
 | `tags.py` | **Tags** | Generic object tags (`fss_tags`, semicolon-separated), per-row `[-]`/`[+]` assignment, selection, and per-tag skip-merge and Keep toggles |
 | `merge.py` | **Merge Tree** | Export-time merge groups (`@MERGE_<name>` / `@NOMERGE_<name>`), New Merge Group, tree preview and console details |
 | `uv_marks.py` | **UV Marks** | Authoring marks for the planned UV phases (nothing reads them yet): per-object texel density range (`fss_uv_density`, default 0.9 to 1.1, presets Lower 0.7 to 0.8 and Higher 1.5 to 1.65) and island direction (`fss_uv_direction`: Free, Upright, Flip, Quarter), inherited from the nearest marked ancestor; per-material island margin as a fraction of the UV square (`fss_uv_margin`, default 0.002) |
+| `uv_autoseam.py`, `uv_autoseam_core.py` | **Auto Seam** | Proposes UV seams on hard surface meshes respecting artist seams, normal splits, and distortion limits; Clear, Keep as Artist Seams, Edit Mode selection, and report in Text Editor |
 | `checks.py`, `name_check.py` | **Checks** | **Scan Names** (lists object and bone names that break FSS naming rules and renames them in batch; `@MERGE_` / `@NOMERGE_` allowed) and **Fix Broken Bone Parents** |
 
 ## Tags
@@ -101,6 +102,22 @@ pre-export hook culls before merging, even when Merge on Export is disabled. The
 an intact source scene and calls `report_file` on the written glTF. Console counts sum distinct POSITION accessor
 counts (stored geometry, instances counted once). Quotas and effective-minSize warnings use the High SDK curve;
 MSFS's actual counting of seam splits and instances remains unverified. No polygon reduction is performed.
+
+## Auto Seam
+
+Automated hard-surface seam placement for untextured geometry (`uv_autoseam.py` operators and UI,
+`uv_autoseam_core.py` seam placement algorithm). Operates on selected mesh objects in Object Mode.
+
+- **Non-destructive:** proposes seams without modifying existing artist seams or changing UV maps.
+  Proposed seams are tagged with the boolean edge attribute `fss_auto_seam` and written as Blender edge seams.
+- **Workflow:** **Propose Seams** computes seams modally with progress reporting; **Select Auto** and
+  **Select Artist** in Edit Mode inspect proposed vs manual seams; **Keep as Artist Seams** converts automatic
+  seams into permanent artist seams; **Clear Auto Seams** removes only the automatic seams.
+- **Exclusions:** objects whose materials are all in decal, glass, windshield, invisible, or occluder
+  classes (by name class or MSFS material type) are skipped automatically.
+- **Reporting:** overwrites the text datablock `FSS Auto Seam Report` with execution totals, listing meshes
+  needing manual attention first with plain-language recommendations.
+- **Design and history:** documented in [../docs/journal/20261019.automated-uv-unwrap.md](../docs/journal/20261019.automated-uv-unwrap.md).
 
 ## Testing
 

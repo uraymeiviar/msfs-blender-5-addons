@@ -5,19 +5,20 @@
 
 This guide is for 3D artists who model and texture Flight Sim Studio (FSS) aircraft in Blender 5.2. It explains what each panel and button does, how to use it, and what to watch out for.
 
-It matches **FSS Blender Tools 0.20.0** and the FSS exporter based on Asobo exporter 8.4.1.
+It matches **FSS Blender Tools 0.21.0** and the FSS exporter based on Asobo exporter 8.4.1.
 
 ## Pages
 
 | Page | Contents |
 | :--- | :--- |
-| [fss-tools.md](fss-tools.md) | The **FSS Tools** sidebar tab: **Tools**, **Empty Bounds**, **Tags**, **Merge Tree**, **UV Marks**, **Checks** |
+| [fss-tools.md](fss-tools.md) | The **FSS Tools** sidebar tab: **Tools**, **Empty Bounds**, **Tags**, **Merge Tree**, **UV Marks**, **Auto Seam**, **Checks** |
 | [lod.md](lod.md) | The **LOD** panel: automatic LODs, marks, size cut-offs, quota and hints, the LOD sphere, viewport preview, and exporting with LODs |
+| [uv.md](uv.md) | The **Auto Seam** panel: automated UV seams, workflow, reviewing and keeping seams, readable reports, and limits |
 | [exporter.md](exporter.md) | The exporter: export target MSFS 2024 or MSFS 2020, one `.blend` for both simulators, materials, instancing, legacy normals |
 
 ## Where to Find the Tools
 
-- **FSS Tools:** in the 3D Viewport, press `N` to open the sidebar, then pick the **FSS Tools** tab. The panels are, from top to bottom: **Tools**, **Empty Bounds**, **LOD**, **Tags**, **Merge Tree**, **UV Marks**, **Checks**.
+- **FSS Tools:** in the 3D Viewport, press `N` to open the sidebar, then pick the **FSS Tools** tab. The panels are, from top to bottom: **Tools**, **Empty Bounds**, **LOD**, **Tags**, **Merge Tree**, **UV Marks**, **Auto Seam**, **Checks**.
 - **Exporter:** in the same sidebar, tab **Microsoft Flight Simulator 2024 Tools**, panel **Export Target** (also shown in **File > Export > glTF 2.0**, section **Microsoft Flight Simulator (FSS)**).
 - **Material and object settings:** in the Properties editor, the MSFS panels of the Asobo add-on, plus **MSFS 2020 Object Parameters** and **MSFS 2020 Material Parameters** while the scene targets MSFS 2020.
 
@@ -40,7 +41,7 @@ Do not enable the original `io_scene_gltf2_msfs_2024` or `io_scene_gltf2_msfs_20
 - **In the aircraft repository:** open `tools/blender/FSS-ADDONS-VERSION.txt`. It names the add-on commit and the **FSS Blender Tools** version.
 - **In Blender:** **Edit > Preferences > Add-ons**, search for "FSS Blender Tools"; the version is shown in the add-on details.
 
-If your version is newer than 0.20.0, some labels or buttons may differ from this guide.
+If your version is newer than 0.21.0, some labels or buttons may differ from this guide.
 
 ## Terms Used in This Guide
 
