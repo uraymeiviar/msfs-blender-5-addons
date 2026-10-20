@@ -31,7 +31,7 @@ simulators, materials, legacy normals, instancing) is described in [docs/user/ex
 | `lod_tools_msfs_2024` | LOD Tools | Uses `io_scene_gltf2_msfs_fss` |
 | `wipermask_generator_msfs_2024` | Wiper Mask Generator | |
 | `max_bridge_msfs_2024` | 3ds Max Bridge | |
-| `fss_blender_tools` | FSS Blender Tools | FSS authoring tools (Tools, Empty Bounds, LOD with automatic LOD export, Tags, Merge Tree, UV Marks, Checks); independent of the Asobo add-ons and `_addons_common` |
+| `fss_blender_tools` | FSS Blender Tools | FSS authoring tools (Tools, Empty Bounds, LOD with automatic LOD export, Tags, Merge Tree, UV Marks, Auto Seam, UV Heatmap, Checks); independent of the Asobo add-ons and `_addons_common` |
 
 Install: copy the folders into a Blender scripts `addons` directory (or point Blender's script directory at a
 folder containing them) and enable **Microsoft Flight Simulator 2020 + 2024: glTF Extension (FSS)**.

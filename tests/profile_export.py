@@ -1,6 +1,6 @@
 """Profile one deploy export with cProfile.
 
-Runs an export driver script (for example D:/fss-e2/scripts/export-blend-to-gltf.py) inside Blender under cProfile,
+Runs an export driver script (for example G:/e-jets-e2/scripts/export-blend-to-gltf.py) inside Blender under cProfile,
 with its final quit removed, and writes the raw stats plus a text summary (cumulative and own time).
 
     blender.exe -b <copy of model.blend> --python tests/profile_export.py -- \

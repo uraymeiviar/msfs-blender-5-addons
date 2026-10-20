@@ -32,13 +32,13 @@ Note: the header comment of `proto_blender_v3.py` still shows the v2 usage line;
 
 ## 2. Commands, in order
 
-Working directory for every command: `uvproto\`. Blender: `D:\fss-e2\tools\blender\blender.exe`
+Working directory for every command: `uvproto\`. Blender: `G:\e-jets-e2\tools\blender\blender.exe`
 (5.2.2 LTS), background only, one Blender process at a time. Blender scripts run on Blender's own
 bundled Python (numpy comes with Blender); `xatlas_run.py` and `evaluate3.py` run on the venv
 (`venv\Scripts\python.exe -I`). Shell syntax below is Git Bash.
 
 ```bash
-B=/d/fss-e2/tools/blender/blender.exe
+B=/g/e-jets-e2/tools/blender/blender.exe
 O='W_AUDIO_L_VOLUME_KNOB,W_TRIM_PANEL,W_LEVER_FLAP_LOCK,W_@MERGE_PEDESTAL_SHELL,W_COCKPIT_SHELL_L,W_COCKPIT_SHELL_FLOOR,W_OVERHEAD_SHELL'
 
 # 0. copy the source (never open the original)
@@ -159,7 +159,7 @@ Metric definitions (`uvmetrics.py`, `evaluate3.py`, `evaluate3_extra.py`):
 
 ## 6. Hard-coded paths and assumptions
 
-- `C:\Users\uray\Downloads\E2_190_COCKPIT2.blend` (source, copy step only) and `D:\fss-e2\tools\blender\blender.exe` appear only in the commands above, not in the scripts.
+- `C:\Users\uray\Downloads\E2_190_COCKPIT2.blend` (source, copy step only) and `G:\e-jets-e2\tools\blender\blender.exe` appear only in the commands above, not in the scripts.
 - Scripts locate `uvmetrics.py` / `evaluate3_extra.py` via their own folder (`HERE`). Output folders (`--out`, positional `results3`) are taken relative to the script folder, not the working directory.
 - `prep3.py` writes `objects_info3.json` to the working directory and `work3.blend` next to the opened blend (`//work3.blend`). `list_seams3.py` writes `seams3.json` to the working directory.
 - `proto_blender_v3.py` defaults `--out` to `results2`: always pass `--out results3`.
@@ -196,7 +196,7 @@ PowerShell example, from the scratch folder:
 ```powershell
 $uvObjects = 'W_AUDIO_L_VOLUME_KNOB,W_TRIM_PANEL,W_LEVER_FLAP_LOCK,W_@MERGE_PEDESTAL_SHELL,W_COCKPIT_SHELL_L,W_COCKPIT_SHELL_FLOOR,W_OVERHEAD_SHELL'
 if (Get-Process blender -ErrorAction SilentlyContinue) { throw 'Close Blender first' }
-& 'D:\fss-e2\tools\blender\blender.exe' -b work3.blend --python-exit-code 1 --python proto_blender_v4.py -- --objects $uvObjects --out results3 --skip_smart 1 --tag tree --tree 1
+& 'G:\e-jets-e2\tools\blender\blender.exe' -b work3.blend --python-exit-code 1 --python proto_blender_v4.py -- --objects $uvObjects --out results3 --skip_smart 1 --tag tree --tree 1
 & .\venv\Scripts\python.exe -I -u evaluate3.py results3 tree
 ```
 
@@ -352,7 +352,7 @@ With no other Blender running, execute serially from the work folder:
 
 ```powershell
 if (Get-Process blender -ErrorAction SilentlyContinue) { throw 'Blender already running' }
-& 'D:\fss-e2\tools\blender\blender.exe' -b E2_COCKPIT2_copy.blend --python-exit-code 1 --python prepare_references.py
+& 'G:\e-jets-e2\tools\blender\blender.exe' -b E2_COCKPIT2_copy.blend --python-exit-code 1 --python prepare_references.py
 if ($LASTEXITCODE -ne 0) { throw 'Reference preparation failed' }
 Copy-Item work3.blend references.blend
 ```
@@ -437,7 +437,7 @@ Execute serially from the scratch working directory (e.g. `tests/_work/uv_shape/
 ensuring no other Blender instances are running:
 
 ```powershell
-$B = "D:\fss-e2\tools\blender\blender.exe"
+$B = "G:\e-jets-e2\tools\blender\blender.exe"
 $O_ORIG = "W_AUDIO_L_VOLUME_KNOB,W_TRIM_PANEL,W_LEVER_FLAP_LOCK,W_@MERGE_PEDESTAL_SHELL,W_COCKPIT_SHELL_L,W_COCKPIT_SHELL_FLOOR,W_OVERHEAD_SHELL"
 $O_REFS = "W_COCKPIT_REAR_OBS_SEAT_MOUNTING_FRAME,W_CIRCUIT_BREAKER_COVER_L,W_POWERPLANT_COVER_L,W_LEVER_FLAP,W_DISC_HANDLE_AILERON,W_EFB_HINGE_ARM_1,W_EFB_HINGE_CLAMP_ROTATOR,W_CCD_LEFT_ROTARY_OUTER,W_B_GS_AFCS_AP_BUTTON,W_EFB_HINGE_ROTATOR_2"
 

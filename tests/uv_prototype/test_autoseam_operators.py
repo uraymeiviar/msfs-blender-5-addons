@@ -2,7 +2,7 @@
 Unit and integration tests for FSS Auto Seam operators and panel (Package 3 & 4).
 
 To run:
-D:\fss-e2\tools\blender\blender.exe -b --factory-startup --python tests/uv_prototype/test_autoseam_operators.py
+G:\e-jets-e2\tools\blender\blender.exe -b --factory-startup --python tests/uv_prototype/test_autoseam_operators.py
 
 Verifies:
 1. Artist seams unchanged after Propose, Clear, and a second Propose.

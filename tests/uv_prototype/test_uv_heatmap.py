@@ -1,7 +1,7 @@
 """Unit and integration tests for UV Heatmap measures, overlay logic, and Skip Auto Seam mark.
 
 To run:
-D:\\fss-e2\\tools\\blender\\blender.exe -b --factory-startup --python tests/uv_prototype/test_uv_heatmap.py
+G:\\e-jets-e2\\tools\\blender\\blender.exe -b --factory-startup --python tests/uv_prototype/test_uv_heatmap.py
 """
 
 import json

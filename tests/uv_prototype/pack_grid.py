@@ -56,7 +56,7 @@ DEFAULT_MAT_MAP = {
     'W_TRIM_PANEL': ['Cockpit_STD', 'Rear_doors']
 }
 
-BLENDER_EXE = r'D:\fss-e2\tools\blender\blender.exe'
+BLENDER_EXE = r'G:\e-jets-e2\tools\blender\blender.exe'
 
 
 def load_texture_sets(results_dir, mat_map=None):

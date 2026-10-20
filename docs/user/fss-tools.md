@@ -132,7 +132,7 @@ Automated UV seam proposal for hard-surface meshes. See [uv.md](uv.md) for the c
 
 ## UV Heatmap
 
-Viewport distortion overlay showing conformal shape distortion and relative texel density directly on 3D surfaces. See [uv.md](uv.md#uv-heatmap-distortion-and-texel-density) for the complete guide, color scale, and legend details.
+Colours the selected objects by how well their UVs fit: **Distortion** (does each face keep its shape?) or **Density** (does it get the right amount of texture?), with a distribution chart in the panel and an optional UV grid with cell labels. See [uv.md](uv.md#uv-heatmap-distortion-and-texel-density) for how to read it.
 
 ## Checks
 

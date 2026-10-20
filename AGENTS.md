@@ -14,7 +14,7 @@ install them into their own Blender.
 | `io_scene_gltf2_msfs_fss` | Asobo, forked by FSS | The glTF exporter for MSFS 2024 and 2020 (unified). Asobo code plus FSS changes in FSS-owned modules |
 | `_addons_common` | Asobo | Shared helpers of the Asobo add-ons |
 | `lod_tools_msfs_2024`, `wipermask_generator_msfs_2024`, `max_bridge_msfs_2024` | Asobo | Asobo tools, unchanged |
-| `fss_blender_tools` | FSS | FSS authoring tools: Tools (Add Empty Parent, Origin to Bounding Box), Empty Bounds, LOD level marking, Tags, Merge Tree, and Checks (Name Check, Fix Broken Bone Parents) |
+| `fss_blender_tools` | FSS | FSS authoring tools: Tools (Add Empty Parent, Origin to Bounding Box), Empty Bounds, LOD level marking, Tags, Merge Tree, UV Marks, Auto Seam, UV Heatmap, and Checks (Name Check, Fix Broken Bone Parents) |
 | `tests` | FSS | Differential test harness ([tests/README.md](tests/README.md)) |
 | `tools` | FSS | `deploy.ps1` / `deploy.bat` |
 
@@ -120,6 +120,7 @@ This repository is the single source of truth for the add-ons and their document
 - **Artist guide:** when a change alters what an artist sees or does (a panel, a button, a mark, an export behaviour), update `docs/user/` in the same commit. Describe only what exists; design and rationale belong in the journals.
 - The journals on the exporter conversion, the wish-list, Empty Bounds, Name Check, and Tags and Merge were started in the FSS aircraft repository (`codes/wasm/doc/journal/`) and moved here on 20261019; the copies there end with a pointer session. That repository keeps its own authoring guide (`doc/msfs-authoring/`) for aircraft-specific workflow.
 
-Testing in an aircraft repository happens on the E2 testbed (`D:\fss-e2`, not under git; back up a file into its
-`codes/wasm/.cache/backup/` before editing it). The FSS aircraft repository (E1) receives add-on updates only when the
+Testing in an aircraft repository happens on the E2 repository (`G:\e-jets-e2`, under git; the maintainer commits there,
+agents do not; back up a file into its `codes/wasm/.cache/backup/` before editing it). The earlier testbed `D:\fss-e2` is
+deprecated. The FSS aircraft repository (E1) receives add-on updates only when the
 maintainer asks.
