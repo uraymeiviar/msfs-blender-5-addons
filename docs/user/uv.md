@@ -85,7 +85,8 @@ The **UV Heatmap** panel (sidebar `N` > **FSS Tools** > **UV Heatmap**) displays
 
 - Click **Show UV Heatmap** in the panel to toggle the overlay on selected mesh objects.
 - Switch between **Shape** and **Density** modes.
-- Click **Refresh** to recompute measures after editing UVs, scaling islands, or changing materials. Turning the heatmap on computes once; results are cached per object until you click Refresh.
+- Click **Refresh** to recompute measures after editing UVs, scaling islands, or changing materials. Turning the heatmap on computes once; results are cached per object until you click Refresh. Moving an object keeps its colours on it; editing its UVs or scale needs a Refresh.
+- **Opacity** sets how strongly the colours cover the viewport shading (0.3 to 1.0).
 
 ### How to Read the Colours
 
@@ -104,7 +105,7 @@ The overlay uses a diverging colour scheme centred on **Neutral 1.0**:
    - Values scale from 1.0 (neutral) to 2.0+ (blue).
    - If an area shows dark blue, the geometry is distorted or sheared in UV space. Add manual seams across high-curvature areas to allow the island to relax flatter.
 2. **Density (Texel Density):**
-   - Measures the triangle's UV area / 3D area relative to the area-weighted median of all shown triangles sharing the same material (one atlas per material).
+   - Measures the triangle's UV area / 3D area relative to its texture set: the area-weighted median over every object in the scene that uses the same material (one atlas per material). The colours therefore do not change with what is selected.
    - Evaluated against the object's authored texel density range (set in the **UV Marks** panel, default 0.9 to 1.1):
      - Inside the authored range: displays as neutral 1.0.
      - Above the range: turns blue on a log scale up to 2.0x.

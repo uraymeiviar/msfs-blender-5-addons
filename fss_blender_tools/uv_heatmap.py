@@ -9,6 +9,7 @@ import math
 import numpy as np
 import bpy
 import blf
+from bpy.app.handlers import persistent
 
 try:
     import gpu
@@ -36,6 +37,7 @@ COLOR_TEXT_WARN = (1.0, 0.75, 0.25, 1.0)
 
 # Global caches and draw handles
 _cache = {}  # obj_name -> ObjectHeatmapCache
+_ref_cache = {}  # material name -> reference density of its texture set (all scene objects using it)
 _global_stats = {}
 _draw_view_handle = None
 _draw_pixel_handle = None
@@ -133,43 +135,33 @@ def compute_triangle_measures(P3, U, degeneracy_relative=1e-12):
     }
 
 
-def compute_relative_density(raw_density, area3, is_degenerate, material_keys, density_ranges):
+def material_references(raw_density, area3, is_degenerate, material_keys):
+    """Area-weighted median of UV area / 3D area per material: the reference density of each texture set."""
+    refs = {}
+    usable = (~is_degenerate) & np.isfinite(raw_density)
+    for mat in set(material_keys):
+        mask = (material_keys == mat) & usable
+        refs[mat] = area_weighted_median(raw_density[mask], area3[mask]) if np.any(mask) else 1.0
+    return refs
+
+
+def compute_relative_density(raw_density, area3, is_degenerate, material_keys, density_ranges, ref_by_material=None):
     """Compute relative texel density per triangle.
 
-    For each material across all shown triangles:
-    - calculates the area-weighted median of UV area / 3D area as reference.
-    - normalizes density against the material's reference.
-    - evaluates relative to the object's authored density range:
-      inside range counts as 1.0 (neutral), below min relative to min, above max relative to max.
+    The density of each triangle is divided by its material's reference (the given references, else the
+    area-weighted median over these triangles), then read against the object's authored density range:
+    inside the range counts as 1.0 (neutral), below the range relative to its minimum, above relative to its maximum.
     """
-    n = len(raw_density)
-    rel_density = np.ones(n, dtype=np.float64)
-
-    # 1. Compute reference median per material
-    unique_materials = set(material_keys)
-    ref_by_material = {}
-    for mat in unique_materials:
-        mat_mask = (material_keys == mat) & (~is_degenerate) & np.isfinite(raw_density)
-        if np.any(mat_mask):
-            ref_by_material[mat] = area_weighted_median(raw_density[mat_mask], area3[mat_mask])
-        else:
-            ref_by_material[mat] = 1.0
-
-    # 2. Normalize and scale relative to density range
-    for i in range(n):
-        if is_degenerate[i] or not np.isfinite(raw_density[i]):
-            rel_density[i] = np.nan
-            continue
-        ref = ref_by_material.get(material_keys[i], 1.0)
-        norm_d = (raw_density[i] / ref) if ref > 0 else 1.0
-        low, high = density_ranges[i]
-        if norm_d < low and low > 0:
-            rel_density[i] = norm_d / low
-        elif norm_d > high and high > 0:
-            rel_density[i] = norm_d / high
-        else:
-            rel_density[i] = 1.0
-
+    if ref_by_material is None:
+        ref_by_material = material_references(raw_density, area3, is_degenerate, material_keys)
+    density_ranges = np.asarray(density_ranges, dtype=np.float64).reshape(-1, 2)
+    ref = np.array([ref_by_material.get(m, 1.0) for m in material_keys], dtype=np.float64)
+    low, high = density_ranges[:, 0], density_ranges[:, 1]
+    with np.errstate(divide='ignore', invalid='ignore'):
+        norm_d = np.where(ref > 0, raw_density / ref, 1.0)
+        rel_density = np.where((norm_d < low) & (low > 0), norm_d / low,
+                               np.where((norm_d > high) & (high > 0), norm_d / high, 1.0))
+    rel_density[is_degenerate | ~np.isfinite(raw_density)] = np.nan
     return rel_density, ref_by_material
 
 
@@ -205,34 +197,29 @@ def measures_to_colors(shape, rel_density, is_degenerate, mode):
 class ObjectHeatmapCache:
     """Cached geometry, measures, and GPU batches for a single mesh object."""
 
-    def __init__(self, obj_name, P3, tri_measures, rel_density, colors_shape, colors_density):
+    def __init__(self, obj_name, P_local, tri_measures, rel_density, colors_shape, colors_density):
         self.obj_name = obj_name
-        self.n_tris = len(P3)
-        self.pos = P3.reshape(-1, 3).astype(np.float32)
+        self.n_tris = len(P_local)
+        # object space: the overlay is drawn with the object's current matrix, so it follows moves
+        self.pos = P_local.reshape(-1, 3).astype(np.float32)
         self.colors_shape = np.repeat(colors_shape, 3, axis=0).astype(np.float32)
         self.colors_density = np.repeat(colors_density, 3, axis=0).astype(np.float32)
         self.area3 = tri_measures['area3']
         self.is_degenerate = tri_measures['is_degenerate']
         self.shape = tri_measures['shape']
         self.rel_density = rel_density
-        self.batch_shape = None
-        self.batch_density = None
+        self.batches = {}  # (mode, opacity) -> GPUBatch
 
-    def get_batch(self, mode, shader):
+    def get_batch(self, mode, shader, opacity=ALPHA):
         if gpu is None or batch_for_shader is None:
             return None
-        if mode == 'SHAPE':
-            if self.batch_shape is None:
-                self.batch_shape = batch_for_shader(
-                    shader, 'TRIS', {'pos': self.pos, 'color': self.colors_shape}
-                )
-            return self.batch_shape
-        else:
-            if self.batch_density is None:
-                self.batch_density = batch_for_shader(
-                    shader, 'TRIS', {'pos': self.pos, 'color': self.colors_density}
-                )
-            return self.batch_density
+        key = (mode, round(opacity, 3))
+        if key not in self.batches:
+            colors = (self.colors_shape if mode == 'SHAPE' else self.colors_density).copy()
+            colors[:, 3] = opacity
+            self.batches.clear()
+            self.batches[key] = batch_for_shader(shader, 'TRIS', {'pos': self.pos, 'color': colors})
+        return self.batches[key]
 
 
 def tag_redraw():
@@ -244,170 +231,158 @@ def tag_redraw():
 
 
 def clear_cache():
-    """Clear all cached heatmap geometry and GPU batches."""
-    global _cache, _global_stats
+    """Clear all cached heatmap geometry, material references and GPU batches."""
     _cache.clear()
+    _ref_cache.clear()
     _global_stats.clear()
 
 
-def update_heatmap_cache(context):
-    """Compute and cache UV heatmap measures for selected mesh objects."""
-    global _cache, _global_stats
-    _cache.clear()
-    _global_stats.clear()
+@persistent
+def _on_load_post(_dummy):
+    # cache keys are object names, which a newly loaded file may reuse
+    clear_cache()
 
-    selected = [obj for obj in context.selected_objects if _editable(obj)]
-    mesh_objs = [obj for obj in selected if obj.type == 'MESH']
 
-    skipped_no_uvs = []
-    eval_data = []
+def _object_triangles(obj, depsgraph):
+    """Loop triangles of the evaluated mesh: world and object space corners, UVs and material per triangle.
 
+    None when the object has no faces or no active UV map.
+    """
+    if not obj.data or not len(obj.data.polygons) or obj.data.uv_layers.active is None:
+        return None
+    me = obj.evaluated_get(depsgraph).data
+    if not me or not len(me.polygons) or me.uv_layers.active is None:
+        return None
+    me.calc_loop_triangles()
+    n_tris = len(me.loop_triangles)
+    if n_tris == 0:
+        return None
+    tri_verts = np.empty((n_tris, 3), dtype=np.int32)
+    me.loop_triangles.foreach_get('vertices', tri_verts.ravel())
+    tri_loops = np.empty((n_tris, 3), dtype=np.int32)
+    me.loop_triangles.foreach_get('loops', tri_loops.ravel())
+    tri_mat = np.empty(n_tris, dtype=np.int32)
+    me.loop_triangles.foreach_get('material_index', tri_mat)
+    V = np.empty((len(me.vertices), 3), dtype=np.float64)
+    me.vertices.foreach_get('co', V.ravel())
+    M = np.array(obj.matrix_world, dtype=np.float64)
+    uv_data = np.empty((len(me.loops), 2), dtype=np.float64)
+    me.uv_layers.active.data.foreach_get('uv', uv_data.ravel())
+    slot_names = [slot.material.name if slot.material else '' for slot in obj.material_slots]
+    mat_keys = np.array([slot_names[i] if 0 <= i < len(slot_names) else '' for i in tri_mat], dtype=object)
+    return {
+        'P3': (V @ M[:3, :3].T + M[:3, 3])[tri_verts],  # world space: measures include the object's scale
+        'P_local': V[tri_verts],
+        'U': uv_data[tri_loops],
+        'mat_keys': mat_keys,
+    }
+
+
+def _texture_set_references(context, depsgraph, materials, known):
+    """Reference density per material over every mesh object in the view layer that uses it.
+
+    One texture set per material (decision 8): a part is compared with everything sharing its texture,
+    not only with the current selection. `known` maps object names to already computed triangle data.
+    """
+    raw, area, degen, keys = [], [], [], []
+    for obj in context.view_layer.objects:
+        if obj.type != 'MESH' or not obj.data:
+            continue
+        if not any(slot.material and slot.material.name in materials for slot in obj.material_slots):
+            continue
+        item = known.get(obj.name)
+        if item is None:
+            tris = _object_triangles(obj, depsgraph)
+            if tris is None:
+                continue
+            item = dict(tris, measures=compute_triangle_measures(tris['P3'], tris['U']))
+        m = item['measures']
+        raw.append(m['raw_density'])
+        area.append(m['area3'])
+        degen.append(m['is_degenerate'])
+        keys.append(item['mat_keys'])
+    if not raw:
+        return {mat: 1.0 for mat in materials}
+    refs = material_references(np.concatenate(raw), np.concatenate(area), np.concatenate(degen),
+                               np.concatenate(keys))
+    return {mat: refs.get(mat, 1.0) for mat in materials}
+
+
+def update_heatmap_cache(context, refresh=True):
+    """Compute and cache UV heatmap measures for the selected mesh objects.
+
+    refresh=True recomputes everything (toggle, Refresh); refresh=False only adds newly selected objects,
+    reusing the cached texture set references, so a selection change stays cheap.
+    """
+    global _global_stats
+    if refresh:
+        _cache.clear()
+        _ref_cache.clear()
     depsgraph = context.evaluated_depsgraph_get()
 
-    for obj in mesh_objs:
-        me_orig = obj.data
-        if not me_orig or len(me_orig.polygons) == 0:
+    selected = [obj for obj in context.selected_objects if _editable(obj) and obj.type == 'MESH']
+    skipped_no_uvs = []
+    new_items = {}
+    for obj in selected:
+        if obj.name in _cache:
             continue
-        if not me_orig.uv_layers or me_orig.uv_layers.active is None:
-            skipped_no_uvs.append(obj.name)
+        tris = _object_triangles(obj, depsgraph)
+        if tris is None:
+            if obj.data and len(obj.data.polygons):
+                skipped_no_uvs.append(obj.name)
             continue
-
-        ev = obj.evaluated_get(depsgraph)
-        me = ev.data
-        if not me or len(me.polygons) == 0:
-            continue
-        if not me.uv_layers or me.uv_layers.active is None:
-            skipped_no_uvs.append(obj.name)
-            continue
-
-        me.calc_loop_triangles()
-        n_tris = len(me.loop_triangles)
-        if n_tris == 0:
-            continue
-
-        tri_verts = np.empty((n_tris, 3), dtype=np.int32)
-        me.loop_triangles.foreach_get('vertices', tri_verts.ravel())
-        tri_loops = np.empty((n_tris, 3), dtype=np.int32)
-        me.loop_triangles.foreach_get('loops', tri_loops.ravel())
-        tri_mat = np.empty(n_tris, dtype=np.int32)
-        me.loop_triangles.foreach_get('material_index', tri_mat)
-
-        V = np.empty((len(me.vertices), 3), dtype=np.float64)
-        me.vertices.foreach_get('co', V.ravel())
-        M = np.array(obj.matrix_world, dtype=np.float64)
-        V_world = V @ M[:3, :3].T + M[:3, 3]
-        P3 = V_world[tri_verts]
-
-        uv_data = np.empty((len(me.loops), 2), dtype=np.float64)
-        me.uv_layers.active.data.foreach_get('uv', uv_data.ravel())
-        U = uv_data[tri_loops]
-
-        # Material keys
-        slot_names = [slot.material.name if slot.material else '' for slot in obj.material_slots]
-        mat_keys = np.array([
-            slot_names[idx] if 0 <= idx < len(slot_names) else ''
-            for idx in tri_mat
-        ], dtype=object)
-
-        # Authoring density range
         (low, high), _ = density(obj)
+        new_items[obj.name] = dict(tris, measures=compute_triangle_measures(tris['P3'], tris['U']),
+                                   density_range=(low, high))
 
-        eval_data.append({
-            'obj': obj,
-            'P3': P3,
-            'U': U,
-            'mat_keys': mat_keys,
-            'density_range': (low, high),
-        })
+    needed = {m for item in new_items.values() for m in item['mat_keys']} - set(_ref_cache)
+    if needed:
+        _ref_cache.update(_texture_set_references(context, depsgraph, needed, new_items))
 
-    if not eval_data:
-        _global_stats = {
-            'skipped_no_uvs': skipped_no_uvs,
-            'total_tris': 0,
-            'valid_area': 0.0,
-            'share_above_110': 0.0,
-            'share_above_125': 0.0,
-            'share_outside': 0.0,
-            'share_under': 0.0,
-            'share_over': 0.0,
-            'share_degenerate': 0.0,
-            'degenerate_count': 0,
-        }
+    for name, item in new_items.items():
+        m = item['measures']
+        rel_d, _ = compute_relative_density(m['raw_density'], m['area3'], m['is_degenerate'], item['mat_keys'],
+                                            [item['density_range']] * len(item['mat_keys']), _ref_cache)
+        _cache[name] = ObjectHeatmapCache(
+            name, item['P_local'], m, rel_d,
+            measures_to_colors(m['shape'], rel_d, m['is_degenerate'], 'SHAPE'),
+            measures_to_colors(m['shape'], rel_d, m['is_degenerate'], 'DENSITY'))
+
+    # Legend statistics over the selected objects shown
+    entries = [_cache[obj.name] for obj in selected if obj.name in _cache]
+    if not refresh:
+        skipped_no_uvs = sorted(set(skipped_no_uvs) | set(_global_stats.get('skipped_no_uvs', [])))
+    if not entries:
+        _global_stats = {'skipped_no_uvs': skipped_no_uvs, 'total_tris': 0, 'valid_area': 0.0,
+                         'share_above_110': 0.0, 'share_above_125': 0.0, 'share_outside': 0.0,
+                         'share_under': 0.0, 'share_over': 0.0, 'share_degenerate': 0.0, 'degenerate_count': 0}
         return
-
-    # 1. Compute per-triangle measures
-    for item in eval_data:
-        item['measures'] = compute_triangle_measures(item['P3'], item['U'])
-
-    # 2. Aggregate for density reference across all shown triangles
-    all_raw_d = np.concatenate([item['measures']['raw_density'] for item in eval_data])
-    all_area3 = np.concatenate([item['measures']['area3'] for item in eval_data])
-    all_degen = np.concatenate([item['measures']['is_degenerate'] for item in eval_data])
-    all_mat_keys = np.concatenate([item['mat_keys'] for item in eval_data])
-    all_ranges = []
-    for item in eval_data:
-        all_ranges.extend([item['density_range']] * len(item['mat_keys']))
-    all_ranges = np.array(all_ranges)
-
-    all_rel_d, _ = compute_relative_density(
-        all_raw_d, all_area3, all_degen, all_mat_keys, all_ranges
-    )
-
-    # 3. Split relative density back to items, compute colors, and create cache entries
-    offset = 0
-    for item in eval_data:
-        n = len(item['P3'])
-        item_rel_d = all_rel_d[offset:offset + n]
-        offset += n
-        colors_shape = measures_to_colors(
-            item['measures']['shape'], item_rel_d, item['measures']['is_degenerate'], 'SHAPE'
-        )
-        colors_density = measures_to_colors(
-            item['measures']['shape'], item_rel_d, item['measures']['is_degenerate'], 'DENSITY'
-        )
-        cache_entry = ObjectHeatmapCache(
-            item['obj'].name, item['P3'], item['measures'], item_rel_d, colors_shape, colors_density
-        )
-        _cache[item['obj'].name] = cache_entry
-
-    # 4. Compute global summary stats for viewport legend
-    all_shape = np.concatenate([item['measures']['shape'] for item in eval_data])
+    all_shape = np.concatenate([e.shape for e in entries])
+    all_rel_d = np.concatenate([e.rel_density for e in entries])
+    all_area3 = np.concatenate([e.area3 for e in entries])
+    all_degen = np.concatenate([e.is_degenerate for e in entries])
     valid_mask = (~all_degen) & (all_area3 > 0)
     total_valid_area = float(np.sum(all_area3[valid_mask]))
-    deg_mask = all_degen
-    deg_count = int(np.sum(deg_mask))
     total_area_all = float(np.sum(all_area3))
-    deg_area = float(np.sum(all_area3[deg_mask]))
-
     if total_valid_area > 0:
-        area_110 = float(np.sum(all_area3[valid_mask & (all_shape > 1.10)]))
-        area_125 = float(np.sum(all_area3[valid_mask & (all_shape > 1.25)]))
-        share_110 = area_110 / total_valid_area
-        share_125 = area_125 / total_valid_area
-
-        # Density stats: outside range means rel_density < 1.0 (under) or > 1.0 (over)
-        # Because relative density maps range [low, high] -> 1.0 exactly
-        area_under = float(np.sum(all_area3[valid_mask & (all_rel_d < 0.9999)]))
-        area_over = float(np.sum(all_area3[valid_mask & (all_rel_d > 1.0001)]))
-        share_under = area_under / total_valid_area
-        share_over = area_over / total_valid_area
-        share_outside = share_under + share_over
+        share_110 = float(np.sum(all_area3[valid_mask & (all_shape > 1.10)])) / total_valid_area
+        share_125 = float(np.sum(all_area3[valid_mask & (all_shape > 1.25)])) / total_valid_area
+        # the object's density range maps to exactly 1.0
+        share_under = float(np.sum(all_area3[valid_mask & (all_rel_d < 0.9999)])) / total_valid_area
+        share_over = float(np.sum(all_area3[valid_mask & (all_rel_d > 1.0001)])) / total_valid_area
     else:
-        share_110 = share_125 = share_outside = share_under = share_over = 0.0
-
-    share_deg = (deg_area / total_area_all) if total_area_all > 0 else 0.0
-
+        share_110 = share_125 = share_under = share_over = 0.0
     _global_stats = {
         'skipped_no_uvs': skipped_no_uvs,
         'total_tris': len(all_shape),
         'valid_area': total_valid_area,
         'share_above_110': share_110,
         'share_above_125': share_125,
-        'share_outside': share_outside,
+        'share_outside': share_under + share_over,
         'share_under': share_under,
         'share_over': share_over,
-        'share_degenerate': share_deg,
-        'degenerate_count': deg_count,
+        'share_degenerate': (float(np.sum(all_area3[all_degen])) / total_area_all) if total_area_all > 0 else 0.0,
+        'degenerate_count': int(np.sum(all_degen)),
     }
 
 
@@ -430,12 +405,14 @@ def _draw_viewport_heatmap():
     if not selected_mesh_names:
         return
 
-    # Check if cache needs update
+    # Newly selected objects are added; cached ones and the texture set references are kept until Refresh
     if not all(name in _cache for name in selected_mesh_names if name not in _global_stats.get('skipped_no_uvs', [])):
-        update_heatmap_cache(context)
+        update_heatmap_cache(context, refresh=False)
 
     mode = context.scene.fss_uv_heatmap_mode
+    opacity = context.scene.fss_uv_heatmap_opacity
     shader = gpu.shader.from_builtin('SMOOTH_COLOR')
+    objects = context.view_layer.objects
 
     gpu.state.depth_test_set('LESS_EQUAL')
     gpu.state.depth_mask_set(False)
@@ -444,9 +421,13 @@ def _draw_viewport_heatmap():
         shader.bind()
         for name in selected_mesh_names:
             entry = _cache.get(name)
-            if entry is not None:
-                batch = entry.get_batch(mode, shader)
-                if batch is not None:
+            obj = objects.get(name)
+            if entry is None or obj is None:
+                continue
+            batch = entry.get_batch(mode, shader, opacity)
+            if batch is not None:
+                with gpu.matrix.push_pop():
+                    gpu.matrix.multiply_matrix(obj.matrix_world)
                     batch.draw(shader)
     finally:
         gpu.state.depth_mask_set(True)
@@ -574,6 +555,7 @@ class FSS_PT_UvHeatmap(bpy.types.Panel):
         if scene.fss_uv_heatmap_show:
             row = layout.row(align=True)
             row.prop(scene, 'fss_uv_heatmap_mode', expand=True)
+            layout.prop(scene, 'fss_uv_heatmap_opacity', slider=True)
 
             stats = _global_stats
             box = layout.box()
@@ -622,6 +604,15 @@ def register():
         update=_on_mode_change,
     )
 
+    bpy.types.Scene.fss_uv_heatmap_opacity = bpy.props.FloatProperty(
+        name='Opacity', default=ALPHA, min=0.3, max=1.0, precision=2, options={'SKIP_SAVE'},
+        description='Opacity of the heatmap over the viewport shading',
+        update=_on_mode_change,
+    )
+
+    if _on_load_post not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_on_load_post)
+
     if not bpy.app.background and gpu is not None:
         _draw_view_handle = bpy.types.SpaceView3D.draw_handler_add(
             _draw_viewport_heatmap, (), 'WINDOW', 'POST_VIEW'
@@ -640,9 +631,11 @@ def unregister():
         bpy.types.SpaceView3D.draw_handler_remove(_draw_pixel_handle, 'WINDOW')
         _draw_pixel_handle = None
 
+    if _on_load_post in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_on_load_post)
     clear_cache()
 
-    for prop in ('fss_uv_heatmap_show', 'fss_uv_heatmap_mode'):
+    for prop in ('fss_uv_heatmap_show', 'fss_uv_heatmap_mode', 'fss_uv_heatmap_opacity'):
         if hasattr(bpy.types.Scene, prop):
             delattr(bpy.types.Scene, prop)
 

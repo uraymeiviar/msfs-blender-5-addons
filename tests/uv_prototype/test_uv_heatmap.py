@@ -153,7 +153,22 @@ def test_uv_scaled_by_two():
     max_dens_diff = np.max(np.abs(cache_scaled.rel_density - 4.0))
     assert max_dens_diff < 1e-6, f"Density should be 4.0, got {cache_scaled.rel_density}"
 
-    print(f"  -> PASS: shape {cache_scaled.shape[0]:.4f}, relative density {cache_scaled.rel_density[0]:.4f}")
+    # The reference is the whole texture set, not the selection: alone, the scaled object still reads 4.0
+    obj_ref.select_set(False)
+    uv_heatmap.update_heatmap_cache(bpy.context)
+    alone = uv_heatmap._cache.get(obj_scaled.name)
+    assert np.max(np.abs(alone.rel_density - 4.0)) < 1e-6, f"Density alone should stay 4.0, got {alone.rel_density}"
+    assert obj_ref.name not in uv_heatmap._cache, "unselected objects are not drawn"
+
+    # Drawn positions are in object space (the overlay follows the object's current matrix)
+    assert np.max(np.abs(alone.pos[:, 0])) <= 0.5 + 1e-6, "cached positions must be object space, not world space"
+
+    # Opening another file clears the cache (keys are object names)
+    uv_heatmap._on_load_post(None)
+    assert not uv_heatmap._cache and not uv_heatmap._ref_cache, "load_post must clear the heatmap cache"
+
+    print(f"  -> PASS: shape {cache_scaled.shape[0]:.4f}, relative density {cache_scaled.rel_density[0]:.4f}, "
+          f"texture set reference, object space, cleared on load")
 
 
 def test_uv_sheared():
