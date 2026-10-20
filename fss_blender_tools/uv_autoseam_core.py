@@ -206,6 +206,23 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
             if len(no_cut_arr) != nE:
                 raise ValueError(f"no_cut length ({len(no_cut_arr)}) != edge count ({nE})")
 
+        # Map faces to original polygon components across no_cut diagonals
+        poly_id = list(range(nF))
+        if no_cut is not None:
+            def find_p(x):
+                while poly_id[x] != x:
+                    poly_id[x] = poly_id[poly_id[x]]
+                    x = poly_id[x]
+                return x
+            for e in range(nE):
+                if no_cut_arr[e] and len(e_faces[e]) == 2:
+                    p0, p1 = find_p(e_faces[e][0]), find_p(e_faces[e][1])
+                    if p0 != p1:
+                        poly_id[p0] = p1
+            poly_map = [find_p(f) for f in range(nF)]
+        else:
+            poly_map = list(range(nF))
+
         forced = np.zeros(nE, bool)
         why = dict(nonmanifold_or_border=0, normal_split=0, seam=0, material=0)
         for e in bm.edges:
@@ -608,7 +625,8 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
                 if c not in charts or not charts[c]:
                     continue
                 d, ov, U = trial(charts[c])
-                accepted = (d <= THR and not ov)
+                n_c = len(components(sorted(charts[c]), lambda e: not forced[e]))
+                accepted = (d <= THR and not ov and n_c == 1)
                 if accepted:
                     verified[c] = d
                     if last_trial[0]:
@@ -784,69 +802,130 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
             elif d > THR or ov:
                 unver_bad += 1
 
-        # Repair pass
+        # Decision 49: decompose an unverified chart via cuts / seed pieces verified by Angle Based trial unwrap
+        fallback_cuts_count = 0
+        fallback_seed_count = 0
+
+        def get_poly_pca_cuts(fl_sub):
+            cen = P3all[fl_sub].mean(1)
+            w = area3[fl_sub] + 1e-30
+            mu = (cen * w[:, None]).sum(0) / w.sum()
+            C = ((cen - mu) * w[:, None]).T @ (cen - mu)
+            _, axes = np.linalg.eigh(C)
+
+            poly_cens = {}
+            for i, f in enumerate(fl_sub):
+                p = poly_map[f]
+                poly_cens.setdefault(p, []).append(cen[i])
+            if len(poly_cens) <= 1:
+                return []
+
+            for ax_idx in [2, 1]:
+                ax = axes[:, ax_idx]
+                poly_vals = {p: np.mean(poly_cens[p], axis=0) @ ax for p in poly_cens}
+                med = np.median(list(poly_vals.values()))
+                val_map = {f: poly_vals[poly_map[f]] for f in fl_sub}
+
+                cuts = [e for f in fl_sub for e in face_edges[f]
+                        if not forced[e] and not no_cut_arr[e] and len(e_faces[e]) == 2
+                        and (val_map.get(e_faces[e][0], med) <= med) != (val_map.get(e_faces[e][1], med) <= med)]
+                if cuts:
+                    return cuts
+            return []
+
+        def decompose_chart(fl_init):
+            nonlocal fallback_cuts_count, fallback_seed_count
+            fl_init = sorted(fl_init)
+            if len(fl_init) == 1:
+                d, ov, U = trial(fl_init)
+                return [(fl_init, d, U)]
+
+            d, ov, U = trial(fl_init)
+            n_c = len(components(fl_init, lambda e: not forced[e]))
+            if not ov and d <= THR and n_c == 1:
+                return [(fl_init, d, U)]
+
+            # Strategy 1: Seed pieces split (between forced and soft edges)
+            subs = components(fl_init, lambda e: not forced[e] and not soft[e])
+            if len(subs) > 1:
+                fallback_seed_count += 1
+                res = []
+                for sub in subs:
+                    res.extend(decompose_chart(sub))
+                return res
+
+            # Strategy 2: If already a single seed piece, try PCA bisection across original edges
+            cuts = get_poly_pca_cuts(fl_init)
+            if cuts:
+                cand_pieces = components(fl_init, lambda e: not forced[e] and e not in cuts)
+                if len(cand_pieces) > 1:
+                    fallback_cuts_count += 1
+                    res = []
+                    for cp in cand_pieces:
+                        res.extend(decompose_chart(cp))
+                    return res
+
+            # Strategy 3: Normal PCA clustering
+            cen = P3all[fl_init].mean(1)
+            w = area3[fl_init] + 1e-30
+            mu = (cen * w[:, None]).sum(0) / w.sum()
+            C = ((cen - mu) * w[:, None]).T @ (cen - mu)
+            _, axes = np.linalg.eigh(C)
+            nd = FN[fl_init] @ axes
+            dmap = dict(zip(fl_init, np.argmax(np.concatenate([nd, -nd], 1), 1)))
+            norm_pieces = components(fl_init, lambda e: (not forced[e]) and dmap.get(e_faces[e][0]) == dmap.get(e_faces[e][1]))
+            if len(norm_pieces) > 1:
+                fallback_cuts_count += 1
+                res = []
+                for np_piece in norm_pieces:
+                    res.extend(decompose_chart(np_piece))
+                return res
+
+            # Strategy 4: Worst triangle incident cut
+            wf = fl_init[len(fl_init) // 2]
+            cut = [e for e in face_edges[wf] if not forced[e] and not no_cut_arr[e] and len(e_faces[e]) == 2]
+            if cut:
+                worst_pieces = components(fl_init, lambda e: not forced[e] and e not in cut)
+                if len(worst_pieces) > 1:
+                    fallback_cuts_count += 1
+                    res = []
+                    for wp in worst_pieces:
+                        res.extend(decompose_chart(wp))
+                    return res
+
+            d, ov, U = trial(fl_init)
+            return [(fl_init, d, U)]
+
+        # Repair pass per decision 49 (cuts only, no planar projection writes)
         t = time.perf_counter()
-        rep = rep_fail = rep2 = rep_abf = rep_slit = 0
-        for c in [c for c, v in per.items() if v[2] or (c not in verified and v[0] > THR)]:
+        bad_charts = [c for c, v in per.items() if v[2] or (c not in verified and v[0] > THR) or len(components(sorted(charts[c]), lambda e: not forced[e])) > 1]
+        for c in bad_charts:
             fl = sorted(charts[c])
-            n = (FN[fl] * area3[fl, None]).sum(0)
-            n /= max(np.linalg.norm(n), 1e-30)
-            if (FN[fl] @ n).min() > 0.05:
-                groups = [fl]
-            else:
-                cen = P3all[fl].mean(1)
-                w = area3[fl] + 1e-30
-                mu = (cen * w[:, None]).sum(0) / w.sum()
-                C = ((cen - mu) * w[:, None]).T @ (cen - mu)
-                _, axes = np.linalg.eigh(C)
-                nd = FN[fl] @ axes
-                dmap = dict(zip(fl, np.argmax(np.concatenate([nd, -nd], 1), 1)))
-                groups = components(fl, lambda e: (not forced[e]) and dmap.get(e_faces[e][0]) == dmap.get(e_faces[e][1]))
-            queue = [(sorted(g), 0) for g in groups]
-            first = True
-            while queue:
-                g, lvl = queue.pop()
-                select_unwrap(g)
-                U = read_uv(g)
-                d1, m1, o1 = measure(g, U)
-                if o1:
-                    gn = (FN[g] * area3[g, None]).sum(0)
-                    gn /= max(np.linalg.norm(gn), 1e-30)
-                    a = np.cross(gn, [1.0, 0, 0] if abs(gn[0]) < 0.9 else [0, 1.0, 0])
-                    a /= np.linalg.norm(a)
-                    b = np.cross(gn, a)
-                    U = np.stack([P3all[g] @ a, P3all[g] @ b], -1)
-                    d1, m1, o1 = measure(g, U)
-                    if o1 and lvl < 1 and len(g) > 1:
-                        subs = components(g, lambda e: not forced[e] and not soft[e])
-                        if len(subs) > 1:
-                            queue += [(sorted(x), lvl + 1) for x in subs]
-                            rep2 += 1
-                            continue
-                    gs = set(g)
-                    rep_slit += int(any(forced[e] and len(e_faces[e]) == 2 and e_faces[e][0] in gs and e_faces[e][1] in gs
-                                        for f in g for e in face_edges[f]))
-                    write_uv(g, U)
+            decomp = decompose_chart(fl)
+            for i, (pc, d_pc, U_pc) in enumerate(decomp):
+                pc_sorted = sorted(pc)
+                if i == 0:
+                    charts[c] = set(pc)
+                    fc[pc] = c
+                    per[c] = (d_pc, 0.0, False)
+                    verified[c] = d_pc
+                    chart_uv[c] = (tuple(pc_sorted), U_pc)
                 else:
-                    rep_abf += 1
-                if first:
-                    charts[c] = set(g)
-                    per[c] = (d1, m1, o1)
-                    first = False
-                else:
-                    charts[nid[0]] = set(g)
-                    fc[g] = nid[0]
-                    per[nid[0]] = (d1, m1, o1)
+                    new_cid = nid[0]
                     nid[0] += 1
-                rep += 1
-                rep_fail += int(o1)
+                    charts[new_cid] = set(pc)
+                    fc[pc] = new_cid
+                    per[new_cid] = (d_pc, 0.0, False)
+                    verified[new_cid] = d_pc
+                    chart_uv[new_cid] = (tuple(pc_sorted), U_pc)
+        recompute_seams()
         tm['repair'] = time.perf_counter() - t
 
-        # Worst-triangle pass
+        # Worst-triangle pass (Decision 49: NO minimize_stretch)
         t = time.perf_counter()
         worst_before = max(v[1] for v in per.values())
         n_bad_before = sum(1 for v in per.values() if v[1] > WORST)
-        split_ok = ms_ok = 0
+        split_ok = 0
         for c in [c for c, v in per.items() if v[1] > WORST]:
             if time.perf_counter() - T0 > BUDGET * 2:
                 break
@@ -867,7 +946,7 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
                 Rl = sorted(R)
                 dW, mW, oW = measure(Wl, read_uv(Wl))
                 dR, mR, oR = measure(Rl, read_uv(Rl))
-                if max(mW, mR) < m0 and not oW and not oR and dW <= THR and dR <= THR:
+                if max(mW, mR) < m0 and not oW and not oR and dW <= THR and dR <= THR and len(components(Wl, lambda e: not forced[e])) == 1 and len(components(Rl, lambda e: not forced[e])) == 1:
                     charts[nid[0]] = W
                     fc[Wl] = nid[0]
                     charts[c] = R
@@ -875,6 +954,8 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
                         seam[e] = True
                     per[nid[0]] = (dW, mW, False)
                     per[c] = (dR, mR, False)
+                    verified[nid[0]] = dW
+                    verified[c] = dR
                     nid[0] += 1
                     split_ok += 1
                     done = True
@@ -882,16 +963,7 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
                     restore_seams(cut)
                     select_unwrap(fl)
             if not done:
-                select_unwrap(fl)
-                bpy.ops.uv.minimize_stretch(fill_holes=True, blend=0.0, iterations=MS_ITER)
-                bm = bmesh.from_edit_mesh(me)
-                bm.faces.ensure_lookup_table()
-                d1, m1, o1 = measure(fl, read_uv(fl))
-                if m1 < m0 and not o1 and d1 <= THR:
-                    per[c] = (d1, m1, False)
-                    ms_ok += 1
-                else:
-                    write_uv(fl, saved)
+                write_uv(fl, saved)
         tm['worst'] = time.perf_counter() - t
 
         # Ring / frame straightening with frame protection
@@ -1079,6 +1151,67 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
                 frame_ok += 1
         tm['ringframe'] = time.perf_counter() - t
 
+        # Step 3: Final gate in the core
+        # Unwrap the whole work object once with the final seams;
+        # every island checked for overlaps and the shape limits, failures go back to step 2;
+        # the returned UVs are this unwrap.
+        t_fg = time.perf_counter()
+        gate_rounds = 0
+        gate_repaired = 0
+        while gate_rounds < 10:
+            gate_rounds += 1
+            recompute_seams()
+            bm = bmesh.from_edit_mesh(me)
+            bm.faces.ensure_lookup_table()
+            bm.edges.ensure_lookup_table()
+            bm.verts.ensure_lookup_table()
+            for f in bm.faces: f.select = True
+            for v in bm.verts: v.select = True
+            for e in bm.edges:
+                e.select = True
+                e.seam = bool(seam[e.index])
+            bmesh.update_edit_mesh(me, loop_triangles=False, destructive=False)
+            bpy.ops.uv.unwrap(method=METHOD, fill_holes=False, correct_aspect=True, margin_method='FRACTION', margin=0.0)
+            bm = bmesh.from_edit_mesh(me)
+            bm.faces.ensure_lookup_table()
+
+            uv_layer = bm.loops.layers.uv.active
+            U_all = np.array([[l[uv_layer].uv[:] for l in bm.faces[f].loops] for f in range(nF)], np.float64)
+
+            # Check every chart in this whole-object unwrap
+            failing = []
+            for c, fs in list(charts.items()):
+                fl = sorted(fs)
+                U_c = U_all[fl]
+                d, dmax, ov = measure(fl, U_c)
+                n_c = len(components(fl, lambda e: not forced[e]))
+                if ov or d > THR or n_c > 1:
+                    failing.append(c)
+
+            if not failing:
+                break
+
+            gate_repaired += len(failing)
+            for c in failing:
+                fl = sorted(charts[c])
+                decomp = decompose_chart(fl)
+                for i, (pc, d_pc, U_pc) in enumerate(decomp):
+                    pc_sorted = sorted(pc)
+                    if i == 0:
+                        charts[c] = set(pc)
+                        fc[pc] = c
+                        per[c] = (d_pc, 0.0, False)
+                        verified[c] = d_pc
+                    else:
+                        new_cid = nid[0]
+                        nid[0] += 1
+                        charts[new_cid] = set(pc)
+                        fc[pc] = new_cid
+                        per[new_cid] = (d_pc, 0.0, False)
+                        verified[new_cid] = d_pc
+
+        tm['final_gate'] = time.perf_counter() - t_fg
+
         # Seam extraction: switch to Object Mode to update polygon loops
         bmesh.update_edit_mesh(me, loop_triangles=True, destructive=False)
         bpy.ops.object.mode_set(mode='OBJECT')
@@ -1113,6 +1246,10 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
             ring_cuts=ring_ok,
             wall_fallback=wall_fallback_applied,
             frame_protected_skipped=frame_protected_skipped,
+            fallback_cuts=fallback_cuts_count,
+            fallback_seed=fallback_seed_count,
+            gate_repaired=gate_repaired,
+            gate_rounds=gate_rounds,
             stage_time=tm,
             time=time.perf_counter() - T0,
             uv=loop_uvs,
