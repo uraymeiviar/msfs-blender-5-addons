@@ -9,7 +9,8 @@ from bpy_extras.view3d_utils import location_3d_to_region_2d
 from gpu_extras.batch import batch_for_shader
 from mathutils import Vector
 
-from . import lod_model, lod_rules
+from bpy.app.handlers import persistent
+from . import lod_model, lod_rules, uv_heatmap
 
 LOD_KEY = lod_model.HIDE_KEY
 LOD_HIDDEN_KEY = lod_model.HIDDEN_KEY
@@ -147,8 +148,13 @@ def _apply_plan_level(context, plan, level):
         scene.fss_lod_settings.preview_error = f'LOD{level:02}: not written (first empty LOD{plan["write_count"]:02})'
     for obj in context.view_layer.objects:
         if obj.name not in present and obj.visible_get(view_layer=context.view_layer):
-            obj[LOD_HIDDEN_KEY] = True
-            obj.hide_set(True, view_layer=context.view_layer)
+            orig = obj.display_type
+            if hasattr(uv_heatmap, '_display_original') and obj.name in uv_heatmap._display_original:
+                orig = uv_heatmap._display_original.pop(obj.name)
+                if hasattr(uv_heatmap, '_display_active'):
+                    uv_heatmap._display_active.discard(obj.name)
+            obj[LOD_HIDDEN_KEY] = orig
+            obj.display_type = 'BOUNDS'
     wm = getattr(context, 'window_manager', None)
     if wm is not None:
         for window in wm.windows:
@@ -1009,6 +1015,28 @@ class FSS_PT_LodExportAdvanced(bpy.types.Panel):
                     layout.prop(settings, 'min_sizes_' + target, index=level, text=f'LOD{level:02}')
 
 
+@persistent
+def _on_save_pre(*_dummy):
+    lod_model.restore_filter(bpy.context)
+
+
+@persistent
+def _on_save_post(*_dummy):
+    context = bpy.context
+    scene = getattr(context, 'scene', None)
+    if scene is not None:
+        if getattr(scene, 'fss_viewport_lod_auto', False) or scene.fss_viewport_lod >= 0:
+            apply_viewport_lod(context)
+
+
+@persistent
+def _on_load_post(*_dummy):
+    _stop_auto_timer()
+    lod_model.restore_filter(bpy.context)
+    for scene in bpy.data.scenes:
+        scene.fss_viewport_lod = -1
+
+
 CLASSES = (FSS_LodHintItem, FSS_LodSettings, FSS_OT_LodRefresh, FSS_OT_LodSelectHint, FSS_OT_LodInspectLevel,
            FSS_OT_SetObjectLod, FSS_OT_SetViewportLod, FSS_OT_LodPrintSettings,
            FSS_OT_LodEditTable, FSS_PT_Lod, FSS_PT_LodQuotaHints, FSS_PT_LodExport, FSS_PT_LodExportAdvanced)
@@ -1030,11 +1058,22 @@ def register():
         _text_handle = bpy.types.SpaceView3D.draw_handler_add(_draw_viewport_lod_text, (), 'WINDOW', 'POST_PIXEL')
         for draw, kind in ((_draw_lod_sphere, 'POST_VIEW'), (_draw_lod_sphere_labels, 'POST_PIXEL')):
             _sphere_handles.append(bpy.types.SpaceView3D.draw_handler_add(draw, (), 'WINDOW', kind))
+    for handlers, handler in ((bpy.app.handlers.save_pre, _on_save_pre),
+                              (bpy.app.handlers.save_post, _on_save_post),
+                              (bpy.app.handlers.load_post, _on_load_post)):
+        if handler not in handlers:
+            handlers.append(handler)
 
 
 def unregister():
     global _text_handle
     _stop_auto_timer()
+    lod_model.restore_filter(bpy.context)
+    for handlers, handler in ((bpy.app.handlers.save_pre, _on_save_pre),
+                              (bpy.app.handlers.save_post, _on_save_post),
+                              (bpy.app.handlers.load_post, _on_load_post)):
+        if handler in handlers:
+            handlers.remove(handler)
     if _text_handle is not None:
         bpy.types.SpaceView3D.draw_handler_remove(_text_handle, 'WINDOW')
         _text_handle = None

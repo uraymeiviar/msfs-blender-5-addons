@@ -25,13 +25,27 @@ def mark(obj, key):
     return max(0, min(6, int(value))) if isinstance(value, (int, float)) else 0
 
 
-def restore_filter(context):
-    """Only restore objects hidden by us, including a filter saved in the blend."""
-    for obj in context.view_layer.objects:
-        if obj.get(HIDDEN_KEY):
-            obj.hide_set(False, view_layer=context.view_layer)
+def restore_filter(context=None):
+    """Restore objects modified by the viewport LOD preview, including a filter saved in the blend."""
+    ctx = context or getattr(bpy, 'context', None)
+    view_layer = getattr(ctx, 'view_layer', None) if ctx else None
+    for obj in getattr(bpy.data, 'objects', ()):
+        if HIDDEN_KEY in obj:
+            val = obj[HIDDEN_KEY]
+            if isinstance(val, str):
+                if obj.display_type == 'BOUNDS':
+                    obj.display_type = val
+            else:
+                if view_layer is not None:
+                    try:
+                        obj.hide_set(False, view_layer=view_layer)
+                    except RuntimeError:
+                        obj.hide_set(False)
+                else:
+                    obj.hide_set(False)
             del obj[HIDDEN_KEY]
-    context.view_layer.update()
+    if view_layer is not None:
+        view_layer.update()
 
 
 def _bounds(points):

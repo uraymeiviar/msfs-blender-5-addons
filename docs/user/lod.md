@@ -55,16 +55,16 @@ When to use them:
 
 The **Viewport LOD** row shows in the viewport what an export would put in each file.
 
-- **0** to **6:** hides every object that is not in that LOD file. The bottom-left corner of the viewport says "Filtered by LODn".
+- **0** to **6:** displays objects absent from that LOD file as bounding boxes (`Bounds`); objects in that LOD keep their normal display. The bottom-left corner of the viewport says "Filtered by LODn".
 - **Auto:** picks the LOD from the current view, as MSFS would: it measures how large the LOD sphere is on screen (from the view's field of view and distance) and switches the filter when the LOD changes. The viewport shows "Auto LODn (ratio)", the panel "Auto: LODnn (screen ratio ...)". After a **Refresh LOD Counts** it also accounts for the vertex counts, as MSFS does (MSFS 2024 only).
-- **Off:** shows again every object the filter hid. Objects you hid yourself stay hidden.
+- **Off:** restores the original display types of previewed objects. Objects you had set to Wire or Bounds yourself keep that setting.
 
 Notes:
 
-- The preview hides whole objects. Loose pieces that the export drops are not shown in the viewport, only counted in the panel.
+- The preview shows absent objects as boxes. Loose pieces that the export drops are not shown in the viewport, only counted in the panel.
 - Choosing a LOD after the last written one shows "LODnn: not written (first empty LODmm)".
 - The preview only looks at **visible** objects, as the export does. Hidden objects are not part of the model.
-- **Set Viewport LOD to Off before you save.** The filter hides objects with Blender's normal hide, and that is saved with the file. The LOD deploy clears it, but other exports (for example a single-file deploy) skip every hidden object.
+- **Files are saved without the preview:** the preview is undone before saving and restored afterwards. Opening a file saved with a preview (including older files with hidden objects) cleans it and sets **Viewport LOD** to **Off**, so all objects stay visible to every export path.
 
 ## Refresh LOD Counts
 
@@ -223,7 +223,7 @@ It ends with the vertex count of the file, the screen range the LOD is meant for
 
 - **Forgot to Refresh:** cut-offs, counts, hints and the LOD sphere are from the last **Refresh LOD Counts**. The export always measures again, so it is correct, but the panel may be out of date.
 - **Far origins:** the most common cause of LODs switching at strange distances. Check the warning in **Export Settings** and **Show LOD Sphere**.
-- **Viewport filter saved in the file:** set **Viewport LOD** to **Off** before saving.
+- **Files saved with a preview:** files are saved without the preview; opening any file resets **Viewport LOD** to **Off** and restores original display types.
 - **Important small parts disappear:** give them **Keep** (or a tag with **Keep**).
 - **A LOD stays red although many parts are hidden:** the vertices sit in a few large meshes. Hide those meshes from that LOD, or split them; the tools do not reduce polygons.
 - **Interior export stops with "exterior diameter missing":** enter **Exterior Diameter (m)**.
