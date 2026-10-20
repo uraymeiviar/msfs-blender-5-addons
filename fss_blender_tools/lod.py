@@ -146,8 +146,14 @@ def _apply_plan_level(context, plan, level):
     present = plan['decisions'][level].present if level < plan['write_count'] else set()
     if level >= plan['write_count']:
         scene.fss_lod_settings.preview_error = f'LOD{level:02}: not written (first empty LOD{plan["write_count"]:02})'
+    hide = getattr(scene, 'fss_lod_preview_display', 'HIDDEN') == 'HIDDEN'
     for obj in context.view_layer.objects:
         if obj.name not in present and obj.visible_get(view_layer=context.view_layer):
+            if hide:
+                # hidden (the clean preview); save_pre and load_post undo it, so a saved file never keeps it
+                obj[LOD_HIDDEN_KEY] = True
+                obj.hide_set(True, view_layer=context.view_layer)
+                continue
             orig = obj.display_type
             if hasattr(uv_heatmap, '_display_original') and obj.name in uv_heatmap._display_original:
                 orig = uv_heatmap._display_original.pop(obj.name)
@@ -784,6 +790,12 @@ class FSS_PT_Lod(bpy.types.Panel):
         for level in range(7):
             row.operator('fss.set_viewport_lod', text=str(level),
                          depress=context.scene.fss_viewport_lod == level).level = level
+        row = layout.row(align=True)
+        row.label(text='Excluded')
+        row.prop(context.scene, 'fss_lod_preview_display', expand=True)
+        previewing = is_auto or context.scene.fss_viewport_lod >= 0
+        if previewing and context.scene.fss_lod_preview_display == 'HIDDEN':
+            layout.label(text='Excluded objects hidden: set Viewport LOD Off before exporting by hand', icon='INFO')
         if is_auto and not context.scene.fss_lod_settings.preview_error:
             lvl = max(0, context.scene.fss_viewport_lod)
             layout.label(text=f'Auto: LOD{lvl:02} (screen ratio {_auto_state["last_ratio"]:.1%})', icon='VIEWZOOM')
@@ -1015,6 +1027,11 @@ class FSS_PT_LodExportAdvanced(bpy.types.Panel):
                     layout.prop(settings, 'min_sizes_' + target, index=level, text=f'LOD{level:02}')
 
 
+def _on_preview_display_change(self, context):
+    if getattr(self, 'fss_viewport_lod_auto', False) or self.fss_viewport_lod >= 0:
+        apply_viewport_lod(context)
+
+
 @persistent
 def _on_save_pre(*_dummy):
     lod_model.restore_filter(bpy.context)
@@ -1049,6 +1066,11 @@ def register():
     bpy.types.Scene.fss_lod_settings = bpy.props.PointerProperty(type=FSS_LodSettings)
     bpy.types.Scene.fss_viewport_lod = bpy.props.IntProperty(default=-1, min=-1, max=6)
     bpy.types.Scene.fss_viewport_lod_auto = bpy.props.BoolProperty(default=False, options={'SKIP_SAVE'})
+    bpy.types.Scene.fss_lod_preview_display = bpy.props.EnumProperty(
+        name='Excluded', default='HIDDEN', update=_on_preview_display_change,
+        description='How the viewport LOD preview shows objects that are not in the previewed LOD',
+        items=[('HIDDEN', 'Hidden', 'Hide them: a clean view of what the LOD keeps'),
+               ('BOUNDS', 'Bounds', 'Show them as box outlines: where the excluded parts are')])
     bpy.types.Scene.fss_lod_export_level = bpy.props.IntProperty(default=-1, min=-1, max=6, options={'SKIP_SAVE'})
     bpy.types.Scene.fss_lod_show_sphere = bpy.props.BoolProperty(
         name='Show LOD Sphere', default=False, options={'SKIP_SAVE'},
@@ -1079,7 +1101,8 @@ def unregister():
         _text_handle = None
     while _sphere_handles:
         bpy.types.SpaceView3D.draw_handler_remove(_sphere_handles.pop(), 'WINDOW')
-    for name in ('fss_lod_settings', 'fss_viewport_lod', 'fss_viewport_lod_auto', 'fss_lod_export_level',
+    for name in ('fss_lod_settings', 'fss_viewport_lod', 'fss_viewport_lod_auto', 'fss_lod_preview_display',
+                 'fss_lod_export_level',
                  'fss_lod_show_sphere'):
         delattr(bpy.types.Scene, name)
     for cls in reversed(CLASSES):

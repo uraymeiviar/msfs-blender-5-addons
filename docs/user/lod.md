@@ -55,13 +55,15 @@ When to use them:
 
 The **Viewport LOD** row shows in the viewport what an export would put in each file.
 
-- **0** to **6:** displays objects absent from that LOD file as bounding boxes (`Bounds`); objects in that LOD keep their normal display. The bottom-left corner of the viewport says "Filtered by LODn".
+- **0** to **6:** shows what that LOD file keeps; objects absent from it are hidden or shown as boxes, as **Excluded** says (below). The bottom-left corner of the viewport says "Filtered by LODn".
 - **Auto:** picks the LOD from the current view, as MSFS would: it measures how large the LOD sphere is on screen (from the view's field of view and distance) and switches the filter when the LOD changes. The viewport shows "Auto LODn (ratio)", the panel "Auto: LODnn (screen ratio ...)". After a **Refresh LOD Counts** it also accounts for the vertex counts, as MSFS does (MSFS 2024 only).
-- **Off:** restores the original display types of previewed objects. Objects you had set to Wire or Bounds yourself keep that setting.
+- **Off:** shows every object again, with its own display setting. Objects you had set to Wire or Bounds yourself keep that setting.
+- **Excluded: Hidden / Bounds:** how the preview shows objects absent from the previewed LOD. **Hidden** (default) gives a clean view of what the LOD keeps; **Bounds** shows them as box outlines, to see where the excluded parts are. While **Hidden** is in use, the panel reminds you to set Viewport LOD to **Off** before exporting by hand from Blender, because exporting only visible objects would leave the hidden ones out.
 
 Notes:
 
-- The preview shows absent objects as boxes. Loose pieces that the export drops are not shown in the viewport, only counted in the panel.
+- Loose pieces that the export drops are not shown in the viewport, only counted in the panel.
+- Saving the file undoes the preview first and puts it back afterwards, and opening a file switches it off, so a saved file always contains every object as you made it. The deploy scripts therefore always export the full model.
 - Choosing a LOD after the last written one shows "LODnn: not written (first empty LODmm)".
 - The preview only looks at **visible** objects, as the export does. Hidden objects are not part of the model.
 - **Files are saved without the preview:** the preview is undone before saving and restored afterwards. Opening a file saved with a preview (including older files with hidden objects) cleans it and sets **Viewport LOD** to **Off**, so all objects stay visible to every export path.

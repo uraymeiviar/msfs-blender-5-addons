@@ -48,6 +48,7 @@ def clean_scene():
     scene.unit_settings.scale_length = 1.0
     scene.fss_viewport_lod = -1
     scene.fss_viewport_lod_auto = False
+    scene.fss_lod_preview_display = 'BOUNDS'  # most tests check the bounds preview; the hidden one has its own
     return scene
 
 
@@ -427,6 +428,33 @@ def test_heatmap_and_preview_coexistence():
     print("  -> PASS: All combinations of heatmap and preview takeover restore artist's display type.")
 
 
+def test_hidden_preview_saved_clean():
+    """The default Hidden preview hides absent objects in the session, but a saved file keeps every object visible."""
+    print("Test 7: Hidden preview: hidden in the session, saved file clean, single-file export complete...")
+    clean_scene()
+    scene = bpy.context.scene
+    scene.fss_lod_preview_display = 'HIDDEN'
+    SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
+    path = SCRATCH_DIR / "hidden_preview_saved.blend"
+    keep = create_mesh_cube("Keep", size=2.0)
+    absent = create_mesh_cube("Absent", size=0.2, location=(3, 0, 0), display_type='SOLID')
+    absent['fss_lod'] = 1
+    scene.fss_viewport_lod = 1
+    lod.apply_viewport_lod(bpy.context)
+    assert not absent.visible_get() and absent.display_type == 'SOLID', "Hidden mode hides, display type untouched"
+    assert keep.visible_get()
+
+    bpy.ops.wm.save_as_mainfile(filepath=str(path))
+    assert not absent.visible_get(), "after saving, the preview is re-applied in the session"
+    bpy.ops.wm.open_mainfile(filepath=str(path))
+    scene = bpy.context.scene
+    names = {obj.name for obj in scene.objects if obj.visible_get()}
+    assert {"Keep", "Absent"} <= names, f"saved file must keep every object visible, visible: {names}"
+    assert scene.fss_viewport_lod == -1
+    assert lod_model.HIDDEN_KEY not in bpy.data.objects["Absent"], "no preview marker in the saved file"
+    print("  -> PASS: hidden in the session, every object visible in the saved file.")
+
+
 def main():
     print("=" * 70)
     print("RUNNING VIEWPORT LOD PREVIEW & DISPLAY TAKEOVER TESTS")
@@ -438,6 +466,7 @@ def main():
         test_legacy_file_cleaned_on_open()
         test_single_file_export_contains_all_objects()
         test_heatmap_and_preview_coexistence()
+        test_hidden_preview_saved_clean()
         print("=" * 70)
         print("ALL LOD PREVIEW TESTS PASSED SUCCESSFULLY.")
         print("=" * 70)

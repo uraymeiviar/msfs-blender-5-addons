@@ -87,11 +87,11 @@ no objects and is not written. The first empty LOD ends the list; later visible-
 not more files. FS20 has its own table, initially following FS24, with its second-to-last entry at least 1 percent;
 FS20 values remain unverified in the simulator.
 
-Viewport buttons 0–6 preview the same object membership as export (whole objects only, absent objects displayed as
-bounds; dropped loose pieces are counted in the panel and removed at export); **Auto** computes the model's
+Viewport buttons 0–6 preview the same object membership as export (whole objects only, absent objects hidden or displayed as bounds,
+`fss_lod_preview_display`; dropped loose pieces are counted in the panel and removed at export); **Auto** computes the model's
 bounding-sphere screen ratio from the active 3D viewport (vertical FOV and camera distance, matching
 `lod_tools_msfs_2024`), picks the LOD from the `minSize` table, and applies the filter only when the active LOD
-changes. **Off** restores original display types. The preview is restored before saving and on file load, so saved files
+changes. **Off** unhides and restores original display types. The preview is restored before saving and on file load, so saved files
 never carry it and all export paths see visible objects. **Refresh LOD Counts** caches object
 counts, cut-offs, estimated glTF vertex counts (accounting for UV/normal corner splits, piece dropping, and shared
 instances), High quotas, and per-LOD hints in the **Quota and Hints** subpanel (**Largest Contributors**, **Loose
