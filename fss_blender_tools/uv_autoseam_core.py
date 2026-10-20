@@ -135,13 +135,15 @@ def _overlap_pairs(U, eps_rel=1e-6, max_pairs_chunk=200000):
     return np.concatenate(res) if res else np.zeros((0, 2), np.int64)
 
 
-def propose_seams(obj, artist_seam, normal_split=None):
+def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
     """Propose automatic UV seams on obj.
 
     Parameters:
         obj: bpy.types.Object in OBJECT mode, active in current view layer.
         artist_seam: boolean sequence of length len(obj.data.edges); True for artist seams.
         normal_split: optional boolean sequence of length len(obj.data.edges); True for shading splits.
+        no_cut: optional boolean sequence of length len(obj.data.edges); True for edges that must
+                never be cut or act as chart boundaries (e.g. triangulation diagonals).
 
     Returns:
         (auto_seam_edges, stats):
@@ -197,9 +199,18 @@ def propose_seams(obj, artist_seam, normal_split=None):
         e_verts = np.array([[v.index for v in e.verts] for e in bm.edges])
         face_edges = [[e.index for e in f.edges] for f in bm.faces]
 
+        if no_cut is None:
+            no_cut_arr = np.zeros(nE, bool)
+        else:
+            no_cut_arr = np.asarray(no_cut, bool)
+            if len(no_cut_arr) != nE:
+                raise ValueError(f"no_cut length ({len(no_cut_arr)}) != edge count ({nE})")
+
         forced = np.zeros(nE, bool)
         why = dict(nonmanifold_or_border=0, normal_split=0, seam=0, material=0)
         for e in bm.edges:
+            if no_cut_arr[e.index]:
+                continue
             lf = e.link_faces
             if len(lf) != 2:
                 forced[e.index] = True
@@ -255,7 +266,7 @@ def propose_seams(obj, artist_seam, normal_split=None):
             if len(e_faces[e.index]) == 2:
                 ang = e.calc_face_angle(0.0)
                 edge_dihedral[e.index] = ang
-                if not forced[e.index] and ang > SOFT_RAD:
+                if not forced[e.index] and not no_cut_arr[e.index] and ang > SOFT_RAD:
                     soft[e.index] = True
 
         def components(face_list, edge_ok):
@@ -272,7 +283,9 @@ def propose_seams(obj, artist_seam, normal_split=None):
             for f in fl:
                 for e in face_edges[f]:
                     ef = e_faces[e]
-                    if len(ef) != 2 or not edge_ok(e):
+                    if len(ef) != 2:
+                        continue
+                    if not (no_cut_arr[e] or edge_ok(e)):
                         continue
                     g = ef[0] if ef[1] == f else ef[1]
                     if g in inset:
@@ -298,7 +311,7 @@ def propose_seams(obj, artist_seam, normal_split=None):
         def recompute_seams():
             for e in range(nE):
                 ef = e_faces[e]
-                seam[e] = forced[e] or (e in internal_seams) or (len(ef) == 2 and fc[ef[0]] != fc[ef[1]])
+                seam[e] = not no_cut_arr[e] and (forced[e] or (e in internal_seams) or (len(ef) == 2 and fc[ef[0]] != fc[ef[1]]))
             bm.edges.ensure_lookup_table()
             for e in bm.edges:
                 e.seam = bool(seam[e.index])
@@ -479,7 +492,7 @@ def propose_seams(obj, artist_seam, normal_split=None):
             groups = components(sorted(fs), lambda e: not forced[e])
             if len(groups) >= len(children):
                 return children
-            cuts = [e for e in range(nE) if not forced[e] and len(e_faces[e]) == 2
+            cuts = [e for e in range(nE) if not forced[e] and not no_cut_arr[e] and len(e_faces[e]) == 2
                     and all(f in fs for f in e_faces[e])]
             valid = True
             cand_results = []
@@ -573,6 +586,9 @@ def propose_seams(obj, artist_seam, normal_split=None):
                         new_cost += weight * (fc[other] != d)
                     improve = new_cost < old_cost - 1e-12
                     if k >= 2 and improve and len(charts[fc[f]]) > 1:
+                        if any(no_cut_arr[edge] and fc[e_faces[edge][0] if e_faces[edge][1] == f else e_faces[edge][1]] != d
+                               for edge in face_edges[f] if len(e_faces[edge]) == 2):
+                            continue
                         charts[fc[f]].discard(f)
                         charts[d].add(f)
                         fc[f] = d
@@ -648,7 +664,7 @@ def propose_seams(obj, artist_seam, normal_split=None):
             corner_edges = []
             for f in wall_faces:
                 for e in face_edges[f]:
-                    if forced[e]:
+                    if forced[e] or no_cut_arr[e]:
                         continue
                     ef = e_faces[e]
                     if len(ef) != 2:
@@ -700,7 +716,7 @@ def propose_seams(obj, artist_seam, normal_split=None):
                 hinge_edges = []
                 for f in wall_faces:
                     for e in face_edges[f]:
-                        if forced[e]:
+                        if forced[e] or no_cut_arr[e]:
                             continue
                         ef = e_faces[e]
                         if len(ef) != 2:
@@ -844,7 +860,7 @@ def propose_seams(obj, artist_seam, normal_split=None):
             if len(sub) > 1:
                 W = set(next(s for s in sub if wf in s))
                 R = set(fl) - W
-                cut = [e for f in W for e in face_edges[f] if len(e_faces[e]) == 2 and
+                cut = [e for f in W for e in face_edges[f] if not no_cut_arr[e] and len(e_faces[e]) == 2 and
                        (e_faces[e][0] in R or e_faces[e][1] in R)]
                 select_unwrap(fl, set_edges=cut)
                 Wl = sorted(W)
@@ -952,7 +968,7 @@ def propose_seams(obj, artist_seam, normal_split=None):
             adj = {}
             for f in fl:
                 for e in face_edges[f]:
-                    if forced[e] or sum(1 for x in e_faces[e] if x in S) != 2:
+                    if forced[e] or no_cut_arr[e] or sum(1 for x in e_faces[e] if x in S) != 2:
                         continue
                     a_, b_ = int(e_verts[e][0]), int(e_verts[e][1])
                     adj.setdefault(a_, []).append((b_, e))
@@ -1083,12 +1099,15 @@ def propose_seams(obj, artist_seam, normal_split=None):
 
         auto_seam_edges = []
         for e in me.edges:
+            if no_cut_arr[e.index]:
+                continue
             es = sides[e.index]
             if len(es) == 2 and es[0] != es[1] and not artist_seam[e.index]:
                 auto_seam_edges.append(e.index)
 
         stats = dict(
             charts=len(charts),
+            chart_faces=[sorted(fs) for fs in charts.values()],
             wall_cuts=wall_cuts_applied,
             frame_cuts=frame_ok,
             ring_cuts=ring_ok,

@@ -103,22 +103,28 @@ def get_shading_splits(obj):
         bpy.context.view_layer.update()
 
 
-def propose(obj, cache=None):
+def propose(obj, cache=None, measurement_arrays=False, use_temp_scene=True, **kwargs):
     """Propose automatic UV seams on obj without modifying the object or mesh.
 
     Parameters:
         obj: bpy.types.Object of type 'MESH'.
         cache: optional dict mapping mesh datablock to (proposal, diagonal_cuts, report).
                If provided and obj.data has already been processed, returns the cached result.
+        measurement_arrays: bool (default False). When True, includes P, T, UV, NT, SE
+                            and work seam/nsplit arrays in report for benchmark runner.
+        use_temp_scene: bool (default True). When True, runs propose_seams inside an isolated
+                        temporary scene containing only the work object for speed.
 
     Returns:
         (proposed_orig_edges, diagonal_cuts, report):
             proposed_orig_edges: list of edge indices on obj.data.edges proposed as seams.
             diagonal_cuts: count of proposed seam cuts on internal triangulation diagonals
-                           (which cannot be written to original quad/ngon edges).
+                           (which cannot be written to original quad/ngon edges; 0 with no_cut).
             report: dictionary containing modifier info, topology check, face counts,
                     diagonal counts, shading splits method/count, warnings, and core stats.
     """
+    if kwargs.get('return_measurement_arrays', False):
+        measurement_arrays = True
     if obj is None or obj.type != 'MESH':
         raise ValueError(f"Object '{obj}' is not a valid mesh object")
     orig_me = obj.data
@@ -164,6 +170,8 @@ def propose(obj, cache=None):
 
     work_me = None
     work_obj = None
+    temp_scene = None
+    orig_scene = None
 
     try:
         # Build temporary work mesh before all modifiers, transformed to world space
@@ -171,12 +179,16 @@ def propose(obj, cache=None):
         work_me.name = f"__fss_autoseam_work_{orig_me.name}__"
         work_me.transform(obj.matrix_world)
 
-        # Triangulate with bmesh
+        # Triangulate with bmesh, tracking original polygon per triangle
         bm = bmesh.new()
         bm.from_mesh(work_me)
         faces_before = len(bm.faces)
+        poly_layer = bm.faces.layers.int.new("__orig_poly__")
+        for f in bm.faces:
+            f[poly_layer] = f.index
         bmesh.ops.triangulate(bm, faces=bm.faces[:])
         faces_after = len(bm.faces)
+        tri_to_orig_poly = np.array([f[poly_layer] for f in bm.faces], dtype=np.int64)
         bm.to_mesh(work_me)
         bm.free()
 
@@ -189,6 +201,7 @@ def propose(obj, cache=None):
         work_to_orig = [None] * len(work_me.edges)
         work_artist_seam = np.zeros(len(work_me.edges), bool)
         work_nsplit = np.zeros(len(work_me.edges), bool)
+        work_no_cut = np.zeros(len(work_me.edges), bool)
 
         orig_seams = np.zeros(len(orig_me.edges), bool)
         orig_me.edges.foreach_get('use_seam', orig_seams)
@@ -203,15 +216,24 @@ def propose(obj, cache=None):
                 work_nsplit[we.index] = nsplit[oe_idx]
             else:
                 total_diagonals += 1
+                work_no_cut[we.index] = True
 
-        # Create temporary work object in scene
+        # Create temporary work object
         work_obj = bpy.data.objects.new(f"__fss_autoseam_work_{obj.name}__", work_me)
-        bpy.context.scene.collection.objects.link(work_obj)
-        bpy.context.view_layer.objects.active = work_obj
-        work_obj.select_set(True)
+        if use_temp_scene:
+            orig_scene = bpy.context.scene
+            temp_scene = bpy.data.scenes.new(f"__fss_autoseam_temp_scene_{obj.name}__")
+            temp_scene.collection.objects.link(work_obj)
+            bpy.context.window.scene = temp_scene
+            temp_scene.view_layers[0].objects.active = work_obj
+            work_obj.select_set(True)
+        else:
+            bpy.context.scene.collection.objects.link(work_obj)
+            bpy.context.view_layer.objects.active = work_obj
+            work_obj.select_set(True)
 
-        # Run core propose_seams
-        auto_edges, stats = propose_seams(work_obj, work_artist_seam, work_nsplit)
+        # Run core propose_seams passing diagonals as no_cut
+        auto_edges, stats = propose_seams(work_obj, work_artist_seam, work_nsplit, no_cut=work_no_cut)
 
         # Map proposed cuts back to original edges; count cuts on diagonals
         proposed_orig_edges = []
@@ -224,27 +246,34 @@ def propose(obj, cache=None):
                 diagonal_cuts += 1
         proposed_orig_edges.sort()
 
-        # Extract geometry and split topology for evaluation before work mesh cleanup
-        P = np.zeros(len(work_me.vertices) * 3, np.float64)
-        work_me.vertices.foreach_get('co', P)
-        P = P.reshape(-1, 3)
+        # Map core charts to original polygon sets via seam-partitioned components
+        auto_set = set(auto_edges)
+        par = list(range(len(work_me.polygons)))
 
-        T = np.zeros(len(work_me.polygons) * 3, np.int64)
-        work_me.polygons.foreach_get('vertices', T)
-        T = T.reshape(-1, 3)
+        def find(i):
+            while par[i] != i:
+                par[i] = par[par[i]]
+                i = par[i]
+            return i
 
-        UV = stats['uv'].reshape(-1, 3, 2)
+        e_faces = [[] for _ in work_me.edges]
+        for f in work_me.polygons:
+            for li in f.loop_indices:
+                e_faces[work_me.loops[li].edge_index].append(f.index)
 
-        # Build NT (normal-split triangle corners) and SE (artist seam vertex pairs)
-        bm_split = bmesh.new()
-        bm_split.from_mesh(work_me)
-        bm_split.edges.ensure_lookup_table()
-        SE = np.array([[e.verts[0].index, e.verts[1].index] for e in bm_split.edges if work_artist_seam[e.index]], dtype=np.int64).reshape(-1, 2)
-        bmesh.ops.split_edges(bm_split, edges=[e for e in bm_split.edges if work_nsplit[e.index] and len(e.link_faces) == 2])
-        bm_split.verts.index_update()
-        bm_split.faces.ensure_lookup_table()
-        NT = np.array([[v.index for v in f.verts] for f in bm_split.faces], dtype=np.int64)
-        bm_split.free()
+        for e_idx, ef in enumerate(e_faces):
+            if len(ef) == 2 and not work_artist_seam[e_idx] and (e_idx not in auto_set):
+                f0, f1 = ef
+                if work_me.polygons[f0].material_index == work_me.polygons[f1].material_index:
+                    r0, r1 = find(f0), find(f1)
+                    if r0 != r1:
+                        par[r0] = r1
+
+        groups = {}
+        for i in range(len(work_me.polygons)):
+            groups.setdefault(find(i), set()).add(int(tri_to_orig_poly[i]))
+
+        core_chart_polys = [frozenset(s) for s in groups.values()]
 
         report = {
             'object': obj.name,
@@ -263,14 +292,41 @@ def propose(obj, cache=None):
             'warnings': warnings,
             'time': stats.get('time', 0.0),
             'stats': stats,
-            'P': P,
-            'T': T,
-            'UV': UV,
-            'NT': NT,
-            'SE': SE,
-            'work_artist_seam': work_artist_seam,
-            'work_nsplit': work_nsplit,
+            'core_chart_polys': core_chart_polys,
+            'tri_to_orig_poly': tri_to_orig_poly,
         }
+
+        if measurement_arrays:
+            # Extract geometry and split topology for benchmark evaluation
+            P = np.zeros(len(work_me.vertices) * 3, np.float64)
+            work_me.vertices.foreach_get('co', P)
+            P = P.reshape(-1, 3)
+
+            T = np.zeros(len(work_me.polygons) * 3, np.int64)
+            work_me.polygons.foreach_get('vertices', T)
+            T = T.reshape(-1, 3)
+
+            UV = stats['uv'].reshape(-1, 3, 2)
+
+            bm_split = bmesh.new()
+            bm_split.from_mesh(work_me)
+            bm_split.edges.ensure_lookup_table()
+            SE = np.array([[e.verts[0].index, e.verts[1].index] for e in bm_split.edges if work_artist_seam[e.index]], dtype=np.int64).reshape(-1, 2)
+            bmesh.ops.split_edges(bm_split, edges=[e for e in bm_split.edges if work_nsplit[e.index] and len(e.link_faces) == 2])
+            bm_split.verts.index_update()
+            bm_split.faces.ensure_lookup_table()
+            NT = np.array([[v.index for v in f.verts] for f in bm_split.faces], dtype=np.int64)
+            bm_split.free()
+
+            report.update({
+                'P': P,
+                'T': T,
+                'UV': UV,
+                'NT': NT,
+                'SE': SE,
+                'work_artist_seam': work_artist_seam,
+                'work_nsplit': work_nsplit,
+            })
 
         result = (proposed_orig_edges, diagonal_cuts, report)
         if cache is not None:
@@ -278,12 +334,20 @@ def propose(obj, cache=None):
         return result
 
     finally:
-        # Guarantee removal of temporary work object and work mesh
-        if work_obj is not None:
+        # Guarantee removal of temporary work object, work mesh, and temporary scene
+        if use_temp_scene and temp_scene is not None:
+            if orig_scene is not None and orig_scene.name in bpy.data.scenes:
+                bpy.context.window.scene = orig_scene
+            if work_obj is not None and work_obj.name in temp_scene.collection.objects:
+                temp_scene.collection.objects.unlink(work_obj)
+            if temp_scene.name in bpy.data.scenes:
+                bpy.data.scenes.remove(temp_scene)
+        elif work_obj is not None:
             if work_obj.name in bpy.context.scene.collection.objects:
                 bpy.context.scene.collection.objects.unlink(work_obj)
+        if work_obj is not None and work_obj.name in bpy.data.objects:
             bpy.data.objects.remove(work_obj, do_unlink=True)
-        if work_me is not None:
+        if work_me is not None and work_me.name in bpy.data.meshes:
             bpy.data.meshes.remove(work_me, do_unlink=True)
 
         # Restore original selection, active object, and mode
