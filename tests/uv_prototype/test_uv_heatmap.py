@@ -458,6 +458,33 @@ def test_distribution_chart():
     print(f"  -> PASS: shares, range '{data['range_text']}', and a {px.shape[0]} px card drawn.")
 
 
+def test_updates_after_uv_change():
+    """Changed UVs reach the heatmap without Refresh: a geometry update drops the object's cached results."""
+    print("Test 12: Heatmap follows UV changes...")
+    from types import SimpleNamespace
+    clean_scene()
+    obj = create_plane("Plane_Unwrap", size=1.0)
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    uv_heatmap.update_heatmap_cache(bpy.context)
+    assert np.max(np.abs(uv_heatmap._cache[obj.name].shape - 1.0)) < 1e-6
+
+    # shear the UVs (what an unwrap or a UV edit changes), then deliver the update Blender sends for it
+    for loop in obj.data.uv_layers.active.data:
+        loop.uv = (loop.uv[0] + 0.8 * loop.uv[1], loop.uv[1])
+    obj.data.update()
+    fake = SimpleNamespace(updates=[SimpleNamespace(is_updated_geometry=True, id=obj.data)])
+    assert uv_heatmap._invalidate_changed(fake), "a geometry update of the mesh must invalidate the object"
+    assert obj.name not in uv_heatmap._cache and uv_heatmap._global_stats.get('selection') is None
+    uv_heatmap.update_heatmap_cache(bpy.context, refresh=False)  # what the next redraw does
+    assert np.min(uv_heatmap._cache[obj.name].shape) > 1.2, "the recomputed heatmap must show the sheared UVs"
+
+    # updates without geometry changes (moving, display type) keep the cache
+    fake = SimpleNamespace(updates=[SimpleNamespace(is_updated_geometry=False, id=obj)])
+    assert not uv_heatmap._invalidate_changed(fake) and obj.name in uv_heatmap._cache
+    print("  -> PASS: UV change invalidates and recomputes; transform-only updates keep the cache.")
+
+
 def test_wire_display_takeover():
     """While shown, the heatmap's objects display as wire; their own display comes back afterwards."""
     print("Test 10: Wire display takeover and restore...")
@@ -512,6 +539,7 @@ def run_all_tests():
     test_overhead_shell_performance()
     test_opaque_surface_shader()
     test_distribution_chart()
+    test_updates_after_uv_change()
     test_wire_display_takeover()
     print("=" * 70)
     print("ALL UV HEATMAP TESTS PASSED SUCCESSFULLY.")

@@ -129,8 +129,8 @@ Viewport distortion and texel density overlay for inspecting UV quality (`uv_hea
 - **Modes:**
   - **Distortion:** per-triangle conformal distortion (\(\sigma_1 / \sigma_2 \ge 1.0\), scale-independent); neutral 1.0 (light grey) up to 2.0+ (blue).
   - **Density:** per-triangle texel density (\(A_{UV} / A_{3D}\)) relative to the area-weighted median of shown triangles with the same material, read against the object's authored density range (inside range is neutral 1.0, above up to 2.0x blue, below down to 0.5x red on a log scale).
-  - **Degenerate:** zero 3D area or zero UV area faces are drawn in grey and counted separately.
-- **Legend:** corner overlay displaying active mode, colour scale, area share beyond limits (Distortion > 1.10 and > 1.25; Density outside authored range), degenerate counts, and objects skipped due to missing UVs. Automatically hidden in Edit Mode.
+  - **Error** (degenerate faces): zero 3D area or zero UV area faces are drawn in magenta and counted separately.
+- **Legend:** corner overlay displaying active mode, colour scale, area share beyond limits (Distortion > 1.10 and > 1.25; Density outside authored range), error (degenerate) counts, and objects skipped due to missing UVs. Automatically hidden in Edit Mode.
 
 ## Testing
 

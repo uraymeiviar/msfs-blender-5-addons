@@ -26,7 +26,8 @@ ALPHA = 0.75
 COLOR_NEUTRAL = np.array([0.92, 0.92, 0.92, ALPHA], dtype=np.float32)
 COLOR_BLUE = np.array([0.10, 0.35, 0.95, ALPHA], dtype=np.float32)
 COLOR_RED = np.array([0.95, 0.15, 0.15, ALPHA], dtype=np.float32)
-COLOR_DEGENERATE = np.array([0.50, 0.50, 0.50, ALPHA], dtype=np.float32)
+# faces that cannot be measured (no area in the UVs or the model), shown to artists as 'Error': a colour on neither scale
+COLOR_DEGENERATE = np.array([1.00, 0.00, 1.00, ALPHA], dtype=np.float32)
 
 # Text / Legend settings
 TEXT_FONT = 0
@@ -181,7 +182,7 @@ def measures_to_colors(shape, rel_density, is_degenerate, mode):
     - Red below 1.0, blue above 1.0
     - Shape: 1.0 to 2.0 (blue)
     - Density: 0.5 to 2.0 on log scale (0.5 red, 2.0 blue)
-    - Degenerate: grey
+    - Degenerate (shown as 'Error'): magenta
     """
     n = len(shape)
     colors = np.empty((n, 4), dtype=np.float32)
@@ -253,7 +254,7 @@ def _heatmap_shader():
         info.fragment_out(0, 'VEC4', 'FragColor')
         info.vertex_source('void main() { gl_Position = mvp * vec4(pos, 1.0); '
                            'v_nor = (normal_matrix * vec4(nor, 0.0)).xyz; v_color = color; }')
-        info.fragment_source('void main() { float shade = 0.35 + 0.65 * abs(normalize(v_nor).z); '
+        info.fragment_source('void main() { float shade = 0.7 + 0.3 * abs(normalize(v_nor).z); '
                              'vec3 c = mix(vec3(base_grey), v_color.rgb, opacity) * shade; '
                              'FragColor = vec4(c, 1.0); }')
         _shader = gpu.shader.create_from_info(info)
@@ -314,12 +315,49 @@ def _sync_timer():
     return SYNC_INTERVAL if keep else None
 
 
+def _invalidate_changed(depsgraph):
+    """Drop the cached results of objects whose geometry or UVs changed, and the texture set references of their
+    materials, so the next redraw recomputes them (an unwrap arrives here when Edit Mode is left)."""
+    if depsgraph is None or not _cache:
+        return False
+    objects, meshes = set(), set()
+    for update in depsgraph.updates:
+        if not update.is_updated_geometry:
+            continue
+        idd = getattr(update.id, 'original', update.id)
+        if isinstance(idd, bpy.types.Object):
+            objects.add(idd.name)
+        elif isinstance(idd, bpy.types.Mesh):
+            meshes.add(idd.name)
+    stale = [name for name in _cache
+             if name in objects or ((obj := bpy.data.objects.get(name)) is not None and obj.data is not None
+                                    and obj.data.name in meshes)]
+    materials = set()
+    for name in stale:
+        obj = bpy.data.objects.get(name)
+        if obj is not None:
+            materials |= {slot.material.name for slot in obj.material_slots if slot.material is not None}
+    for mat in materials:
+        _ref_cache.pop(mat, None)
+    # a changed texture set reference changes the density of every cached object using that material
+    for name in list(_cache):
+        obj = bpy.data.objects.get(name)
+        if name in stale or (obj is not None and any(s.material is not None and s.material.name in materials
+                                                     for s in obj.material_slots)):
+            del _cache[name]
+    if stale:
+        _global_stats['selection'] = None  # the draw handler recomputes statistics and chart
+    return bool(stale)
+
+
 @persistent
-def _on_depsgraph_update_post(_scene, _depsgraph=None):
+def _on_depsgraph_update_post(_scene, depsgraph=None):
     # a selection change takes effect at once; the timer stays as a safety net. Idempotent, so the update
     # caused by changing a display type does not loop.
     if _display_active or any(getattr(s, 'fss_uv_heatmap_show', False) for s, _ in _view_layers()):
         _sync_display()
+        if _invalidate_changed(depsgraph):
+            tag_redraw()
 
 
 def _start_sync_timer():
@@ -787,12 +825,12 @@ def _draw_viewport_legend():
 
     # Scale explanation
     if mode == 'SHAPE':
-        lines.append(('Scale: 1.0 (neutral) to 2.0+ (blue), grey = degenerate', COLOR_TEXT_DIM, False))
+        lines.append(('Scale: 1.0 (neutral) to 2.0+ (blue), magenta = error', COLOR_TEXT_DIM, False))
         s110 = stats.get('share_above_110', 0.0)
         s125 = stats.get('share_above_125', 0.0)
         lines.append((f'Surface over 1.10 (target): {s110:.1%} | over 1.25 (limit): {s125:.1%}', COLOR_TEXT_MAIN, False))
     else:
-        lines.append(('Scale: 0.5 (red) - 1.0 (neutral) - 2.0 (blue) [log], grey = degenerate', COLOR_TEXT_DIM, False))
+        lines.append(('Scale: 0.5 (red) - 1.0 (neutral) - 2.0 (blue), magenta = error', COLOR_TEXT_DIM, False))
         s_out = stats.get('share_outside', 0.0)
         s_und = stats.get('share_under', 0.0)
         s_ovr = stats.get('share_over', 0.0)
@@ -802,7 +840,7 @@ def _draw_viewport_legend():
     deg_cnt = stats.get('degenerate_count', 0)
     if deg_cnt > 0:
         deg_share = stats.get('share_degenerate', 0.0)
-        lines.append((f'Degenerate: {deg_share:.1%} ({deg_cnt} tris)', COLOR_TEXT_WARN, False))
+        lines.append((f'Error: {deg_share:.1%} of surface ({deg_cnt} faces without area in the UVs or the model)', COLOR_TEXT_WARN, False))
 
     # Skipped objects without UVs
     skipped = stats.get('skipped_no_uvs', [])
@@ -887,7 +925,7 @@ class FSS_PT_UvHeatmap(bpy.types.Panel):
             if stats.get('total_tris', 0) > 0 and chart is not None and _chart_key and _chart_key[0] == scene.fss_uv_heatmap_mode:
                 box.template_icon(icon_value=chart.icon_id, scale=CHART_SCALE)
                 if stats.get('degenerate_count', 0) > 0:
-                    box.label(text=f"Degenerate: {stats.get('share_degenerate', 0.0):.1%} ({stats.get('degenerate_count', 0)} tris)", icon='INFO')
+                    box.label(text=f"Error: {stats.get('share_degenerate', 0.0):.1%} ({stats.get('degenerate_count', 0)} faces without area)", icon='ERROR')
             elif stats.get('total_tris', 0) > 0:
                 # text fallback when the chart image is not available
                 if scene.fss_uv_heatmap_mode == 'SHAPE':
@@ -897,7 +935,7 @@ class FSS_PT_UvHeatmap(bpy.types.Panel):
                     box.label(text=f"Outside density range: {stats.get('share_outside', 0.0):.1%} of surface")
                     box.label(text=f"  too low: {stats.get('share_under', 0.0):.1%}, too high: {stats.get('share_over', 0.0):.1%}")
                 if stats.get('degenerate_count', 0) > 0:
-                    box.label(text=f"Degenerate: {stats.get('share_degenerate', 0.0):.1%} ({stats.get('degenerate_count', 0)} tris)", icon='INFO')
+                    box.label(text=f"Error: {stats.get('share_degenerate', 0.0):.1%} ({stats.get('degenerate_count', 0)} faces without area)", icon='ERROR')
             elif stats.get('skipped_no_uvs'):
                 box.label(text=f"Skipped (no UVs): {', '.join(stats.get('skipped_no_uvs'))}", icon='CANCEL')
             else:

@@ -85,7 +85,7 @@ The **UV Heatmap** panel (sidebar `N` > **FSS Tools** > **UV Heatmap**) displays
 
 - Click **Show UV Heatmap** in the panel to toggle the overlay on selected mesh objects.
 - Switch between **Distortion** and **Density** modes.
-- Click **Refresh** to recompute measures after editing UVs, scaling islands, or changing materials. Turning the heatmap on computes once; results are cached per object until you click Refresh. Moving an object keeps its colours on it; editing its UVs or scale needs a Refresh.
+- The heatmap updates by itself when an object's UVs or geometry change (after an unwrap, as soon as you leave Edit Mode), and when the selection changes. Moving an object keeps its colours on it. Click **Refresh** after changing an object's scale or materials, or whenever the colours look out of date.
 - **Opacity** sets how strongly the heatmap colours cover the plain grey shading of the surface (0.3 to 1.0).
 - While the heatmap is on, its objects are shown with **Display As: Wire** and the heatmap draws their surface itself. Their own display setting comes back when the heatmap is off, when you deselect them, and before the file is saved.
 
@@ -96,7 +96,8 @@ The overlay uses a diverging colour scheme centred on **Neutral 1.0**:
 - **Neutral 1.0 (light grey / white):** ideal shape or within the authored density range.
 - **Above 1.0 (towards blue):** stretched or sheared triangles (in Distortion mode); over-dense texture resolution (in Density mode).
 - **Below 1.0 (towards red):** under-dense texture resolution (in Density mode).
-- **Grey:** degenerate triangles (zero 3D area or collapsed UVs).
+- **Magenta (Error):** faces that cannot be measured because they have no area, in the UVs (collapsed to a point or a line) or on the model. Check them in the UV editor or clean up the mesh.
+- Faces are shaded lightly by their angle to the view, so a neutral face turned away looks light grey, not white.
 
 ### Modes
 
@@ -130,7 +131,7 @@ A legend in the corner of the viewport displays:
 - The active mode (**Distortion** or **Density**) and colour scale.
 - For Distortion: the share of the selected objects' surface distorted more than **1.10** (our shape target) and more than **1.25** (the limit Auto Seam uses to accept an island).
 - For Density: the share of the surface outside its object's density range (too low and too high).
-- Degenerate face counts and area share.
+- **Error:** how many faces cannot be measured, and their share of the surface.
 - Skipped objects: mesh objects without active UV maps are safely skipped and listed in the legend without interrupting the tool.
 
 ### Non-Destructive and Modifiers
