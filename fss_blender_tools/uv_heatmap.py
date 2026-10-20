@@ -260,14 +260,27 @@ def _heatmap_shader():
     return _shader
 
 
+def _view_layers():
+    """(scene, view layer) of every window; timers and handlers have no selection in bpy.context, windows do."""
+    wm = getattr(bpy.context, 'window_manager', None)
+    pairs = [(w.scene, w.view_layer) for w in wm.windows] if wm is not None else []
+    if not pairs and getattr(bpy.context, 'view_layer', None) is not None:
+        pairs = [(bpy.context.scene, bpy.context.view_layer)]  # background Blender has no windows
+    return pairs
+
+
 def _heatmap_targets():
     """Names of the objects the heatmap draws now: selected editable meshes with an active UV map, outside Edit Mode."""
-    context = bpy.context
-    scene = getattr(context, 'scene', None)
-    if scene is None or not getattr(scene, 'fss_uv_heatmap_show', False) or context.mode == 'EDIT_MESH':
-        return set()
-    return {obj.name for obj in context.selected_objects
-            if obj.type == 'MESH' and _editable(obj) and obj.data and obj.data.uv_layers.active is not None}
+    names = set()
+    for scene, view_layer in _view_layers():
+        if not getattr(scene, 'fss_uv_heatmap_show', False):
+            continue
+        active = view_layer.objects.active
+        if active is not None and active.mode == 'EDIT':
+            continue
+        names |= {obj.name for obj in view_layer.objects.selected
+                  if obj.type == 'MESH' and _editable(obj) and obj.data and obj.data.uv_layers.active is not None}
+    return names
 
 
 def _sync_display():
@@ -295,9 +308,18 @@ def _sync_display():
 def _sync_timer():
     try:
         _sync_display()
-    except (AttributeError, ReferenceError, RuntimeError):
-        pass  # no usable context right now (file loading, shutdown); try again next tick
-    return SYNC_INTERVAL if _display_active or _heatmap_targets() else None
+        keep = bool(_display_active) or any(getattr(s, 'fss_uv_heatmap_show', False) for s, _ in _view_layers())
+    except (ReferenceError, RuntimeError):
+        keep = True  # no usable data right now (file loading); try again next tick
+    return SYNC_INTERVAL if keep else None
+
+
+@persistent
+def _on_depsgraph_update_post(_scene, _depsgraph=None):
+    # a selection change takes effect at once; the timer stays as a safety net. Idempotent, so the update
+    # caused by changing a display type does not loop.
+    if _display_active or any(getattr(s, 'fss_uv_heatmap_show', False) for s, _ in _view_layers()):
+        _sync_display()
 
 
 def _start_sync_timer():
@@ -467,10 +489,12 @@ def update_heatmap_cache(context, refresh=True):
     entries = [_cache[obj.name] for obj in selected if obj.name in _cache]
     if not refresh:
         skipped_no_uvs = sorted(set(skipped_no_uvs) | set(_global_stats.get('skipped_no_uvs', [])))
+    selection = tuple(sorted(obj.name for obj in selected))  # the statistics belong to this selection
     if not entries:
         _global_stats = {'skipped_no_uvs': skipped_no_uvs, 'total_tris': 0, 'valid_area': 0.0,
                          'share_above_110': 0.0, 'share_above_125': 0.0, 'share_outside': 0.0,
-                         'share_under': 0.0, 'share_over': 0.0, 'share_degenerate': 0.0, 'degenerate_count': 0}
+                         'share_under': 0.0, 'share_over': 0.0, 'share_degenerate': 0.0, 'degenerate_count': 0,
+                         'selection': selection}
         return
     all_shape = np.concatenate([e.shape for e in entries])
     all_rel_d = np.concatenate([e.rel_density for e in entries])
@@ -489,6 +513,7 @@ def update_heatmap_cache(context, refresh=True):
         share_110 = share_125 = share_under = share_over = 0.0
     chart_mask = valid_mask & np.isfinite(all_shape) & np.isfinite(all_rel_d)
     _global_stats = {
+        'selection': selection,
         'skipped_no_uvs': skipped_no_uvs,
         'total_tris': len(all_shape),
         'valid_area': total_valid_area,
@@ -526,6 +551,15 @@ def _chart_axis(mode):
     def to_x(v):
         return np.clip((np.log2(np.maximum(np.asarray(v, dtype=np.float64), 1e-12)) + 1.0) / 2.0, 0.0, 1.0)
     return to_x, [0.5, 0.71, 1.0, 1.41, 2.0], ['0.5-', '0.71', '1.0', '1.41', '2.0+']
+
+
+def _axis_text(mode, value):
+    """A value as the chart's axis shows it: beyond the scale's ends as '2.0+' or '0.5-'."""
+    if value > 2.0:
+        return '2.0+'
+    if mode != 'SHAPE' and value < 0.5:
+        return '0.5-'
+    return f"{value:.2f}"
 
 
 def _weighted_quantile(values, weights, q):
@@ -566,7 +600,7 @@ def chart_data(mode, stats):
         'tick_labels': labels,
         'marks': [float(to_x(m)) for m in marks],
         'range': (float(to_x(low)), float(to_x(high))),
-        'range_text': f"90% of surface: {low:.2f} to {high:.2f}",
+        'range_text': f"90% of surface: {_axis_text(mode, low)} to {_axis_text(mode, high)}",
         'title': 'Distortion' if mode == 'SHAPE' else 'Texel density',
         'lines': lines,
     }
@@ -690,8 +724,9 @@ def _draw_viewport_heatmap():
     if not selected_mesh_names:
         return
 
-    # Newly selected objects are added; cached ones and the texture set references are kept until Refresh
-    if not all(name in _cache for name in selected_mesh_names if name not in _global_stats.get('skipped_no_uvs', [])):
+    # A selection change updates statistics and chart; cached objects and texture set references are kept until
+    # Refresh, so this only computes newly selected objects
+    if _global_stats.get('selection') != tuple(sorted(selected_mesh_names)):
         update_heatmap_cache(context, refresh=False)
 
     mode = context.scene.fss_uv_heatmap_mode
@@ -912,7 +947,8 @@ def register():
                               (bpy.app.handlers.save_pre, _on_save_pre),
                               (bpy.app.handlers.save_post, _on_save_post),
                               (bpy.app.handlers.undo_post, _on_undo_redo_post),
-                              (bpy.app.handlers.redo_post, _on_undo_redo_post)):
+                              (bpy.app.handlers.redo_post, _on_undo_redo_post),
+                              (bpy.app.handlers.depsgraph_update_post, _on_depsgraph_update_post)):
         if handler not in handlers:
             handlers.append(handler)
 
@@ -945,7 +981,8 @@ def unregister():
                               (bpy.app.handlers.save_pre, _on_save_pre),
                               (bpy.app.handlers.save_post, _on_save_post),
                               (bpy.app.handlers.undo_post, _on_undo_redo_post),
-                              (bpy.app.handlers.redo_post, _on_undo_redo_post)):
+                              (bpy.app.handlers.redo_post, _on_undo_redo_post),
+                              (bpy.app.handlers.depsgraph_update_post, _on_depsgraph_update_post)):
         if handler in handlers:
             handlers.remove(handler)
     clear_cache()

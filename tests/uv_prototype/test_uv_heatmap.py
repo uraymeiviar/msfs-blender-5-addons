@@ -450,7 +450,7 @@ def test_distribution_chart():
     assert abs(data['share'].sum() - 1.0) < 1e-9, "histogram shares must add up to the whole surface"
     assert abs(data['share'][0] - 0.7) < 1e-9, "70 % of the area sits at 1.0"
     assert abs(data['share'][-1] - 0.1) < 1e-9, "values beyond 2.0 go into the last bin"
-    assert data['range_text'] == "90% of surface: 1.00 to 2.50", data['range_text']  # 10 % of the area lies at 2.5
+    assert data['range_text'] == "90% of surface: 1.00 to 2.0+", data['range_text']  # 10 % of the area lies at 2.5
     assert data['lines'] == ["Over 1.10 (target): 20.0%", "Over 1.25 (limit): 20.0%"]
     px = uv_heatmap.render_chart(data)
     assert px.shape == (uv_heatmap.CHART_SIZE, uv_heatmap.CHART_SIZE, 4)
@@ -479,8 +479,9 @@ def test_wire_display_takeover():
     uv_heatmap._sync_display()
     assert obj.display_type == 'TEXTURED', "a deselected object gets its own display back"
     obj.select_set(True)
-    uv_heatmap._sync_display()
-    assert obj.display_type == 'WIRE'
+    uv_heatmap._on_depsgraph_update_post(scene)  # a selection change arrives as a depsgraph update
+    assert obj.display_type == 'WIRE', 'the depsgraph handler takes a newly selected object over'
+    assert uv_heatmap._sync_timer() == uv_heatmap.SYNC_INTERVAL, 'the timer keeps running while shown'
 
     uv_heatmap._on_save_pre(None)
     assert obj.display_type == 'TEXTURED', "the saved file must not keep the wire display"
