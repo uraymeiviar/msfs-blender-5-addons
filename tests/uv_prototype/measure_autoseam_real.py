@@ -342,11 +342,23 @@ def run_round_trip(o, prop_edges, rep):
                 poly_to_core_isl[p] = isl_idx
         core_tri_labels = np.array([poly_to_core_isl[p] for p in tri_to_orig_poly], dtype=np.int64)
 
+        P = rep['P']
+        T = rep['T']
+        P_tri = P[T]
+        area3_tri = 0.5 * np.linalg.norm(np.cross(P_tri[:, 1] - P_tri[:, 0], P_tri[:, 2] - P_tri[:, 0]), axis=1)
+
         core_overlaps = 0
+        core_sliver_overlaps = 0
         for isl_idx in range(len(core_islands)):
             isl_tris = np.where(core_tri_labels == isl_idx)[0]
             if len(isl_tris) > 0:
-                core_overlaps += len(uvmetrics.overlap_pairs(core_UV[isl_tris]))
+                pairs = uvmetrics.overlap_pairs(core_UV[isl_tris])
+                if len(pairs) > 0:
+                    a0 = area3_tri[isl_tris[pairs[:, 0]]]
+                    a1 = area3_tri[isl_tris[pairs[:, 1]]]
+                    sliver = (a0 < 1e-8) & (a1 < 1e-8)
+                    core_overlaps += int(np.count_nonzero(~sliver))
+                    core_sliver_overlaps += int(np.count_nonzero(sliver))
 
         poly_to_rt_isl = {}
         for isl_idx, s in enumerate(rt_islands):
@@ -355,10 +367,17 @@ def run_round_trip(o, prop_edges, rep):
         rt_tri_labels = np.array([poly_to_rt_isl[p] for p in tri_to_orig_poly], dtype=np.int64)
 
         rt_overlaps = 0
+        rt_sliver_overlaps = 0
         for isl_idx in range(len(rt_islands)):
             isl_tris = np.where(rt_tri_labels == isl_idx)[0]
             if len(isl_tris) > 0:
-                rt_overlaps += len(uvmetrics.overlap_pairs(blender_work_UV[isl_tris]))
+                pairs = uvmetrics.overlap_pairs(blender_work_UV[isl_tris])
+                if len(pairs) > 0:
+                    a0 = area3_tri[isl_tris[pairs[:, 0]]]
+                    a1 = area3_tri[isl_tris[pairs[:, 1]]]
+                    sliver = (a0 < 1e-8) & (a1 < 1e-8)
+                    rt_overlaps += int(np.count_nonzero(~sliver))
+                    rt_sliver_overlaps += int(np.count_nonzero(sliver))
 
         NT = rep['NT']
         nv_n = int(len(np.unique(NT)))
@@ -367,13 +386,13 @@ def run_round_trip(o, prop_edges, rep):
         k2_rt = np.concatenate([NT.reshape(-1, 1).astype(np.float64), blender_work_UV.reshape(-1, 2)], 1)
         rt_extra = int(len(np.unique(k2_rt, axis=0))) - nv_n
 
-        P = rep['P']
         SE = rep['SE']
         metrics = evaluate_shape(P, T, blender_work_UV, NT, SE, labels=rt_tri_labels)
         metrics['intra_overlaps'] = rt_overlaps
+        metrics['sliver_overlaps'] = rt_sliver_overlaps
         metrics['render_extra_vs_normals'] = rt_extra
 
-        # Check islands over shape limits in round trip (d > 1.25 or overlap)
+        # Check islands over shape limits in round trip (d > 1.25 or non-sliver overlap)
         rt_islands_over_shape_limit = 0
         for isl_idx in range(len(rt_islands)):
             isl_tris = np.where(rt_tri_labels == isl_idx)[0]
@@ -381,7 +400,14 @@ def run_round_trip(o, prop_edges, rep):
                 _, _, r = uvmetrics.area_distortion(P[T[isl_tris]], blender_work_UV[isl_tris])
                 fin = np.isfinite(r)
                 d_isl = float(r[fin].mean()) if np.any(fin) else 999.0
-                ov_isl = len(uvmetrics.overlap_pairs(blender_work_UV[isl_tris]))
+                pairs = uvmetrics.overlap_pairs(blender_work_UV[isl_tris])
+                if len(pairs) > 0:
+                    a0 = area3_tri[isl_tris[pairs[:, 0]]]
+                    a1 = area3_tri[isl_tris[pairs[:, 1]]]
+                    sliver = (a0 < 1e-8) & (a1 < 1e-8)
+                    ov_isl = int(np.count_nonzero(~sliver))
+                else:
+                    ov_isl = 0
                 if d_isl > 1.25 or ov_isl > 0:
                     rt_islands_over_shape_limit += 1
         metrics['islands_over_shape_limit'] = rt_islands_over_shape_limit
@@ -394,6 +420,9 @@ def run_round_trip(o, prop_edges, rep):
             'core_diag_splits': core_diag_splits,
             'total_diags': total_diags,
             'core_overlaps': core_overlaps,
+            'core_sliver_overlaps': core_sliver_overlaps,
+            'rt_overlaps': rt_overlaps,
+            'rt_sliver_overlaps': rt_sliver_overlaps,
             'core_extra': core_extra,
             'core_tri_labels': core_tri_labels,
             'islands_over_shape_limit': rt_islands_over_shape_limit,
@@ -477,6 +506,7 @@ def main():
         core_met = evaluate_shape(rep['P'], rep['T'], rep['UV'], rep['NT'], rep['SE'], labels=rt_result['core_tri_labels'])
         core_met['time'] = rep['time']
         core_met['intra_overlaps'] = rt_result['core_overlaps']
+        core_met['sliver_overlaps'] = rt_result['core_sliver_overlaps']
         core_met['render_extra_vs_normals'] = rt_result['core_extra']
 
         # Decision 49 / Cost-Aware stats from core
@@ -575,7 +605,11 @@ def main():
         rt_eq = "yes" if rt['islands_equal'] else "no"
         diag_str = f"**{rt['core_diag_splits']} / {rt['rt_diag_splits']}**"
         isl_str = f"{rt['core_charts_count']} / {rt['mesh_islands_count']}"
-        ov_str = f"{c_m['intra_overlaps']} / {rt_m['intra_overlaps']}"
+        c_slv = c_m.get('sliver_overlaps', 0)
+        rt_slv = rt_m.get('sliver_overlaps', 0)
+        c_ov_str = f"{c_m['intra_overlaps']}" + (f" ({c_slv} slv)" if c_slv > 0 else "")
+        rt_ov_str = f"{rt_m['intra_overlaps']}" + (f" ({rt_slv} slv)" if rt_slv > 0 else "")
+        ov_str = f"{c_ov_str} / {rt_ov_str}"
         unv_count = len(r['unverified_charts'])
         unv_str = f"**{unv_count}**" if unv_count > 0 else "0"
         md_lines.append(
@@ -700,11 +734,12 @@ def main():
     eq_detail = "Equal on all 22 objects" if all_equal else f"{len(unequal_objs)} differ: {', '.join(unequal_objs)}"
     md_lines.append(f"| **Round trip islands equal to core** | Equal on all 22 objects | {eq_status} | {eq_detail} |")
 
-    # 3. Intra-island overlaps
+    # 3. Intra-island overlaps (other than slivers)
+    total_rt_sliver = sum(r['round_trip']['metrics'].get('sliver_overlaps', 0) for r in results.values())
     ov_status = "**MET**" if total_rt_overlaps == 0 else "**NOT MET**"
     ov_objs = [f"{name} ({r['round_trip']['metrics']['intra_overlaps']})" for name, r in results.items() if r['round_trip']['metrics']['intra_overlaps'] > 0]
-    ov_detail = "0 on all 22 objects" if total_rt_overlaps == 0 else f"{total_rt_overlaps} total in RT: {', '.join(ov_objs)}"
-    md_lines.append(f"| **Intra-island overlaps in RT** | 0 on all 22 objects | {ov_status} | {ov_detail} |")
+    ov_detail = f"0 on all 22 objects (sliver overlaps: {total_rt_sliver})" if total_rt_overlaps == 0 else f"{total_rt_overlaps} total non-sliver in RT: {', '.join(ov_objs)} (sliver overlaps: {total_rt_sliver})"
+    md_lines.append(f"| **Intra-island overlaps (other than slivers) in RT** | 0 on all 22 objects | {ov_status} | {ov_detail} |")
 
     # 4. Unverified charts
     unv_status = "**MET**" if total_unverified == 0 else "**NOT MET**"

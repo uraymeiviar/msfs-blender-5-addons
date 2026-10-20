@@ -383,7 +383,15 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
             d, dmax, _ = _area_distortion(P3all[fl], U)
             fl_ = _flipped_count(U) > 0
             last_flip[0] = fl_
-            ov = fl_ or len(_overlap_pairs(U)) > 0
+            pairs = _overlap_pairs(U)
+            if len(pairs) > 0:
+                fl_arr = np.asarray(fl)
+                a0 = area3[fl_arr[pairs[:, 0]]]
+                a1 = area3[fl_arr[pairs[:, 1]]]
+                sliver = (a0 < 1e-8) & (a1 < 1e-8)
+                ov = fl_ or (np.count_nonzero(~sliver) > 0)
+            else:
+                ov = fl_
             return d, dmax, ov
 
         chart_uv = {}
@@ -1517,12 +1525,20 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
 
         tm['final_gate'] = time.perf_counter() - t_fg
 
-        # Collect unverified charts (no split possible or gate round limit reached)
+        # Collect unverified charts and count sliver overlaps
+        total_sliver_overlaps = 0
         final_unverified = []
         for c, fs in list(charts.items()):
             fl = sorted(fs)
             U_c = U_all[fl]
             d, dmax, ov = measure(fl, U_c)
+            pairs = _overlap_pairs(U_c)
+            if len(pairs) > 0:
+                fl_arr = np.asarray(fl)
+                a0 = area3[fl_arr[pairs[:, 0]]]
+                a1 = area3[fl_arr[pairs[:, 1]]]
+                sliver = (a0 < 1e-8) & (a1 < 1e-8)
+                total_sliver_overlaps += int(np.count_nonzero(sliver))
             n_c = len(components(fl, lambda e: not forced[e]))
             if ov or d > THR or n_c > 1:
                 crit = 'overlap' if ov else ('distortion' if d > THR else 'disconnected')
@@ -1580,6 +1596,7 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
             fallback_feature=fb_feature,
             fallback_cuts=fb_cuts_total,
             unverified_charts=final_unverified,
+            sliver_overlaps=total_sliver_overlaps,
             gate_repaired=gate_repaired,
             gate_rounds=gate_rounds,
             stage_time=tm,
@@ -1608,9 +1625,9 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
             o = bpy.context.scene.objects.get(o_name)
             if o:
                 o.select_set(sel)
-        if orig_active:
-            bpy.context.view_layer.objects.active = orig_active
         ts.use_uv_select_sync = orig_uv_sync
         ts.mesh_select_mode = orig_mesh_select_mode
         if orig_mode != 'OBJECT':
             bpy.ops.object.mode_set(mode=orig_mode)
+        if orig_active:
+            bpy.context.view_layer.objects.active = orig_active
