@@ -381,6 +381,71 @@ def test_overhead_shell_performance():
     print("  -> PASS: OVERHEAD_SHELL computed well under the 2.0 s limit.")
 
 
+def test_depth_bias_no_zfighting():
+    """The add-on's overlay shader compiles and wins against the surface it lies on (no z-fighting speckles)."""
+    print("Test 9: Overlay depth bias against z-fighting (offscreen)...")
+    import math
+    import gpu
+    from mathutils import Matrix
+    from gpu_extras.batch import batch_for_shader
+    gpu.init()  # background Blender: initialise the GPU module for offscreen drawing
+
+    # a tilted 2 m plane of 40 x 40 quads, seen at a grazing angle from 3 m (Blender's default clip range)
+    n = 40
+    g = np.linspace(-1.0, 1.0, n + 1)
+    quads = []
+    for i in range(n):
+        for j in range(n):
+            a, b, c, d = (g[i], g[j]), (g[i + 1], g[j]), (g[i + 1], g[j + 1]), (g[i], g[j + 1])
+            quads += [a, b, c, a, c, d]
+    xy = np.array(quads, np.float32)
+    pos = np.column_stack([xy[:, 0], xy[:, 1], 0.3 * xy[:, 0]]).astype(np.float32)
+    near, far, t = 0.01, 1000.0, 1.0 / math.tan(math.radians(25))
+    proj = Matrix(((t, 0, 0, 0), (0, t, 0, 0), (0, 0, (far + near) / (near - far), 2 * far * near / (near - far)),
+                   (0, 0, -1, 0)))
+    view = Matrix.Translation((0, 0, -3.0)) @ Matrix.Rotation(math.radians(-70), 4, 'X')
+    mvp = proj @ view
+
+    surface_shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+    heat = uv_heatmap._heatmap_shader()
+    surface = batch_for_shader(surface_shader, 'TRIS', {'pos': pos})
+    overlay = batch_for_shader(heat, 'TRIS', {'pos': pos, 'color': np.tile([1.0, 0.0, 0.0, 1.0], (len(pos), 1)).astype(np.float32)})
+
+    size = 256
+    off = gpu.types.GPUOffScreen(size, size)
+    try:
+        def speckles(bias):
+            with off.bind():
+                fb = gpu.state.active_framebuffer_get()
+                fb.clear(color=(0, 0, 0, 1), depth=1.0)
+                with gpu.matrix.push_pop():
+                    gpu.matrix.load_matrix(view)
+                    gpu.matrix.load_projection_matrix(proj)
+                    gpu.state.depth_test_set('LESS_EQUAL')
+                    gpu.state.depth_mask_set(True)
+                    surface_shader.bind()
+                    surface_shader.uniform_float('color', (0.0, 1.0, 0.0, 1.0))
+                    surface.draw(surface_shader)
+                gpu.state.depth_mask_set(False)
+                heat.bind()
+                heat.uniform_float('mvp', mvp)
+                heat.uniform_float('depth_bias', bias)
+                overlay.draw(heat)
+                gpu.state.depth_mask_set(True)
+                gpu.state.depth_test_set('NONE')
+                px = np.array(fb.read_color(0, 0, size, size, 4, 0, 'FLOAT').to_list(), np.float32).reshape(-1, 4)
+            return int(np.count_nonzero(px[:, 1] > 0.5)), int(np.count_nonzero(px[:, 0] > 0.5))
+
+        lost, covered = speckles(uv_heatmap.DEPTH_BIAS)
+        assert covered > 1000, f"overlay not drawn ({covered} px)"
+        assert lost == 0, f"{lost} surface pixels show through the overlay (z-fighting) with DEPTH_BIAS"
+        lost0, _ = speckles(0.0)
+    finally:
+        off.free()
+    print(f"  -> PASS: {covered} px covered, 0 speckles with DEPTH_BIAS={uv_heatmap.DEPTH_BIAS} "
+          f"(without bias: {lost0} speckles).")
+
+
 def run_all_tests():
     print("=" * 70)
     print("RUNNING UV HEATMAP & SKIP MARK TESTS")
@@ -393,6 +458,7 @@ def run_all_tests():
     test_gltf_export_unchanged()
     test_uvmetrics_parity_on_trim_panel()
     test_overhead_shell_performance()
+    test_depth_bias_no_zfighting()
     print("=" * 70)
     print("ALL UV HEATMAP TESTS PASSED SUCCESSFULLY.")
     print("=" * 70)

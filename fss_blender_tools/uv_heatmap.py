@@ -36,6 +36,12 @@ COLOR_TEXT_DIM = (0.78, 0.78, 0.78, 1.0)
 COLOR_TEXT_WARN = (1.0, 0.75, 0.25, 1.0)
 
 # Global caches and draw handles
+# Clip-space depth bias towards the camera, so the overlay wins against the surface it lies on (no z-fighting).
+# 1e-6 already removed every speckle in an offscreen test; a larger value lets the overlay show through surfaces
+# closer behind than about bias * distance² / (2 * clip start).
+DEPTH_BIAS = 5e-6
+_shader = None
+
 _cache = {}  # obj_name -> ObjectHeatmapCache
 _ref_cache = {}  # material name -> reference density of its texture set (all scene objects using it)
 _global_stats = {}
@@ -220,6 +226,26 @@ class ObjectHeatmapCache:
             self.batches.clear()
             self.batches[key] = batch_for_shader(shader, 'TRIS', {'pos': self.pos, 'color': colors})
         return self.batches[key]
+
+
+def _heatmap_shader():
+    """Per-vertex colour shader with a depth bias; created on first use (needs a GPU context)."""
+    global _shader
+    if _shader is None:
+        info = gpu.types.GPUShaderCreateInfo()
+        info.push_constant('MAT4', 'mvp')
+        info.push_constant('FLOAT', 'depth_bias')
+        info.vertex_in(0, 'VEC3', 'pos')
+        info.vertex_in(1, 'VEC4', 'color')
+        iface = gpu.types.GPUStageInterfaceInfo('fss_uv_heatmap_iface')
+        iface.smooth('VEC4', 'v_color')
+        info.vertex_out(iface)
+        info.fragment_out(0, 'VEC4', 'FragColor')
+        info.vertex_source('void main() { gl_Position = mvp * vec4(pos, 1.0); '
+                           'gl_Position.z -= depth_bias * gl_Position.w; v_color = color; }')
+        info.fragment_source('void main() { FragColor = v_color; }')
+        _shader = gpu.shader.create_from_info(info)
+    return _shader
 
 
 def tag_redraw():
@@ -411,7 +437,8 @@ def _draw_viewport_heatmap():
 
     mode = context.scene.fss_uv_heatmap_mode
     opacity = context.scene.fss_uv_heatmap_opacity
-    shader = gpu.shader.from_builtin('SMOOTH_COLOR')
+    shader = _heatmap_shader()
+    view_projection = context.region_data.perspective_matrix
     objects = context.view_layer.objects
 
     gpu.state.depth_test_set('LESS_EQUAL')
@@ -419,6 +446,7 @@ def _draw_viewport_heatmap():
     gpu.state.blend_set('ALPHA')
     try:
         shader.bind()
+        shader.uniform_float('depth_bias', DEPTH_BIAS)
         for name in selected_mesh_names:
             entry = _cache.get(name)
             obj = objects.get(name)
@@ -426,9 +454,8 @@ def _draw_viewport_heatmap():
                 continue
             batch = entry.get_batch(mode, shader, opacity)
             if batch is not None:
-                with gpu.matrix.push_pop():
-                    gpu.matrix.multiply_matrix(obj.matrix_world)
-                    batch.draw(shader)
+                shader.uniform_float('mvp', view_projection @ obj.matrix_world)
+                batch.draw(shader)
     finally:
         gpu.state.depth_mask_set(True)
         gpu.state.depth_test_set('NONE')
@@ -623,7 +650,7 @@ def register():
 
 
 def unregister():
-    global _draw_view_handle, _draw_pixel_handle
+    global _draw_view_handle, _draw_pixel_handle, _shader
     if _draw_view_handle is not None:
         bpy.types.SpaceView3D.draw_handler_remove(_draw_view_handle, 'WINDOW')
         _draw_view_handle = None
@@ -634,6 +661,7 @@ def unregister():
     if _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
     clear_cache()
+    _shader = None
 
     for prop in ('fss_uv_heatmap_show', 'fss_uv_heatmap_mode', 'fss_uv_heatmap_opacity'):
         if hasattr(bpy.types.Scene, prop):
