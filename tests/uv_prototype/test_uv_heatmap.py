@@ -437,6 +437,27 @@ def test_opaque_surface_shader():
     print(f"  -> PASS: near plane wins ({np.round(full[:3], 3)}), opacity mixes with grey ({np.round(half[:3], 3)}).")
 
 
+def test_distribution_chart():
+    """The panel chart: area-weighted histogram, 90 % range and text, and an offscreen drawing of the card."""
+    print("Test 11: Distribution chart for the panel...")
+    import gpu
+    gpu.init()
+    values = np.array([1.0, 1.0, 1.05, 1.3, 2.5])
+    areas = np.array([4.0, 3.0, 1.0, 1.0, 1.0])
+    stats = {'chart_distortion': values, 'chart_density': np.ones(5), 'chart_area': areas,
+             'share_above_110': 0.2, 'share_above_125': 0.2, 'share_under': 0.0, 'share_over': 0.0}
+    data = uv_heatmap.chart_data('SHAPE', stats)
+    assert abs(data['share'].sum() - 1.0) < 1e-9, "histogram shares must add up to the whole surface"
+    assert abs(data['share'][0] - 0.7) < 1e-9, "70 % of the area sits at 1.0"
+    assert abs(data['share'][-1] - 0.1) < 1e-9, "values beyond 2.0 go into the last bin"
+    assert data['range_text'] == "90% of surface: 1.00 to 2.50", data['range_text']  # 10 % of the area lies at 2.5
+    assert data['lines'] == ["Over 1.10 (target): 20.0%", "Over 1.25 (limit): 20.0%"]
+    px = uv_heatmap.render_chart(data)
+    assert px.shape == (uv_heatmap.CHART_SIZE, uv_heatmap.CHART_SIZE, 4)
+    assert float(px[..., 2].max()) > 0.9, "the band and the histogram must be drawn (blue end of the scale)"
+    print(f"  -> PASS: shares, range '{data['range_text']}', and a {px.shape[0]} px card drawn.")
+
+
 def test_wire_display_takeover():
     """While shown, the heatmap's objects display as wire; their own display comes back afterwards."""
     print("Test 10: Wire display takeover and restore...")
@@ -489,6 +510,7 @@ def run_all_tests():
     test_uvmetrics_parity_on_trim_panel()
     test_overhead_shell_performance()
     test_opaque_surface_shader()
+    test_distribution_chart()
     test_wire_display_takeover()
     print("=" * 70)
     print("ALL UV HEATMAP TESTS PASSED SUCCESSFULLY.")

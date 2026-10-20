@@ -351,9 +351,11 @@ def clear_cache():
 @persistent
 def _on_load_post(_dummy):
     # cache keys are object names, which a newly loaded file may reuse; the file was saved without wire takeovers
+    global _chart_key
     clear_cache()
     _display_original.clear()
     _display_active.clear()
+    _chart_key = None
 
 
 def _object_triangles(obj, depsgraph):
@@ -485,6 +487,7 @@ def update_heatmap_cache(context, refresh=True):
         share_over = float(np.sum(all_area3[valid_mask & (all_rel_d > 1.0001)])) / total_valid_area
     else:
         share_110 = share_125 = share_under = share_over = 0.0
+    chart_mask = valid_mask & np.isfinite(all_shape) & np.isfinite(all_rel_d)
     _global_stats = {
         'skipped_no_uvs': skipped_no_uvs,
         'total_tris': len(all_shape),
@@ -496,7 +499,176 @@ def update_heatmap_cache(context, refresh=True):
         'share_over': share_over,
         'share_degenerate': (float(np.sum(all_area3[all_degen])) / total_area_all) if total_area_all > 0 else 0.0,
         'degenerate_count': int(np.sum(all_degen)),
+        # the distribution behind the panel's chart
+        'chart_distortion': all_shape[chart_mask],
+        'chart_density': all_rel_d[chart_mask],
+        'chart_area': all_area3[chart_mask],
     }
+    _update_chart(context.scene.fss_uv_heatmap_mode, _global_stats)
+
+
+# Distribution chart shown in the panel: a square card drawn offscreen into a preview image (a panel can only show
+# Blender's own widgets and images, not custom drawing). Redrawn after each update and mode change, not per frame.
+CHART_SIZE = 256
+CHART_BINS = 48
+CHART_SCALE = 12.0  # icon size in UI units in the panel (about 240 px at 100 % interface scale)
+_previews = None
+_chart_key = None  # what the current chart image shows, to skip redrawing an unchanged chart
+
+
+def _chart_axis(mode):
+    """(value -> 0..1 position, tick values, tick labels) for the chart's horizontal axis."""
+    if mode == 'SHAPE':
+        def to_x(v):
+            return np.clip((np.asarray(v, dtype=np.float64) - 1.0) / 1.0, 0.0, 1.0)
+        return to_x, [1.0, 1.10, 1.25, 1.5, 2.0], ['1.0', '1.10', '1.25', '1.5', '2.0+']
+
+    def to_x(v):
+        return np.clip((np.log2(np.maximum(np.asarray(v, dtype=np.float64), 1e-12)) + 1.0) / 2.0, 0.0, 1.0)
+    return to_x, [0.5, 0.71, 1.0, 1.41, 2.0], ['0.5-', '0.71', '1.0', '1.41', '2.0+']
+
+
+def _weighted_quantile(values, weights, q):
+    order = np.argsort(values, kind='stable')
+    cumulative = np.cumsum(weights[order])
+    idx = min(int(np.searchsorted(cumulative, q * cumulative[-1])), len(order) - 1)
+    return float(values[order[idx]])
+
+
+def chart_data(mode, stats):
+    """Histogram, range bar and text of the chart, without drawing (testable in background)."""
+    values = stats.get('chart_distortion' if mode == 'SHAPE' else 'chart_density')
+    areas = stats.get('chart_area')
+    if values is None or areas is None or not len(values) or areas.sum() <= 0:
+        return None
+    to_x, ticks, labels = _chart_axis(mode)
+    x = to_x(values)
+    hist, _ = np.histogram(x, bins=CHART_BINS, range=(0.0, 1.0), weights=areas)
+    share = hist / areas.sum()
+    centres = (np.arange(CHART_BINS) + 0.5) / CHART_BINS
+    if mode == 'SHAPE':
+        bin_values = 1.0 + centres
+        colors = measures_to_colors(bin_values, np.ones(CHART_BINS), np.zeros(CHART_BINS, bool), 'SHAPE')
+        lines = [f"Over 1.10 (target): {stats.get('share_above_110', 0.0):.1%}",
+                 f"Over 1.25 (limit): {stats.get('share_above_125', 0.0):.1%}"]
+        marks = [1.10, 1.25]
+    else:
+        bin_values = 2.0 ** (centres * 2.0 - 1.0)
+        colors = measures_to_colors(np.ones(CHART_BINS), bin_values, np.zeros(CHART_BINS, bool), 'DENSITY')
+        lines = [f"Too low: {stats.get('share_under', 0.0):.1%}", f"Too high: {stats.get('share_over', 0.0):.1%}"]
+        marks = [1.0]
+    low = _weighted_quantile(values, areas, 0.05)
+    high = _weighted_quantile(values, areas, 0.95)
+    return {
+        'share': share,
+        'colors': colors,
+        'ticks': [float(to_x(t)) for t in ticks],
+        'tick_labels': labels,
+        'marks': [float(to_x(m)) for m in marks],
+        'range': (float(to_x(low)), float(to_x(high))),
+        'range_text': f"90% of surface: {low:.2f} to {high:.2f}",
+        'title': 'Distortion' if mode == 'SHAPE' else 'Texel density',
+        'lines': lines,
+    }
+
+
+def render_chart(data, size=CHART_SIZE):
+    """Draw the chart card offscreen; returns RGBA float pixels (size x size x 4), bottom row first."""
+    from mathutils import Matrix
+    W = H = size
+    left, right = 12, W - 12
+    width = right - left
+    hist_bottom, hist_top = 122, 214
+    band_bottom, band_top = 104, 118
+
+    def rects(boxes, colors):
+        pos, col = [], []
+        for (x0, y0, x1, y1), c in zip(boxes, colors):
+            pos += [(x0, y0), (x1, y0), (x1, y1), (x0, y0), (x1, y1), (x0, y1)]
+            col += [tuple(c)] * 6
+        return pos, col
+
+    boxes, colors = [], []
+    boxes.append((0, 0, W, H))
+    colors.append((0.16, 0.16, 0.16, 1.0))
+    peak = max(float(data['share'].max()), 1e-12)
+    for i, (s, c) in enumerate(zip(data['share'], data['colors'])):
+        if s <= 0:
+            continue
+        x0 = left + width * i / CHART_BINS
+        x1 = left + width * (i + 1) / CHART_BINS - 1
+        h = (hist_top - hist_bottom) * math.sqrt(s / peak)  # square-root scale: small tails stay visible
+        boxes.append((x0, hist_bottom, x1, hist_bottom + max(h, 1.0)))
+        colors.append((c[0], c[1], c[2], 1.0))
+    for i, c in enumerate(data['colors']):
+        boxes.append((left + width * i / CHART_BINS, band_bottom, left + width * (i + 1) / CHART_BINS, band_top))
+        colors.append((c[0], c[1], c[2], 1.0))
+    for m in data['marks']:
+        x = left + width * m
+        boxes.append((x - 0.5, band_bottom - 2, x + 0.5, hist_top))
+        colors.append((1.0, 0.75, 0.25, 1.0))
+    r0, r1 = data['range']
+    xr0, xr1 = left + width * r0, left + width * r1
+    boxes += [(xr0, 74, max(xr1, xr0 + 1), 76), (xr0 - 1, 70, xr0 + 1, 80), (xr1 - 1, 70, xr1 + 1, 80)]
+    colors += [(0.95, 0.95, 0.95, 1.0)] * 3
+    pos, col = rects(boxes, colors)
+
+    shader = gpu.shader.from_builtin('SMOOTH_COLOR')
+    batch = batch_for_shader(shader, 'TRIS', {'pos': pos, 'color': col})
+    ortho = Matrix(((2.0 / W, 0, 0, -1), (0, 2.0 / H, 0, -1), (0, 0, 1, 0), (0, 0, 0, 1)))
+    off = gpu.types.GPUOffScreen(W, H)
+    try:
+        with off.bind():
+            fb = gpu.state.active_framebuffer_get()
+            fb.clear(color=(0.16, 0.16, 0.16, 1.0))
+            with gpu.matrix.push_pop():
+                gpu.matrix.load_identity()
+                gpu.matrix.load_projection_matrix(ortho)
+                batch.draw(shader)
+                font = 0
+                blf.size(font, 12)
+                blf.color(font, 1.0, 1.0, 1.0, 1.0)
+                blf.position(font, left, 236, 0)
+                blf.draw(font, data['title'])
+                blf.size(font, 10)
+                blf.color(font, 0.8, 0.8, 0.8, 1.0)
+                for t, label in zip(data['ticks'], data['tick_labels']):
+                    tw = blf.dimensions(font, label)[0]
+                    blf.position(font, min(max(left + width * t - tw / 2, 2), W - tw - 2), 88, 0)
+                    blf.draw(font, label)
+                blf.size(font, 11)
+                blf.color(font, 0.95, 0.95, 0.95, 1.0)
+                blf.position(font, left, 54, 0)
+                blf.draw(font, data['range_text'])
+                for i, line in enumerate(data['lines']):
+                    blf.position(font, left, 32 - 16 * i, 0)
+                    blf.draw(font, line)
+            pixels = np.array(fb.read_color(0, 0, W, H, 4, 0, 'FLOAT').to_list(), dtype=np.float32)
+    finally:
+        off.free()
+    return pixels.reshape(H, W, 4)
+
+
+def _update_chart(mode, stats):
+    """Redraw the panel's chart preview; silently keeps the text fallback when no GPU is available."""
+    global _chart_key
+    if _previews is None:
+        return
+    key = (mode, stats.get('total_tris', 0), stats.get('valid_area', 0.0), stats.get('share_above_110', 0.0),
+           stats.get('share_outside', 0.0))
+    if key == _chart_key and 'chart' in _previews:
+        return
+    data = chart_data(mode, stats)
+    if data is None:
+        return
+    try:
+        pixels = render_chart(data)
+    except Exception:  # no GPU context (for example background Blender without gpu.init)
+        return
+    preview = _previews.get('chart') or _previews.new('chart')
+    preview.image_size = (CHART_SIZE, CHART_SIZE)
+    preview.image_pixels_float.foreach_set(pixels.ravel())
+    _chart_key = key
 
 
 def _draw_viewport_heatmap():
@@ -631,7 +803,8 @@ def _on_toggle_show(self, context):
 
 
 def _on_mode_change(self, context):
-    """Callback when Heatmap Mode (Shape / Density) changes."""
+    """Callback when the heatmap mode (Distortion / Density) or the opacity changes."""
+    _update_chart(context.scene.fss_uv_heatmap_mode, _global_stats)
     tag_redraw()
 
 
@@ -675,7 +848,13 @@ class FSS_PT_UvHeatmap(bpy.types.Panel):
 
             stats = _global_stats
             box = layout.box()
-            if stats.get('total_tris', 0) > 0:
+            chart = _previews.get('chart') if _previews is not None else None
+            if stats.get('total_tris', 0) > 0 and chart is not None and _chart_key and _chart_key[0] == scene.fss_uv_heatmap_mode:
+                box.template_icon(icon_value=chart.icon_id, scale=CHART_SCALE)
+                if stats.get('degenerate_count', 0) > 0:
+                    box.label(text=f"Degenerate: {stats.get('share_degenerate', 0.0):.1%} ({stats.get('degenerate_count', 0)} tris)", icon='INFO')
+            elif stats.get('total_tris', 0) > 0:
+                # text fallback when the chart image is not available
                 if scene.fss_uv_heatmap_mode == 'SHAPE':
                     box.label(text=f"Over 1.10 (target): {stats.get('share_above_110', 0.0):.1%} of surface")
                     box.label(text=f"Over 1.25 (limit): {stats.get('share_above_125', 0.0):.1%} of surface")
@@ -697,9 +876,11 @@ CLASSES = (
 
 
 def register():
-    global _draw_view_handle, _draw_pixel_handle
+    global _draw_view_handle, _draw_pixel_handle, _previews
+    import bpy.utils.previews
     for cls in CLASSES:
         bpy.utils.register_class(cls)
+    _previews = bpy.utils.previews.new()
 
     bpy.types.Scene.fss_uv_heatmap_show = bpy.props.BoolProperty(
         name='Show UV Heatmap',
@@ -745,7 +926,11 @@ def register():
 
 
 def unregister():
-    global _draw_view_handle, _draw_pixel_handle, _shader
+    global _draw_view_handle, _draw_pixel_handle, _shader, _previews, _chart_key
+    if _previews is not None:
+        bpy.utils.previews.remove(_previews)
+        _previews = None
+    _chart_key = None
     if _draw_view_handle is not None:
         bpy.types.SpaceView3D.draw_handler_remove(_draw_view_handle, 'WINDOW')
         _draw_view_handle = None

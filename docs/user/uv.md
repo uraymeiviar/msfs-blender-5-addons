@@ -113,6 +113,16 @@ The overlay uses a diverging colour scheme centred on **Neutral 1.0**:
      - Below the range: turns red on a log scale down to 0.5x.
    - If an object is marked with a higher density preset (such as the glareshield at 1.5 to 1.65), it remains neutral when its density matches that authored target.
 
+### Distribution Chart in the Panel
+
+The panel shows a chart of the selected objects' surface:
+
+- **Colour band:** the same colours as on the model, with the values below it (Distortion 1.0 to 2.0 and more; Density 0.5 to 2.0, with 1.0 inside the object's range).
+- **Histogram above the band:** how much of the surface lies at each value, weighted by area. Bar heights use a square-root scale, so small tails stay visible; a tall bar at 1.0 with little else is a good result.
+- **Marks:** at 1.10 (our shape target) and 1.25 (the limit Auto Seam uses to accept an island) in Distortion mode; at 1.0 in Density mode.
+- **Range bar:** the middle 90 % of the surface (5 % lies below its left end, 5 % above its right end), with its values.
+- **Percentages:** the share of the surface over 1.10 and over 1.25, or outside the density range (too low, too high).
+
 ### Viewport Legend
 
 A legend in the corner of the viewport displays:
