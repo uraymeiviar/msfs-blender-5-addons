@@ -1068,6 +1068,10 @@ def propose_seams(obj, artist_seam, normal_split=None):
         bpy.ops.object.mode_set(mode='OBJECT')
 
         uv = me.uv_layers[temp_layer_name].data
+        loop_uvs = np.zeros(len(me.loops) * 2, dtype=np.float64)
+        uv.foreach_get('uv', loop_uvs)
+        loop_uvs = loop_uvs.reshape(-1, 2)
+
         sides = [[] for _ in me.edges]
         for face in me.polygons:
             loops = list(face.loop_indices)
@@ -1092,6 +1096,7 @@ def propose_seams(obj, artist_seam, normal_split=None):
             frame_protected_skipped=frame_protected_skipped,
             stage_time=tm,
             time=time.perf_counter() - T0,
+            uv=loop_uvs,
         )
 
         return auto_seam_edges, stats
