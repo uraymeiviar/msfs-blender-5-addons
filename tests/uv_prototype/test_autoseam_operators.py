@@ -600,10 +600,11 @@ def test_decal_skip():
     bpy.ops.wm.read_homefile(use_empty=True)
 
     # 1. Name class tests (DECAL, DECAL_EM, DECAL_FROST, DECAL_BLEND, GLASS, WNDSHIELD, INVIS, OCCLUDER)
+    # decision 23: <SCENE>_<ZONE>_<CLASS>, the class is the last part (Blender's .001 suffix allowed)
     skip_names = [
-        "MAT_DECAL_TEST",
-        "EXT_DECAL_EM_LIGHT",
-        "WND_DECAL_FROST_01",
+        "E2_TEST_DECAL",
+        "EXT_LIGHT_DECAL_EM",
+        "WND_DECAL_FROST.001",
         "PANEL_DECAL_BLEND",
         "CABIN_GLASS",
         "PILOT_WNDSHIELD",
@@ -650,8 +651,12 @@ def test_decal_skip():
     # 4. Standard mesh with no materials -> MUST NOT BE SKIPPED
     obj_nomat = create_cube("Obj_NoMat")
 
+    # 5. A class word inside the name, not at its end -> MUST NOT BE SKIPPED
+    obj_inner = create_cube("Obj_InnerClassWord")
+    obj_inner.data.materials.append(bpy.data.materials.new("COCKPIT_GLASS_FRAME_STD"))
+
     # Select all
-    all_objs = skip_objs + [obj_mixed, obj_nomat]
+    all_objs = skip_objs + [obj_mixed, obj_nomat, obj_inner]
     for o in all_objs:
         o.select_set(True)
 
@@ -670,7 +675,8 @@ def test_decal_skip():
     assert obj_nomat.name not in skip_dict, f"No-material object {obj_nomat.name} was incorrectly skipped"
     assert obj_mixed.data in unique_meshes, "obj_mixed mesh should be in unique_meshes"
     assert obj_nomat.data in unique_meshes, "obj_nomat mesh should be in unique_meshes"
-    assert len(unique_meshes) == 2, f"Expected 2 processed meshes, got {len(unique_meshes)}"
+    assert obj_inner.data in unique_meshes, "a class word inside the material name must not skip the object"
+    assert len(unique_meshes) == 3, f"Expected 3 processed meshes, got {len(unique_meshes)}"
 
     print("  -> PASS: Decal skip correctly handles all 8 name classes, MSFS material types, and mixed materials.")
 
@@ -700,7 +706,8 @@ def test_report_attention_counts():
             'islands': 8,
             'extra_vertices_vs_shading': 14,
             'time': 1.45,
-            'unverified_charts': [{'faces': 2, 'distortion': 2.37}],
+            'unverified_charts': [{'faces': 2, 'distortion': 2.37}, {'faces': 2, 'distortion': 1.50},
+                                  {'faces': 2, 'distortion': float('inf')}],
             'islands_over_limits': [{'faces': 43, 'distortion': 1.28, 'overlap': False}],
             'over_limits_count': 1,
             'sliver_overlaps': 2,
@@ -734,8 +741,11 @@ def test_report_attention_counts():
     assert att_pos < clean_pos, f"Meshes needing attention must come first: att_pos={att_pos}, clean_pos={clean_pos}"
 
     # 3. Plain wording checks
-    assert any("1 quad too distorted to flatten (2 faces, d=2.37): check the mesh" in l for l in lines)
-    assert any("1 island too stretched (43 faces, distortion 1.28): add a seam by hand" in l for l in lines)
+    # repeated problems are grouped into one line each; zero-area faces are reported apart
+    assert sum("too distorted to flatten" in l for l in lines) == 1
+    assert any("2 quad(s) or face(s) too distorted to flatten (worst 2.37)" in l for l in lines)
+    assert any("1 group(s) of faces with zero area" in l for l in lines)
+    assert any("1 island(s) too stretched (largest 43 faces, worst 1.28): add a seam by hand" in l for l in lines)
     assert any("Warning: Shading-split fallback" in l for l in lines)
     assert any("2 sliver overlap(s) ignored (< 1e-8 m²)" in l for l in lines)
 
@@ -743,7 +753,7 @@ def test_report_attention_counts():
     att_block = [l for l in lines[att_pos:clean_pos]]
     stat_line = [l for l in att_block if "over_limits=" in l][0]
     assert "over_limits=1" in stat_line
-    assert "unverified=1" in stat_line
+    assert "unverified=3" in stat_line
 
     print("  -> PASS: Report summary, attention ordering, plain wording, and separate over_limits verified.")
 

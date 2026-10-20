@@ -36,6 +36,8 @@ SKIP_MATERIAL_CLASSES = {
     'GLASS', 'WNDSHIELD', 'INVIS', 'OCCLUDER'
 }
 
+SKIP_MATERIAL_CLASSES = ('DECAL', 'DECAL_EM', 'DECAL_FROST', 'DECAL_BLEND', 'GLASS', 'WNDSHIELD', 'INVIS', 'OCCLUDER')
+
 MSFS_SKIP_MATERIAL_TYPES = {
     'msfs_decal',
     'msfs_geo_decal',
@@ -59,13 +61,10 @@ def _is_skip_material(mat):
     if mat is None:
         return False
 
-    name_upper = mat.name.upper()
-    for c in ('DECAL_EM', 'DECAL_FROST', 'DECAL_BLEND'):
-        if re.search(rf'(^|_){c}(_|\.|\d|$)', name_upper):
-            return True
-    tokens = set(re.split(r'[^A-Z0-9]+', name_upper))
-    for c in ('DECAL', 'GLASS', 'WNDSHIELD', 'INVIS', 'OCCLUDER'):
-        if c in tokens:
+    # decision 23 names are <SCENE>_<ZONE>_<CLASS>: the class is the last part, before Blender's .001 suffix
+    base = re.sub(r'\.\d+$', '', mat.name.upper())
+    for c in SKIP_MATERIAL_CLASSES:
+        if base == c or base.endswith('_' + c):
             return True
 
     mtype = getattr(mat, 'msfs_material_type', None)
@@ -447,26 +446,36 @@ def write_report_text(mesh_reports, run_time):
         block_lines = []
         if needs_attention:
             block_lines.append(f"Mesh '{mesh_name}' (objects: {objs_str}) - NEEDS ATTENTION:")
-            for u in unv:
-                f_cnt = u.get('faces', 1)
-                d = u.get('distortion', 0.0)
-                if f_cnt == 2:
-                    block_lines.append(f"  - 1 quad too distorted to flatten (2 faces, d={d:.2f}): check the mesh")
-                elif f_cnt == 1:
-                    block_lines.append(f"  - 1 face too distorted to flatten (1 face, d={d:.2f}): check the mesh")
-                else:
-                    block_lines.append(f"  - 1 chart too distorted to flatten ({f_cnt} faces, d={d:.2f}): check the mesh")
+            # Group repeated problems into one line each, so a broken mesh does not flood the report
+            zero_area = [x for x in unv + over if not math.isfinite(x.get('distortion', 0.0))]
+            small = [u for u in unv if math.isfinite(u.get('distortion', 0.0)) and u.get('faces', 1) <= 2]
+            charts = [u for u in unv if math.isfinite(u.get('distortion', 0.0)) and u.get('faces', 1) > 2]
+            overlapping = [i for i in over if i.get('overlap', False) and math.isfinite(i.get('distortion', 0.0))]
+            stretched = [i for i in over if not i.get('overlap', False) and math.isfinite(i.get('distortion', 0.0))
+                         and i.get('distortion', 0.0) > 1.25]
 
-            for isl in over:
-                f_cnt = isl.get('faces', 1)
-                has_ov = isl.get('overlap', False)
-                p_cnt = isl.get('overlap_pairs', 0)
-                d = isl.get('distortion', 0.0)
-                if has_ov:
-                    p_str = f"{p_cnt} pair" if p_cnt == 1 else f"{p_cnt} pairs"
-                    block_lines.append(f"  - 1 island has overlapping triangles ({p_str}, {f_cnt} faces): add a seam by hand")
-                elif d > 1.25:
-                    block_lines.append(f"  - 1 island too stretched ({f_cnt} faces, distortion {d:.2f}): add a seam by hand")
+            def worst(items):
+                return max(x.get('distortion', 0.0) for x in items)
+
+            def largest(items):
+                return max(x.get('faces', 1) for x in items)
+
+            if zero_area:
+                block_lines.append(f"  - {len(zero_area)} group(s) of faces with zero area (collapsed or duplicate "
+                                   f"faces, largest {largest(zero_area)} faces): clean up the mesh")
+            if small:
+                block_lines.append(f"  - {len(small)} quad(s) or face(s) too distorted to flatten (worst "
+                                   f"{worst(small):.2f}): split or flatten them in the mesh; a seam cannot help")
+            if charts:
+                block_lines.append(f"  - {len(charts)} chart(s) too distorted to flatten (largest {largest(charts)} "
+                                   f"faces, worst {worst(charts):.2f}): add seams by hand through steep steps or corners")
+            if overlapping:
+                pairs = sum(i.get('overlap_pairs', 0) for i in overlapping)
+                block_lines.append(f"  - {len(overlapping)} island(s) with overlapping triangles ({pairs} pair(s), "
+                                   f"largest {largest(overlapping)} faces): add a seam by hand across the fold")
+            if stretched:
+                block_lines.append(f"  - {len(stretched)} island(s) too stretched (largest {largest(stretched)} faces, "
+                                   f"worst {worst(stretched):.2f}): add a seam by hand")
 
             for w in warns:
                 block_lines.append(f"  - Warning: {w}")

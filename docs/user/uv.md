@@ -56,19 +56,22 @@ To open the full report: switch any workspace area to the **Text Editor**, click
 
 ### Plain-Language Advice
 
+Repeated problems on one mesh are grouped into one line, with the count, the largest island and the worst value.
+
 | Report Message | What It Means | What To Do |
 | :--- | :--- | :--- |
-| **1 island too stretched (N faces, distortion X.XX): add a seam by hand** | An island has an area distortion ratio greater than 1.25. | Add a manual seam across the high-curvature area to split the island into two flatter pieces. |
-| **1 quad too distorted to flatten (2 faces, d=X.XX): check the mesh** | A single quad is non-planar or degenerate and cannot be flattened without tearing. | Inspect the mesh geometry. Straighten or planarize the quad, or cut it with a manual seam. |
-| **1 chart too distorted to flatten (N faces, d=X.XX): check the mesh** | The algorithm could not find a safe cut path across this chart. | Inspect the mesh topology. Add manual seams through steep steps or sharp corners. |
-| **1 island has overlapping triangles (N pairs, X faces): add a seam by hand** | Triangles overlap in the final 2D unwrap. | Add a relief seam across the fold or fillet causing the self-intersection. |
+| **N island(s) too stretched: add a seam by hand** | Islands whose area distortion is above 1.25. | Add a manual seam across the high-curvature area to split the island into two flatter pieces. |
+| **N quad(s) or face(s) too distorted to flatten: split or flatten them in the mesh** | Single quads or faces that are strongly bent or skewed. A seam cannot run through the inside of a face, so no seam helps. | Fix the mesh: split the quad with an edge (`J` between two corners), or flatten it. |
+| **N group(s) of faces with zero area: clean up the mesh** | Collapsed or duplicate faces without area. They cannot be unwrapped at all. | Remove them, for example with **Mesh > Clean Up > Merge by Distance**, then run Propose again. |
+| **N chart(s) too distorted to flatten: add seams by hand** | The tool found no safe cut through these larger pieces. | Add manual seams through steep steps or sharp corners. |
+| **N island(s) with overlapping triangles: add a seam by hand across the fold** | Triangles overlap in the final 2D unwrap. | Add a relief seam across the fold or fillet causing the overlap. |
 | **N sliver overlap(s) ignored (< 1e-8 m²)** | Microscopic sliver triangles (smaller than 0.01 mm²) touch in UV space. | Safe to ignore; texture quality is unaffected. |
-| **Warning: Shared mesh '...' has differing or non-uniform scales** | Several objects share this mesh but have different scales. | Blender unwraps in object space. Apply scale (`Ctrl + A > Scale`) on the sharing objects where possible. |
+| **Warning: Shared mesh '...' has differing or non-uniform scales** | Several objects share this mesh but have different scales. | Blender unwraps in object space, so one UV layout cannot fit all of them. Scale cannot be applied on a shared mesh; either accept the stretch, or give the differently scaled objects their own mesh (**Object > Relations > Make Single User**) and apply scale there. |
 
 ## Limits and What to Watch Out For
 
 - **Modal interface:** Blender processes one mesh per step with progress shown in the status bar. The interface is blocked while a single mesh is calculated. Large shells (such as `OVERHEAD_SHELL`) can take 2 to 2.5 minutes to process. Press **Esc** to cancel between meshes (finished meshes keep their results).
 - **Modifiers:** seams are placed on the base mesh before **Mirror** and **Array** modifiers. The generated sides inherit the same seam positions.
 - **Object scale:** Blender's Angle-Based unwrap operates in object space. If an object has non-uniform scale (`1.0, 1.0, 2.0`), unwrap will stretch unless you apply scale (`Ctrl + A > Scale`).
-- **UV Marks panel:** density and orientation settings in the **UV Marks** panel are for texture baking and packing; they are not read by Auto Seam.
+- **UV Marks panel:** density and direction marks in the **UV Marks** panel are for the coming packing step; they are not read by Auto Seam.
 - **Undo:** a full run on multiple objects reverts in a single undo step (`Ctrl + Z`).
