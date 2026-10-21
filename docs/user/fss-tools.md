@@ -141,7 +141,7 @@ Colours the selected objects directly in the 3D viewport:
 - **Density:** Does each face get the right amount of texture relative to the texture set median and object marks?
 - **Visibility:** How well is each face seen from the reference cameras (from `<blend_name>.visibility`)?
 
-Includes a distribution chart in the panel and an optional UV grid with cell labels. See [uv.md](uv.md#heatmap) for how to read it.
+Includes a distribution chart in the panel and an optional UV grid with cell labels. See [uv.md](uv.md#heatmap-distortion-texel-density-and-visibility) for how to read it.
 
 ## Checks
 

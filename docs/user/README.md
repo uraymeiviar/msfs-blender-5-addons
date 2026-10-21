@@ -12,9 +12,9 @@ It matches **FSS Blender Tools 0.24.1** and the FSS exporter based on Asobo expo
 
   | Page | Contents |
   | :--- | :--- |
-  | [fss-tools.md](fss-tools.md) | The **FSS Tools** sidebar tab: **Tools**, **Empty Bounds**, **Tags**, **Merge Tree**, **UV Marks**, **Auto Seam**, **UV Heatmap**, **Checks** |
+  | [fss-tools.md](fss-tools.md) | The **FSS Tools** sidebar tab: **Tools**, **Empty Bounds**, **Tags**, **Merge Tree**, **UV Marks**, **Auto Seam**, **Heatmap**, **Visibility Test**, **Checks** |
   | [lod.md](lod.md) | The **LOD** panel: automatic LODs, marks, size cut-offs, quota and hints, the LOD sphere, viewport preview, and exporting with LODs |
-  | [uv.md](uv.md) | The **Auto Seam** panel (proposed and current seams, workflow, reports, limits) and the **UV Heatmap** panel (distortion and texel density on the model, the distribution chart, the UV grid) |
+  | [uv.md](uv.md) | The **Auto Seam** panel (proposed and current seams, workflow, reports, limits) and the **Heatmap** panel (distortion, texel density and visibility on the model, the distribution chart, the UV grid) |
   | [exporter.md](exporter.md) | The exporter: export target MSFS 2024 or MSFS 2020, one `.blend` for both simulators, materials, instancing, legacy normals |
 
 - **The MSFS rules behind the steps** (draw calls, LOD limits, materials, texture budgets, with their SDK sources) are in the aircraft repository's **MSFS Authoring Guide**, `doc/msfs-authoring/`. This guide links its steps to those rules by topic.
@@ -132,7 +132,7 @@ Steps marked **in development** describe what the tool will do, and how to get t
 - Mark the seams that matter to you by hand: panel joints, visible cuts, symmetry edges.
 - **Auto Seam** proposes seams for hard-surface parts around yours. Review them, **Accept Proposed** or **Discard Proposed**. Objects such as fur, cables or decal soups get the **Skip Auto Seam** mark in [UV Marks](fss-tools.md#uv-marks). See [uv.md](uv.md).
 - Unwrap with Blender's **Unwrap** (Angle Based). Apply the object's scale first where you can: Blender unwraps in object space.
-- Check with the **UV Heatmap** in **Distortion** mode and the **UV Grid**: cells should stay square, labels upright. See [UV Heatmap](uv.md#uv-heatmap-distortion-and-texel-density).
+- Check with the **Heatmap** in **Distortion** mode and the **UV Grid**: cells should stay square, labels upright. See [Heatmap](uv.md#heatmap-distortion-texel-density-and-visibility).
 
 **Check:** the heatmap's chart shows most of the surface near 1.0, with little above 1.25; nothing shows in magenta (Error).
 
@@ -140,21 +140,24 @@ Steps marked **in development** describe what the tool will do, and how to get t
 
 ### 7. Visibility Scoring
 
-**Why:** texture space is limited. Parts the flight crew sees deserve more texture than parts hidden behind other parts or beneath the seats.
+**Why:** texture space is limited. Parts the pilot sees deserve more texture than parts hidden behind other parts or behind the seat.
+
+**What it measures:** from the cameras you include (for the cockpit the pilot and copilot eyes; for the exterior your own exterior cameras) and over the animation states, how much of each face is actually visible, weighted by how far the head has to turn from the camera's default view. The score is a factor from 0 to 1 per face that depends neither on distance nor on size: a small knob in plain view scores as high as a large panel. Parts too small to measure (screw heads, small labels) take the value of the part they belong to.
+
+**How packing uses it:** each island gets a texel density (pixels per centimetre) within its object's density range from [UV Marks](fss-tools.md#uv-marks) × zone multiplier × visibility × the target density. An island's visibility comes from its seen faces only, so a partly hidden island keeps the density its visible part needs. Faces never seen in the analysed views and states get a small minimum density; nothing is deleted.
 
 **Do:**
-- Open sidebar `N` > **FSS Tools** > **Visibility Test**.
-- Ensure the scene's reference cameras (e.g. `CAM_PILOT`, `CAM_COPILOT`) are included in the camera list, set to **Look Around** (or **Fixed View** for dedicated instrument views).
-- Set **States** (default 5, evenly sampling animations across 0%, 25%, 50%, 75%, and 100%).
-- Click **Update Visibility**. The analysis evaluates the scene and writes `<blend_name>.visibility` next to the `.blend`.
-- Review never-seen parts via **Select Never Seen** or inspect stale meshes via **Select Stale**.
-- See [visibility.md](visibility.md) for full options and [Heatmap](uv.md#heatmap) in **Visibility** mode to inspect scores in the 3D viewport.
+
+- In **FSS Tools** > **Visibility Test**, tick **Include** for your cameras and set each to **Look Around** (the head can turn) or **Fixed View** (only what the camera's own frame shows).
+- Set **States** (default 5: 0, 25, 50, 75 and 100 % of each animation).
+- Save the `.blend`, then **Update Visibility**. The results go to `<blend name>.visibility` beside the `.blend`. See [visibility.md](visibility.md).
 
 **Check:**
-- Turn on **Heatmap** with **Mode: Visibility**. Prominent panels and switches show blue (0.5 to 1.0); occluded surfaces show red to magenta.
-- **FSS Visibility Report** in Blender's Text Editor lists summary percentiles, never-seen objects, and resolved sub-pixel parts.
 
-**Redo when:** you change mesh geometry, camera positions, or control animations. Updating visibility recalculates the `.visibility` file, which the automatic packer reads during UV packing.
+- The [Heatmap](uv.md#heatmap-distortion-texel-density-and-visibility) in **Visibility** mode: what the pilot looks at is blue, what is hidden or far to the side is red, never seen is magenta.
+- **Select Never Seen** and judge the list: switch positions and parts shown only under some conditions are not seen in every analysed state. Hide or delete only what really is never visible.
+
+**Redo when:** cameras, animations or the geometry change; the panel lists stale meshes. New seams or a new unwrap do not count: the scores belong to faces, not islands.
 
 ### 8. Packing (in development)
 
@@ -208,7 +211,7 @@ Some work has no step of its own, because it runs through several:
 
 ## Where to Find the Tools
 
-- **FSS Tools:** in the 3D Viewport, press `N` to open the sidebar, then pick the **FSS Tools** tab. The panels are, from top to bottom: **Tools**, **Empty Bounds**, **LOD**, **Tags**, **Merge Tree**, **UV Marks**, **Auto Seam**, **UV Heatmap**, **Checks**.
+- **FSS Tools:** in the 3D Viewport, press `N` to open the sidebar, then pick the **FSS Tools** tab. The panels are, from top to bottom: **Tools**, **Empty Bounds**, **LOD**, **Tags**, **Merge Tree**, **UV Marks**, **Auto Seam**, **Heatmap**, **Visibility Test**, **Checks**.
 - **Exporter:** in the same sidebar, tab **Microsoft Flight Simulator 2024 Tools**, panel **Export Target** (also shown in **File > Export > glTF 2.0**, section **Microsoft Flight Simulator (FSS)**).
 - **Material and object settings:** in the Properties editor, the MSFS panels of the Asobo add-on, plus **MSFS 2020 Object Parameters** and **MSFS 2020 Material Parameters** while the scene targets MSFS 2020.
 

@@ -1,9 +1,9 @@
-# UV: Auto Seam and UV Heatmap
+# UV: Auto Seam and Heatmap
 
 [Artist Guide](README.md) / **uv.md**
 ***
 
-This page covers two panels: **Auto Seam**, which proposes UV seams, and [UV Heatmap](#uv-heatmap-distortion-and-texel-density), which shows how well the UVs fit.
+This page covers two panels: **Auto Seam**, which proposes UV seams, and [Heatmap](#heatmap-distortion-texel-density-and-visibility), which shows how well the UVs fit and how visible each face is.
 
 The **Auto Seam** panel (sidebar `N` > **FSS Tools** > **Auto Seam**) proposes seams for hard-surface meshes, so you mark by hand only the seams that matter to you. It works alongside your own seams: it never removes or changes them, unless you click **Clear Current**.
 
@@ -34,7 +34,7 @@ Accept, Discard and Clear act on whole objects, also when clicked in Edit Mode. 
 1. **Mark your critical seams by hand** (optional): wherever you want a specific texture layout, for example along panel joints, visible exterior cuts, or mirrored symmetry edges.
 2. **Select objects** in Object Mode.
 3. **Propose Seams:** a dialog lists the meshes to process, shared meshes, and any skipped objects. Click **OK** to run.
-4. **Review in Edit Mode** (`Tab`) with **Select Proposed** and **Select Current**, and with the **UV Heatmap** after a test unwrap.
+4. **Review in Edit Mode** (`Tab`) with **Select Proposed** and **Select Current**, and with the **Heatmap** after a test unwrap.
 5. **Adjust if needed:** add seams by hand, or remove unwanted ones.
 6. **Accept Proposed** when you are happy, or **Discard Proposed** to drop the proposal.
 7. **Unwrap:** in Edit Mode, select all faces and unwrap with **UV > Unwrap** (Angle Based).
@@ -91,7 +91,7 @@ Repeated problems on one mesh are grouped into one line, with the count, the lar
 - **Blender waits while a mesh is calculated:** Blender processes one mesh per step with progress shown in the status bar. The interface is blocked while a single mesh is calculated. Large shells (such as `OVERHEAD_SHELL`) can take 2 to 2.5 minutes to process. Press **Esc** to cancel between meshes (finished meshes keep their results).
 - **Modifiers:** seams are placed on the base mesh before **Mirror** and **Array** modifiers. The generated sides inherit the same seam positions.
 - **Object scale:** Blender's Angle-Based unwrap operates in object space. If an object has non-uniform scale (`1.0, 1.0, 2.0`), unwrap will stretch unless you apply scale (`Ctrl + A > Scale`).
-- **UV Marks panel:** density and direction marks in the **UV Marks** panel are for the packing step and the UV Heatmap; the **Skip Auto Seam** mark in that panel tells Auto Seam to skip marked objects.
+- **UV Marks panel:** density and direction marks in the **UV Marks** panel are for the packing step and the Heatmap; the **Skip Auto Seam** mark in that panel tells Auto Seam to skip marked objects.
 - **Undo:** a full run on multiple objects reverts in a single undo step (`Ctrl + Z`).
 
 ## Heatmap: Distortion, Texel Density, and Visibility
