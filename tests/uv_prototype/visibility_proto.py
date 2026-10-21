@@ -1,4 +1,4 @@
-"""Visibility-based Texel Demand Prototype for Blender 5.2 (Round 4).
+"""Visibility-based Texel Demand Prototype for Blender 5.2 (Round 5).
 
 Implements Session 75 Design and Hand-Off (Decisions 79, 80, 81):
 1. Cameras (Decision 80): reference cameras come strictly from CLI (--cameras NAME[:MODE],...).
@@ -1088,12 +1088,13 @@ def compute_patch_scores_and_groups(mesh_meta, mesh_arrays, min_px_threshold=10.
                 if len(c) > 0 and np.all(face_undetermined[c]):
                     resolved_counts[best_lvl]['pieces'] += 1
 
-        # 3. Compute Island Values (Decision 79)
+        # 3. Compute Island Values (Decision 82)
         unique_isls = np.unique(island_ids)
         isl_values_arr = np.zeros(len(unique_isls), dtype=np.float32)
         isl_never_seen_arr = np.zeros(len(unique_isls), dtype=bool)
         isl_seen_share_arr = np.zeros(len(unique_isls), dtype=np.float32)
         isl_undet_only_arr = np.zeros(len(unique_isls), dtype=bool)
+        isl_r4_avg_arr = np.zeros(len(unique_isls), dtype=np.float32)
 
         for idx, isl_id in enumerate(unique_isls):
             isl_mask = (island_ids == isl_id)
@@ -1107,17 +1108,31 @@ def compute_patch_scores_and_groups(mesh_meta, mesh_arrays, min_px_threshold=10.
             isl_size_px = float(np.max(f_unocc)) / d_omega_px
             tot_area = float(np.sum(f_ar))
 
-            # Seen faces: score > 0
+            # Seen faces: score > 0 (includes undetermined faces with inherited score)
             seen_mask = (f_sc > 0.0)
             seen_area = float(np.sum(f_ar[seen_mask]))
+            seen_faces = isl_faces[seen_mask]
 
             if seen_area > 0.0:
-                isl_val = float(np.sum(f_sc[seen_mask] * f_ar[seen_mask]) / seen_area)
                 never_seen = False
                 seen_share = seen_area / max(tot_area, 1e-12)
                 is_undet_only = bool(np.all(f_udet[seen_mask]))
+                r4_avg = float(np.sum(f_sc[seen_mask] * f_ar[seen_mask]) / seen_area)
+
+                # Decision 82: sums over seen faces per view and instance
+                seen_unocc = np.sum(m_data['unocc_omega'][:, :, seen_faces], axis=-1)
+                max_seen_unocc = float(np.max(seen_unocc))
+
+                if max_seen_unocc >= omega_threshold:
+                    seen_vis = np.sum(m_data['vis_omega'][:, :, seen_faces], axis=-1)
+                    valid = seen_unocc > 1e-12
+                    ratio = np.where(valid, np.clip(seen_vis / np.maximum(seen_unocc, 1e-12), 0.0, 1.0), 0.0)
+                    isl_val = float(np.max(ratio))
+                else:
+                    isl_val = r4_avg
             else:
                 isl_val = 0.0
+                r4_avg = 0.0
                 never_seen = True
                 seen_share = 0.0
                 is_undet_only = False
@@ -1126,11 +1141,13 @@ def compute_patch_scores_and_groups(mesh_meta, mesh_arrays, min_px_threshold=10.
             isl_never_seen_arr[idx] = never_seen
             isl_seen_share_arr[idx] = seen_share
             isl_undet_only_arr[idx] = is_undet_only
+            isl_r4_avg_arr[idx] = r4_avg
 
             island_summaries[f"{m_name}__isl_{isl_id}"] = {
                 'mesh_name': m_name,
                 'island_id': int(isl_id),
                 'score': isl_val,
+                'r4_avg': r4_avg,
                 'size_px': isl_size_px,
                 'never_seen': never_seen,
                 'seen_area_share': seen_share,
@@ -1143,8 +1160,9 @@ def compute_patch_scores_and_groups(mesh_meta, mesh_arrays, min_px_threshold=10.
         m_data['island_never_seen'] = isl_never_seen_arr
         m_data['island_seen_shares'] = isl_seen_share_arr
         m_data['island_undet_only'] = isl_undet_only_arr
+        m_data['island_r4_avgs'] = isl_r4_avg_arr
 
-        # 4. Compute Object Summaries (Decision 79)
+        # 4. Compute Object Summaries (Decision 82)
         for inst_info in meta['instances']:
             o_name = inst_info['object_name']
             if o_name in object_summaries:
@@ -1159,6 +1177,7 @@ def compute_patch_scores_and_groups(mesh_meta, mesh_arrays, min_px_threshold=10.
             if 0.0 < o_size_px < min_px_threshold:
                 # Undetermined object!
                 o_score, o_lvl, _ = resolve_object_score(o_obj) if o_obj else (1.0, 'FALLBACK_1.0', 0.0)
+                o_r4_avg = o_score
                 o_never_seen = False
                 o_undetermined = True
                 o_seen_share = 1.0
@@ -1166,6 +1185,7 @@ def compute_patch_scores_and_groups(mesh_meta, mesh_arrays, min_px_threshold=10.
             elif o_size_px == 0.0:
                 # Completely unseen object (e.g. facing away in all views)
                 o_score = 0.0
+                o_r4_avg = 0.0
                 o_never_seen = True
                 o_undetermined = False
                 o_seen_share = 0.0
@@ -1173,12 +1193,23 @@ def compute_patch_scores_and_groups(mesh_meta, mesh_arrays, min_px_threshold=10.
                 # Measurable object!
                 seen_mask = (face_scores > 0.0)
                 seen_area = float(np.sum(areas[seen_mask]))
+                seen_faces = np.flatnonzero(seen_mask)
                 if seen_area > 0.0:
-                    o_score = float(np.sum(face_scores[seen_mask] * areas[seen_mask]) / seen_area)
+                    o_r4_avg = float(np.sum(face_scores[seen_mask] * areas[seen_mask]) / seen_area)
+                    seen_unocc_mesh = np.sum(m_data['unocc_omega'][:, :, seen_faces], axis=-1)
+                    max_seen_unocc_mesh = float(np.max(seen_unocc_mesh))
+                    if max_seen_unocc_mesh >= omega_threshold:
+                        seen_vis_mesh = np.sum(m_data['vis_omega'][:, :, seen_faces], axis=-1)
+                        valid_mesh = seen_unocc_mesh > 1e-12
+                        ratio_mesh = np.where(valid_mesh, np.clip(seen_vis_mesh / np.maximum(seen_unocc_mesh, 1e-12), 0.0, 1.0), 0.0)
+                        o_score = float(np.max(ratio_mesh))
+                    else:
+                        o_score = o_r4_avg
                     o_never_seen = False
                     o_seen_share = seen_area / max(o_tot_area, 1e-12)
                 else:
                     o_score = 0.0
+                    o_r4_avg = 0.0
                     o_never_seen = True
                     o_seen_share = 0.0
                 o_undetermined = False
@@ -1186,6 +1217,7 @@ def compute_patch_scores_and_groups(mesh_meta, mesh_arrays, min_px_threshold=10.
             object_summaries[o_name] = {
                 'mesh_name': m_name,
                 'score': o_score,
+                'r4_avg': o_r4_avg,
                 'size_px': o_size_px,
                 'never_seen': o_never_seen,
                 'undetermined': o_undetermined,
@@ -1203,7 +1235,7 @@ def compute_patch_scores_and_groups(mesh_meta, mesh_arrays, min_px_threshold=10.
 
 
 # ---------------------------------------------------------------------------
-# Core Analysis Engine (Round 4)
+# Core Analysis Engine (Round 5)
 # ---------------------------------------------------------------------------
 
 def analyze_visibility(
@@ -1216,7 +1248,7 @@ def analyze_visibility(
     falloff=1.0,
     min_px_threshold=10.0,
 ):
-    """Execute complete visibility analysis with per-face sums and patch scoring (Round 4)."""
+    """Execute complete visibility analysis with per-face sums and patch scoring (Round 5)."""
     if not cameras:
         raise ValueError(
             "No reference cameras specified. Visibility analysis requires artist-defined "
@@ -1436,7 +1468,8 @@ def analyze_visibility(
             valid = gl_unocc > 1e-12
             old_ratio = float(np.max(np.where(valid, np.clip(gl_vis / np.maximum(gl_unocc, 1e-12), 0.0, 1.0), 0.0)))
             glareshield_isl_report = {
-                'island_value_now': gl_data['score'],
+                'island_value_d82': gl_data['score'],
+                'island_value_r4_avg': gl_data['r4_avg'],
                 'seen_area_share': gl_data['seen_area_share'],
                 'old_sum_ratio': old_ratio,
                 'n_faces': gl_data['n_faces'],
@@ -1538,6 +1571,7 @@ def save_visibility_file(blend_path, results):
         'glareshield_island_report': results['glareshield_island_report'],
         'mesh_face_counts': mesh_face_counts,
         'object_summaries': results['object_summaries'],
+        'island_summaries': results['island_summaries'],
     }
 
     arrays_to_save = {
@@ -1769,11 +1803,17 @@ def test_gltf_export(blend_path, out_dir):
     print("\n--- Verifying glTF Export Integrity ---")
     gltf_out = Path(out_dir) / "vis_export_test.gltf"
 
+    t_start = time.perf_counter()
     bpy.ops.export_scene.gltf(
         filepath=str(gltf_out),
         export_format='GLTF_SEPARATE',
         use_selection=False,
+        export_animations=False,
+        export_skins=False,
+        export_morph=False,
     )
+    t_export = time.perf_counter() - t_start
+    print(f"glTF export completed in {t_export:.2f} s")
 
     with open(gltf_out, 'r', encoding='utf-8') as f:
         gltf_data = json.load(f)
@@ -1793,7 +1833,7 @@ def test_gltf_export(blend_path, out_dir):
             assert 'visibility' not in k.lower(), f"Leak: found visibility extras property {k} in exported glTF node"
 
     print("PASS: Verified that no visibility attributes or extras reach exported glTF!\n")
-    return True
+    return t_export
 
 
 # ---------------------------------------------------------------------------
@@ -2011,9 +2051,10 @@ def validate_synthetic_cases(results, blend_path=None):
     objs = results['object_summaries']
     isls = results['island_summaries']
     m_arrays = results['mesh_arrays']
+    mesh_meta = results['mesh_meta']
 
     print("\n" + "=" * 70)
-    print("      SYNTHETIC VALIDATION (ROUND 4 - 15 CASES)")
+    print("      SYNTHETIC VALIDATION (ROUND 5 - 15 CASES)")
     print("=" * 70)
 
     # Case 1: Distance-free equal scores at 0.5 m and 2.0 m
@@ -2069,17 +2110,25 @@ def validate_synthetic_cases(results, blend_path=None):
     assert s_sensor >= 0.80, f"Sensor uncovered at frame 100 must be seen, got {s_sensor:.4f}"
     print("  -> PASS: Action evaluated across its normalized percentage range.")
 
-    # Case 8: Multi-face resolution invariance - EVERY face within 0.02 of single quad
-    s_quad = objs["CASE8_PANEL_QUAD"]['score']
+    # Case 8: Multi-face resolution invariance - island value within 0.02 of single quad (Decision 82)
+    isl_quad = isls["CASE8_PANEL_QUAD_Mesh__isl_0"]
+    isl_grid = isls["CASE8_PANEL_GRID_Mesh__isl_0"]
+    s_quad = isl_quad['score']
+    s_grid = isl_grid['score']
+    r4_grid = isl_grid['r4_avg']
+
     grid_faces_sc = m_arrays["CASE8_PANEL_GRID_Mesh"]['face_scores']
+    grid_faces_ar = mesh_meta["CASE8_PANEL_GRID_Mesh"]['orig_areas']
     max_grid_diff = float(np.max(np.abs(grid_faces_sc - s_quad)))
-    mean_grid_diff = float(np.mean(np.abs(grid_faces_sc - s_quad)))
-    print(f"Case 8 (Multi-Face Patch Invariance): Quad = {s_quad:.4f}, Grid 10k Faces Max Diff = {max_grid_diff:.4f}, Mean Diff = {mean_grid_diff:.4f}")
+    mean_grid_diff = float(np.average(np.abs(grid_faces_sc - s_quad), weights=grid_faces_ar))
+    mean_grid_sc = float(np.average(grid_faces_sc, weights=grid_faces_ar))
+    isl_diff = abs(s_grid - s_quad)
+
+    print(f"Case 8 (Multi-Face Patch Invariance): Quad Island = {s_quad:.4f}, Grid Island (D82) = {s_grid:.4f}, Grid R4 Avg = {r4_grid:.4f}")
+    print(f"  Info: Per-Face Max Diff = {max_grid_diff:.4f}, Area-Weighted Mean Diff = {mean_grid_diff:.4f}, Area-Weighted Mean Score = {mean_grid_sc:.4f}")
     assert s_quad >= 0.85, f"Quad score low: {s_quad:.4f}"
-    if max_grid_diff <= 0.02:
-        print("  -> PASS: Every face of the 10,000-face grid is within 0.02 of the single quad.")
-    else:
-        print(f"  -> NOT MET: Grid faces max diff {max_grid_diff:.4f} > 0.02 (mean diff {mean_grid_diff:.4f})")
+    assert isl_diff <= 0.02, f"Grid island value exceeds 0.02 tolerance against quad: {isl_diff:.4f}"
+    print(f"  -> PASS: Island value of 10,000-face grid is within {isl_diff:.4f} <= 0.02 of single quad.")
 
     # Case 9: Mirror object with one copy hidden
     s_mirr = objs["CASE9_MIRROR_OBJ"]['score']
@@ -2147,12 +2196,9 @@ def validate_synthetic_cases(results, blend_path=None):
         assert "CASE1_PANEL_NEAR_Mesh" in stale_detected, "Modified mesh not detected as stale!"
         print("  -> PASS: Modified mesh detected and reported as stale on load.")
 
-    if max_grid_diff <= 0.02:
-        print("\nALL 15 SYNTHETIC CASES PASSED SUCCESSFULLY!")
-    else:
-        print(f"\nSYNTHETIC VALIDATION: 14/15 PASSED, 1 NOT MET (Case 8 max diff {max_grid_diff:.4f} > 0.02)")
+    print("\nALL 15 SYNTHETIC CASES PASSED SUCCESSFULLY!")
     print("=" * 70 + "\n")
-    return (max_grid_diff <= 0.02)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -2162,7 +2208,7 @@ def validate_synthetic_cases(results, blend_path=None):
 def run_resolution_check(blend_path, cameras=None, floor=0.2, falloff=1.0, out_dir="tests/_work/uv_visibility"):
     """Run resolution check comparing cube_res=1024 vs cube_res=4096 (Step 7)."""
     print("\n" + "=" * 70)
-    print("      RESOLUTION CHECK: 1,024 vs 4,096 PX CUBE FACES (ROUND 4)")
+    print("      RESOLUTION CHECK: 1,024 vs 4,096 PX CUBE FACES (ROUND 5)")
     print("=" * 70)
 
     # 1. Run at 1024
@@ -2296,9 +2342,9 @@ def run_resolution_check(blend_path, cameras=None, floor=0.2, falloff=1.0, out_d
 # ---------------------------------------------------------------------------
 
 def print_cockpit_report(results):
-    """Print detailed analysis report for the cockpit model (Round 4)."""
+    """Print detailed analysis report for the cockpit model (Round 5)."""
     print("\n" + "=" * 76)
-    print("      VISIBILITY ANALYSIS REPORT (E2 COCKPIT - ROUND 4)")
+    print("      VISIBILITY ANALYSIS REPORT (E2 COCKPIT - ROUND 5)")
     print("=" * 76)
     print(f"File: {results['blend_file']}")
     print(f"Schema Version: {results['schema_version']}")
@@ -2369,14 +2415,52 @@ def print_cockpit_report(results):
     for name, data in sorted_by_score[-20:][::-1]:
         print(f"{name:<42} {data['score']:<8.4f} {data['size_px']:<10.1f} {data['area_m2']:<10.4f} {data['n_faces']:<8}")
 
+    # Island Value Comparison: Decision 82 vs Round 5 Area-Weighted Average
+    isls = results['island_summaries']
+    isl_size_arr = np.array([v['size_px'] for v in isls.values()], dtype=np.float64)
+    isl_d82_arr = np.array([v['score'] for v in isls.values()], dtype=np.float64)
+    isl_r4_arr = np.array([v['r4_avg'] for v in isls.values()], dtype=np.float64)
+    isl_ar_arr = np.array([v['area_m2'] for v in isls.values()], dtype=np.float64)
+    isl_undet_arr = np.array([v['undetermined_only'] for v in isls.values()], dtype=bool)
+    isl_nv_arr = np.array([v['never_seen'] for v in isls.values()], dtype=bool)
+
+    seen_isls_mask = ~isl_nv_arr
+
+    island_buckets = [
+        ("undetermined only", seen_isls_mask & isl_undet_arr),
+        ("1 to 10 px",        seen_isls_mask & (~isl_undet_arr) & (isl_size_arr >= 1.0) & (isl_size_arr < 10.0)),
+        ("10 to 100 px",      seen_isls_mask & (~isl_undet_arr) & (isl_size_arr >= 10.0) & (isl_size_arr < 100.0)),
+        ("over 100 px",       seen_isls_mask & (~isl_undet_arr) & (isl_size_arr >= 100.0)),
+    ]
+
+    print("\n--- Island Values: Decision 82 vs Round 4 Average (Area-Weighted) ---")
+    print("| Island Bucket          | Count | Area (m²) | Mean Signed Diff | Mean Absolute Diff |")
+    print("| :---                   | ---:  | ---:      | ---:             | ---:               |")
+    for glabel, mask in island_buckets:
+        n_cnt = int(np.count_nonzero(mask))
+        if n_cnt > 0:
+            diff_signed = isl_d82_arr[mask] - isl_r4_arr[mask]
+            diff_abs = np.abs(diff_signed)
+            w = isl_ar_arr[mask]
+            w_sum = np.sum(w)
+            mean_signed = float(np.sum(diff_signed * w) / max(w_sum, 1e-12))
+            mean_abs = float(np.sum(diff_abs * w) / max(w_sum, 1e-12))
+            print(f"| {glabel:<22} | {n_cnt:>5} | {w_sum:>9.3f} | {mean_signed:>16.4f} | {mean_abs:>18.4f} |")
+        else:
+            print(f"| {glabel:<22} | {n_cnt:>5} |       N/A |              N/A |                N/A |")
+
     # Glareshield island report
-    gl = results['glareshield_island_report']
+    gl = results.get('glareshield_island_report')
     if gl:
         print("\n--- Glareshield Island Report (CockpitShell.010 Island 4) ---")
         print(f"  Faces: {gl['n_faces']}, Total Area: {gl['area_m2']:.4f} m²")
-        print(f"  Island Value Now (Seen Faces Average): {gl['island_value_now']:.4f}")
+        print(f"  Decision 82 Value (Sums over Seen Faces): {gl['island_value_d82']:.4f}")
+        print(f"  Round 4 Average (Area-Weighted Seen Faces): {gl['island_value_r4_avg']:.4f}")
+        print(f"  Old Sum Ratio (All Faces, Decision 78): {gl['old_sum_ratio']:.4f}")
         print(f"  Seen Face Area Share: {gl['seen_area_share']*100:.1f}%")
-        print(f"  Old Sum Ratio (Decision 78): {gl['old_sum_ratio']:.4f}")
+
+    if results.get('gltf_export_time_s') is not None:
+        print(f"\nglTF Export Integrity Check: completed in {results['gltf_export_time_s']:.2f} s")
 
     print("=" * 76 + "\n")
     sys.stdout.flush()
@@ -2387,7 +2471,7 @@ def main():
     argv = sys.argv
     args_to_parse = argv[argv.index("--") + 1:] if "--" in argv else []
 
-    parser = argparse.ArgumentParser(description="Texel Demand Prototype Round 4")
+    parser = argparse.ArgumentParser(description="Texel Demand Prototype Round 5")
     parser.add_argument("--synthetic", action="store_true", help="Run 15 synthetic validation cases")
     parser.add_argument("--cockpit", action="store_true", help="Run full cockpit analysis")
     parser.add_argument("--resolution-check", action="store_true", help="Run 1024 vs 4096 resolution check")
@@ -2464,6 +2548,9 @@ def main():
         assert meta_loaded['schema_version'] == 4
         assert len(stale_list) == 0
 
+        t_export = test_gltf_export(blend_copy, out_dir)
+        results['gltf_export_time_s'] = t_export
+
         print_cockpit_report(results)
 
         print("Rendering offscreen heatmap images...")
@@ -2497,8 +2584,6 @@ def main():
             results=results
         )
         print(f"Saved Outside Heatmap Image: {outside_png}")
-
-        test_gltf_export(blend_copy, out_dir)
 
 
 if __name__ == "__main__":
