@@ -546,7 +546,147 @@ def test_visibility_heatmap_mode():
 
 
 # ---------------------------------------------------------------------------
-# Test 6: glTF Leak Check with Animations Off
+# Test 6: Heatmap Modifier Face Mapping & Evaluated Face Count Mismatch
+# ---------------------------------------------------------------------------
+
+def test_heatmap_modifier_face_mapping():
+    """Verify heatmap colors across modifiers (Mirror, Triangulate) and No-data on count mismatch."""
+    blend_path = SCRATCH_DIR / "heatmap_modifier_test.blend"
+    build_synthetic_scene(blend_path)
+
+    visibility.sync_camera_list(bpy.context.scene)
+    bpy.context.scene.fss_visibility.cameras[0].include = True
+    bpy.ops.fss.update_visibility()
+
+    vis_file = blend_path.with_suffix('.visibility')
+    meta, data, _ = visibility_core.load_visibility_file(vis_file)
+
+    # Enable Heatmap and set Visibility mode
+    scene = bpy.context.scene
+    scene.fss_uv_heatmap_show = True
+    scene.fss_uv_heatmap_mode = 'VISIBILITY'
+
+    # 1. Mirror object (CASE9_MIRROR_OBJ)
+    bpy.ops.object.select_all(action='DESELECT')
+    obj_mirr = bpy.data.objects["CASE9_MIRROR_OBJ"]
+    obj_mirr.select_set(True)
+
+    uv_heatmap.update_heatmap_cache(bpy.context, refresh=True)
+    cache_mirr = uv_heatmap._cache["CASE9_MIRROR_OBJ"]
+    assert cache_mirr.vis_data['has_data'], "Mirror object must have visibility data"
+
+    # Original face 0 score and color
+    s_mirr = data['CASE9_MIRROR_OBJ_Mesh__face_scores'][0]
+    expected_color_mirr = visibility_core.compute_heatmap_colors(
+        np.array([s_mirr]), np.array([False]), np.array([False])
+    )[0]
+
+    # Every evaluated triangle (original half and mirrored half) must match original face 0 color
+    assert len(cache_mirr.colors_visibility) > 0, "No evaluated triangles for mirror object"
+    for tri_col in cache_mirr.colors_visibility:
+        np.testing.assert_allclose(tri_col, expected_color_mirr, atol=1e-4)
+
+    # 2. Triangulate object (CASE10_TRI_PANEL)
+    bpy.ops.object.select_all(action='DESELECT')
+    obj_tri = bpy.data.objects["CASE10_TRI_PANEL"]
+    obj_tri.select_set(True)
+
+    uv_heatmap.update_heatmap_cache(bpy.context, refresh=True)
+    cache_tri = uv_heatmap._cache["CASE10_TRI_PANEL"]
+    assert cache_tri.vis_data['has_data'], "Triangulate object must have visibility data"
+
+    s_tri = data['CASE10_TRI_PANEL_Mesh__face_scores'][0]
+    expected_color_tri = visibility_core.compute_heatmap_colors(
+        np.array([s_tri]), np.array([False]), np.array([False])
+    )[0]
+
+    assert len(cache_tri.colors_visibility) > 0, "No evaluated triangles for triangulate object"
+    for tri_col in cache_tri.colors_visibility:
+        np.testing.assert_allclose(tri_col, expected_color_tri, atol=1e-4)
+
+    # 3. Object whose evaluated face count changed after the run shows No data
+    bpy.ops.object.select_all(action='DESELECT')
+    obj_near = bpy.data.objects["CASE1_PANEL_NEAR"]
+    obj_near.select_set(True)
+
+    # Before modifying: has valid data
+    uv_heatmap.update_heatmap_cache(bpy.context, refresh=True)
+    assert uv_heatmap._cache["CASE1_PANEL_NEAR"].vis_data['has_data'], "Base panel must have data"
+
+    # Add Subsurf modifier so evaluated face count changes from 1 to 4
+    mod_sub = obj_near.modifiers.new("ChangeEvalCount", "SUBSURF")
+    mod_sub.levels = 1
+
+    uv_heatmap.update_heatmap_cache(bpy.context, refresh=True)
+    cache_near_changed = uv_heatmap._cache["CASE1_PANEL_NEAR"]
+    assert not cache_near_changed.vis_data['has_data'], "Object with changed eval face count must NOT have data"
+    assert uv_heatmap._global_stats['no_data_count'] == 1, "no_data_count must be 1"
+
+    for tri_col in cache_near_changed.colors_visibility:
+        np.testing.assert_allclose(tri_col, uv_heatmap.COLOR_NO_DATA, atol=1e-4)
+
+    # Restore modifier and verify it regains data
+    obj_near.modifiers.remove(mod_sub)
+    uv_heatmap.update_heatmap_cache(bpy.context, refresh=True)
+    assert uv_heatmap._cache["CASE1_PANEL_NEAR"].vis_data['has_data'], "Panel must regain data when modifier removed"
+    assert uv_heatmap._global_stats['no_data_count'] == 0, "no_data_count must return to 0"
+
+    print("PASS: test_heatmap_modifier_face_mapping")
+
+
+# ---------------------------------------------------------------------------
+# Test 7: Camera Renaming and Deletion
+# ---------------------------------------------------------------------------
+
+def test_camera_renaming_and_deletion():
+    """Verify camera items preserve Include and Mode across renames and delete cleanly."""
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+
+    cam1_data = bpy.data.cameras.new("CAM_ALPHA")
+    cam1_obj = bpy.data.objects.new("CAM_ALPHA", cam1_data)
+    bpy.context.scene.collection.objects.link(cam1_obj)
+
+    cam2_data = bpy.data.cameras.new("CAM_BETA")
+    cam2_obj = bpy.data.objects.new("CAM_BETA", cam2_data)
+    bpy.context.scene.collection.objects.link(cam2_obj)
+
+    visibility.sync_camera_list(bpy.context.scene)
+    settings = bpy.context.scene.fss_visibility
+    assert len(settings.cameras) == 2, f"Expected 2 cameras, got {len(settings.cameras)}"
+
+    # Configure camera 1
+    item1 = next(it for it in settings.cameras if it.camera == cam1_obj)
+    item1.include = True
+    item1.mode = 'FIXED_VIEW'
+
+    # Configure camera 2
+    item2 = next(it for it in settings.cameras if it.camera == cam2_obj)
+    item2.include = False
+    item2.mode = 'LOOK_AROUND'
+
+    # 1. Rename camera 1: Include and Mode must be kept, name shown must be new name
+    cam1_obj.name = "CAM_ALPHA_RENAMED"
+    visibility.sync_camera_list(bpy.context.scene)
+
+    item1_after = next((it for it in settings.cameras if it.camera == cam1_obj), None)
+    assert item1_after is not None, "Camera 1 missing after rename"
+    assert item1_after.camera.name == "CAM_ALPHA_RENAMED"
+    assert item1_after.camera_name == "CAM_ALPHA_RENAMED"
+    assert item1_after.include is True, "Include was lost on rename"
+    assert item1_after.mode == 'FIXED_VIEW', f"Mode was lost on rename: {item1_after.mode}"
+
+    # 2. Delete camera 2: It must leave the list
+    bpy.data.objects.remove(cam2_obj, do_unlink=True)
+    visibility.sync_camera_list(bpy.context.scene)
+
+    assert len(settings.cameras) == 1, f"Expected 1 camera after delete, got {len(settings.cameras)}"
+    assert settings.cameras[0].camera == cam1_obj
+
+    print("PASS: test_camera_renaming_and_deletion")
+
+
+# ---------------------------------------------------------------------------
+# Test 8: glTF Leak Check with Animations Off
 # ---------------------------------------------------------------------------
 
 def test_gltf_leak_check():
@@ -588,11 +728,11 @@ def test_gltf_leak_check():
 
 
 # ---------------------------------------------------------------------------
-# Test 7: Packer Interface Function
+# Test 9: Packer Interface Function & Cache Verification (200 Calls)
 # ---------------------------------------------------------------------------
 
-def test_packer_interface():
-    """Verify get_object_visibility returns Decision 82 island values and face scores."""
+def test_packer_interface_and_cache():
+    """Verify get_object_visibility returns Decision 82 values and reuses cache across 200 calls."""
     blend_path = SCRATCH_DIR / "packer_test.blend"
     build_synthetic_scene(blend_path)
 
@@ -601,8 +741,9 @@ def test_packer_interface():
     bpy.ops.fss.update_visibility()
 
     obj12 = bpy.data.objects["CASE12_PARTLY_HIDDEN_OBJ"]
-    res12 = visibility_core.get_object_visibility(obj12)
 
+    # 1. Basic interface verification
+    res12 = visibility_core.get_object_visibility(obj12)
     assert not res12['stale'], "Object must not be stale"
     assert res12['object_name'] == "CASE12_PARTLY_HIDDEN_OBJ"
     assert len(res12['island_values']) > 0, "No island values returned"
@@ -611,7 +752,33 @@ def test_packer_interface():
     assert isl_val >= 0.80, f"Partly hidden island value too low: {isl_val}"
     assert len(res12['face_scores']) == len(obj12.data.polygons)
 
-    print("PASS: test_packer_interface")
+    # 2. Cache verification: 200 calls read the file from disk exactly once
+    visibility_core.clear_file_cache()
+    c_start = visibility_core.get_file_load_count()
+
+    cached_results = []
+    for _ in range(200):
+        res = visibility_core.get_object_visibility(obj12)
+        cached_results.append(res)
+
+    loads = visibility_core.get_file_load_count() - c_start
+    assert loads == 1, f"Expected file to be read exactly once in 200 calls, got {loads} loads"
+
+    # 3. Uncached call verification: results must equal cached call
+    uncached = visibility_core.get_object_visibility(obj12, use_cache=False)
+    first_cached = cached_results[0]
+
+    assert first_cached['object_name'] == uncached['object_name']
+    assert first_cached['stale'] == uncached['stale']
+    assert first_cached['never_seen'] == uncached['never_seen']
+    assert first_cached['undetermined'] == uncached['undetermined']
+    assert abs(first_cached['object_score'] - uncached['object_score']) < 1e-6
+    assert first_cached['island_values'] == uncached['island_values']
+    np.testing.assert_array_equal(first_cached['face_scores'], uncached['face_scores'])
+    np.testing.assert_array_equal(first_cached['face_undetermined'], uncached['face_undetermined'])
+    np.testing.assert_array_equal(first_cached['face_never_seen'], uncached['face_never_seen'])
+
+    print(f"PASS: test_packer_interface_and_cache (200 calls, {loads} disk load)")
 
 
 # ---------------------------------------------------------------------------
@@ -628,8 +795,10 @@ def main():
     test_scene_unchanged_after_run_and_esc()
     test_disabled_states()
     test_visibility_heatmap_mode()
+    test_heatmap_modifier_face_mapping()
+    test_camera_renaming_and_deletion()
     test_gltf_leak_check()
-    test_packer_interface()
+    test_packer_interface_and_cache()
 
     print("\n" + "=" * 70)
     print("      ALL TESTS PASSED")

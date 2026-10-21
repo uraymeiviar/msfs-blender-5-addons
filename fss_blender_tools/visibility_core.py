@@ -550,6 +550,8 @@ def extract_scene_geometry(depsgraph, view_layer, mesh_meta):
     all_tri_ids = []
 
     eval_poly_info = {}
+    object_eval_face_maps = {}
+    object_eval_face_counts = {}
     global_id = 1
 
     mesh_objs = [
@@ -658,6 +660,8 @@ def extract_scene_geometry(depsgraph, view_layer, mesh_meta):
                 opaque_ids.append(tri_id_expanded)
 
         global_id += n_eval_polys
+        object_eval_face_maps[o.name] = orig_indices.copy().astype(np.int32)
+        object_eval_face_counts[o.name] = int(n_eval_polys)
         eval_obj.to_mesh_clear()
 
     batches = {
@@ -674,7 +678,7 @@ def extract_scene_geometry(depsgraph, view_layer, mesh_meta):
         'tri_ids': np.concatenate(all_tri_ids, axis=0) if all_tri_ids else np.zeros(0, dtype=np.int32),
     }
 
-    return batches, eval_poly_info, tri_geometry, global_id
+    return batches, eval_poly_info, tri_geometry, global_id, object_eval_face_maps, object_eval_face_counts
 
 
 # ---------------------------------------------------------------------------
@@ -1202,6 +1206,7 @@ def save_visibility_file(blend_path, results, settings=None):
         'resolved_counts': results.get('resolved_counts', {}),
         'glareshield_island_report': results.get('glareshield_island_report', {}),
         'mesh_face_counts': mesh_face_counts,
+        'object_eval_face_counts': results.get('object_eval_face_counts', {}),
         'object_summaries': results.get('object_summaries', {}),
         'island_summaries': results.get('island_summaries', {}),
         'settings': settings or {},
@@ -1220,13 +1225,56 @@ def save_visibility_file(blend_path, results, settings=None):
         arrays_to_save[f"{safe_name}__face_never_seen"] = m_data['face_never_seen'].astype(bool)
         arrays_to_save[f"{safe_name}__face_patch_size_px"] = m_data['face_patch_size_px'].astype(np.float32)
 
+    for obj_name, eval_map in results.get('object_eval_face_maps', {}).items():
+        safe_obj_name = obj_name.replace('/', '_').replace('\\', '_')
+        arrays_to_save[f"eval_map__{safe_obj_name}"] = eval_map.astype(np.int32)
+
     with open(vis_path, 'wb') as f:
         np.savez_compressed(f, **arrays_to_save)
+
+    vis_path_res = vis_path.resolve()
+    if vis_path_res in _vis_file_cache:
+        del _vis_file_cache[vis_path_res]
+
     return vis_path
 
 
-def load_visibility_file(vis_path, scene_meshes=None):
+_vis_file_cache = {}
+_vis_file_load_count = 0
+
+
+def get_file_load_count():
+    """Return number of times a .visibility file was loaded from disk (for tests)."""
+    return _vis_file_load_count
+
+
+def clear_file_cache():
+    """Clear cached .visibility file data."""
+    global _vis_file_load_count
+    _vis_file_cache.clear()
+
+
+def load_visibility_file(vis_path, scene_meshes=None, use_cache=True):
     """Load `.visibility` file and verify staleness against scene meshes."""
+    global _vis_file_load_count
+    vis_path = Path(vis_path).resolve()
+    mtime = vis_path.stat().st_mtime if vis_path.exists() else 0.0
+
+    if use_cache and vis_path in _vis_file_cache:
+        cached = _vis_file_cache[vis_path]
+        if cached['mtime'] == mtime:
+            meta = cached['meta']
+            data = cached['data']
+            stale_meshes = []
+            if scene_meshes:
+                saved_counts = meta.get('mesh_face_counts', {})
+                for m_name, saved_n_faces in saved_counts.items():
+                    me = scene_meshes.get(m_name)
+                    if me is None or len(me.polygons) != saved_n_faces:
+                        stale_meshes.append(m_name)
+            return meta, data, stale_meshes
+
+    _vis_file_load_count += 1
     data = np.load(vis_path)
     meta = json.loads(str(data['_meta_json'][0]))
 
@@ -1237,6 +1285,13 @@ def load_visibility_file(vis_path, scene_meshes=None):
             me = scene_meshes.get(m_name)
             if me is None or len(me.polygons) != saved_n_faces:
                 stale_meshes.append(m_name)
+
+    if use_cache:
+        _vis_file_cache[vis_path] = {
+            'mtime': mtime,
+            'meta': meta,
+            'data': data,
+        }
 
     return meta, data, stale_meshes
 
@@ -1321,7 +1376,7 @@ class VisibilityAnalyzer:
         self.floor = floor
         self.falloff = falloff
         self.min_px_threshold = min_px_threshold
-        self.blend_path = blend_path or (scene.fss_visibility.cameras[0].camera_name if hasattr(scene, 'fss_visibility') else "")
+        self.blend_path = blend_path or (scene.fss_visibility.cameras[0].camera_name if hasattr(scene, 'fss_visibility') and len(scene.fss_visibility.cameras) else "")
 
         # State tracking
         self.shader = None
@@ -1330,6 +1385,8 @@ class VisibilityAnalyzer:
         self.anim_ctrl = None
         self.mesh_meta = None
         self.mesh_arrays = None
+        self.object_eval_face_maps = {}
+        self.object_eval_face_counts = {}
         self.view_configs = []
         self.current_step = 0
         self.current_state_idx = -1
@@ -1420,9 +1477,16 @@ class VisibilityAnalyzer:
             self.anim_ctrl.apply_percentage_state(state_val)
 
             dg = bpy.context.evaluated_depsgraph_get()
-            self.batches, self.eval_poly_info, self.tri_geom, self.max_id = extract_scene_geometry(
+            (self.batches, self.eval_poly_info, self.tri_geom, self.max_id,
+             obj_maps, obj_counts) = extract_scene_geometry(
                 dg, self.view_layer, self.mesh_meta
             )
+            if not self.object_eval_face_maps:
+                self.object_eval_face_maps = obj_maps
+                self.object_eval_face_counts = obj_counts
+            else:
+                self.object_eval_face_maps.update(obj_maps)
+                self.object_eval_face_counts.update(obj_counts)
 
             self.batch_op = None
             if len(self.batches['opaque_pos']) > 0:
@@ -1607,6 +1671,8 @@ class VisibilityAnalyzer:
             'mesh_arrays': self.mesh_arrays,
             'object_summaries': obj_sums,
             'island_summaries': isl_sums,
+            'object_eval_face_maps': self.object_eval_face_maps,
+            'object_eval_face_counts': self.object_eval_face_counts,
         }
         return results
 
@@ -1687,7 +1753,7 @@ def analyze_visibility(
 # Packer Interface Function (Requirement 7)
 # ---------------------------------------------------------------------------
 
-def get_object_visibility(obj, uv_name=None, vis_path=None):
+def get_object_visibility(obj, uv_name=None, vis_path=None, use_cache=True):
     """For the packer: returns each island's value (Decision 82) and each face's score with stale status.
 
     Returns dict containing:
@@ -1721,7 +1787,7 @@ def get_object_visibility(obj, uv_name=None, vis_path=None):
         return {'stale': True, 'reason': 'FILE_NOT_FOUND', 'island_values': {}, 'face_scores': None}
 
     try:
-        meta, data, stale_meshes = load_visibility_file(vis_path, scene_meshes=bpy.data.meshes)
+        meta, data, stale_meshes = load_visibility_file(vis_path, scene_meshes=bpy.data.meshes, use_cache=use_cache)
     except Exception as e:
         return {'stale': True, 'reason': f'LOAD_ERROR: {e}', 'island_values': {}, 'face_scores': None}
 

@@ -591,6 +591,7 @@ def _object_triangles(obj, depsgraph, allow_no_uvs=False):
         'U': U,
         'has_uvs': me.uv_layers.active is not None,
         'tri_poly': tri_poly,
+        'eval_face_count': len(me.polygons),
         'mat_keys': mat_keys,
     }
 
@@ -649,6 +650,8 @@ def update_heatmap_cache(context, refresh=True):
             pass
 
     selected = [obj for obj in context.selected_objects if _editable(obj) and obj.type == 'MESH']
+    if is_vis:
+        selected = [obj for obj in selected if not (obj.hide_render or visibility_core.is_invisible_object(obj))]
     skipped_no_uvs = []
     new_items = {}
     for obj in selected:
@@ -678,20 +681,30 @@ def update_heatmap_cache(context, refresh=True):
             obj_inst = context.view_layer.objects.get(name)
             m_name = obj_inst.data.name if (obj_inst and obj_inst.data) else ""
             safe_name = m_name.replace('/', '_').replace('\\', '_')
+            safe_obj_name = name.replace('/', '_').replace('\\', '_')
             sc_key = f"{safe_name}__face_scores"
-            if m_name and m_name not in stale_meshes and sc_key in vis_data_arrays:
-                face_sc = vis_data_arrays[sc_key]
-                face_ud = vis_data_arrays.get(f"{safe_name}__face_undetermined", np.zeros(len(face_sc), dtype=bool))
-                face_nv = vis_data_arrays.get(f"{safe_name}__face_never_seen", np.zeros(len(face_sc), dtype=bool))
-                poly_colors = visibility_core.compute_heatmap_colors(face_sc, face_ud, face_nv, alpha=ALPHA)
-                tp = np.clip(item['tri_poly'], 0, len(poly_colors) - 1)
-                colors_vis = poly_colors[tp]
-                vis_item_data = {
-                    'has_data': True,
-                    'scores': face_sc[tp],
-                    'undetermined': face_ud[tp],
-                    'never_seen': face_nv[tp],
-                }
+            eval_map_key = f"eval_map__{safe_obj_name}"
+            stored_counts = vis_meta.get('object_eval_face_counts', {})
+            stored_eval_count = stored_counts.get(name)
+            current_eval_count = item.get('eval_face_count', -1)
+
+            if (m_name and m_name not in stale_meshes and sc_key in vis_data_arrays and
+                    eval_map_key in vis_data_arrays and stored_eval_count is not None and
+                    stored_eval_count == current_eval_count):
+                eval_map = vis_data_arrays[eval_map_key]
+                if len(eval_map) == current_eval_count:
+                    face_sc = vis_data_arrays[sc_key]
+                    face_ud = vis_data_arrays.get(f"{safe_name}__face_undetermined", np.zeros(len(face_sc), dtype=bool))
+                    face_nv = vis_data_arrays.get(f"{safe_name}__face_never_seen", np.zeros(len(face_sc), dtype=bool))
+                    poly_colors = visibility_core.compute_heatmap_colors(face_sc, face_ud, face_nv, alpha=ALPHA)
+                    tri_orig = eval_map[item['tri_poly']]
+                    colors_vis = poly_colors[tri_orig]
+                    vis_item_data = {
+                        'has_data': True,
+                        'scores': face_sc[tri_orig],
+                        'undetermined': face_ud[tri_orig],
+                        'never_seen': face_nv[tri_orig],
+                    }
 
         if colors_vis is None:
             colors_vis = np.tile(COLOR_NO_DATA, (len(item['P_local']), 1))

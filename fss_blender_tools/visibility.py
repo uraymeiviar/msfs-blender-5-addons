@@ -19,7 +19,12 @@ from . import visibility_core
 
 class FSS_VisibilityCameraItem(bpy.types.PropertyGroup):
     """Camera entry in the visibility test list."""
-    camera_name: StringProperty(name="Camera Name")
+    camera: PointerProperty(
+        name="Camera",
+        type=bpy.types.Object,
+        poll=lambda self, obj: obj.type == 'CAMERA',
+        description="Reference camera object"
+    )
     include: BoolProperty(name="Include", default=False, description="Include this camera in visibility analysis")
     mode: EnumProperty(
         name="Mode",
@@ -30,6 +35,10 @@ class FSS_VisibilityCameraItem(bpy.types.PropertyGroup):
         default='LOOK_AROUND',
         description="Camera viewing mode"
     )
+
+    @property
+    def camera_name(self):
+        return self.camera.name if self.camera else ""
 
 
 class FSS_VisibilitySettings(bpy.types.PropertyGroup):
@@ -93,16 +102,20 @@ def sync_camera_list(scene):
     if settings is None:
         return
 
-    existing_settings = {item.camera_name: (item.include, item.mode) for item in settings.cameras}
-    scene_cams = sorted([o.name for o in scene.objects if o.type == 'CAMERA'])
+    existing = {}
+    for item in settings.cameras:
+        if item.camera and item.camera.name in scene.objects:
+            existing[item.camera] = (item.include, item.mode)
 
-    # Rebuild collection preserving settings
+    scene_cams = sorted([o for o in scene.objects if o.type == 'CAMERA'], key=lambda o: o.name)
+
+    # Rebuild collection preserving settings by camera object
     settings.cameras.clear()
-    for cam_name in scene_cams:
+    for cam_obj in scene_cams:
         item = settings.cameras.add()
-        item.camera_name = cam_name
-        if cam_name in existing_settings:
-            item.include, item.mode = existing_settings[cam_name]
+        item.camera = cam_obj
+        if cam_obj in existing:
+            item.include, item.mode = existing[cam_obj]
         else:
             item.include = False
             item.mode = 'LOOK_AROUND'
@@ -219,10 +232,10 @@ class FSS_OT_UpdateVisibility(bpy.types.Operator):
         settings = context.scene.fss_visibility
         cams = []
         for item in settings.cameras:
-            if not item.include:
+            if not item.include or not item.camera:
                 continue
-            cam_obj = bpy.data.objects.get(item.camera_name)
-            if cam_obj is None or cam_obj.type != 'CAMERA':
+            cam_obj = item.camera
+            if cam_obj.type != 'CAMERA':
                 continue
             cams.append({
                 'name': cam_obj.name,
@@ -240,7 +253,7 @@ class FSS_OT_UpdateVisibility(bpy.types.Operator):
     def _get_settings_dict(self, context):
         s = context.scene.fss_visibility
         return {
-            'cameras': [{'name': item.camera_name, 'mode': item.mode} for item in s.cameras if item.include],
+            'cameras': [{'name': item.camera.name, 'mode': item.mode} for item in s.cameras if item.include and item.camera],
             'states': s.states,
             'floor': s.floor,
             'falloff': s.falloff,
@@ -485,16 +498,17 @@ class FSS_OT_VisibilitySelectStale(bpy.types.Operator):
 class FSS_UL_VisibilityCameraList(bpy.types.UIList):
     """Camera item row rendering."""
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        cam_name = item.camera.name if item.camera else "(deleted)"
         if self.layout_type in {'DEFAULT', 'COMPACT'}:
             row = layout.row(align=True)
             row.prop(item, 'include', text="")
-            row.label(text=item.camera_name, icon='CAMERA_DATA')
+            row.label(text=cam_name, icon='CAMERA_DATA')
             sub = row.row(align=True)
             sub.enabled = item.include
             sub.prop(item, 'mode', text="")
         elif self.layout_type == 'GRID':
             layout.alignment = 'CENTER'
-            layout.label(text=item.camera_name, icon='CAMERA_DATA')
+            layout.label(text=cam_name, icon='CAMERA_DATA')
 
 
 # ---------------------------------------------------------------------------
