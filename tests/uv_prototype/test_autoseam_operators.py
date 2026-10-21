@@ -311,6 +311,15 @@ def test_keep_and_clear_from_edit_mode():
     assert cleared_auto == 0 and cleared_artist == kept_artist, (cleared_auto, cleared_artist)
     print("  -> PASS: Keep and Clear work from Edit Mode and the change survives leaving it.")
 
+    # Clear Current removes the current (accepted) seams and leaves a new proposal alone
+    bpy.ops.fss.uv_propose_seams()
+    proposed, current = uv_autoseam.get_mesh_seam_counts(me)
+    assert current > 0
+    assert bpy.ops.fss.uv_clear_current_seams('EXEC_DEFAULT') == {'FINISHED'}
+    after_proposed, after_current = uv_autoseam.get_mesh_seam_counts(me)
+    assert after_current == 0 and after_proposed == proposed, (after_proposed, after_current)
+    print("  -> PASS: Clear Current removes the current seams and keeps the proposed ones.")
+
 
 def test_select_operators_in_edit_mode():
     """Verify Select Auto Seams and Select Artist Seams in Edit Mode."""

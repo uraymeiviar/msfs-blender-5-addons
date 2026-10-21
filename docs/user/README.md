@@ -5,7 +5,7 @@
 
 This guide is for 3D artists who model and texture Flight Sim Studio (FSS) aircraft in Blender 5.2. It explains what each panel and button does, how to use it, and what to watch out for.
 
-It matches **FSS Blender Tools 0.23.0** and the FSS exporter based on Asobo exporter 8.4.1.
+It matches **FSS Blender Tools 0.24.0** and the FSS exporter based on Asobo exporter 8.4.1.
 
 ## Pages
 
@@ -41,7 +41,7 @@ Do not enable the original `io_scene_gltf2_msfs_2024` or `io_scene_gltf2_msfs_20
 - **In the aircraft repository:** open `tools/blender/FSS-ADDONS-VERSION.txt`. It names the add-on commit and the **FSS Blender Tools** version.
 - **In Blender:** **Edit > Preferences > Add-ons**, search for "FSS Blender Tools"; the version is shown in the add-on details.
 
-If your version is newer than 0.23.0, some labels or buttons may differ from this guide.
+If your version is newer than 0.24.0, some labels or buttons may differ from this guide.
 
 ## Terms Used in This Guide
 

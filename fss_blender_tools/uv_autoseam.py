@@ -6,8 +6,9 @@ Constructs a temporary triangulated world-space work copy of the object mesh
 the proposal mapped to original edges along with diagonal cut counts.
 Leaves the source object and mesh completely unmodified.
 
-Provides operators to propose seams (modal and synchronous), clear auto seams,
-keep them as artist seams, and select auto or artist seams in Edit Mode.
+Provides operators to propose seams (modal and synchronous), accept or discard the proposed seams, clear the
+current seams, and select proposed or current seams in Edit Mode. Wording for artists: "proposed" seams are the
+ones the tool wrote and marked fss_auto_seam; "current" seams are all other seams (internally: artist seams).
 """
 import math
 import re
@@ -265,6 +266,16 @@ def clear_auto_seams(mesh):
     mesh.attributes.remove(attr)
     mesh.update()
     return cleared_count
+
+
+def clear_current_seams(mesh):
+    """Remove the current seams (every seam not marked fss_auto_seam); proposed seams stay."""
+    current, proposed = get_mesh_seam_masks(mesh)
+    count = int(np.count_nonzero(current))
+    if count:
+        mesh.edges.foreach_set('use_seam', proposed)
+        mesh.update()
+    return count
 
 
 def keep_as_artist_seams(mesh):
@@ -841,8 +852,8 @@ def _gather_candidate_objects(context):
 class FSS_OT_UvProposeSeams(bpy.types.Operator):
     bl_idname = 'fss.uv_propose_seams'
     bl_label = 'Propose Seams'
-    bl_description = ('Propose automatic UV seams for selected mesh objects without modifying artist seams. '
-                      'Replaces previous automatic seams')
+    bl_description = ('Propose UV seams for the selected mesh objects; their current seams stay and steer the '
+                      'proposal. A new proposal replaces the previous proposed seams')
     bl_options = {'REGISTER', 'UNDO'}
 
     _timer = None
@@ -888,7 +899,7 @@ class FSS_OT_UvProposeSeams(bpy.types.Operator):
             if len(self._shared_meshes) > 5:
                 box.label(text=f"  ... and {len(self._shared_meshes) - 5} more")
         if self._replaced_meshes:
-            box.label(text=f"Meshes with auto seams to replace: {len(self._replaced_meshes)}", icon='RECOVER_LAST')
+            box.label(text=f"Meshes whose proposed seams are replaced: {len(self._replaced_meshes)}", icon='RECOVER_LAST')
             for m in self._replaced_meshes[:5]:
                 box.label(text=f"  {m.name}")
             if len(self._replaced_meshes) > 5:
@@ -1024,8 +1035,8 @@ def _in_object_mode(context, work):
 
 class FSS_OT_UvClearAutoSeams(bpy.types.Operator):
     bl_idname = 'fss.uv_clear_auto_seams'
-    bl_label = 'Clear Auto Seams'
-    bl_description = 'Remove automatic seams from selected mesh objects; artist seams are preserved'
+    bl_label = 'Discard Proposed'
+    bl_description = 'Remove the proposed seams from the selected mesh objects; current seams stay'
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -1039,14 +1050,15 @@ class FSS_OT_UvClearAutoSeams(bpy.types.Operator):
                 meshes.add(o.data)
         cleared_total = _in_object_mode(context, lambda: sum(clear_auto_seams(m)
                                                              for m in sorted(meshes, key=lambda m: m.name)))
-        self.report({'INFO'}, f"Cleared auto seams on {len(meshes)} mesh(es)")
+        self.report({'INFO'}, f"Discarded {cleared_total} proposed seam(s) on {len(meshes)} mesh(es)")
         return {'FINISHED'}
 
 
 class FSS_OT_UvKeepAsArtistSeams(bpy.types.Operator):
     bl_idname = 'fss.uv_keep_as_artist_seams'
-    bl_label = 'Keep as Artist Seams'
-    bl_description = 'Convert automatic seams on selected objects into artist seams so future runs keep them'
+    bl_label = 'Accept Proposed'
+    bl_description = ('Make the proposed seams of the selected mesh objects current seams; later proposals keep '
+                      'them')
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -1060,14 +1072,36 @@ class FSS_OT_UvKeepAsArtistSeams(bpy.types.Operator):
                 meshes.add(o.data)
         kept_total = _in_object_mode(context, lambda: sum(keep_as_artist_seams(m)
                                                           for m in sorted(meshes, key=lambda m: m.name)))
-        self.report({'INFO'}, f"Converted auto seams to artist seams on {len(meshes)} mesh(es)")
+        self.report({'INFO'}, f"Accepted {kept_total} proposed seam(s) on {len(meshes)} mesh(es)")
+        return {'FINISHED'}
+
+
+class FSS_OT_UvClearCurrentSeams(bpy.types.Operator):
+    bl_idname = 'fss.uv_clear_current_seams'
+    bl_label = 'Clear Current'
+    bl_description = ('Remove the current seams (all seams except proposed ones) from the selected mesh objects, '
+                      'for example before proposing from scratch')
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return bool([o for o in context.selected_objects if o.type == 'MESH' and _editable(o)])
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(self, event)
+
+    def execute(self, context):
+        meshes = {o.data for o in context.selected_objects if o.type == 'MESH' and _editable(o) and o.data}
+        removed = _in_object_mode(context, lambda: sum(clear_current_seams(m)
+                                                       for m in sorted(meshes, key=lambda m: m.name)))
+        self.report({'INFO'}, f"Removed {removed} current seam(s) on {len(meshes)} mesh(es)")
         return {'FINISHED'}
 
 
 class FSS_OT_UvSelectAutoSeams(bpy.types.Operator):
     bl_idname = 'fss.uv_select_auto_seams'
-    bl_label = 'Select Auto Seams'
-    bl_description = 'Select automatic seam edges on the active mesh in Edit Mode'
+    bl_label = 'Select Proposed'
+    bl_description = 'Select the proposed seam edges of the active mesh in Edit Mode'
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -1090,14 +1124,14 @@ class FSS_OT_UvSelectAutoSeams(bpy.types.Operator):
             if is_auto:
                 sel_count += 1
         bmesh.update_edit_mesh(me)
-        self.report({'INFO'}, f"Selected {sel_count} auto seam edge(s)")
+        self.report({'INFO'}, f"Selected {sel_count} proposed seam edge(s)")
         return {'FINISHED'}
 
 
 class FSS_OT_UvSelectArtistSeams(bpy.types.Operator):
     bl_idname = 'fss.uv_select_artist_seams'
-    bl_label = 'Select Artist Seams'
-    bl_description = 'Select artist seam edges on the active mesh in Edit Mode'
+    bl_label = 'Select Current'
+    bl_description = 'Select the current seam edges (not proposed) of the active mesh in Edit Mode'
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -1121,7 +1155,7 @@ class FSS_OT_UvSelectArtistSeams(bpy.types.Operator):
             if is_artist:
                 sel_count += 1
         bmesh.update_edit_mesh(me)
-        self.report({'INFO'}, f"Selected {sel_count} artist seam edge(s)")
+        self.report({'INFO'}, f"Selected {sel_count} current seam edge(s)")
         return {'FINISHED'}
 
 
@@ -1147,7 +1181,7 @@ class FSS_PT_UvAutoSeam(bpy.types.Panel):
             box.label(text=f"{obj.name} ({obj.data.name})", icon='MESH_DATA')
             if context.mode == 'OBJECT':
                 auto_cnt, artist_cnt = get_mesh_seam_counts(obj.data)
-                box.label(text=f"Auto seams: {auto_cnt} | Artist seams: {artist_cnt}")
+                box.label(text=f"Proposed: {auto_cnt} | Current: {artist_cnt}")
             else:
                 box.label(text="(Seam counts shown in Object Mode)")
 
@@ -1156,13 +1190,14 @@ class FSS_PT_UvAutoSeam(bpy.types.Panel):
         box.label(text=f"Selected: {len(sel_meshes)} editable mesh(es)")
         box.operator(FSS_OT_UvProposeSeams.bl_idname, text='Propose Seams', icon='UV_EDGESEL')
         row = box.row(align=True)
-        row.operator(FSS_OT_UvClearAutoSeams.bl_idname, text='Clear Auto Seams', icon='X')
-        row.operator(FSS_OT_UvKeepAsArtistSeams.bl_idname, text='Keep as Artist Seams', icon='CHECKMARK')
+        row.operator(FSS_OT_UvKeepAsArtistSeams.bl_idname, text='Accept Proposed', icon='CHECKMARK')
+        row.operator(FSS_OT_UvClearAutoSeams.bl_idname, text='Discard Proposed', icon='X')
+        box.operator(FSS_OT_UvClearCurrentSeams.bl_idname, text='Clear Current', icon='TRASH')
 
         if context.mode == 'EDIT_MESH':
             row = box.row(align=True)
-            row.operator(FSS_OT_UvSelectAutoSeams.bl_idname, text='Select Auto')
-            row.operator(FSS_OT_UvSelectArtistSeams.bl_idname, text='Select Artist')
+            row.operator(FSS_OT_UvSelectAutoSeams.bl_idname, text='Select Proposed')
+            row.operator(FSS_OT_UvSelectArtistSeams.bl_idname, text='Select Current')
 
         txt = bpy.data.texts.get(REPORT_TEXT_NAME)
         box = layout.box()
@@ -1186,6 +1221,7 @@ CLASSES = (
     FSS_OT_UvProposeSeams,
     FSS_OT_UvClearAutoSeams,
     FSS_OT_UvKeepAsArtistSeams,
+    FSS_OT_UvClearCurrentSeams,
     FSS_OT_UvSelectAutoSeams,
     FSS_OT_UvSelectArtistSeams,
     FSS_PT_UvAutoSeam,

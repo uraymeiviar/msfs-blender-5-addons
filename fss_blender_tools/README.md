@@ -14,7 +14,7 @@ repository are in [../AGENTS.md](../AGENTS.md).
 | `tags.py` | **Tags** | Generic object tags (`fss_tags`, semicolon-separated), per-row `[-]`/`[+]` assignment, selection, and per-tag skip-merge and Keep toggles |
 | `merge.py` | **Merge Tree** | Export-time merge groups (`@MERGE_<name>` / `@NOMERGE_<name>`), New Merge Group, tree preview and console details |
 | `uv_marks.py` | **UV Marks** | Authoring marks for UV unwrapping and packing: per-object texel density range (`fss_uv_density`, default 0.9 to 1.1, presets Lower 0.7 to 0.8 and Higher 1.5 to 1.65), island direction (`fss_uv_direction`: Free, Upright, Flip, Quarter), and Skip Auto Seam mark (`fss_uv_skip_autoseam`), inherited from the nearest marked ancestor; per-material island margin as a fraction of the UV square (`fss_uv_margin`, default 0.002) |
-| `uv_autoseam.py`, `uv_autoseam_core.py` | **Auto Seam** | Proposes UV seams on hard surface meshes respecting artist seams, normal splits, and distortion limits; Clear, Keep as Artist Seams, Edit Mode selection, and report in Text Editor |
+| `uv_autoseam.py`, `uv_autoseam_core.py` | **Auto Seam** | Proposes UV seams on hard surface meshes keeping the current seams, normal splits, and distortion limits; Accept Proposed, Discard Proposed, Clear Current, Edit Mode selection, and report in Text Editor |
 | `uv_heatmap.py` | **UV Heatmap** | Viewport heatmap: Distortion (conformal singular-value ratio) and Density (relative to material median and object range), RizomUV-style diverging colours, legend, and evaluated Mirror/Array support |
 | `checks.py`, `name_check.py` | **Checks** | **Scan Names** (lists object and bone names that break FSS naming rules and renames them in batch; `@MERGE_` / `@NOMERGE_` allowed) and **Fix Broken Bone Parents** |
 
@@ -112,9 +112,11 @@ Automated hard-surface seam placement for untextured geometry (`uv_autoseam.py` 
 
 - **Non-destructive:** proposes seams without modifying existing artist seams or changing UV maps.
   Proposed seams are tagged with the boolean edge attribute `fss_auto_seam` and written as Blender edge seams.
-- **Workflow:** **Propose Seams** computes seams modally with progress reporting; **Select Auto** and
-  **Select Artist** in Edit Mode inspect proposed vs manual seams; **Keep as Artist Seams** converts automatic
-  seams into permanent artist seams; **Clear Auto Seams** removes only the automatic seams.
+- **Workflow:** **Propose Seams** computes seams modally with progress reporting. Seams are **proposed** (marked
+  `fss_auto_seam`) or **current** (all others; internally artist seams). **Accept Proposed** removes the mark,
+  **Discard Proposed** removes the proposed seams, **Clear Current** removes the current ones (confirmation), and
+  **Select Proposed** / **Select Current** select them in Edit Mode. Accept, Discard and Clear switch to Object Mode
+  for their work when clicked in Edit Mode.
 - **Exclusions:** objects whose materials are all in decal, glass, windshield, invisible, or occluder
   classes (by name class or MSFS material type) are skipped automatically.
 - **Reporting:** overwrites the text datablock `FSS Auto Seam Report` with execution totals, listing meshes

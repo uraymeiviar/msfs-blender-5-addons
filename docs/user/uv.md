@@ -5,26 +5,41 @@
 
 The **Auto Seam** panel (sidebar `N` > **FSS Tools** > **Auto Seam**) proposes automatic UV seams for hard-surface meshes. It is designed to save time on complex, untextured cockpit and airframe parts.
 
-Using Auto Seam is completely **optional**. It works alongside manual seams: it never removes or overwrites seams you marked yourself.
+Using Auto Seam is completely **optional**. It works alongside manual seams: it never removes or overwrites seams you made yourself, unless you click **Clear Current**.
 
 ## How It Works
 
 - The tool analyzes the 3D surface, sharp edges, and normal splits of your mesh to find natural seams where islands can flatten with minimal distortion.
-- Proposed seams are stored as regular Blender edge seams and marked with a boolean attribute (`fss_auto_seam`).
-- Existing seams that you marked by hand are preserved as **artist seams**. A new proposal replaces only earlier automatic seams.
-- Running **Propose Seams** does not change your existing UV maps or unwrapped UV coordinates. You decide when to unwrap.
+- A mesh has two kinds of seams:
+  - **Proposed** seams: written by the tool and not accepted yet (marked with the edge attribute `fss_auto_seam`);
+  - **Current** seams: every other seam, whether you marked it by hand or accepted it from an earlier proposal.
+- The panel shows both counts for the active object, for example "Proposed: 575 | Current: 347".
+- **Propose Seams** keeps the current seams; they steer the proposal. A new proposal replaces only the earlier proposed seams.
+- None of the buttons changes your UV maps. You decide when to unwrap.
+
+## The Buttons
+
+| Button | Does |
+| :--- | :--- |
+| **Propose Seams** | Adds proposed seams to the selected objects. Current seams stay. |
+| **Accept Proposed** | Makes the proposed seams current seams. Later proposals keep them. |
+| **Discard Proposed** | Removes the proposed seams. Current seams stay. |
+| **Clear Current** | Removes the current seams (asks first). Proposed seams stay. Use it to propose from scratch. |
+| **Select Proposed** / **Select Current** | In Edit Mode, selects those edges on the active mesh. |
+
+Accept, Discard and Clear act on whole objects, also when clicked in Edit Mode. **Ctrl+Z** undoes each of them.
 
 ## The Workflow
 
-1. **Mark your critical seams by hand:** place seams wherever you want a specific texture layout (for example along panel joints, visible exterior cuts, or mirrored symmetry edges).
-2. **Select objects:** select the mesh objects in Object Mode.
-3. **Propose Seams:** click **Propose Seams** in the Auto Seam panel. A dialog lists the meshes to process, shared meshes, and any skipped objects. Click **OK** to run.
-4. **Review in Edit Mode:** select a mesh and switch to Edit Mode (`Tab`):
-   - **Select Auto:** selects only the edges proposed by the tool.
-   - **Select Artist:** selects only your manual seams.
-5. **Adjust if needed:** add seams where you want more cuts, or clear unwanted seams.
-6. **Keep as Artist Seams:** in Object Mode, click **Keep as Artist Seams**. This removes the automatic mark; from now on, all seams are treated as authored artist seams and will not be overwritten by future proposals.
-7. **Unwrap and Pack:** switch to Edit Mode, select all faces, and unwrap with **UV > Unwrap** (Angle Based). Then pack your islands with your packing tool.
+1. **Mark your critical seams by hand** (optional): wherever you want a specific texture layout, for example along panel joints, visible exterior cuts, or mirrored symmetry edges.
+2. **Select objects** in Object Mode.
+3. **Propose Seams:** a dialog lists the meshes to process, shared meshes, and any skipped objects. Click **OK** to run.
+4. **Review in Edit Mode** (`Tab`) with **Select Proposed** and **Select Current**, and with the **UV Heatmap** after a test unwrap.
+5. **Adjust if needed:** add seams by hand, or remove unwanted ones.
+6. **Accept Proposed** when you are happy, or **Discard Proposed** to drop the proposal.
+7. **Unwrap and Pack:** in Edit Mode, select all faces and unwrap with **UV > Unwrap** (Angle Based). Then pack your islands.
+
+**To replace the current seams with a fresh proposal:** **Clear Current**, then **Propose Seams**, then **Accept Proposed**. The order matters: proposing first would let the old seams steer the proposal.
 
 ## What Is Skipped
 
