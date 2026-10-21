@@ -110,7 +110,11 @@ Steps marked **in development** describe what the tool will do, and how to get t
 
 ### 7. Visibility Scoring (in development)
 
-**Why:** texture space is limited. Parts the pilot sees up close deserve more texture than parts behind the seat or hidden behind other parts. The tool will measure, from the cockpit camera set (pilot and copilot eyes, quickviews) or the exterior camera set, how many screen pixels each face can get, over the animation states, and turn that into a texel density per part. Faces never seen are reported as candidates for removal.
+**Why:** texture space is limited. Parts the pilot sees deserve more texture than parts hidden behind other parts or behind the seat.
+
+**What the tool will do:** from the cameras you define (for the cockpit the pilot and copilot eyes; for the exterior your own exterior cameras) and over the animation states, measure how much of each face is actually visible, weighted by how far the head has to turn from the camera's default view. The result is a factor from 0 to 1 per face that depends neither on distance nor on size: a small knob in plain view scores as high as a large panel. It is kept in a separate `.visibility` file next to the `.blend`; new seams or a new unwrap do not make it out of date, a change to the faces does.
+
+The packer then gives each island a texel density (pixels per centimetre) of zone multiplier × object mark × visibility × the target density, within a lower and an upper bound. An island's visibility is the average over its faces that are seen, so a partly hidden island keeps the density its visible part needs. Faces never seen in the analysed views and states get a small minimum and are listed for you to judge (switch positions and other parts shown only under some conditions are not seen in every state); nothing is deleted. Parts too small to measure take the value of the part they belong to.
 
 **Meanwhile, by hand:** set the texel density marks in [UV Marks](fss-tools.md#uv-marks) from your own judgement of what the pilot sees: **Higher** (1.5 to 1.65) for prominent parts such as the glareshield and main panel, **Lower** (0.7 to 0.8) for parts that are hardly seen, the default 0.9 to 1.1 for the rest. Marks on an empty apply to everything below it.
 
@@ -134,6 +138,8 @@ Steps marked **in development** describe what the tool will do, and how to get t
 **Why:** texture memory is the budget that matters most for frame rate. The texture sizes, atlas rules and memory budget are in `texturing.md` of the MSFS Authoring Guide.
 
 **Do:** texture each texture set in Substance Painter from the packed UVs. Use material values (colour, metallic, roughness) instead of a texture where a flat value is enough.
+
+For tiling patterns (brushed metal, fabric, grip), use tri-planar projection instead of UV projection: islands are packed at different densities, and a UV-projected pattern would change size from island to island.
 
 ### 10. Export and Deploy
 
