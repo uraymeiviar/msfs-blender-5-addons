@@ -848,7 +848,7 @@ def chart_data(mode, stats):
         bin_values = 1.0 + centres
         colors = measures_to_colors(bin_values, np.ones(CHART_BINS), np.zeros(CHART_BINS, bool), 'SHAPE')
         lines = [f"Over 1.10 (target): {stats.get('share_above_110', 0.0):.1%}",
-                 f"Over 1.25 (limit): {stats.get('share_above_125', 0.0):.1%}"]
+                 f"Over 1.25: {stats.get('share_above_125', 0.0):.1%}"]
         marks = [1.10, 1.25]
     elif mode == 'DENSITY':
         bin_values = 2.0 ** (centres * 2.0 - 1.0)
@@ -1071,7 +1071,7 @@ def _draw_viewport_legend():
         lines.append(('Scale: 1.0 (neutral) to 2.0+ (blue), magenta = error', COLOR_TEXT_DIM, False))
         s110 = stats.get('share_above_110', 0.0)
         s125 = stats.get('share_above_125', 0.0)
-        lines.append((f'Surface over 1.10 (target): {s110:.1%} | over 1.25 (limit): {s125:.1%}', COLOR_TEXT_MAIN, False))
+        lines.append((f'Surface over 1.10 (target): {s110:.1%} | over 1.25: {s125:.1%}', COLOR_TEXT_MAIN, False))
     elif mode == 'DENSITY':
         lines.append(('Scale: 0.5 (red) - 1.0 (neutral) - 2.0 (blue), magenta = error', COLOR_TEXT_DIM, False))
         s_out = stats.get('share_outside', 0.0)
@@ -1186,7 +1186,7 @@ class FSS_PT_UvHeatmap(bpy.types.Panel):
                 # text fallback when the chart image is not available
                 if scene.fss_uv_heatmap_mode == 'SHAPE':
                     box.label(text=f"Over 1.10 (target): {stats.get('share_above_110', 0.0):.1%} of surface")
-                    box.label(text=f"Over 1.25 (limit): {stats.get('share_above_125', 0.0):.1%} of surface")
+                    box.label(text=f"Over 1.25: {stats.get('share_above_125', 0.0):.1%} of surface")
                 elif scene.fss_uv_heatmap_mode == 'DENSITY':
                     box.label(text=f"Outside density range: {stats.get('share_outside', 0.0):.1%} of surface")
                     box.label(text=f"  too low: {stats.get('share_under', 0.0):.1%}, too high: {stats.get('share_over', 0.0):.1%}")

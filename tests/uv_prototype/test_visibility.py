@@ -685,6 +685,39 @@ def test_camera_renaming_and_deletion():
     print("PASS: test_camera_renaming_and_deletion")
 
 
+def test_camera_sync_after_draw():
+    """The panel only reads the camera list while drawing; an out-of-date list is synced once by a timer."""
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    scene = bpy.context.scene
+    cam = bpy.data.objects.new("CAM_ONE", bpy.data.cameras.new("CAM_ONE"))
+    scene.collection.objects.link(cam)
+    visibility.sync_camera_list(scene)
+    settings = scene.fss_visibility
+    settings.cameras[0].include = True
+    assert visibility.camera_list_in_sync(scene), "a synced list must read as in sync"
+
+    cam2 = bpy.data.objects.new("CAM_TWO", bpy.data.cameras.new("CAM_TWO"))
+    scene.collection.objects.link(cam2)
+    assert not visibility.camera_list_in_sync(scene), "an added camera must make the list out of date"
+
+    registered = []
+    original = bpy.app.timers.register
+    bpy.app.timers.register = lambda fn, first_interval=0.0, persistent=False: registered.append(fn)
+    try:
+        visibility.schedule_camera_sync(scene)
+        visibility.schedule_camera_sync(scene)  # a second draw before the timer runs schedules nothing
+    finally:
+        bpy.app.timers.register = original
+    assert len(registered) == 1, f"expected one scheduled sync, got {len(registered)}"
+    assert len(settings.cameras) == 1, "scheduling must not write the list"
+    registered[0]()
+    assert visibility.camera_list_in_sync(scene)
+    assert [it.camera for it in settings.cameras] == [cam, cam2]
+    assert settings.cameras[0].include is True, "Include must survive the sync"
+    assert visibility._camera_sync_pending is False
+    print("PASS: test_camera_sync_after_draw")
+
+
 # ---------------------------------------------------------------------------
 # Test 8: glTF Leak Check with Animations Off
 # ---------------------------------------------------------------------------
@@ -797,6 +830,7 @@ def main():
     test_visibility_heatmap_mode()
     test_heatmap_modifier_face_mapping()
     test_camera_renaming_and_deletion()
+    test_camera_sync_after_draw()
     test_gltf_leak_check()
     test_packer_interface_and_cache()
 

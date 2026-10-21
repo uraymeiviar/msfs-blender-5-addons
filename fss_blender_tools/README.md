@@ -119,7 +119,7 @@ Automated hard-surface seam placement for untextured geometry (`uv_autoseam.py` 
   **Select Proposed** / **Select Current** select them in Edit Mode. Accept, Discard and Clear switch to Object Mode
   for their work when clicked in Edit Mode.
 - **Distortion Limit:** the scene property `fss_uv_autoseam_limit` (saved with the file; default `THR` = 1.25,
-  allowed 1.05 to 2.0, slider 1.10 to 1.60) is passed as `limit` to `propose_seams` (every merge and
+  allowed 1.05 to 2.0, slider 1.05 to 1.75) is passed as `limit` to `propose_seams` (every merge and
   verification test), to the final-unwrap check and to the report, which states it. Measured on the 17 reference
   objects in journal Session 87.
 - **Exclusions:** objects whose materials are all in decal, glass, windshield, invisible, or occluder

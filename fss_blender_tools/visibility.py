@@ -96,6 +96,41 @@ class FSS_VisibilitySettings(bpy.types.PropertyGroup):
     )
 
 
+_camera_sync_pending = False
+
+
+def camera_list_in_sync(scene):
+    """True when the camera list holds exactly the scene's cameras, in name order (read only)."""
+    settings = getattr(scene, 'fss_visibility', None)
+    if settings is None:
+        return True
+    scene_cams = sorted([o for o in scene.objects if o.type == 'CAMERA'], key=lambda o: o.name)
+    return [item.camera for item in settings.cameras] == scene_cams
+
+
+def schedule_camera_sync(scene):
+    """Panels may not write to the scene while drawing; sync once, right after the draw."""
+    global _camera_sync_pending
+    if _camera_sync_pending:
+        return
+    _camera_sync_pending = True
+    name = scene.name
+
+    def run():
+        global _camera_sync_pending
+        _camera_sync_pending = False
+        target = bpy.data.scenes.get(name)
+        if target is not None:
+            sync_camera_list(target)
+            for window in bpy.context.window_manager.windows:
+                for area in window.screen.areas:
+                    if area.type == 'VIEW_3D':
+                        area.tag_redraw()
+        return None
+
+    bpy.app.timers.register(run, first_interval=0.0)
+
+
 def sync_camera_list(scene):
     """Synchronize camera collection with scene cameras (follow added, renamed or deleted)."""
     settings = getattr(scene, 'fss_visibility', None)
@@ -527,8 +562,9 @@ class FSS_PT_Visibility(bpy.types.Panel):
         layout = self.layout
         scene = context.scene
 
-        # Keep camera list in sync with scene cameras
-        sync_camera_list(scene)
+        # Keep camera list in sync with scene cameras (written after the draw: panels may not write while drawing)
+        if not camera_list_in_sync(scene):
+            schedule_camera_sync(scene)
         settings = scene.fss_visibility
 
         # 1. Cameras list

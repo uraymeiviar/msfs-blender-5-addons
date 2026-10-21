@@ -508,7 +508,7 @@ def test_distribution_chart():
     assert abs(data['share'][0] - 0.7) < 1e-9, "70 % of the area sits at 1.0"
     assert abs(data['share'][-1] - 0.1) < 1e-9, "values beyond 2.0 go into the last bin"
     assert data['range_text'] == "90% of surface: 1.00 to 2.0+", data['range_text']  # 10 % of the area lies at 2.5
-    assert data['lines'] == ["Over 1.10 (target): 20.0%", "Over 1.25 (limit): 20.0%"]
+    assert data['lines'] == ["Over 1.10 (target): 20.0%", "Over 1.25: 20.0%"]
     px = uv_heatmap.render_chart(data)
     assert px.shape == (uv_heatmap.CHART_SIZE, uv_heatmap.CHART_SIZE, 4)
     assert float(px[..., 2].max()) > 0.9, "the band and the histogram must be drawn (blue end of the scale)"

@@ -36,7 +36,7 @@ The **Distortion Limit** slider above **Propose Seams** sets how much an island 
 - **Lower (towards Less distortion):** islands keep their shape better, but there are more islands, more seams and more vertices (every seam splits vertices, which count toward the MSFS LOD vertex limit).
 - **Higher (towards Fewer islands):** fewer islands, seams and vertices, but more stretch inside the islands.
 - **1.25** is the default, used before the slider existed. **1.0** would mean no stretch at all, which only flat pieces can manage; the slider therefore starts above it.
-- The slider moves from 1.10 to 1.60, the range that has been measured. You can type values from 1.05 to 2.0; outside 1.10 to 1.60 the results are untested.
+- The slider moves from 1.05 to 1.75; you can type values up to 2.0. Only 1.10 to 1.60 has been measured; outside it the results are untested.
 - It mostly changes **large shells** (overhead, floor, trim panels). Small parts such as knobs and buttons usually keep the same islands at any value, because your seams and the material borders already decide them.
 - One step does not always change a single object the expected way: the tool merges pieces one at a time, so a looser limit can occasionally end with a few more islands on one mesh. Over many objects, higher always meant fewer islands.
 - The setting is saved with the `.blend` and applies to the next **Propose Seams**; the report states the limit it used.
@@ -95,7 +95,7 @@ Repeated problems on one mesh are grouped into one line, with the count, the lar
 
 | Report Message | What It Means | What To Do |
 | :--- | :--- | :--- |
-| **N island(s) too stretched: add a seam by hand** | Islands whose area distortion is above 1.25. | Add a manual seam across the high-curvature area to split the island into two flatter pieces. |
+| **N island(s) too stretched: add a seam by hand** | Islands whose area distortion is above the Distortion Limit used for the run. | Add a manual seam across the high-curvature area to split the island into two flatter pieces. |
 | **N quad(s) or face(s) too distorted to flatten: split or flatten them in the mesh** | Single quads or faces that are strongly bent or skewed. A seam cannot run through the inside of a face, so no seam helps. | Fix the mesh: split the quad with an edge (`J` between two corners), or flatten it. |
 | **N group(s) of faces with zero area: clean up the mesh** | Collapsed or duplicate faces without area. They cannot be unwrapped at all. | Remove them, for example with **Mesh > Clean Up > Merge by Distance**, then run Propose again. |
 | **N chart(s) too distorted to flatten: add seams by hand** | The tool found no safe cut through these larger pieces. | Add manual seams through steep steps or sharp corners. |
@@ -167,7 +167,7 @@ The panel shows a chart of the selected objects' surface:
 
 - **Colour band:** the same colours as on the model, with the values below it (Distortion 1.0 to 2.0 and more; Density 0.5 to 2.0; Visibility 0.0 to 1.0).
 - **Histogram above the band:** how much of the surface lies at each value, weighted by area. Bar heights use a square-root scale, so small tails stay visible; a tall bar at 1.0 with little else is a good result.
-- **Marks:** at 1.10 (our shape target) and 1.25 (the limit Auto Seam uses to accept an island) in Distortion mode; at 1.0 in Density mode; at 0.50 in Visibility mode.
+- **Marks:** at 1.10 (our shape target) and 1.25 (Auto Seam's default [Distortion Limit](#distortion-limit); Auto Seam limits how much an island's triangles change in area on average, the heatmap shows how much each face is sheared, so faces above 1.25 can remain inside the limit) in Distortion mode; at 1.0 in Density mode; at 0.50 in Visibility mode.
 - **Range bar:** the middle 90 % of the surface (5 % lies below its left end, 5 % above its right end), with its values.
 - **Percentages:** the share of the surface over 1.10 and over 1.25, outside the density range, or never seen / undetermined.
 
@@ -176,7 +176,7 @@ The panel shows a chart of the selected objects' surface:
 A legend in the corner of the viewport displays:
 
 - The active mode (**Distortion**, **Density**, or **Visibility**) and colour scale.
-- For Distortion: the share of the selected objects' surface distorted more than **1.10** (our shape target) and more than **1.25** (the limit Auto Seam uses to accept an island).
+- For Distortion: the share of the selected objects' surface distorted more than **1.10** (our shape target) and more than **1.25** (Auto Seam's default [Distortion Limit](#distortion-limit); Auto Seam limits how much an island's triangles change in area on average, the heatmap shows how much each face is sheared, so faces above 1.25 can remain inside the limit).
 - For Density: the share of the surface outside its object's density range (too low and too high).
 - For Visibility: the share of the surface never seen or undetermined.
 - **Error:** how many faces cannot be measured, and their share of the surface.

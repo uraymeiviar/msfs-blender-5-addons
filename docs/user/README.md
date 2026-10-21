@@ -5,7 +5,7 @@
 
 This guide is for 3D artists who build Flight Sim Studio (FSS) aircraft in Blender 5.2. It assumes you already model, unwrap, animate, texture and export in Blender. It explains what MSFS needs on top of that, the order in which we prepare a model for it, and which of our tools help at each step and why.
 
-It matches **FSS Blender Tools 0.26.0** and the FSS exporter based on Asobo exporter 8.4.1.
+It matches **FSS Blender Tools 0.26.1** and the FSS exporter based on Asobo exporter 8.4.1.
 
 - **The pipeline** (below): the steps from a new model to a deployed one, in order.
 - **The reference pages:** what each panel and button does, linked from the steps:

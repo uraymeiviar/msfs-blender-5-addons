@@ -1244,7 +1244,7 @@ def register():
     for cls in CLASSES:
         bpy.utils.register_class(cls)
     bpy.types.Scene.fss_uv_autoseam_limit = bpy.props.FloatProperty(
-        name='Distortion Limit', default=THR, min=1.05, max=2.0, soft_min=1.10, soft_max=1.60,
+        name='Distortion Limit', default=THR, min=1.05, max=2.0, soft_min=1.05, soft_max=1.75,
         precision=2, step=5,
         description='How much an island may stretch (1.0 = not at all). Higher: fewer islands and seam vertices, '
                     'more stretch. Lower: less stretch, more islands. Mostly changes large shells')
