@@ -23,7 +23,7 @@ import numpy as np
 
 from . import lod_model, tags
 
-# "@" keeps the marker from clashing with real node names and is stripped before the glTF is written
+# "@" keeps markers from clashing with real node names; every leading "@" is stripped before the glTF is written
 PREFIX = "@MERGE_"
 NO_MERGE_PREFIX = "@NOMERGE_"
 MARKERS = (PREFIX, NO_MERGE_PREFIX)
@@ -42,11 +42,15 @@ def logical_name(obj) -> str:
 
 
 def strip_markers(name):
-    """name without a leading @MERGE_ or @NOMERGE_ (unchanged when that would leave it empty)."""
+    """The exported name: without a leading @MERGE_ or @NOMERGE_, and without any other leading '@' (@ZONE_FWD
+    exports as ZONE_FWD); unchanged when that would leave it empty."""
     if isinstance(name, str):
         for marker in MARKERS:
             if name.startswith(marker) and len(name) > len(marker):
                 return name[len(marker):]
+        stripped = name.lstrip("@")
+        if stripped:
+            return stripped
     return name
 
 

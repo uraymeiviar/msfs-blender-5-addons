@@ -70,6 +70,7 @@ Merge groups join many small objects into one mesh at export, while every part s
 - **`@MERGE_<name>`:** an object (empty or mesh) with this name prefix starts a merge group. At export, it and its subtree become one mesh named `<name>`. A mesh root merges its own geometry too.
 - **`@NOMERGE_<name>`:** an object inside a group with this prefix stays out of the merge, with its subtree, and is exported as `<name>`.
 - The prefixes never reach the glTF: exported names are always without them.
+- Any other name starting with `@` loses only the `@` at export: a zone empty `@ZONE_FWD` exports as `ZONE_FWD`. Make sure no other object exports under the same name; **Scan Names** reports it (`CLS`).
 
 ### What Stays Separate
 
@@ -156,9 +157,10 @@ The object or bone name becomes the glTF node name, and the model XML, `.cfg` fi
 | `SFX` | **Suffix** | Ends in `.NNN` and the name without it is free | Remove the suffix |
 | `COL` | **Collision** | Ends in `.NNN` and the name without it is taken | None: rename by hand |
 | `CASE` | **Case** | Lower-case letters | Upper case (an Asobo `x0_` to `x9_` prefix stays as written) |
-| `CHR` | **Characters** | Characters other than `A-Z`, `0-9` and `_` (the `@MERGE_` and `@NOMERGE_` prefixes are allowed) | Replace with `_` |
+| `CHR` | **Characters** | Characters other than `A-Z`, `0-9` and `_` (a leading `@`, as in `@MERGE_` or `@ZONE_`, is allowed: the export strips it) | Replace with `_` |
 | `DEF` | **Default** | A Blender default name such as `Cube`, `Empty`, `Plane`, `Bone` | None: rename by hand |
 | `TKN` | **Taken** | The proposed name is already used | Unticked; edit the proposal or rename the other item first |
+| `CLS` | **Clash** | Exports under the same name as another item once the export strips the `@` (for example `@ABCD` next to `ABCD`) | None: rename by hand |
 
 How to use it:
 

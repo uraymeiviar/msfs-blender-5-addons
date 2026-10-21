@@ -10,7 +10,7 @@ import re
 
 import bpy
 
-from .merge import MARKERS
+from .merge import MARKERS, strip_markers
 
 SUFFIX = re.compile(r"^(.*)\.(\d{3,})$")
 # Asobo LOD prefix (x0_, x1_ ...), matched case-insensitively by the multi-exporter; kept as written
@@ -30,8 +30,10 @@ RULES = (
     ("CHARS", "Characters", "Contains characters other than A-Z, 0-9 and _: replaced with _"),
     ("DEFAULT", "Default", "Blender default name: report only, rename by hand"),
     ("TAKEN", "Taken", "The proposed name is already used: edit the proposal or rename the other item first"),
+    ("CLASH", "Clash", "Exports under the same name as another item once the '@' marker is stripped: rename by hand"),
 )
-RULE_TAGS = {"SUFFIX": "SFX", "COLLISION": "COL", "CASE": "CASE", "CHARS": "CHR", "DEFAULT": "DEF", "TAKEN": "TKN"}
+RULE_TAGS = {"SUFFIX": "SFX", "COLLISION": "COL", "CASE": "CASE", "CHARS": "CHR", "DEFAULT": "DEF", "TAKEN": "TKN",
+             "CLASH": "CLS"}
 
 
 def _suffix_number(name):
@@ -70,8 +72,10 @@ def check_names(names, taken):
             rules = (rules - {"SUFFIX"}) | {"DEFAULT"}
             proposal = name
         else:
-            # The merge markers are allowed; the rules apply to the rest of the name
+            # Markers are allowed: the merge markers, and any other leading '@', which the export strips
             group_prefix = next((marker for marker in MARKERS if base.startswith(marker)), "")
+            if not group_prefix:
+                group_prefix = base[:len(base) - len(base.lstrip("@"))]
             fixed = ILLEGAL_CHARS.sub("_", base[len(group_prefix):])
             if fixed != base[len(group_prefix):]:
                 rules.add("CHARS")
@@ -90,6 +94,15 @@ def check_names(names, taken):
                 planned.add(proposal)
         if rules:
             findings[name] = (rules, proposal)
+
+    # Two names that export the same once the export strips their '@' marker (@ABCD next to ABCD)
+    exported = {}
+    for name in taken:
+        exported.setdefault(strip_markers(name), []).append(name)
+    for name in names:
+        if len(exported.get(strip_markers(name), ())) > 1:
+            rules, proposal = findings.get(name, (set(), name))
+            findings[name] = (rules | {"CLASH"}, proposal)
     return findings
 
 
