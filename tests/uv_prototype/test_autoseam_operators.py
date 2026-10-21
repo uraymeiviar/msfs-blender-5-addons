@@ -977,6 +977,45 @@ def test_progress_and_buttons():
     print("  -> PASS: same seams with progress, progress in order, buttons by counts, Cancel only during a run.")
 
 
+def test_overlap_check_collapsed_unwrap():
+    """A collapsed trial unwrap (most triangles of zero size, a few across the square) is checked quickly, with the
+    same pairs as a brute-force check (EFB_HINGE_ARM_2_R took 221 s in one such check, journal Session 91)."""
+    print("Test 16: Overlap check on a collapsed unwrap...")
+    from fss_blender_tools import uv_autoseam_core
+    rng = np.random.default_rng(7)
+    tiny = np.repeat(rng.random((150, 1, 2)) * 0.01 + 0.5, 3, axis=1)  # zero-size triangles near the centre
+    huge = rng.random((8, 3, 2))
+    huge[:, 0] = (0.0, 0.0)
+    huge[:, 1] = (1.0, rng.random())
+    U = np.concatenate([tiny, huge])
+    t = time.perf_counter()
+    got = uv_autoseam_core._overlap_pairs(U)
+    dt = time.perf_counter() - t
+    assert dt < 2.0, f"overlap check took {dt:.1f} s"
+
+    def brute(U, eps_rel=1e-6):
+        allp = U.reshape(-1, 2)
+        eps = eps_rel * float((allp.max(0) - allp.min(0)).max())
+        out = set()
+        for a in range(len(U)):
+            for b in range(a + 1, len(U)):
+                sep = False
+                for T in (U[a], U[b]):
+                    e = np.roll(T, -1, axis=0) - T
+                    for ax in np.stack([-e[:, 1], e[:, 0]], -1):
+                        ax = ax / max(np.linalg.norm(ax), 1e-30)
+                        pa, pb = U[a] @ ax, U[b] @ ax
+                        if pa.max() <= pb.min() + eps or pb.max() <= pa.min() + eps:
+                            sep = True
+                lo_a, hi_a, lo_b, hi_b = U[a].min(0), U[a].max(0), U[b].min(0), U[b].max(0)
+                if not sep and np.all(lo_a < hi_b - eps) and np.all(lo_b < hi_a - eps):
+                    out.add((a, b))
+        return out
+
+    assert {tuple(p) for p in np.sort(got, 1).tolist()} == brute(U), "pairs differ from the brute-force check"
+    print(f"  -> PASS: {len(got)} pairs in {dt * 1000:.0f} ms, equal to brute force.")
+
+
 def main():
     print("=" * 70)
     print("RUNNING FSS AUTO SEAM OPERATOR & EXPORT TESTS")
@@ -997,6 +1036,7 @@ def main():
     test_distortion_limit()
     test_accept_and_unwrap()
     test_progress_and_buttons()
+    test_overlap_check_collapsed_unwrap()
     print("=" * 70)
     print("ALL TESTS PASSED SUCCESSFULLY.")
     print("=" * 70)

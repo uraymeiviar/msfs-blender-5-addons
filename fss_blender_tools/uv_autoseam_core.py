@@ -30,6 +30,7 @@ MS_ITER = 50
 FILL_MIN = 0.5
 FILL_GAIN = 1.25
 TREE_FACES = 512
+LARGE_CELLS = 1024  # a triangle over more overlap-grid cells is paired by bounding box, not through the grid
 # Progress inside one mesh: stages in order with their share of the run time, from OVERHEAD_SHELL,
 # COCKPIT_SHELL_FLOOR and @MERGE_PEDESTAL_SHELL together (journal Session 90); single meshes differ a lot
 PROGRESS_STAGES = (('Seeding', 0.15), ('Merging', 0.42), ('Strips', 0.12), ('Smoothing', 0.02), ('Wall cuts', 0.03),
@@ -89,9 +90,12 @@ def _overlap_pairs(U, eps_rel=1e-6, max_pairs_chunk=200000):
     i0 = np.floor((lo - o) / cell).astype(np.int64)
     i1 = np.floor((hi - o) / cell).astype(np.int64)
     W = int(i1[:, 0].max() + 2)
-    keys = []
-    tris = []
-    for t in range(n):
+    # A collapsed trial unwrap (most triangles of zero size, a few across the whole square) would make the few large
+    # triangles fill millions of grid cells; they are paired by bounding box instead (journal Session 91)
+    large = (i1 - i0 + 1).prod(1) > LARGE_CELLS
+    keys = [np.zeros(0, np.int64)]
+    tris = [np.zeros(0, np.int64)]
+    for t in np.flatnonzero(~large):
         xs = np.arange(i0[t, 0], i1[t, 0] + 1)
         ys = np.arange(i0[t, 1], i1[t, 1] + 1)
         k = (ys[:, None] * W + xs[None, :]).ravel()
@@ -113,6 +117,11 @@ def _overlap_pairs(U, eps_rel=1e-6, max_pairs_chunk=200000):
         a, b = np.triu_indices(len(ts), 1)
         pa.append(ts[a])
         pb.append(ts[b])
+    for t in np.flatnonzero(large):
+        others = np.flatnonzero(np.all(lo < hi[t] - eps, 1) & np.all(lo[t] < hi - eps, 1))
+        others = others[others != t]
+        pa.append(np.full(len(others), t))
+        pb.append(others)
     if not pa:
         return np.zeros((0, 2), np.int64)
     pairs = np.stack([np.concatenate(pa), np.concatenate(pb)], 1)
