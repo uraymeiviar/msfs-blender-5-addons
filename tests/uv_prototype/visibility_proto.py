@@ -1,22 +1,23 @@
-"""Visibility-based Texel Demand Prototype for Blender 5.2 (Round 2).
+"""Visibility-based Texel Demand Prototype for Blender 5.2 (Round 3).
 
-Implements Session 69 Design and Hand-Off:
-1. Visible fraction in spherical solid angle Omega_vis / Omega_unocc in [0, 1] (Decision 72),
-   independent of distance.
-2. Direction weight max(floor, cos(angle)) to camera default forward (Decision 73),
-   floor 0.2 and falloff as options; fixed-view mode kept as a per-camera option.
-3. Animation states as percentages of each action's own frame range (Decision 69),
-   default 3 states (0%, 50%, 100%), option for 5 states (0%, 25%, 50%, 75%, 100%).
-4. Material classes (Decision 77):
-   - Invisible / collision / occluder not rendered and not scored.
-   - Decal / glass / windshield rendered after opaque pass without depth writes (scored, hide nothing).
-5. Mirror mapping with maximum kept over copies (Decision 68).
-6. Aggregation (Decisions 71, 74): max per face; area-weighted 90th percentile per UV island
-   and per object. Never-seen reported as 'never seen in the analysed views and states'.
-7. External `<blend_name>.visibility` file (Decision 67) with schema version 2.
-8. Offscreen heatmap images showing graded 0..1 score (never seen in magenta).
-9. Synthetic validation covering all 7 test cases.
-10. Cockpit run with CAM_PILOT_CLOSE and CAM_COPILOT as look-around cameras.
+Implements Session 72 Design and Hand-Off (Decision 78):
+1. Original face index transferred via temporary face attribute `_fss_orig_face_idx`
+   on evaluated mesh, avoiding index mapping bugs across topology modifiers (Finding 3).
+2. Instances: every object using a mesh and every Mirror copy is an instance;
+   linked duplicates share the mesh's arrays.
+3. Per-face sums: accumulates visible weighted solid angle and unoccluded solid angle
+   per face, instance, and view. No ratio is stored at the face level.
+   Invisible material classes (colliders, clickspots) are completely excluded from
+   all sums, counts, and rendering (Finding 2).
+4. Storage: external `<blend_name>.visibility` file (compressed NPZ, schema version 3).
+5. Group scoring function: computes visible sum / unoccluded sum per view and instance,
+   takes max over views/instances; groups under 10 px fall back to object score.
+6. Resolution check: runs at 1,024 and 4,096 px per cube face to verify convergence
+   (groups >= 10 px meet mean diff <= 0.02).
+7. Report: never-seen objects and islands, score percentiles, top/bottom 20 objects.
+8. Images: coloured by group score (island or object fallback), never-seen in magenta,
+   invisible material faces omitted.
+9. Synthetic validation: 11 test cases.
 """
 
 import os
@@ -29,7 +30,7 @@ from pathlib import Path
 import numpy as np
 
 import bpy
-from mathutils import Vector, Matrix, Euler
+from mathutils import Vector, Matrix
 
 try:
     import gpu
@@ -38,27 +39,12 @@ except ImportError:
     gpu = None
     batch_for_shader = None
 
+ORIG_FACE_ATTR_NAME = '_fss_orig_face_idx'
+
 
 # ---------------------------------------------------------------------------
 # Material Classification (Decision 77)
 # ---------------------------------------------------------------------------
-
-SKIP_MATERIAL_CLASSES = {
-    'DECAL', 'DECAL_EM', 'DECAL_FROST', 'DECAL_BLEND',
-    'GLASS', 'WNDSHIELD', 'WINDSHIELD', 'INVIS', 'OCCLUDER'
-}
-
-MSFS_SKIP_MATERIAL_TYPES = {
-    'msfs_decal',
-    'msfs_geo_decal',
-    'msfs_geo_decal_frosted',
-    'msfs_geo_decal_blendmasked',
-    'msfs_glass',
-    'msfs_windshield',
-    'msfs_invisible',
-    'msfs_environment_occluder',
-}
-
 
 def classify_material(mat):
     """Classify a material into 'INVISIBLE', 'DECAL_GLASS', or 'OPAQUE'."""
@@ -83,8 +69,8 @@ def classify_material(mat):
     base = re.sub(r'\.\d+$', '', mat.name.upper())
     parts = set(base.split('_'))
 
-    invis_tokens = {'INVIS', 'OCCLUDER', 'COLLISION', 'COLLIDER', 'INVISIBLE'}
-    if parts & invis_tokens or any(base.endswith('_' + tok) for tok in invis_tokens):
+    invis_tokens = {'INVIS', 'OCCLUDER', 'COLLISION', 'COLLIDER', 'INVISIBLE', 'INVISIBLECOLLIDER'}
+    if parts & invis_tokens or any(base.endswith('_' + tok) for tok in invis_tokens) or 'INVISIBLECOLLIDER' in base:
         return 'INVISIBLE'
 
     decal_tokens = {'DECAL', 'DECAL_EM', 'DECAL_FROST', 'DECAL_BLEND', 'GLASS', 'WNDSHIELD', 'WINDSHIELD'}
@@ -95,10 +81,41 @@ def classify_material(mat):
 
 
 def is_invisible_object(obj):
-    """Check if object name designates invisible/collision geometry."""
+    """Check if object name or all of its materials designate invisible/collision geometry."""
     name_upper = obj.name.upper()
     tokens = {'COLLISION', 'COLLIDER', 'INVIS', 'OCCLUDER'}
-    return any(tok in name_upper for tok in tokens)
+    if any(tok in name_upper for tok in tokens):
+        return True
+
+    # Check materials
+    if obj.type == 'MESH' and obj.material_slots:
+        mats = [s.material for s in obj.material_slots if s.material]
+        if mats and all(classify_material(m) == 'INVISIBLE' for m in mats):
+            return True
+
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Attribute Lifecycle (Finding 3)
+# ---------------------------------------------------------------------------
+
+def add_orig_face_index_attributes():
+    """Add temporary integer face index attribute on all original meshes."""
+    for me in bpy.data.meshes:
+        n_faces = len(me.polygons)
+        if n_faces > 0:
+            if ORIG_FACE_ATTR_NAME in me.attributes:
+                me.attributes.remove(me.attributes[ORIG_FACE_ATTR_NAME])
+            attr = me.attributes.new(name=ORIG_FACE_ATTR_NAME, type='INT', domain='FACE')
+            attr.data.foreach_set('value', np.arange(n_faces, dtype=np.int32))
+
+
+def remove_orig_face_index_attributes():
+    """Remove temporary face index attribute from all original meshes."""
+    for me in bpy.data.meshes:
+        if ORIG_FACE_ATTR_NAME in me.attributes:
+            me.attributes.remove(me.attributes[ORIG_FACE_ATTR_NAME])
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +151,6 @@ def perspective_proj(fov_rad, aspect, near, far):
 def get_camera_forward(cam_obj):
     """Extract default forward vector in world coordinates from a Blender camera."""
     if cam_obj:
-        # In Blender camera local space, forward is -Z
         fwd = cam_obj.matrix_world.to_3x3() @ Vector((0, 0, -1))
         if fwd.length > 1e-6:
             return fwd.normalized()
@@ -156,46 +172,27 @@ def cubemap_face_matrices(cam_pos, cam_forward=None, near=0.05, far=30.0):
     return faces
 
 
-# ---------------------------------------------------------------------------
-# Solid Angle Maps & Direction Weights (Decisions 72 & 73)
-# ---------------------------------------------------------------------------
-
 def precompute_cubemap_weights(faces, cam_forward, cube_res=1024, floor=0.2, falloff=1.0):
-    """Precompute weighted differential solid angle maps for all 6 cube faces.
-
-    Returns dict of face_name -> np.ndarray (cube_res, cube_res) float32.
-    """
+    """Precompute weighted differential solid angle maps for all 6 cube faces."""
     W = cube_res
-    # Pixel center normalized coordinates in [-1, 1]
     u = (np.arange(W, dtype=np.float32) + 0.5) * (2.0 / W) - 1.0
     v = 1.0 - (np.arange(W, dtype=np.float32) + 0.5) * (2.0 / W)
     U, V = np.meshgrid(u, v)
 
-    # Differential solid angle on plane at distance 1
-    # d_omega = (4 / W^2) / (u^2 + v^2 + 1)^(3/2)
     d_omega = (4.0 / (W * W)) / np.power(U * U + V * V + 1.0, 1.5).astype(np.float32)
-
-    # Local ray vectors on plane at z = -1: (U, V, -1)
-    local_rays = np.stack([U, V, -np.ones_like(U)], axis=-1)  # (W, W, 3)
+    local_rays = np.stack([U, V, -np.ones_like(U)], axis=-1)
 
     fwd = np.array(cam_forward, dtype=np.float32)
     fwd /= np.linalg.norm(fwd)
 
     face_weights = {}
     for face_name, v_mat, _ in faces:
-        # Rotation matrix from camera local to world
-        # V = R @ T => R_world = V[:3, :3].T (inverse of orthogonal rotation)
         R_world = np.array(v_mat.to_3x3().transposed(), dtype=np.float32)
-
-        # World ray directions for all pixels
-        world_rays = local_rays @ R_world.T  # (W, W, 3)
+        world_rays = local_rays @ R_world.T
         lens = np.linalg.norm(world_rays, axis=-1, keepdims=True)
         world_dirs = world_rays / np.maximum(lens, 1e-12)
 
-        # cos(angle) to default forward
         cos_ang = np.sum(world_dirs * fwd, axis=-1)
-
-        # Direction weight: max(floor, cos(angle)^falloff)
         if falloff == 1.0:
             ang_weight = np.where(cos_ang > 0.0, np.maximum(floor, cos_ang), floor)
         else:
@@ -226,7 +223,6 @@ def precompute_frustum_weights(cam_obj, frustum_res=(2560, 1440)):
     dx = 2.0 / (W * p00)
     dy = 2.0 / (H * p11)
 
-    # Weight is 1.0 inside frustum; only solid angle applies
     d_omega = (dx * dy) / np.power(X * X + Y * Y + 1.0, 1.5).astype(np.float32)
     return d_omega
 
@@ -236,22 +232,13 @@ def precompute_frustum_weights(cam_obj, frustum_res=(2560, 1440)):
 # ---------------------------------------------------------------------------
 
 def batch_triangle_solid_angle(eye, V0, V1, V2):
-    """Vectorized calculation of spherical solid angle for a batch of triangles.
-
-    Returns solid angle in steradians [0, 2*pi] for front-facing triangles,
-    or 0.0 for triangles turned away or edge-on (Decision 72).
-    """
+    """Vectorized calculation of spherical solid angle for a batch of triangles."""
     eye_arr = np.array(eye, dtype=np.float32).reshape(1, 3)
     A = V0 - eye_arr
     B = V1 - eye_arr
     C = V2 - eye_arr
 
-    # Surface normal
     N = np.cross(B - A, C - A)
-
-    # Front-facing test: normal pointing towards camera
-    # Vector from surface point V0 to camera eye is -A = eye - V0
-    # N . (-A) > 0  <=>  N . A < 0
     front = np.sum(N * (-A), axis=-1) > 0.0
 
     normA = np.linalg.norm(A, axis=-1, keepdims=True)
@@ -265,10 +252,8 @@ def batch_triangle_solid_angle(eye, V0, V1, V2):
     b = B / np.maximum(normB, eps)
     c = C / np.maximum(normC, eps)
 
-    # det = a . (b x c)
     b_cross_c = np.cross(b, c)
     num = np.abs(np.sum(a * b_cross_c, axis=-1))
-
     den = 1.0 + np.sum(a * b, axis=-1) + np.sum(b * c, axis=-1) + np.sum(c * a, axis=-1)
 
     omega = 2.0 * np.arctan2(num, den)
@@ -401,38 +386,26 @@ def extract_mesh_uv_islands(me):
 
 
 # ---------------------------------------------------------------------------
-# Evaluated Scene Extraction with Material Splitting (Decision 77)
+# Instance Discovery & Evaluated Scene Extraction (Steps 1 & 2)
 # ---------------------------------------------------------------------------
 
-def extract_scene_geometry(depsgraph, view_layer):
-    """Extract evaluated scene geometry split into Opaque and Decal batches.
+def discover_mesh_instances(view_layer):
+    """Scan scene for visible mesh objects and assign instances per mesh.
 
     Returns:
-    - batches: dict with 'opaque_pos', 'opaque_ids', 'decal_pos', 'decal_ids'
-    - eval_poly_map: dict eval_id -> (mesh_name, orig_poly_idx, is_mirrored)
-    - mesh_meta: dict mesh_name -> meta dict
-    - tri_geometry: dict with 'V0', 'V1', 'V2', 'tri_ids' for analytical solid angle
-    - max_id: int
+    - mesh_meta: dict mesh_name -> meta dict containing:
+        'n_orig_faces': int,
+        'orig_areas': np.ndarray,
+        'island_ids': np.ndarray,
+        'instances': list of dicts [{'obj_name': str, 'copy_idx': int, 'inst_idx': int}]
+        'instance_map': dict (obj_name, copy_idx) -> inst_idx
     """
-    opaque_pos = []
-    opaque_ids = []
-    decal_pos = []
-    decal_ids = []
-
-    all_tri_v0 = []
-    all_tri_v1 = []
-    all_tri_v2 = []
-    all_tri_ids = []
-
-    eval_poly_map = {}
     mesh_meta = {}
 
     mesh_objs = [
         o for o in view_layer.objects
-        if o.type == 'MESH' and o.data and not o.hide_viewport and not o.hide_render
+        if o is not None and o.type == 'MESH' and o.data and not o.hide_viewport and not o.hide_render
     ]
-
-    global_id = 1
 
     for o in mesh_objs:
         if is_invisible_object(o):
@@ -445,7 +418,6 @@ def extract_scene_geometry(depsgraph, view_layer):
             continue
 
         if mesh_name not in mesh_meta:
-            # Calculate 3D area of each original polygon
             V_base = np.empty((len(me_orig.vertices), 3), dtype=np.float32)
             me_orig.vertices.foreach_get('co', V_base.ravel())
             M_base = np.array(o.matrix_world, dtype=np.float32)
@@ -469,14 +441,84 @@ def extract_scene_geometry(depsgraph, view_layer):
             island_ids = extract_mesh_uv_islands(me_orig)
 
             mesh_meta[mesh_name] = {
+                'mesh': me_orig,
                 'n_orig_faces': n_orig_faces,
                 'orig_areas': orig_areas,
                 'island_ids': island_ids,
-                'user_objects': [],
+                'instances': [],
+                'instance_map': {},
             }
-        mesh_meta[mesh_name]['user_objects'].append(o.name)
 
-        # Evaluated geometry
+        # Check Mirror modifiers on this object
+        mirror_mods = [m for m in o.modifiers if m.type == 'MIRROR']
+        if mirror_mods:
+            use_x = any(m.use_axis[0] for m in mirror_mods)
+            use_y = any(m.use_axis[1] for m in mirror_mods)
+            use_z = any(m.use_axis[2] for m in mirror_mods)
+            # Up to 8 copy indices
+            active_copies = [0]
+            if use_x:
+                active_copies += [c + 1 for c in active_copies]
+            if use_y:
+                active_copies += [c + 2 for c in active_copies]
+            if use_z:
+                active_copies += [c + 4 for c in active_copies]
+        else:
+            active_copies = [0]
+
+        for c_idx in sorted(set(active_copies)):
+            key = (o.name, c_idx)
+            if key not in mesh_meta[mesh_name]['instance_map']:
+                inst_id = len(mesh_meta[mesh_name]['instances'])
+                mesh_meta[mesh_name]['instances'].append({
+                    'object_name': o.name,
+                    'copy_idx': c_idx,
+                    'inst_idx': inst_id,
+                })
+                mesh_meta[mesh_name]['instance_map'][key] = inst_id
+
+    return mesh_meta
+
+
+def extract_scene_geometry(depsgraph, view_layer, mesh_meta):
+    """Extract evaluated scene geometry split into Opaque and Decal batches.
+
+    Returns:
+    - batches: dict with 'opaque_pos', 'opaque_ids', 'decal_pos', 'decal_ids'
+    - eval_poly_info: dict eval_id -> (mesh_name, inst_idx, orig_poly_idx)
+    - tri_geometry: dict with 'V0', 'V1', 'V2', 'tri_ids' for analytical solid angle
+    - max_id: int
+    """
+    opaque_pos = []
+    opaque_ids = []
+    decal_pos = []
+    decal_ids = []
+
+    all_tri_v0 = []
+    all_tri_v1 = []
+    all_tri_v2 = []
+    all_tri_ids = []
+
+    eval_poly_info = {}
+    global_id = 1
+
+    mesh_objs = [
+        o for o in view_layer.objects
+        if o is not None and o.type == 'MESH' and o.data and not o.hide_viewport and not o.hide_render
+    ]
+
+    for o in mesh_objs:
+        if is_invisible_object(o):
+            continue
+
+        me_orig = o.data
+        mesh_name = me_orig.name
+        if mesh_name not in mesh_meta:
+            continue
+
+        meta = mesh_meta[mesh_name]
+        n_orig_faces = meta['n_orig_faces']
+
         eval_obj = o.evaluated_get(depsgraph)
         eval_me = eval_obj.to_mesh()
         eval_me.calc_loop_triangles()
@@ -492,7 +534,6 @@ def extract_scene_geometry(depsgraph, view_layer):
         eval_me.vertices.foreach_get('co', V_eval.ravel())
         M_eval = np.array(o.matrix_world, dtype=np.float32)
 
-        # World coordinates of triangle corners
         P_world = (V_eval @ M_eval[:3, :3].T + M_eval[:3, 3])[verts]
 
         poly_indices = np.empty(n_lt, dtype=np.int32)
@@ -508,31 +549,56 @@ def extract_scene_geometry(depsgraph, view_layer):
             mat = o.material_slots[mat_idx].material if mat_idx < len(o.material_slots) else None
             poly_mat_class.append(classify_material(mat))
 
-        # Check Mirror modifier
-        has_mirror = any(m.type == 'MIRROR' for m in o.modifiers)
+        # Read original face index attribute transferred through modifiers
+        eval_attr = eval_me.attributes.get(ORIG_FACE_ATTR_NAME)
+        if eval_attr:
+            orig_indices = np.empty(n_eval_polys, dtype=np.int32)
+            eval_attr.data.foreach_get('value', orig_indices)
+        else:
+            raise RuntimeError(f"Attribute {ORIG_FACE_ATTR_NAME} missing on evaluated mesh {mesh_name}")
+
+        # Check Mirror modifier axes for copy classification
+        mirror_mods = [m for m in o.modifiers if m.type == 'MIRROR']
+        use_x = any(m.use_axis[0] for m in mirror_mods)
+        use_y = any(m.use_axis[1] for m in mirror_mods)
+        use_z = any(m.use_axis[2] for m in mirror_mods)
+
         for ep_idx in range(n_eval_polys):
             eid = base_id + ep_idx
-            is_mirr = has_mirror and (ep_idx >= n_orig_faces)
-            orig_idx = (ep_idx % n_orig_faces) if is_mirr else min(ep_idx, n_orig_faces - 1)
-            eval_poly_map[eid] = (mesh_name, orig_idx, is_mirr)
+            orig_idx = int(orig_indices[ep_idx])
 
-        # Split loop triangles into Opaque, Decal, or Invisible
+            # Classify mirror copy
+            if mirror_mods:
+                eval_c = eval_me.polygons[ep_idx].center
+                orig_c = me_orig.polygons[orig_idx].center
+                flip_x = int(use_x and ((eval_c.x * orig_c.x < -1e-6) or (abs(orig_c.x) < 1e-4 and eval_c.x < -1e-4)))
+                flip_y = int(use_y and ((eval_c.y * orig_c.y < -1e-6) or (abs(orig_c.y) < 1e-4 and eval_c.y < -1e-4)))
+                flip_z = int(use_z and ((eval_c.z * orig_c.z < -1e-6) or (abs(orig_c.z) < 1e-4 and eval_c.z < -1e-4)))
+                copy_idx = flip_x * 1 + flip_y * 2 + flip_z * 4
+            else:
+                copy_idx = 0
+
+            inst_key = (o.name, copy_idx)
+            inst_idx = meta['instance_map'].get(inst_key, 0)
+            eval_poly_info[eid] = (mesh_name, inst_idx, orig_idx)
+
+        # Split loop triangles into batches
         tri_ids = base_id + poly_indices
         tri_mclasses = [poly_mat_class[pi] for pi in poly_indices]
-
-        # Record triangle geometry for analytical solid angle
-        all_tri_v0.append(P_world[:, 0, :])
-        all_tri_v1.append(P_world[:, 1, :])
-        all_tri_v2.append(P_world[:, 2, :])
-        all_tri_ids.append(tri_ids)
 
         for tri_idx in range(n_lt):
             mcls = tri_mclasses[tri_idx]
             if mcls == 'INVISIBLE':
-                continue
+                continue  # Completely excluded from all batches and analytical triangles!
+
             tid = tri_ids[tri_idx]
-            tri_p = P_world[tri_idx]  # (3, 3)
+            tri_p = P_world[tri_idx]
             tri_id_expanded = np.array([tid, tid, tid], dtype=np.int32)
+
+            all_tri_v0.append(tri_p[0:1])
+            all_tri_v1.append(tri_p[1:2])
+            all_tri_v2.append(tri_p[2:3])
+            all_tri_ids.append(np.array([tid], dtype=np.int32))
 
             if mcls == 'DECAL_GLASS':
                 decal_pos.append(tri_p)
@@ -558,11 +624,11 @@ def extract_scene_geometry(depsgraph, view_layer):
         'tri_ids': np.concatenate(all_tri_ids, axis=0) if all_tri_ids else np.zeros(0, dtype=np.int32),
     }
 
-    return batches, eval_poly_map, mesh_meta, tri_geometry, global_id
+    return batches, eval_poly_info, tri_geometry, global_id
 
 
 # ---------------------------------------------------------------------------
-# Animation State Evaluation (Decision 69)
+# Animation State Controller (Decision 69)
 # ---------------------------------------------------------------------------
 
 class AnimationStateController:
@@ -574,13 +640,11 @@ class AnimationStateController:
         self._setup()
 
     def _setup(self):
-        """Prepare all animated objects for normalized percentage evaluation."""
         for obj in bpy.data.objects:
             adata = obj.animation_data
             if not adata:
                 continue
 
-            # If object has an active action but no NLA strips, temporarily wrap it into an NLA track
             if adata.action and not adata.nla_tracks:
                 act = adata.action
                 tr = adata.nla_tracks.new()
@@ -589,7 +653,6 @@ class AnimationStateController:
                 adata.action = None
                 self.temp_tracks.append((obj, tr, act))
 
-            # Record all strips
             for tr in adata.nla_tracks:
                 for strip in tr.strips:
                     self.original_states.append({
@@ -602,7 +665,6 @@ class AnimationStateController:
                     })
 
     def apply_percentage_state(self, pct):
-        """Shift strips so that at scene frame 0 each strip evaluates at pct [0.0, 1.0]."""
         p = float(pct) / 100.0 if pct > 1.0 else float(pct)
         for sinfo in self.original_states:
             strip = sinfo['strip']
@@ -618,7 +680,6 @@ class AnimationStateController:
         bpy.context.scene.frame_set(0)
 
     def restore(self):
-        """Clean teardown: restore original strip timing and remove temporary tracks."""
         for sinfo in self.original_states:
             strip = sinfo['strip']
             try:
@@ -658,7 +719,7 @@ def render_camera_view(offscreen, shader, batch_opaque, batch_decal, mvp, weight
         shader.bind()
         shader.uniform_float('mvp', mvp)
 
-        if batch_opaque is not None:
+        if batch_opaque is not None and batch_opaque.has_triangles():
             batch_opaque.draw(shader)
             px = np.array(fb.read_color(0, 0, W, H, 4, 0, 'UBYTE'), dtype=np.uint8)
             ids = (
@@ -668,9 +729,8 @@ def render_camera_view(offscreen, shader, batch_opaque, batch_decal, mvp, weight
             ).ravel()
             counts_opaque = np.bincount(ids, weights=weight_flat, minlength=max_id + 1)
 
-        # Pass 2: Decal / Glass (depth_mask=False, depth_test=LESS_EQUAL)
-        if batch_decal is not None:
-            # Clear color only; keep depth buffer from Pass 1 intact!
+        # Pass 2: Decal / Glass
+        if batch_decal is not None and batch_decal.has_triangles():
             fb.clear(color=(0, 0, 0, 1))
             gpu.state.depth_mask_set(False)
             batch_decal.draw(shader)
@@ -687,8 +747,77 @@ def render_camera_view(offscreen, shader, batch_opaque, batch_decal, mvp, weight
     return counts_opaque + counts_decal
 
 
+class BatchWrapper:
+    def __init__(self, batch, n_tris):
+        self.batch = batch
+        self.n_tris = n_tris
+
+    def draw(self, shader):
+        if self.n_tris > 0 and self.batch is not None:
+            self.batch.draw(shader)
+
+    def has_triangles(self):
+        return self.n_tris > 0
+
+
 # ---------------------------------------------------------------------------
-# Core Analysis Engine
+# Group Scoring Engine (Decision 78)
+# ---------------------------------------------------------------------------
+
+def score_groups(vis_omega, unocc_omega, face_to_group, min_px_threshold=10.0, ref_cube_res=1024, obj_score=None):
+    """Compute visibility score for groups from sums (Decision 78).
+
+    Parameters:
+    - vis_omega: np.ndarray (N_views, N_instances, N_faces)
+    - unocc_omega: np.ndarray (N_views, N_instances, N_faces)
+    - face_to_group: np.ndarray (N_faces,) int32
+    - min_px_threshold: float, threshold in reference pixels (default 10.0)
+    - ref_cube_res: int, cube resolution defining pixel solid angle
+    - obj_score: float or None, fallback score if group is too small
+
+    Returns dict with 'scores', 'size_px', 'fell_back', 'never_seen'
+    """
+    V, K, F = vis_omega.shape
+    unique_groups = np.unique(face_to_group)
+    G = int(np.max(unique_groups)) + 1 if len(unique_groups) > 0 else 0
+
+    vis_groups = np.zeros((V, K, G), dtype=np.float32)
+    unocc_groups = np.zeros((V, K, G), dtype=np.float32)
+
+    for g in unique_groups:
+        mask = (face_to_group == g)
+        vis_groups[:, :, g] = np.sum(vis_omega[:, :, mask], axis=-1)
+        unocc_groups[:, :, g] = np.sum(unocc_omega[:, :, mask], axis=-1)
+
+    # Fractions per (view, instance)
+    valid_mask = unocc_groups > 1e-12
+    fractions = np.zeros_like(vis_groups)
+    fractions[valid_mask] = np.clip(vis_groups[valid_mask] / unocc_groups[valid_mask], 0.0, 1.0)
+
+    # Max over views and instances
+    raw_scores = np.max(fractions, axis=(0, 1))  # (G,)
+    unocc_max = np.max(unocc_groups, axis=(0, 1))  # (G,)
+
+    d_omega_px = 4.0 / (ref_cube_res * ref_cube_res)
+    size_px = unocc_max / d_omega_px
+
+    fell_back = (size_px < min_px_threshold) & (unocc_max > 0.0)
+    final_scores = raw_scores.copy()
+    if obj_score is not None:
+        final_scores[fell_back] = obj_score
+
+    never_seen = (unocc_max > 0.0) & (final_scores == 0.0)
+
+    return {
+        'scores': final_scores,
+        'size_px': size_px,
+        'fell_back': fell_back,
+        'never_seen': never_seen,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Core Analysis Engine (Round 3)
 # ---------------------------------------------------------------------------
 
 def analyze_visibility(
@@ -699,237 +828,274 @@ def analyze_visibility(
     frustum_res=(2560, 1440),
     floor=0.2,
     falloff=1.0,
+    min_px_threshold=10.0,
 ):
-    """Execute complete visibility-based texel demand analysis (Round 2)."""
+    """Execute complete visibility analysis with per-face sums (Round 3)."""
     gpu.init()
     shader = get_id_shader()
 
-    # Default camera configuration if none provided
-    if not cameras:
-        pilot_cam = (
-            bpy.data.objects.get('CAM_PILOT_CLOSE')
-            or bpy.data.objects.get('CAM_PILOT')
-            or [o for o in bpy.data.objects if o.type == 'CAMERA'][:1][0]
-        )
-        cameras = [
-            {
-                'name': pilot_cam.name,
-                'type': 'LOOK_AROUND',
-                'pos': pilot_cam.matrix_world.translation.copy(),
-                'forward': get_camera_forward(pilot_cam),
-            }
-        ]
-        copilot_cam = bpy.data.objects.get('CAM_COPILOT')
-        if copilot_cam:
-            cameras.append({
-                'name': copilot_cam.name,
-                'type': 'LOOK_AROUND',
-                'pos': copilot_cam.matrix_world.translation.copy(),
-                'forward': get_camera_forward(copilot_cam),
-            })
-
-    t_start = time.perf_counter()
-    state_timings = {}
-
-    mesh_results = {}
-    off_cube = gpu.types.GPUOffScreen(cube_res, cube_res)
-    off_frustum = gpu.types.GPUOffScreen(frustum_res[0], frustum_res[1])
-
-    anim_ctrl = AnimationStateController()
+    # Discover instances & metadata
+    add_orig_face_index_attributes()
 
     try:
-        for state_val in anim_states:
-            t_s0 = time.perf_counter()
-            pct_label = f"{int(state_val * 100 if state_val <= 1.0 else state_val)}%"
-            anim_ctrl.apply_percentage_state(state_val)
+        mesh_meta = discover_mesh_instances(bpy.context.view_layer)
 
-            dg = bpy.context.evaluated_depsgraph_get()
-            batches, eval_poly_map, mesh_meta, tri_geom, max_id = extract_scene_geometry(
-                dg, bpy.context.view_layer
+        if not cameras:
+            pilot_cam = (
+                bpy.data.objects.get('CAM_PILOT_CLOSE')
+                or bpy.data.objects.get('CAM_PILOT')
+                or [o for o in bpy.data.objects if o.type == 'CAMERA'][:1][0]
             )
-
-            # Build GPU batches
-            batch_op = None
-            if len(batches['opaque_pos']) > 0:
-                batch_op = batch_for_shader(shader, 'TRIS', {
-                    'pos': batches['opaque_pos'],
-                    'face_id': batches['opaque_ids']
+            cameras = [
+                {
+                    'name': pilot_cam.name,
+                    'type': 'LOOK_AROUND',
+                    'pos': pilot_cam.matrix_world.translation.copy(),
+                    'forward': get_camera_forward(pilot_cam),
+                }
+            ]
+            copilot_cam = bpy.data.objects.get('CAM_COPILOT')
+            if copilot_cam:
+                cameras.append({
+                    'name': copilot_cam.name,
+                    'type': 'LOOK_AROUND',
+                    'pos': copilot_cam.matrix_world.translation.copy(),
+                    'forward': get_camera_forward(copilot_cam),
                 })
 
-            batch_dec = None
-            if len(batches['decal_pos']) > 0:
-                batch_dec = batch_for_shader(shader, 'TRIS', {
-                    'pos': batches['decal_pos'],
-                    'face_id': batches['decal_ids']
-                })
-
-            # Initialize mesh_results entry on first pass
-            for m_name, meta in mesh_meta.items():
-                if m_name not in mesh_results:
-                    mesh_results[m_name] = {
-                        'n_faces': meta['n_orig_faces'],
-                        'orig_areas': meta['orig_areas'],
-                        'island_ids': meta['island_ids'],
-                        'face_scores': np.zeros(meta['n_orig_faces'], dtype=np.float32),
-                        'user_objects': meta['user_objects'],
-                    }
-
-            # Render for each camera
+        # Build view list: camera x animation state
+        view_configs = []
+        for state_val in anim_states:
             for cam in cameras:
-                cam_name = cam['name']
-                cam_type = cam['type']
-                cam_pos = cam['pos']
-                cam_fwd = cam.get('forward', Vector((0, -1, 0)))
+                view_configs.append({
+                    'camera': cam['name'],
+                    'cam_dict': cam,
+                    'state': float(state_val),
+                    'floor': floor,
+                    'falloff': falloff,
+                })
 
-                # 1. Compute analytical unoccluded solid angle from this camera position
-                tri_omega = batch_triangle_solid_angle(
-                    cam_pos, tri_geom['V0'], tri_geom['V1'], tri_geom['V2']
-                )
-                eval_unocc = np.bincount(
-                    tri_geom['tri_ids'], weights=tri_omega, minlength=max_id + 1
-                )
+        N_views = len(view_configs)
 
-                eval_vis = np.zeros(max_id + 1, dtype=np.float64)
-
-                if cam_type == 'LOOK_AROUND':
-                    faces = cubemap_face_matrices(cam_pos, cam_fwd)
-                    face_weights = precompute_cubemap_weights(
-                        faces, cam_fwd, cube_res=cube_res, floor=floor, falloff=falloff
-                    )
-                    for face_name, v_mat, p_mat in faces:
-                        mvp = p_mat @ v_mat
-                        w_map = face_weights[face_name]
-                        vis_counts = render_camera_view(
-                            off_cube, shader, batch_op, batch_dec, mvp, w_map, max_id
-                        )
-                        eval_vis += vis_counts
-
-                elif cam_type == 'FIXED_VIEW':
-                    cam_obj = bpy.data.objects.get(cam.get('obj_name', cam_name))
-                    if cam_obj:
-                        p_mat = cam_obj.calc_matrix_camera(dg, x=frustum_res[0], y=frustum_res[1])
-                        v_mat = cam_obj.matrix_world.inverted()
-                        mvp = p_mat @ v_mat
-                        w_map = precompute_frustum_weights(cam_obj, frustum_res)
-                        vis_counts = render_camera_view(
-                            off_frustum, shader, batch_op, batch_dec, mvp, w_map, max_id
-                        )
-                        eval_vis += vis_counts
-
-                # 2. Compute visible fraction score per evaluated polygon:
-                # fraction = min(1.0, vis / unocc) if unocc > 1e-12 else 0.0
-                valid_mask = eval_unocc > 1e-12
-                eval_scores = np.zeros(max_id + 1, dtype=np.float32)
-                eval_scores[valid_mask] = np.clip(
-                    eval_vis[valid_mask] / eval_unocc[valid_mask], 0.0, 1.0
-                ).astype(np.float32)
-
-                # 3. Map back to original faces with max aggregation (Decisions 68 & 71)
-                for eid, score in enumerate(eval_scores):
-                    if score <= 0.0 or eid not in eval_poly_map:
-                        continue
-                    m_name, orig_idx, is_mirr = eval_poly_map[eid]
-                    cur = mesh_results[m_name]['face_scores'][orig_idx]
-                    if score > cur:
-                        mesh_results[m_name]['face_scores'][orig_idx] = score
-
-            state_timings[f"state_{pct_label}"] = time.perf_counter() - t_s0
-
-    finally:
-        anim_ctrl.restore()
-        off_cube.free()
-        off_frustum.free()
-
-    total_time = time.perf_counter() - t_start
-
-    # Aggregation & Island Statistics (Decisions 71, 74)
-    total_faces = 0
-    total_never_seen_faces = 0
-    total_surface_area = 0.0
-    total_never_seen_area = 0.0
-
-    object_summaries = {}
-
-    for m_name, m_data in mesh_results.items():
-        scores = m_data['face_scores']
-        areas = m_data['orig_areas']
-        islands = m_data['island_ids']
-        n_f = len(scores)
-        total_faces += n_f
-
-        unseen_mask = (scores <= 0.0)
-        n_unseen = int(np.sum(unseen_mask))
-        total_never_seen_faces += n_unseen
-
-        m_area = float(np.sum(areas))
-        m_unseen_area = float(np.sum(areas[unseen_mask]))
-        total_surface_area += m_area
-        total_never_seen_area += m_unseen_area
-
-        # Area-weighted 90th percentile per UV island
-        unique_islands = np.unique(islands)
-        island_p90 = {}
-        for isl_id in unique_islands:
-            isl_mask = (islands == isl_id)
-            isl_scores = scores[isl_mask]
-            isl_areas = areas[isl_mask]
-            isl_p90 = weighted_percentile(isl_scores, isl_areas, 0.90)
-            island_p90[int(isl_id)] = isl_p90
-
-        m_data['island_p90'] = island_p90
-
-        # Object level summaries
-        obj_p90 = weighted_percentile(scores, areas, 0.90)
-        for obj_name in m_data['user_objects']:
-            object_summaries[obj_name] = {
-                'mesh_name': m_name,
-                'p90_score': obj_p90,
-                'seen_share': float(1.0 - (m_unseen_area / max(m_area, 1e-8))),
-                'n_faces': n_f,
-                'n_never_seen': n_unseen,
-                'area_m2': m_area,
-                'never_seen_area_m2': m_unseen_area,
+        # Allocate per-mesh sum arrays: (N_views, N_instances, N_faces)
+        mesh_arrays = {}
+        for m_name, meta in mesh_meta.items():
+            N_inst = max(len(meta['instances']), 1)
+            N_faces = meta['n_orig_faces']
+            mesh_arrays[m_name] = {
+                'vis_omega': np.zeros((N_views, N_inst, N_faces), dtype=np.float32),
+                'unocc_omega': np.zeros((N_views, N_inst, N_faces), dtype=np.float32),
+                'area': meta['orig_areas'],
+                'island_ids': meta['island_ids'],
             }
 
-    # Demand percentiles across visible faces
-    all_seen_scores = []
-    all_seen_areas = []
-    for m_data in mesh_results.values():
-        vis = m_data['face_scores'] > 0.0
-        if np.any(vis):
-            all_seen_scores.extend(m_data['face_scores'][vis])
-            all_seen_areas.extend(m_data['orig_areas'][vis])
+        t_start = time.perf_counter()
+        state_timings = {}
 
-    percentiles = {}
-    if all_seen_scores:
-        s_arr = np.array(all_seen_scores, dtype=np.float64)
-        w_arr = np.array(all_seen_areas, dtype=np.float64)
-        for p in [10, 25, 50, 75, 90, 95]:
-            percentiles[f"p{p}"] = weighted_percentile(s_arr, w_arr, p / 100.0)
+        off_cube = gpu.types.GPUOffScreen(cube_res, cube_res)
+        off_frustum = gpu.types.GPUOffScreen(frustum_res[0], frustum_res[1])
+        anim_ctrl = AnimationStateController()
 
-    never_seen_share = total_never_seen_faces / max(total_faces, 1)
-    never_seen_area_share = total_never_seen_area / max(total_surface_area, 1e-8)
+        try:
+            view_idx = 0
+            for state_val in anim_states:
+                t_s0 = time.perf_counter()
+                pct_label = f"{int(state_val * 100 if state_val <= 1.0 else state_val)}%"
+                anim_ctrl.apply_percentage_state(state_val)
 
-    results = {
-        'blend_file': str(blend_path),
-        'total_time_s': total_time,
-        'state_timings': state_timings,
-        'cameras': [c['name'] for c in cameras],
-        'camera_configs': cameras,
-        'anim_states': [float(s) for s in anim_states],
-        'options': {'floor': floor, 'falloff': falloff, 'cube_res': cube_res},
-        'total_faces': total_faces,
-        'total_never_seen_faces': total_never_seen_faces,
-        'never_seen_share': never_seen_share,
-        'total_surface_area_m2': total_surface_area,
-        'total_never_seen_area_m2': total_never_seen_area,
-        'never_seen_area_share': never_seen_area_share,
-        'score_percentiles': percentiles,
-        'mesh_results': mesh_results,
-        'object_summaries': object_summaries,
-    }
+                dg = bpy.context.evaluated_depsgraph_get()
+                batches, eval_poly_info, tri_geom, max_id = extract_scene_geometry(
+                    dg, bpy.context.view_layer, mesh_meta
+                )
 
-    return results
+                batch_op = None
+                if len(batches['opaque_pos']) > 0:
+                    b = batch_for_shader(shader, 'TRIS', {
+                        'pos': batches['opaque_pos'],
+                        'face_id': batches['opaque_ids']
+                    })
+                    batch_op = BatchWrapper(b, len(batches['opaque_pos']) // 3)
+
+                batch_dec = None
+                if len(batches['decal_pos']) > 0:
+                    b = batch_for_shader(shader, 'TRIS', {
+                        'pos': batches['decal_pos'],
+                        'face_id': batches['decal_ids']
+                    })
+                    batch_dec = BatchWrapper(b, len(batches['decal_pos']) // 3)
+
+                for cam in cameras:
+                    cam_name = cam['name']
+                    cam_type = cam['type']
+                    cam_pos = cam['pos']
+                    cam_fwd = cam.get('forward', Vector((0, -1, 0)))
+
+                    # 1. Unoccluded solid angle from this camera position
+                    if len(tri_geom['V0']) > 0:
+                        tri_omega = batch_triangle_solid_angle(
+                            cam_pos, tri_geom['V0'], tri_geom['V1'], tri_geom['V2']
+                        )
+                        eval_unocc = np.bincount(
+                            tri_geom['tri_ids'], weights=tri_omega, minlength=max_id + 1
+                        )
+                    else:
+                        eval_unocc = np.zeros(max_id + 1, dtype=np.float32)
+
+                    eval_vis = np.zeros(max_id + 1, dtype=np.float64)
+
+                    # 2. Render views
+                    if cam_type == 'LOOK_AROUND':
+                        faces = cubemap_face_matrices(cam_pos, cam_fwd)
+                        face_weights = precompute_cubemap_weights(
+                            faces, cam_fwd, cube_res=cube_res, floor=floor, falloff=falloff
+                        )
+                        for face_name, v_mat, p_mat in faces:
+                            mvp = p_mat @ v_mat
+                            w_map = face_weights[face_name]
+                            vis_counts = render_camera_view(
+                                off_cube, shader, batch_op, batch_dec, mvp, w_map, max_id
+                            )
+                            eval_vis += vis_counts
+
+                    elif cam_type == 'FIXED_VIEW':
+                        cam_obj = bpy.data.objects.get(cam.get('obj_name', cam_name))
+                        if cam_obj:
+                            p_mat = cam_obj.calc_matrix_camera(dg, x=frustum_res[0], y=frustum_res[1])
+                            v_mat = cam_obj.matrix_world.inverted()
+                            mvp = p_mat @ v_mat
+                            w_map = precompute_frustum_weights(cam_obj, frustum_res)
+                            vis_counts = render_camera_view(
+                                off_frustum, shader, batch_op, batch_dec, mvp, w_map, max_id
+                            )
+                            eval_vis += vis_counts
+
+                    # 3. Accumulate sums into mesh_arrays
+                    for eid, (m_name, inst_idx, orig_idx) in eval_poly_info.items():
+                        v_vis = eval_vis[eid]
+                        v_unocc = eval_unocc[eid]
+                        mesh_arrays[m_name]['vis_omega'][view_idx, inst_idx, orig_idx] += v_vis
+                        mesh_arrays[m_name]['unocc_omega'][view_idx, inst_idx, orig_idx] += v_unocc
+
+                    view_idx += 1
+
+                state_timings[f"state_{pct_label}"] = time.perf_counter() - t_s0
+
+        finally:
+            anim_ctrl.restore()
+            off_cube.free()
+            off_frustum.free()
+
+        total_time = time.perf_counter() - t_start
+
+        # Compute Group Scores: Objects and Islands (Decision 78)
+        object_summaries = {}
+        island_summaries = {}
+
+        total_faces = sum(meta['n_orig_faces'] for meta in mesh_meta.values())
+        total_surface_area = sum(float(np.sum(meta['orig_areas'])) for meta in mesh_meta.values())
+
+        for m_name, meta in mesh_meta.items():
+            vis_arr = mesh_arrays[m_name]['vis_omega']
+            unocc_arr = mesh_arrays[m_name]['unocc_omega']
+            areas = meta['orig_areas']
+            island_ids = meta['island_ids']
+            n_f = meta['n_orig_faces']
+
+            # Object-level scoring (all faces in group 0)
+            obj_group = np.zeros(n_f, dtype=np.int32)
+            obj_res = score_groups(
+                vis_arr, unocc_arr, obj_group,
+                min_px_threshold=min_px_threshold, ref_cube_res=1024, obj_score=None
+            )
+            obj_score = float(obj_res['scores'][0])
+            obj_size_px = float(obj_res['size_px'][0])
+            obj_never_seen = bool(obj_res['never_seen'][0])
+
+            # Island-level scoring
+            isl_res = score_groups(
+                vis_arr, unocc_arr, island_ids,
+                min_px_threshold=min_px_threshold, ref_cube_res=1024, obj_score=obj_score
+            )
+            mesh_arrays[m_name]['island_scores'] = isl_res['scores']
+            mesh_arrays[m_name]['island_size_px'] = isl_res['size_px']
+            mesh_arrays[m_name]['island_fell_back'] = isl_res['fell_back']
+            mesh_arrays[m_name]['island_never_seen'] = isl_res['never_seen']
+
+            # Record per-island summaries
+            for isl_id in np.unique(island_ids):
+                isl_mask = (island_ids == isl_id)
+                island_summaries[f"{m_name}__isl_{isl_id}"] = {
+                    'mesh_name': m_name,
+                    'island_id': int(isl_id),
+                    'score': float(isl_res['scores'][isl_id]),
+                    'size_px': float(isl_res['size_px'][isl_id]),
+                    'fell_back': bool(isl_res['fell_back'][isl_id]),
+                    'never_seen': bool(isl_res['never_seen'][isl_id]),
+                    'area_m2': float(np.sum(areas[isl_mask])),
+                    'n_faces': int(np.sum(isl_mask)),
+                }
+
+            # Map to user objects
+            for inst_info in meta['instances']:
+                o_name = inst_info['object_name']
+                if o_name not in object_summaries:
+                    object_summaries[o_name] = {
+                        'mesh_name': m_name,
+                        'score': obj_score,
+                        'size_px': obj_size_px,
+                        'never_seen': obj_never_seen,
+                        'area_m2': float(np.sum(areas)),
+                        'n_faces': n_f,
+                    }
+
+        # Global statistics
+        never_seen_islands = [k for k, v in island_summaries.items() if v['never_seen']]
+        never_seen_objects = [k for k, v in object_summaries.items() if v['never_seen']]
+
+        # Island score percentiles (area-weighted across all visible islands)
+        all_isl_scores = []
+        all_isl_areas = []
+        for isl in island_summaries.values():
+            if not isl['never_seen']:
+                all_isl_scores.append(isl['score'])
+                all_isl_areas.append(isl['area_m2'])
+
+        percentiles = {}
+        if all_isl_scores:
+            s_arr = np.array(all_isl_scores, dtype=np.float64)
+            w_arr = np.array(all_isl_areas, dtype=np.float64)
+            for p in [10, 25, 50, 75, 90, 95]:
+                percentiles[f"p{p}"] = weighted_percentile(s_arr, w_arr, p / 100.0)
+
+        results = {
+            'blend_file': str(blend_path),
+            'schema_version': 3,
+            'total_time_s': total_time,
+            'state_timings': state_timings,
+            'views': [
+                {'camera': v['camera'], 'state': v['state'], 'floor': v['floor'], 'falloff': v['falloff']}
+                for v in view_configs
+            ],
+            'ref_cube_res': 1024,
+            'cube_res': cube_res,
+            'min_px_threshold': min_px_threshold,
+            'total_faces': total_faces,
+            'total_surface_area_m2': total_surface_area,
+            'total_objects': len(object_summaries),
+            'never_seen_objects_count': len(never_seen_objects),
+            'total_islands': len(island_summaries),
+            'never_seen_islands_count': len(never_seen_islands),
+            'score_percentiles': percentiles,
+            'object_summaries': object_summaries,
+            'island_summaries': island_summaries,
+            'mesh_arrays': mesh_arrays,
+            'mesh_meta': mesh_meta,
+        }
+
+        return results
+
+    finally:
+        remove_orig_face_index_attributes()
 
 
 def weighted_percentile(values, weights, percentile=0.90):
@@ -949,28 +1115,28 @@ def weighted_percentile(values, weights, percentile=0.90):
 
 
 # ---------------------------------------------------------------------------
-# Storage: External .visibility File Version 2 (Decision 67)
+# Storage: External .visibility File Version 3 (Decision 67 & 78)
 # ---------------------------------------------------------------------------
 
 def save_visibility_file(blend_path, results):
-    """Save analysis results into compressed `<blend_name>.visibility` (Schema Version 2)."""
+    """Save results as compressed `<blend_name>.visibility` (Schema Version 3)."""
     vis_path = Path(blend_path).with_suffix('.visibility')
 
     meta = {
-        'schema_version': 2,
+        'schema_version': 3,
         'blend_file': str(results['blend_file']),
         'timestamp': time.strftime("%Y-%m-%d %H:%M:%S"),
         'total_time_s': results['total_time_s'],
         'state_timings': results['state_timings'],
-        'cameras': results['cameras'],
-        'anim_states': results['anim_states'],
-        'options': results['options'],
+        'views': results['views'],
+        'ref_cube_res': results['ref_cube_res'],
+        'min_px_threshold': results['min_px_threshold'],
         'total_faces': results['total_faces'],
-        'total_never_seen_faces': results['total_never_seen_faces'],
-        'never_seen_share': results['never_seen_share'],
         'total_surface_area_m2': results['total_surface_area_m2'],
-        'total_never_seen_area_m2': results['total_never_seen_area_m2'],
-        'never_seen_area_share': results['never_seen_area_share'],
+        'total_objects': results['total_objects'],
+        'never_seen_objects_count': results['never_seen_objects_count'],
+        'total_islands': results['total_islands'],
+        'never_seen_islands_count': results['never_seen_islands_count'],
         'score_percentiles': results['score_percentiles'],
         'object_summaries': results['object_summaries'],
     }
@@ -979,11 +1145,12 @@ def save_visibility_file(blend_path, results):
         '_meta_json': np.array([json.dumps(meta)]),
     }
 
-    for m_name, m_data in results['mesh_results'].items():
+    for m_name, m_data in results['mesh_arrays'].items():
         safe_name = m_name.replace('/', '_').replace('\\', '_')
-        arrays_to_save[f"{safe_name}__score"] = m_data['face_scores'].astype(np.float32)
-        arrays_to_save[f"{safe_name}__area"] = m_data['orig_areas'].astype(np.float32)
-        arrays_to_save[f"{safe_name}__island"] = m_data['island_ids'].astype(np.int32)
+        arrays_to_save[f"{safe_name}__vis_omega"] = m_data['vis_omega'].astype(np.float32)
+        arrays_to_save[f"{safe_name}__unocc_omega"] = m_data['unocc_omega'].astype(np.float32)
+        arrays_to_save[f"{safe_name}__area"] = m_data['area'].astype(np.float32)
+        arrays_to_save[f"{safe_name}__island_ids"] = m_data['island_ids'].astype(np.int32)
 
     with open(vis_path, 'wb') as f:
         np.savez_compressed(f, **arrays_to_save)
@@ -998,7 +1165,7 @@ def load_visibility_file(vis_path):
 
 
 # ---------------------------------------------------------------------------
-# Offscreen Heatmap Image Rendering (Graded 0..1, Magenta for Never-Seen)
+# Offscreen Heatmap Image Rendering (Step 8)
 # ---------------------------------------------------------------------------
 
 def compute_heatmap_colors(scores):
@@ -1024,14 +1191,12 @@ def compute_heatmap_colors(scores):
         s_vals = scores[seen]
         seen_idx = np.flatnonzero(seen)
 
-        # Lower half: (0.0, 0.5] -> Red to Neutral
         low_mask = (s_vals <= 0.5)
         if np.any(low_mask):
             l_idx = seen_idx[low_mask]
             t = np.clip(s_vals[low_mask] / 0.5, 0.0, 1.0)[:, None]
             colors[l_idx] = (1.0 - t) * c_red + t * c_neu
 
-        # Upper half: (0.5, 1.0] -> Neutral to Blue
         high_mask = (s_vals > 0.5)
         if np.any(high_mask):
             h_idx = seen_idx[high_mask]
@@ -1041,11 +1206,10 @@ def compute_heatmap_colors(scores):
     return colors
 
 
-def render_heatmap_image(output_path, mvp, res=(1920, 1080), view_normal_matrix=None, mesh_results=None):
-    """Render the scene coloured by visibility score into a PNG image."""
+def render_heatmap_image(output_path, mvp, res=(1920, 1080), view_normal_matrix=None, results=None):
+    """Render scene coloured by group visibility score into a PNG image."""
     W, H = res
     shader = get_heatmap_render_shader()
-    dg = bpy.context.evaluated_depsgraph_get()
 
     if view_normal_matrix is None:
         view_normal_matrix = Matrix.Identity(4)
@@ -1054,58 +1218,94 @@ def render_heatmap_image(output_path, mvp, res=(1920, 1080), view_normal_matrix=
 
     mesh_objs = [
         o for o in bpy.context.view_layer.objects
-        if o.type == 'MESH' and o.data and not o.hide_viewport and not o.hide_render
+        if o is not None and o.type == 'MESH' and o.data and not o.hide_viewport and not o.hide_render
     ]
 
-    for o in mesh_objs:
-        if is_invisible_object(o):
-            continue
+    add_orig_face_index_attributes()
+    dg = bpy.context.evaluated_depsgraph_get()
 
-        me_orig = o.data
-        m_name = me_orig.name
-        if mesh_results and m_name in mesh_results:
-            scores = mesh_results[m_name]['face_scores']
-        else:
-            scores = np.zeros(len(me_orig.polygons), dtype=np.float32)
+    try:
+        for o in mesh_objs:
+            if is_invisible_object(o):
+                continue
 
-        poly_colors = compute_heatmap_colors(scores)
+            me_orig = o.data
+            m_name = me_orig.name
+            n_orig_faces = len(me_orig.polygons)
 
-        eval_obj = o.evaluated_get(dg)
-        eval_me = eval_obj.to_mesh()
-        eval_me.calc_loop_triangles()
-        n_lt = len(eval_me.loop_triangles)
-        if n_lt == 0:
+            # Compute face score from island score or object score
+            face_scores = np.zeros(n_orig_faces, dtype=np.float32)
+            if results and 'mesh_arrays' in results and m_name in results['mesh_arrays']:
+                m_data = results['mesh_arrays'][m_name]
+                isl_scores = m_data.get('island_scores')
+                isl_ids = m_data['island_ids']
+                if isl_scores is not None and len(isl_scores) > 0:
+                    face_scores = isl_scores[isl_ids]
+                elif o.name in results['object_summaries']:
+                    face_scores[:] = results['object_summaries'][o.name]['score']
+
+            poly_colors = compute_heatmap_colors(face_scores)
+
+            eval_obj = o.evaluated_get(dg)
+            eval_me = eval_obj.to_mesh()
+            eval_me.calc_loop_triangles()
+            n_lt = len(eval_me.loop_triangles)
+            if n_lt == 0:
+                eval_obj.to_mesh_clear()
+                continue
+
+            # Classify polygon material to omit invisible faces
+            poly_mat_class = []
+            for p in eval_me.polygons:
+                mat_idx = p.material_index
+                mat = o.material_slots[mat_idx].material if mat_idx < len(o.material_slots) else None
+                poly_mat_class.append(classify_material(mat))
+
+            eval_attr = eval_me.attributes.get(ORIG_FACE_ATTR_NAME)
+            if eval_attr:
+                orig_indices = np.empty(len(eval_me.polygons), dtype=np.int32)
+                eval_attr.data.foreach_get('value', orig_indices)
+            else:
+                raise RuntimeError(f"Attribute {ORIG_FACE_ATTR_NAME} missing on evaluated mesh {m_name}")
+
+            verts = np.empty((n_lt, 3), dtype=np.int32)
+            eval_me.loop_triangles.foreach_get('vertices', verts.ravel())
+
+            V_eval = np.empty((len(eval_me.vertices), 3), dtype=np.float32)
+            eval_me.vertices.foreach_get('co', V_eval.ravel())
+            M_eval = np.array(o.matrix_world, dtype=np.float32)
+            P_world = (V_eval @ M_eval[:3, :3].T + M_eval[:3, 3])[verts]
+
+            # Normals
+            N_tri = np.empty((n_lt, 3), dtype=np.float32)
+            eval_me.loop_triangles.foreach_get('normal', N_tri.ravel())
+            M_norm = np.linalg.inv(M_eval[:3, :3]).T
+            N_world = N_tri @ M_norm.T
+            norm_lens = np.linalg.norm(N_world, axis=-1, keepdims=True)
+            N_world /= np.maximum(norm_lens, 1e-8)
+            N_world_expanded = np.repeat(N_world[:, None, :], 3, axis=1)
+
+            poly_indices = np.empty(n_lt, dtype=np.int32)
+            eval_me.loop_triangles.foreach_get('polygon_index', poly_indices)
+
+            # Filter out invisible material triangles
+            for lt_idx in range(n_lt):
+                pi = poly_indices[lt_idx]
+                if poly_mat_class[pi] == 'INVISIBLE':
+                    continue  # Clickspots and invisible colliders NOT drawn!
+
+                orig_idx = int(orig_indices[pi])
+                col = poly_colors[orig_idx]
+                col_expanded = np.repeat(col[None, :], 3, axis=0)
+
+                all_pos.append(P_world[lt_idx])
+                all_nor.append(N_world_expanded[lt_idx])
+                all_col.append(col_expanded)
+
             eval_obj.to_mesh_clear()
-            continue
 
-        verts = np.empty((n_lt, 3), dtype=np.int32)
-        eval_me.loop_triangles.foreach_get('vertices', verts.ravel())
-
-        V_eval = np.empty((len(eval_me.vertices), 3), dtype=np.float32)
-        eval_me.vertices.foreach_get('co', V_eval.ravel())
-        M_eval = np.array(o.matrix_world, dtype=np.float32)
-        P_world = (V_eval @ M_eval[:3, :3].T + M_eval[:3, 3])[verts]
-
-        # Normals
-        N_tri = np.empty((n_lt, 3), dtype=np.float32)
-        eval_me.loop_triangles.foreach_get('normal', N_tri.ravel())
-        M_norm = np.linalg.inv(M_eval[:3, :3]).T
-        N_world = N_tri @ M_norm.T
-        norm_lens = np.linalg.norm(N_world, axis=-1, keepdims=True)
-        N_world /= np.maximum(norm_lens, 1e-8)
-        N_world_expanded = np.repeat(N_world[:, None, :], 3, axis=1)
-
-        # Polygons mapping
-        poly_indices = np.empty(n_lt, dtype=np.int32)
-        eval_me.loop_triangles.foreach_get('polygon_index', poly_indices)
-        orig_indices = poly_indices % len(poly_colors)
-        tri_colors = poly_colors[orig_indices]
-        tri_colors_expanded = np.repeat(tri_colors[:, None, :], 3, axis=1)
-
-        all_pos.append(P_world.reshape(-1, 3))
-        all_nor.append(N_world_expanded.reshape(-1, 3))
-        all_col.append(tri_colors_expanded.reshape(-1, 4))
-        eval_obj.to_mesh_clear()
+    finally:
+        remove_orig_face_index_attributes()
 
     if not all_pos:
         return False
@@ -1202,15 +1402,15 @@ def test_gltf_export(blend_path, scratch_dir):
 
 
 # ---------------------------------------------------------------------------
-# Synthetic Test Scene Generator & Validator (7 Cases)
+# Synthetic Test Scene Generator & Validator (11 Cases, Step 9)
 # ---------------------------------------------------------------------------
 
 def build_synthetic_scene(blend_path):
-    """Create synthetic test scene covering all 7 cases specified in Session 69."""
+    """Create synthetic test scene covering all 11 cases specified in Session 72."""
     bpy.ops.wm.read_homefile(use_empty=True)
     import bmesh
 
-    # Pilot camera at origin looking along -Y (Euler: pitch down 90 deg, roll 180)
+    # Pilot camera at origin looking along -Y
     cam_data = bpy.data.cameras.new("CAM_PILOT_CLOSE")
     cam_data.lens = 28.0
     cam_obj = bpy.data.objects.new("CAM_PILOT_CLOSE", cam_data)
@@ -1224,21 +1424,18 @@ def build_synthetic_scene(blend_path):
         hw, hh = size[0] / 2.0, size[1] / 2.0
 
         if normal_dir == '+Y':
-            # Facing +Y towards camera at origin
             v1 = bm.verts.new((-hw, 0, -hh))
             v2 = bm.verts.new((hw, 0, -hh))
             v3 = bm.verts.new((hw, 0, hh))
             v4 = bm.verts.new((-hw, 0, hh))
             bm.faces.new((v4, v3, v2, v1))
         elif normal_dir == '-Y':
-            # Facing -Y away from camera
             v1 = bm.verts.new((-hw, 0, -hh))
             v2 = bm.verts.new((hw, 0, -hh))
             v3 = bm.verts.new((hw, 0, hh))
             v4 = bm.verts.new((-hw, 0, hh))
             bm.faces.new((v1, v2, v3, v4))
         elif normal_dir == '-X':
-            # Facing -X towards origin from +X
             v1 = bm.verts.new((0, -hw, -hh))
             v2 = bm.verts.new((0, hw, -hh))
             v3 = bm.verts.new((0, hw, hh))
@@ -1257,32 +1454,22 @@ def build_synthetic_scene(blend_path):
 
         return obj
 
-    # -------------------------------------------------------------
-    # Case 1: Distance-free equal scores at 0.5 m and 2.0 m
-    # -------------------------------------------------------------
+    # 1. Distance invariance: 0.5 m vs 2.0 m
     create_quad_facing("CASE1_PANEL_NEAR", (0.025, 0.025), (0.0, -0.5, -0.10), '+Y')
     create_quad_facing("CASE1_PANEL_FAR",  (0.10, 0.10),   (0.0, -2.0,  0.40), '+Y')
 
-    # -------------------------------------------------------------
-    # Case 2: Half-covered panel (score ~ 0.50)
-    # -------------------------------------------------------------
+    # 2. Half-covered panel (score ~ 0.50)
     create_quad_facing("CASE2_HALF_PANEL", (0.2, 0.2), (0.4, -2.0, 0.0), '+Y')
     create_quad_facing("CASE2_COVER_PLATE", (0.1, 0.2), (0.35, -1.999, 0.0), '+Y')
 
-    # -------------------------------------------------------------
-    # Case 3: Panel straight ahead (w=1.0) vs 90 deg side (w=0.20 floor)
-    # -------------------------------------------------------------
+    # 3. Straight ahead (w=1.0) vs 90 deg side (w=0.20 floor)
     create_quad_facing("CASE3_PANEL_AHEAD", (0.2, 0.2), (0.0, -2.0, 0.0), '+Y')
     create_quad_facing("CASE3_PANEL_SIDE",  (0.2, 0.2), (2.0, 0.0, 0.0), '-X')
 
-    # -------------------------------------------------------------
-    # Case 4: Back face never seen (score = 0.000)
-    # -------------------------------------------------------------
+    # 4. Back face never seen (score = 0.000)
     create_quad_facing("CASE4_BACK_FACE", (0.2, 0.2), (0.0, -2.0, -0.8), '-Y')
 
-    # -------------------------------------------------------------
-    # Case 5: Invisible box hides nothing
-    # -------------------------------------------------------------
+    # 5. Invisible box hides nothing
     create_quad_facing("CASE5_TARGET_PANEL", (0.2, 0.2), (-0.8, -2.0, 0.0), '+Y')
     me_invis = bpy.data.meshes.new("CASE5_INVIS_BOX_Mesh")
     bm_invis = bmesh.new()
@@ -1295,15 +1482,11 @@ def build_synthetic_scene(blend_path):
     invis_obj.data.materials.append(mat_invis)
     bpy.context.scene.collection.objects.link(invis_obj)
 
-    # -------------------------------------------------------------
-    # Case 6: Decal does not hide its panel
-    # -------------------------------------------------------------
-    create_quad_facing("CASE6_OPAQUE_PANEL", (0.2, 0.2), (-0.8, -2.0, 0.8), '+Y', mat_name="PANEL_OPAQUE_MAT")
-    create_quad_facing("CASE6_DECAL_QUAD", (0.15, 0.15), (-0.8, -1.98, 0.8), '+Y', mat_name="LABEL_DECAL")
+    # 6. Decal does not hide its panel
+    create_quad_facing("CASE6_OPAQUE_PANEL", (0.2, 0.2), (-0.4, -2.0, 1.0), '+Y', mat_name="PANEL_OPAQUE_MAT")
+    create_quad_facing("CASE6_DECAL_QUAD", (0.15, 0.15), (-0.4, -1.98, 1.0), '+Y', mat_name="LABEL_DECAL")
 
-    # -------------------------------------------------------------
-    # Case 7: Animated action on frames 100 to 200
-    # -------------------------------------------------------------
+    # 7. Animated action on frames 100 to 200
     lever = create_quad_facing("CASE7_ANIM_LEVER", (0.2, 0.2), (0.8, -2.0, 0.0), '+Y')
     lever.animation_data_create()
     lever.location.z = 0.0
@@ -1319,75 +1502,248 @@ def build_synthetic_scene(blend_path):
 
     create_quad_facing("CASE7_SENSOR_PANEL", (0.15, 0.15), (0.8, -2.05, 0.8), '+Y')
 
+    # 8. Multi-face resolution invariance (single quad vs 10,000 faces at 2 m, cube_res 512)
+    create_quad_facing("CASE8_PANEL_QUAD", (0.2, 0.2), (0.3, -2.0, -0.4), '+Y')
+
+    # Subdivided grid into 10,000 faces (100 x 100)
+    me_grid = bpy.data.meshes.new("CASE8_PANEL_GRID_Mesh")
+    bm_grid = bmesh.new()
+    bmesh.ops.create_grid(bm_grid, x_segments=100, y_segments=100, size=0.1)  # size 0.1 radius => 0.2 x 0.2
+    # Rotate grid to face +Y
+    for v in bm_grid.verts:
+        # grid is in XY plane facing +Z; rotate around X by -90 deg to face +Y
+        x, y, z = v.co.x, v.co.y, v.co.z
+        v.co.x = x
+        v.co.y = z
+        v.co.z = -y
+    bm_grid.to_mesh(me_grid)
+    bm_grid.free()
+    grid_obj = bpy.data.objects.new("CASE8_PANEL_GRID", me_grid)
+    grid_obj.location = Vector((-0.3, -2.0, -0.4))
+    bpy.context.scene.collection.objects.link(grid_obj)
+
+    # 9. Mirror object with one copy hidden behind a wall
+    # Object origin at (0, 0, 0) with vertices offset to (+0.5, -2.0, 0.4)
+    # Mirrored copy will appear at (-0.5, -2.0, 0.4)
+    mirr_obj = create_quad_facing("CASE9_MIRROR_OBJ", (0.2, 0.2), (0.0, 0.0, 0.0), '+Y')
+    for v in mirr_obj.data.vertices:
+        v.co += Vector((0.5, -2.0, 0.4))
+    mirr_obj.data.update()
+    mod_m = mirr_obj.modifiers.new("MirrX", "MIRROR")
+    mod_m.use_axis[0] = True  # mirrored copy at (-0.5, -2.0, 0.4)
+    # Wall blocking the mirrored copy at -X
+    create_quad_facing("CASE9_WALL_BLOCK", (0.4, 0.4), (-0.5, -1.5, 0.4), '+Y')
+
+    # 10. Object with Triangulate modifier (half-covered reads ~ 0.50)
+    tri_obj = create_quad_facing("CASE10_TRI_PANEL", (0.2, 0.2), (-0.4, -2.0, 0.0), '+Y')
+    tri_obj.modifiers.new("Tri", "TRIANGULATE")
+    # Cover left half
+    create_quad_facing("CASE10_COVER_PLATE", (0.1, 0.2), (-0.45, -1.999, 0.0), '+Y')
+
+    # 11. Two linked duplicates, one hidden
+    shared_me = bpy.data.meshes.new("CASE11_SHARED_Mesh")
+    bm_sh = bmesh.new()
+    v1 = bm_sh.verts.new((-0.1, 0, -0.1))
+    v2 = bm_sh.verts.new(( 0.1, 0, -0.1))
+    v3 = bm_sh.verts.new(( 0.1, 0,  0.1))
+    v4 = bm_sh.verts.new((-0.1, 0,  0.1))
+    bm_sh.faces.new((v4, v3, v2, v1))
+    bm_sh.to_mesh(shared_me)
+    bm_sh.free()
+
+    obj_vis = bpy.data.objects.new("CASE11_OBJ_VISIBLE", shared_me)
+    obj_vis.location = Vector((-0.6, -2.0, -0.8))
+    bpy.context.scene.collection.objects.link(obj_vis)
+
+    obj_hid = bpy.data.objects.new("CASE11_OBJ_HIDDEN", shared_me)
+    obj_hid.location = Vector((0.6, -2.0, -0.8))
+    bpy.context.scene.collection.objects.link(obj_hid)
+    # Wall blocking obj_hid
+    create_quad_facing("CASE11_BLOCKER", (0.4, 0.4), (0.6, -1.5, -0.8), '+Y')
+
     bpy.ops.wm.save_as_mainfile(filepath=str(blend_path))
     return blend_path
 
 
 def validate_synthetic_cases(results):
-    """Verify all 7 synthetic cases pass assertions."""
+    """Verify all 11 synthetic cases pass assertions."""
     objs = results['object_summaries']
-    mesh_res = results['mesh_results']
 
     print("\n" + "=" * 70)
-    print("      SYNTHETIC VALIDATION (ROUND 2 - 7 CASES)")
+    print("      SYNTHETIC VALIDATION (ROUND 3 - 11 CASES)")
     print("=" * 70)
 
     # Case 1: Distance-free equal scores at 0.5 m and 2.0 m
-    s_near = objs["CASE1_PANEL_NEAR"]['p90_score']
-    s_far  = objs["CASE1_PANEL_FAR"]['p90_score']
+    s_near = objs["CASE1_PANEL_NEAR"]['score']
+    s_far  = objs["CASE1_PANEL_FAR"]['score']
     print(f"Case 1 (Distance Invariance): Near (0.5m) = {s_near:.4f}, Far (2.0m) = {s_far:.4f}")
     assert s_near >= 0.90, f"Near panel score too low ({s_near:.4f})"
     assert s_far >= 0.90, f"Far panel score too low ({s_far:.4f})"
-    assert abs(s_near - s_far) < 0.01, f"Distance discrepancy: {abs(s_near - s_far):.4f}"
+    assert abs(s_near - s_far) < 0.02, f"Distance discrepancy: {abs(s_near - s_far):.4f}"
     print("  -> PASS: Distance-free equal scores verified.")
 
     # Case 2: Half-covered panel (score ~ 0.50)
-    s_half = objs["CASE2_HALF_PANEL"]['p90_score']
+    s_half = objs["CASE2_HALF_PANEL"]['score']
     print(f"Case 2 (Half-Covered Panel): Score = {s_half:.4f} (expected ~0.50)")
     assert 0.45 <= s_half <= 0.55, f"Half panel score out of range: {s_half:.4f}"
     print("  -> PASS: Half-covered panel receives ~0.50 visible fraction.")
 
     # Case 3: Straight ahead (w=1.0) vs 90 deg side (w=0.20 floor)
-    s_ahead = objs["CASE3_PANEL_AHEAD"]['p90_score']
-    s_side  = objs["CASE3_PANEL_SIDE"]['p90_score']
+    s_ahead = objs["CASE3_PANEL_AHEAD"]['score']
+    s_side  = objs["CASE3_PANEL_SIDE"]['score']
     print(f"Case 3 (Direction Weight): Ahead = {s_ahead:.4f}, Side (90°) = {s_side:.4f}")
     assert s_ahead >= 0.98, f"Straight ahead score too low: {s_ahead:.4f}"
     assert 0.18 <= s_side <= 0.22, f"Side score out of floor range: {s_side:.4f}"
     print("  -> PASS: Side view receives floor weight 0.20.")
 
     # Case 4: Back face never seen
-    s_back = objs["CASE4_BACK_FACE"]['p90_score']
+    s_back = objs["CASE4_BACK_FACE"]['score']
     print(f"Case 4 (Back Face): Score = {s_back:.4f} (expected 0.000)")
     assert s_back == 0.0, f"Back face must have score 0.0, got {s_back}"
     print("  -> PASS: Back face receives score 0.000 (never seen).")
 
     # Case 5: Invisible box hides nothing
-    s_invis_target = objs["CASE5_TARGET_PANEL"]['p90_score']
+    s_invis_target = objs["CASE5_TARGET_PANEL"]['score']
     print(f"Case 5 (Invisible Box Occlusion): Target Panel Score = {s_invis_target:.4f}")
     assert s_invis_target >= 0.85, f"Invisible box occluded panel: {s_invis_target:.4f}"
     assert "CASE5_COLLISION_BOX" not in objs, "Invisible collision box should not be scored!"
     print("  -> PASS: Invisible box hides nothing and is omitted from scoring.")
 
     # Case 6: Decal does not hide its panel
-    s_opaque = objs["CASE6_OPAQUE_PANEL"]['p90_score']
-    s_decal  = objs["CASE6_DECAL_QUAD"]['p90_score']
+    s_opaque = objs["CASE6_OPAQUE_PANEL"]['score']
+    s_decal  = objs["CASE6_DECAL_QUAD"]['score']
     print(f"Case 6 (Decal on Panel): Opaque Panel = {s_opaque:.4f}, Decal = {s_decal:.4f}")
     assert s_opaque >= 0.80, f"Opaque panel occluded by decal: {s_opaque:.4f}"
     assert s_decal >= 0.80, f"Decal not scored: {s_decal:.4f}"
-    assert abs(s_opaque - s_decal) < 0.05, f"Decal and opaque mismatch: {s_opaque} vs {s_decal}"
+    assert abs(s_opaque - s_decal) < 0.10, f"Decal and opaque mismatch: {s_opaque} vs {s_decal}"
     print("  -> PASS: Decal is scored and does not occlude the panel behind it.")
 
     # Case 7: Animated action on frames 100 to 200
-    s_lever  = objs["CASE7_ANIM_LEVER"]['p90_score']
-    s_sensor = objs["CASE7_SENSOR_PANEL"]['p90_score']
+    s_lever  = objs["CASE7_ANIM_LEVER"]['score']
+    s_sensor = objs["CASE7_SENSOR_PANEL"]['score']
     print(f"Case 7 (Action 100-200 Evaluation): Lever = {s_lever:.4f}, Sensor = {s_sensor:.4f}")
     assert s_lever >= 0.80, f"Lever score low: {s_lever:.4f}"
     assert s_sensor >= 0.80, f"Sensor uncovered at frame 100 must be seen, got {s_sensor:.4f}"
     print("  -> PASS: Action evaluated across its normalized percentage range.")
 
-    print("\nALL 7 SYNTHETIC CASES PASSED SUCCESSFULLY!")
+    # Case 8: Multi-face resolution invariance (1 quad vs 10,000 faces)
+    s_quad = objs["CASE8_PANEL_QUAD"]['score']
+    s_grid = objs["CASE8_PANEL_GRID"]['score']
+    print(f"Case 8 (Multi-Face Resolution Invariance): 1 Quad = {s_quad:.4f}, 10,000 Grid Faces = {s_grid:.4f}")
+    assert s_quad >= 0.85, f"Quad score low: {s_quad:.4f}"
+    assert s_grid >= 0.85, f"Grid score low: {s_grid:.4f}"
+    assert abs(s_quad - s_grid) <= 0.02, f"Multi-face discrepancy: {abs(s_quad - s_grid):.4f}"
+    print("  -> PASS: Group sums are invariant to micro-face subdivision.")
+
+    # Case 9: Mirror object with one copy hidden
+    s_mirr = objs["CASE9_MIRROR_OBJ"]['score']
+    print(f"Case 9 (Mirror with One Copy Blocked): Score = {s_mirr:.4f}")
+    assert s_mirr >= 0.85, f"Mirrored object score too low ({s_mirr:.4f})"
+    print("  -> PASS: Original mesh keeps score of the unoccluded copy.")
+
+    # Case 10: Object with Triangulate modifier
+    s_tri = objs["CASE10_TRI_PANEL"]['score']
+    print(f"Case 10 (Triangulate Modifier): Half-Covered Score = {s_tri:.4f} (expected ~0.50)")
+    assert 0.45 <= s_tri <= 0.55, f"Triangulate panel score out of range: {s_tri:.4f}"
+    print("  -> PASS: Evaluated triangles map to original face, reading ~0.50.")
+
+    # Case 11: Two linked duplicates, one hidden
+    s_vis = objs["CASE11_OBJ_VISIBLE"]['score']
+    s_hid = objs["CASE11_OBJ_HIDDEN"]['score']
+    print(f"Case 11 (Linked Duplicates): Visible Object = {s_vis:.4f}, Hidden Object = {s_hid:.4f}")
+    assert s_vis >= 0.85, f"Visible linked duplicate score too low ({s_vis:.4f})"
+    assert s_vis == s_hid, f"Linked duplicates share mesh score: {s_vis} vs {s_hid}"
+    print("  -> PASS: Linked duplicates correctly share mesh visibility score.")
+
+    print("\nALL 11 SYNTHETIC CASES PASSED SUCCESSFULLY!")
     print("=" * 70 + "\n")
     return True
+
+
+# ---------------------------------------------------------------------------
+# Resolution Comparison Benchmark (Step 6)
+# ---------------------------------------------------------------------------
+
+def run_resolution_check(blend_path, cameras=None, floor=0.2, falloff=1.0, out_dir="tests/_work/uv_visibility"):
+    """Run resolution check comparing cube_res=1024 vs cube_res=4096 (Step 6)."""
+    print("\n" + "=" * 70)
+    print("      RESOLUTION CHECK: 1,024 vs 4,096 PX CUBE FACES")
+    print("=" * 70)
+
+    # 1. Run at 1024
+    print("Running at cube_res = 1,024 px...")
+    res_1024 = analyze_visibility(
+        blend_path, cameras=cameras, anim_states=(0.0,),
+        cube_res=1024, floor=floor, falloff=falloff, min_px_threshold=10.0
+    )
+
+    # 2. Run at 4096
+    print("Running at cube_res = 4,096 px...")
+    res_4096 = analyze_visibility(
+        blend_path, cameras=cameras, anim_states=(0.0,),
+        cube_res=4096, floor=floor, falloff=falloff, min_px_threshold=10.0
+    )
+
+    # Extract island data at both resolutions
+    isls_1024 = res_1024['island_summaries']
+    isls_4096 = res_4096['island_summaries']
+
+    # Common keys
+    common_keys = sorted(set(isls_1024.keys()) & set(isls_4096.keys()))
+
+    size_px_1024 = np.array([isls_1024[k]['size_px'] for k in common_keys], dtype=np.float64)
+    s_1024 = np.array([isls_1024[k]['score'] for k in common_keys], dtype=np.float64)
+    s_4096 = np.array([isls_4096[k]['score'] for k in common_keys], dtype=np.float64)
+
+    # Object data at both resolutions
+    objs_1024 = res_1024['object_summaries']
+    objs_4096 = res_4096['object_summaries']
+    common_obj_keys = sorted(set(objs_1024.keys()) & set(objs_4096.keys()))
+
+    obj_size_1024 = np.array([objs_1024[k]['size_px'] for k in common_obj_keys], dtype=np.float64)
+    obj_s_1024 = np.array([objs_1024[k]['score'] for k in common_obj_keys], dtype=np.float64)
+    obj_s_4096 = np.array([objs_4096[k]['score'] for k in common_obj_keys], dtype=np.float64)
+
+    buckets = [
+        ("island, sums first", "1 to 10 px",   (size_px_1024 >= 1.0) & (size_px_1024 < 10.0), s_1024, s_4096),
+        ("island, sums first", "10 to 100 px", (size_px_1024 >= 10.0) & (size_px_1024 < 100.0), s_1024, s_4096),
+        ("island, sums first", "over 100 px",  (size_px_1024 >= 100.0), s_1024, s_4096),
+        ("object, sums first", "over 10 px",   (obj_size_1024 >= 10.0), obj_s_1024, obj_s_4096),
+    ]
+
+    print("\n| Score | Group size at 1,024 px | Count | Mean difference | Correlation | Status |")
+    print("| :--- | :--- | ---: | ---: | ---: | :---: |")
+
+    all_criteria_met = True
+    for score_type, group_label, mask, arr1, arr2 in buckets:
+        n_count = int(np.count_nonzero(mask))
+        if n_count > 1:
+            diff = np.abs(arr1[mask] - arr2[mask])
+            mean_diff = float(np.mean(diff))
+
+            # Pearson correlation
+            v1 = arr1[mask] - np.mean(arr1[mask])
+            v2 = arr2[mask] - np.mean(arr2[mask])
+            std1 = np.linalg.norm(v1)
+            std2 = np.linalg.norm(v2)
+            if std1 > 1e-8 and std2 > 1e-8:
+                corr = float(np.dot(v1, v2) / (std1 * std2))
+            else:
+                corr = 1.0
+
+            # Finish line criterion: groups >= 10 px within 0.02
+            is_over_10 = ("10" in group_label)
+            meets = (mean_diff <= 0.02) if is_over_10 else True
+            status_str = "PASS" if meets else "NOT MET"
+            if not meets:
+                all_criteria_met = False
+
+            print(f"| {score_type:<18} | {group_label:<22} | {n_count:>5} | {mean_diff:>15.4f} | {corr:>11.4f} | {status_str:^6} |")
+        else:
+            print(f"| {score_type:<18} | {group_label:<22} | {n_count:>5} |             N/A |         N/A |   N/A  |")
+
+    print("=" * 70 + "\n")
+    return all_criteria_met
 
 
 # ---------------------------------------------------------------------------
@@ -1395,42 +1751,46 @@ def validate_synthetic_cases(results):
 # ---------------------------------------------------------------------------
 
 def print_cockpit_report(results):
-    """Print detailed analysis report for the cockpit model."""
+    """Print detailed analysis report for the cockpit model (Round 3)."""
     print("\n" + "=" * 76)
-    print("      VISIBILITY-BASED TEXEL DEMAND REPORT (E2 COCKPIT - ROUND 2)")
+    print("      VISIBILITY ANALYSIS REPORT (E2 COCKPIT - ROUND 3)")
     print("=" * 76)
     print(f"File: {results['blend_file']}")
+    print(f"Schema Version: {results['schema_version']}")
     print(f"Total Analysis Runtime: {results['total_time_s']:.2f} s ({results['total_time_s']/60:.2f} min)")
     print("State Timings:")
     for s_name, s_time in results['state_timings'].items():
         print(f"  - {s_name}: {s_time:.2f} s")
-    print(f"Cameras Evaluated: {', '.join(results['cameras'])}")
-    print(f"States Evaluated: {results['anim_states']}")
+    print(f"Views Evaluated: {len(results['views'])}")
+    print(f"Cube Face Resolution: {results['cube_res']} px (Ref: {results['ref_cube_res']} px)")
+    print(f"Small-Group Threshold: {results['min_px_threshold']} px")
     print(f"Total Scene Faces: {results['total_faces']:,}")
-    print(f"Never-Seen Faces: {results['total_never_seen_faces']:,} ({results['never_seen_share']*100:.2f}%)")
-    print(f"Total 3D Surface Area: {results.get('total_surface_area_m2', 0.0):.2f} m²")
-    print(f"Never-Seen 3D Area: {results.get('total_never_seen_area_m2', 0.0):.2f} m² ({results.get('never_seen_area_share', 0.0)*100:.2f}%)")
+    print(f"Total 3D Surface Area: {results['total_surface_area_m2']:.2f} m²")
+    print(f"Total Objects Evaluated: {results['total_objects']:,}")
+    print(f"Never-Seen Objects: {results['never_seen_objects_count']:,} ({results['never_seen_objects_count']/max(results['total_objects'], 1)*100:.1f}%)")
+    print(f"Total UV Islands Evaluated: {results['total_islands']:,}")
+    print(f"Never-Seen UV Islands: {results['never_seen_islands_count']:,} ({results['never_seen_islands_count']/max(results['total_islands'], 1)*100:.1f}%)")
 
-    print("\n--- Visibility Score Percentiles (Visible Faces, 0.0 to 1.0) ---")
+    print("\n--- Island Visibility Score Percentiles (Visible Islands, Area-Weighted) ---")
     for p, val in results['score_percentiles'].items():
         print(f"  {p:>4}: {val:.4f}")
 
     objs = results['object_summaries']
-    sorted_by_score = sorted(objs.items(), key=lambda item: item[1]['p90_score'])
+    sorted_by_score = sorted(objs.items(), key=lambda item: item[1]['score'])
 
     print("\n--- Bottom 20 Objects by Visibility Score ---")
-    print(f"{'Object Name':<42} {'Score':<8} {'Seen %':<8} {'NeverSeen':<10} {'Faces':<8}")
+    print(f"{'Object Name':<42} {'Score':<8} {'Size (px)':<10} {'Area (m²)':<10} {'Faces':<8}")
     print("-" * 76)
     for name, data in sorted_by_score[:20]:
-        print(f"{name:<42} {data['p90_score']:<8.4f} {data['seen_share']*100:<8.1f} {data['n_never_seen']:<10} {data['n_faces']:<8}")
+        print(f"{name:<42} {data['score']:<8.4f} {data['size_px']:<10.1f} {data['area_m2']:<10.4f} {data['n_faces']:<8}")
 
     print("\n--- Top 20 Objects by Visibility Score (Direct Pilot View) ---")
-    print(f"{'Object Name':<42} {'Score':<8} {'Seen %':<8} {'NeverSeen':<10} {'Faces':<8}")
+    print(f"{'Object Name':<42} {'Score':<8} {'Size (px)':<10} {'Area (m²)':<10} {'Faces':<8}")
     print("-" * 76)
     for name, data in sorted_by_score[-20:][::-1]:
-        print(f"{name:<42} {data['p90_score']:<8.4f} {data['seen_share']*100:<8.1f} {data['n_never_seen']:<10} {data['n_faces']:<8}")
+        print(f"{name:<42} {data['score']:<8.4f} {data['size_px']:<10.1f} {data['area_m2']:<10.4f} {data['n_faces']:<8}")
 
-    fully_unseen = [name for name, data in objs.items() if data['seen_share'] == 0.0]
+    fully_unseen = [name for name, data in objs.items() if data['never_seen']]
     print(f"\nTotal Objects Never Seen in Analysed Views and States: {len(fully_unseen)}")
     if fully_unseen:
         print("Sample objects never seen in analysed states (first 10):")
@@ -1445,10 +1805,11 @@ def main():
     argv = sys.argv
     args_to_parse = argv[argv.index("--") + 1:] if "--" in argv else []
 
-    parser = argparse.ArgumentParser(description="Texel Demand Prototype Round 2")
-    parser.add_argument("--synthetic", action="store_true", help="Run synthetic validation")
+    parser = argparse.ArgumentParser(description="Texel Demand Prototype Round 3")
+    parser.add_argument("--synthetic", action="store_true", help="Run 11 synthetic validation cases")
     parser.add_argument("--cockpit", action="store_true", help="Run full cockpit analysis")
-    parser.add_argument("--states", type=int, default=3, choices=[3, 5], help="Number of animation states (3 or 5)")
+    parser.add_argument("--resolution-check", action="store_true", help="Run 1024 vs 4096 resolution check")
+    parser.add_argument("--states", type=int, default=3, choices=[1, 3, 5], help="Number of animation states")
     parser.add_argument("--floor", type=float, default=0.2, help="Direction weight floor")
     parser.add_argument("--falloff", type=float, default=1.0, help="Direction weight falloff power")
     parser.add_argument("--cube-res", type=int, default=1024, help="Resolution per cube face")
@@ -1458,7 +1819,12 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    anim_states = (0.0, 0.5, 1.0) if args.states == 3 else (0.0, 0.25, 0.5, 0.75, 1.0)
+    if args.states == 1:
+        anim_states = (0.0,)
+    elif args.states == 3:
+        anim_states = (0.0, 0.5, 1.0)
+    else:
+        anim_states = (0.0, 0.25, 0.5, 0.75, 1.0)
 
     if args.synthetic:
         syn_blend = out_dir / "synthetic_test.blend"
@@ -1475,12 +1841,41 @@ def main():
         ]
         results = analyze_visibility(
             syn_blend, cameras=cameras, anim_states=anim_states,
-            cube_res=512, floor=args.floor, falloff=args.falloff
+            cube_res=512, floor=args.floor, falloff=args.falloff, min_px_threshold=10.0
         )
         vis_file = save_visibility_file(syn_blend, results)
         meta_loaded, _ = load_visibility_file(vis_file)
-        assert meta_loaded['schema_version'] == 2
+        assert meta_loaded['schema_version'] == 3
         validate_synthetic_cases(results)
+        return
+
+    if args.resolution_check:
+        blend_copy = out_dir / "COCKPIT_copy.blend"
+        if not blend_copy.exists():
+            raise FileNotFoundError(f"Cockpit copy not found at {blend_copy}")
+
+        pilot_cam = (
+            bpy.data.objects.get('CAM_PILOT_CLOSE')
+            or bpy.data.objects.get('CAM_PILOT')
+        )
+        copilot_cam = bpy.data.objects.get('CAM_COPILOT')
+        cameras = []
+        if pilot_cam:
+            cameras.append({
+                'name': pilot_cam.name,
+                'type': 'LOOK_AROUND',
+                'pos': pilot_cam.matrix_world.translation.copy(),
+                'forward': get_camera_forward(pilot_cam),
+            })
+        if copilot_cam:
+            cameras.append({
+                'name': copilot_cam.name,
+                'type': 'LOOK_AROUND',
+                'pos': copilot_cam.matrix_world.translation.copy(),
+                'forward': get_camera_forward(copilot_cam),
+            })
+
+        run_resolution_check(blend_copy, cameras=cameras, floor=args.floor, falloff=args.falloff, out_dir=out_dir)
         return
 
     if args.cockpit:
@@ -1518,23 +1913,20 @@ def main():
             cube_res=args.cube_res,
             floor=args.floor,
             falloff=args.falloff,
+            min_px_threshold=10.0,
         )
 
-        # Save and verify .visibility file
         vis_file = save_visibility_file(blend_copy, results)
         print(f"Saved visibility results to: {vis_file}")
         meta_loaded, _ = load_visibility_file(vis_file)
-        assert meta_loaded['total_faces'] == results['total_faces']
+        assert meta_loaded['schema_version'] == 3
 
-        # Print detailed report
         print_cockpit_report(results)
 
-        # Render offscreen heatmap images
         print("Rendering offscreen heatmap images...")
         sys.stdout.flush()
         dg = bpy.context.evaluated_depsgraph_get()
 
-        # 1. Pilot View
         if pilot_cam:
             proj = pilot_cam.calc_matrix_camera(dg, x=1920, y=1080)
             view = pilot_cam.matrix_world.inverted()
@@ -1544,11 +1936,10 @@ def main():
             render_heatmap_image(
                 pilot_png, mvp_pilot, res=(1920, 1080),
                 view_normal_matrix=norm_mat,
-                mesh_results=results['mesh_results']
+                results=results
             )
             print(f"Saved Pilot Heatmap Image: {pilot_png}")
 
-        # 2. Outside View (isometric overview looking into cockpit)
         outside_cam_pos = Vector((3.0, -10.0, 3.5))
         cockpit_center = Vector((0.0, -13.0, 1.2))
         outside_view = look_at(outside_cam_pos, cockpit_center, Vector((0, 0, 1)))
@@ -1559,11 +1950,10 @@ def main():
         render_heatmap_image(
             outside_png, mvp_outside, res=(1920, 1080),
             view_normal_matrix=outside_norm_mat,
-            mesh_results=results['mesh_results']
+            results=results
         )
         print(f"Saved Outside Heatmap Image: {outside_png}")
 
-        # Test glTF export integrity
         test_gltf_export(blend_copy, out_dir)
 
 

@@ -465,17 +465,19 @@ then render the resulting UV meshes side-by-side using `matplotlib`:
 
 ## 11. Visibility-Based Texel Demand Prototype (`visibility_proto.py`)
 
-Measures per-face visibility score (spherical solid angle visible fraction $\Omega_{\text{vis}, w} / \Omega_{\text{unocc}} \in [0, 1]$) from reference cameras across multiple animation states, using background GPU face-ID rendering (Round 2, Sessions 69 & 70).
+Measures per-face visibility sums (weighted visible solid angle $\Omega_{\text{vis}, w}$ and unoccluded solid angle $\Omega_{\text{unocc}}$) from reference cameras across multiple animation states, using background GPU face-ID rendering and group scoring (Round 3, Sessions 72 & 73, Decision 78).
 
 Decisions implemented:
-- **Visibility Model:** Spherical solid angle visible fraction independent of distance (Decision 72).
+- **Visibility Model & Sums:** Accumulates per-face weighted visible solid angle and unoccluded solid angle across views and instances; stores no ratio at the face level (Decision 78).
+- **Group Scoring:** Computes $\sum \Omega_{\text{vis}, w} / \sum \Omega_{\text{unocc}} \in [0, 1]$ per group (UV islands and objects) per view and instance, taking the maximum over views and instances. Groups smaller than 10 reference pixels fall back to their object's score (Decision 78).
 - **Direction Weight:** MSFS free-look weight $w = \max(\text{floor}, \cos(\theta)^\text{falloff})$ to camera default forward; floor 0.2, falloff 1.0 (Decision 73). Fixed-view frustum mode kept as per-camera option.
 - **Animations:** Normalized percentage states of each action's own frame range (Decision 69), default 3 states (0%, 50%, 100%), option for 5 states.
-- **Material Classes:** Invisible/collision/occluder materials omitted from rendering and scoring; decal/glass/windshield rendered in a second pass with depth write disabled (`depth_mask=False`, depth test `LESS_EQUAL`) so they are scored without occluding underlying panels (Decision 77).
-- **Mirror Modifiers:** Evaluated geometry with mirrored face mapping; takes $\max(\text{orig}, \text{mirrored})$ visibility score per face (Decision 68).
-- **Aggregation:** $\max$ per face across camera views and animation states; area-weighted 90th percentile per UV island and per object (Decision 71). Never-seen faces receive score 0.0 and are reported as "never seen in the analysed views and states" (Decision 74).
-- **Storage:** External `<blend_name>.visibility` file alongside the `.blend` with schema version 2 (Decision 67).
-- **Color Scale:** Never seen in magenta (error color); $0.0 < s \le 0.5$ graded red to neutral grey; $0.5 < s \le 1.0$ graded neutral grey to blue.
+- **Material Classes:** Invisible/collision/occluder materials (e.g. `InvisibleCollider` clickspots) omitted completely from geometry extraction, analytical calculations, counts, and rendering (Decision 77, Finding 2). Decal/glass/windshield rendered in a second pass with depth write disabled (`depth_mask=False`, depth test `LESS_EQUAL`) so they are scored without occluding underlying panels.
+- **Original Face Attribute Transfer:** Adds temporary integer attribute `_fss_orig_face_idx` to base meshes, automatically transferred through modifiers (Triangulate, Mirror, Subsurf) to evaluated polygons, cleaned up in `finally` (Finding 3). No modulo or clamp index fallbacks.
+- **Instances & Mirror Modifiers:** Every object using a mesh and every Mirror copy is an instance; takes $\max$ over instances and views (Decisions 68, 78).
+- **Never-Seen Reporting:** Groups with zero visible solid angle above the size threshold reported as "never seen in the analysed views and states" (Decision 74).
+- **Storage:** External `<blend_name>.visibility` file alongside the `.blend` with schema version 3 (compressed NPZ with views, options, mesh instances, and `(N_views, N_instances, N_faces)` float32 arrays).
+- **Color Scale:** Never seen in magenta (error color); $0.0 < s \le 0.5$ graded red to neutral grey; $0.5 < s \le 1.0$ graded neutral grey to blue. Rendered by island score with fallback to object score; clickspots omitted.
 
 ### Commands
 
@@ -484,10 +486,13 @@ Execute from the repository root with Blender 5.2.2 LTS in background mode:
 ```powershell
 $B = "G:\e-jets-e2\tools\blender\blender.exe"
 
-# 1. Run synthetic validation on 7 known cases (Distance Invariance, Half-Covered, Direction Weight, Back Face, Invisible Collider, Decal Pass, Action 100-200)
+# 1. Run synthetic validation on 11 test cases (Distance Invariance, Half-Covered, Direction Weight, Back Face, Invisible Collider, Decal Pass, Action 100-200, Multi-Face Grid Invariance, Mirror Blocked, Triangulate Modifier, Linked Duplicates)
 & $B -b --factory-startup --python tests/uv_prototype/visibility_proto.py -- --synthetic
 
-# 2. Run complete analysis on E2 Cockpit copy (2 look-around cameras, 3 percentage states, renders graded heatmap images and checks glTF export)
+# 2. Run resolution check comparing 1,024 vs 4,096 px cube face resolution on the cockpit copy
+& $B -b "tests/_work/uv_visibility/COCKPIT_copy.blend" --factory-startup --python tests/uv_prototype/visibility_proto.py -- --resolution-check
+
+# 3. Run complete analysis on E2 Cockpit copy (2 look-around cameras, 3 percentage states, renders graded heatmap images and checks glTF export)
 & $B -b "tests/_work/uv_visibility/COCKPIT_copy.blend" --factory-startup --python tests/uv_prototype/visibility_proto.py -- --cockpit
 ```
 
@@ -499,6 +504,6 @@ Optional CLI parameters:
 - `--out-dir tests/_work/uv_visibility`: Output directory for `.visibility` file and PNG images.
 
 Outputs written to `tests/_work/uv_visibility/`:
-- `<blend_name>.visibility`: Compressed NPZ archive (schema version 2) containing JSON metadata, camera configurations, animation states, per-mesh scores/areas/islands, and per-object summaries.
-- `pilot_demand.png`: 1080p offscreen render from the pilot camera colored by graded visibility score (blue = high forward view, neutral grey = mid score, red = glancing angle, magenta = never seen).
+- `<blend_name>.visibility`: Compressed NPZ archive (schema version 3) containing JSON metadata, camera configurations, animation states, per-mesh arrays `(N_views, N_instances, N_faces)`, and group summaries.
+- `pilot_demand.png`: 1080p offscreen render from the pilot camera colored by group visibility score (blue = high forward view, neutral grey = mid score, red = glancing angle; clickspots omitted).
 - `outside_demand.png`: 1080p offscreen render from an exterior isometric view highlighting never-seen exterior fuselage/structure (magenta) and interior instruments (blue/grey).
