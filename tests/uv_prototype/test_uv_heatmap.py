@@ -582,6 +582,71 @@ def test_wire_display_takeover():
     print("  -> PASS: wire while shown, restored on deselect, save, switch-off and undo; artist's wire kept.")
 
 
+def test_area_distortion_and_islands():
+    """Area distortion per face against its island, island labels, colours and the Both chart."""
+    print("Test 14: Area distortion, islands, Both / Shear / Area...")
+    # flat plane, undistorted: one island, area 1.0
+    clean_scene()
+    obj = create_plane("Plane_Area", size=2.0)
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    uv_heatmap.update_heatmap_cache(bpy.context)
+    cache = uv_heatmap._cache[obj.name]
+    assert len(np.unique(cache.islands)) == 1, "a plane without seams is one island"
+    assert np.max(np.abs(cache.area - 1.0)) < 1e-9, f"undistorted plane must read area 1.0: {cache.area}"
+
+    # TRIM_PANEL: islands as uvmetrics finds them; island averages as Auto Seam's core measures them
+    if TRIM_PANEL_NPZ.exists():
+        sys.path.insert(0, str(REPO_ROOT / 'tests' / 'uv_prototype'))
+        import uvmetrics
+        from fss_blender_tools import uv_autoseam_core
+        data = np.load(str(TRIM_PANEL_NPZ))
+        P, T, UV = data['P'], data['T'], data['UV']
+        islands = uv_heatmap.uv_islands(T, UV)
+        _, _, ref = uvmetrics._uv_topology(T, UV)
+        pairs = len(np.unique(np.column_stack([islands, ref]), axis=0))
+        assert pairs == len(np.unique(islands)) == len(np.unique(ref)), "islands must match uvmetrics"
+        m = uv_heatmap.compute_triangle_measures(P[T], UV)
+        area = uv_heatmap.area_distortion(m['uv_area'], m['area3'], islands, m['valid'] & ~m['is_degenerate'])
+        means = uv_heatmap.island_area_means(area, islands)
+        worst = 0.0
+        for isl in np.unique(islands):
+            idx = np.where((islands == isl) & m['valid'] & ~m['is_degenerate'])[0]
+            if len(idx):
+                core_mean = uv_autoseam_core._area_distortion(P[T[idx]], UV[idx])[0]
+                worst = max(worst, abs(core_mean - means[isl]))
+        assert worst < 1e-9, f"island averages differ from the core's measure by {worst:.2e}"
+        print(f"  TRIM_PANEL: {len(np.unique(islands))} islands match uvmetrics; core parity {worst:.2e}")
+    else:
+        print(f"  SKIPPED TRIM_PANEL part: {TRIM_PANEL_NPZ} not found")
+
+    # colours: white, blue (shear), green (area), cyan (both); a view hides the other half
+    shear, area = np.array([1.0, 2.0, 1.0, 2.0]), np.array([1.0, 1.0, 2.0, 2.0])
+    c = uv_heatmap.distortion_colors(shear, area, np.zeros(4, bool), 'BOTH')
+    for got, want in zip(c, (uv_heatmap.COLOR_NEUTRAL, uv_heatmap.COLOR_BLUE, uv_heatmap.COLOR_GREEN,
+                             uv_heatmap.COLOR_CYAN)):
+        assert np.allclose(got, want), (got, want)
+    assert np.allclose(uv_heatmap.distortion_colors(shear, area, np.zeros(4, bool), 'SHEAR')[2],
+                       uv_heatmap.COLOR_NEUTRAL), "Shear view ignores area"
+    assert np.allclose(uv_heatmap.distortion_colors(shear, area, np.zeros(4, bool), 'AREA')[1],
+                       uv_heatmap.COLOR_NEUTRAL), "Area view ignores shear"
+
+    # the Both chart: two histograms, and islands counted against Auto Seam's limit
+    stats = {'chart_distortion': np.array([1.0, 1.3]), 'chart_area_distortion': np.array([1.0, 1.5]),
+             'chart_area': np.array([3.0, 1.0]), 'share_above_125': 0.25, 'area_above_110': 0.25,
+             'area_above_125': 0.25, 'island_means': np.array([1.0, 1.3, 1.5]),
+             'island_area3': np.array([2.0, 1.0, 1.0])}
+    data = uv_heatmap.chart_data('SHAPE', stats, 'BOTH', 1.25)
+    assert 'share2' in data and len(data['lines']) == 3, data['lines']
+    assert data['lines'][2] == "Islands over limit 1.25: 2 of 3 (50.0%)", data['lines'][2]
+    assert uv_heatmap.chart_data('SHAPE', stats, 'BOTH', 1.40)['lines'][2].startswith("Islands over limit 1.40: 1 of 3")
+    import gpu
+    gpu.init()
+    px = uv_heatmap.render_chart(data)
+    assert float(px[..., 1].max()) > 0.7, "the green area histogram must be drawn"
+    print("  -> PASS: plane area 1.0, colours, view masks, Both chart with islands over limit.")
+
+
 def run_all_tests():
     print("=" * 70)
     print("RUNNING UV HEATMAP & SKIP MARK TESTS")
@@ -599,6 +664,7 @@ def run_all_tests():
     test_distribution_chart()
     test_updates_after_uv_change()
     test_wire_display_takeover()
+    test_area_distortion_and_islands()
     print("=" * 70)
     print("ALL UV HEATMAP TESTS PASSED SUCCESSFULLY.")
     print("=" * 70)

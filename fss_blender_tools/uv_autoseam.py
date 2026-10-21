@@ -1081,6 +1081,78 @@ class FSS_OT_UvKeepAsArtistSeams(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def _uniform_scale(obj):
+    s = obj.matrix_world.to_scale()
+    return math.isclose(s.x, s.y, rel_tol=1e-3) and math.isclose(s.y, s.z, rel_tol=1e-3)
+
+
+def unwrap_angle_based(context, objects):
+    """Unwrap the objects' faces with Angle Based, the method Auto Seam checks its seams with, in one multi-object
+    Edit Mode pass. Faces with decal, glass, invisible or occluder materials keep their UVs. Restores the mode,
+    selection and active object."""
+    view_layer = context.view_layer
+    prev_active, prev_selected, prev_mode = view_layer.objects.active, list(context.selected_objects), context.mode
+    if prev_mode != 'OBJECT':
+        bpy.ops.object.mode_set(mode='OBJECT')
+    try:
+        for o in prev_selected:
+            o.select_set(False)
+        for o in objects:
+            o.select_set(True)
+        view_layer.objects.active = objects[0]
+        bpy.ops.object.mode_set(mode='EDIT')
+        for o in objects:
+            bm = bmesh.from_edit_mesh(o.data)
+            skip = {i for i, slot in enumerate(o.material_slots) if _is_skip_material(slot.material)}
+            for f in bm.faces:
+                f.select_set(f.material_index not in skip)
+            bmesh.update_edit_mesh(o.data)
+        bpy.ops.uv.unwrap(method='ANGLE_BASED', fill_holes=False, correct_aspect=True, margin=0.001)
+        bpy.ops.object.mode_set(mode='OBJECT')
+    finally:
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        for o in objects:
+            o.select_set(False)
+        for o in prev_selected:
+            o.select_set(True)
+        view_layer.objects.active = prev_active
+        if prev_mode == 'EDIT_MESH':
+            bpy.ops.object.mode_set(mode='EDIT')
+
+
+class FSS_OT_UvAcceptAndUnwrap(bpy.types.Operator):
+    bl_idname = 'fss.uv_accept_and_unwrap'
+    bl_label = 'Accept + Unwrap'
+    bl_description = ('Accept the proposed seams, then unwrap the selected objects with Angle Based, the method Auto '
+                      'Seam checks its seams with. Replaces their UVs')
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return bool([o for o in context.selected_objects if o.type == 'MESH' and _editable(o)])
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(self, event)
+
+    def execute(self, context):
+        meshes, mesh_to_objs, _shared, _replaced, skipped = _gather_candidate_objects(context)
+        if not meshes:
+            self.report({'WARNING'}, 'Nothing to unwrap: ' + '; '.join(f'{n}: {r}' for n, r in skipped[:5]))
+            return {'CANCELLED'}
+        accepted = _in_object_mode(context, lambda: sum(keep_as_artist_seams(m) for m in meshes))
+        objects = [mesh_to_objs[m][0] for m in meshes]  # shared mesh data is unwrapped once
+        unwrap_angle_based(context, objects)
+        scaled = [o.name for o in objects if not _uniform_scale(o)]
+        text = f"Accepted {accepted} seam(s), unwrapped {len(meshes)} mesh(es) with Angle Based"
+        if skipped:
+            text += f"; skipped {len(skipped)}"
+        if scaled:
+            text += f"; non-uniform scale (unwrap stretches, apply scale first): {', '.join(scaled[:3])}"
+        self.report({'WARNING'} if scaled else {'INFO'}, text)
+        return {'FINISHED'}
+
+
 class FSS_OT_UvClearCurrentSeams(bpy.types.Operator):
     bl_idname = 'fss.uv_clear_current_seams'
     bl_label = 'Clear Current'
@@ -1203,8 +1275,10 @@ class FSS_PT_UvAutoSeam(bpy.types.Panel):
         box.operator(FSS_OT_UvProposeSeams.bl_idname, text='Propose Seams', icon='UV_EDGESEL')
         row = box.row(align=True)
         row.operator(FSS_OT_UvKeepAsArtistSeams.bl_idname, text='Accept Proposed', icon='CHECKMARK')
+        row.operator(FSS_OT_UvAcceptAndUnwrap.bl_idname, text='Accept + Unwrap', icon='UV')
+        row = box.row(align=True)
         row.operator(FSS_OT_UvClearAutoSeams.bl_idname, text='Discard Proposed', icon='X')
-        box.operator(FSS_OT_UvClearCurrentSeams.bl_idname, text='Clear Current', icon='TRASH')
+        row.operator(FSS_OT_UvClearCurrentSeams.bl_idname, text='Clear Current', icon='TRASH')
 
         if context.mode == 'EDIT_MESH':
             row = box.row(align=True)
@@ -1233,6 +1307,7 @@ CLASSES = (
     FSS_OT_UvProposeSeams,
     FSS_OT_UvClearAutoSeams,
     FSS_OT_UvKeepAsArtistSeams,
+    FSS_OT_UvAcceptAndUnwrap,
     FSS_OT_UvClearCurrentSeams,
     FSS_OT_UvSelectAutoSeams,
     FSS_OT_UvSelectArtistSeams,

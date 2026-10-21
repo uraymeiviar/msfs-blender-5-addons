@@ -23,11 +23,12 @@ The **Auto Seam** panel (sidebar `N` > **FSS Tools** > **Auto Seam**) proposes s
 | :--- | :--- |
 | **Propose Seams** | Adds proposed seams to the selected objects. Current seams stay. |
 | **Accept Proposed** | Makes the proposed seams current seams. Later proposals keep them. |
+| **Accept + Unwrap** | Accepts the proposed seams, then unwraps the selected objects with **Angle Based**, the method Auto Seam checks its seams with (asks first: it replaces their UVs). Faces with decal, glass, invisible or occluder materials keep their UVs. Objects with non-uniform scale are named in a warning: unwrapping works on the unscaled mesh, so apply the scale first. |
 | **Discard Proposed** | Removes the proposed seams. Current seams stay. |
 | **Clear Current** | Removes the current seams (asks first). Proposed seams stay. Use it to propose from scratch. |
 | **Select Proposed** / **Select Current** | In Edit Mode, selects those edges on the active mesh. |
 
-Accept, Discard and Clear act on whole objects, also when clicked in Edit Mode. **Ctrl+Z** undoes each of them.
+Accept, Accept + Unwrap, Discard and Clear act on whole objects, also when clicked in Edit Mode. **Ctrl+Z** undoes each of them.
 
 ## Distortion Limit
 
@@ -40,7 +41,8 @@ The **Distortion Limit** slider above **Propose Seams** sets how much an island 
 - It mostly changes **large shells** (overhead, floor, trim panels). Small parts such as knobs and buttons usually keep the same islands at any value, because your seams and the material borders already decide them.
 - One step does not always change a single object the expected way: the tool merges pieces one at a time, so a looser limit can occasionally end with a few more islands on one mesh. Over many objects, higher always meant fewer islands.
 - The setting is saved with the `.blend` and applies to the next **Propose Seams**; the report states the limit it used.
-- The limit measures how much the area of the triangles in an island changes on average; the [Heatmap](#heatmap-distortion-texel-density-and-visibility)'s **Distortion** mode measures how much each face is sheared. An island inside the limit can still show some blue faces in the heatmap.
+- The limit measures how much the area of the triangles in an island changes on average: the **Area** half of the [Heatmap](#heatmap-distortion-texel-density-and-visibility)'s **Distortion** mode, whose chart counts the islands over the current limit. The **Shear** half (blue) is not limited by it; an island inside the limit can still show some blue faces.
+- The limit holds for an **Angle Based** unwrap, the method the tool checks its seams with. **Minimum Stretch** evens out sizes but skews shapes, and on seams from a strict limit it can shear many faces; use **Accept + Unwrap**, or Angle Based in Blender's own **UV > Unwrap** (the menu remembers the last method used).
 
 On 17 cockpit test parts, 1.10 gave about 15 % more islands and 26 % more extra vertices than 1.25, and 1.60 about 16 % fewer islands and 27 % fewer extra vertices.
 
@@ -52,8 +54,8 @@ On 17 cockpit test parts, 1.10 gave about 15 % more islands and 26 % more extra 
 4. **Propose Seams:** a dialog lists the meshes to process, shared meshes, and any skipped objects. Click **OK** to run.
 5. **Review in Edit Mode** (`Tab`) with **Select Proposed** and **Select Current**, and with the **Heatmap** after a test unwrap.
 6. **Adjust if needed:** add seams by hand, or remove unwanted ones.
-7. **Accept Proposed** when you are happy, or **Discard Proposed** to drop the proposal.
-8. **Unwrap:** in Edit Mode, select all faces and unwrap with **UV > Unwrap** (Angle Based).
+7. **Accept + Unwrap** when you are happy (or **Accept Proposed** to unwrap later yourself), or **Discard Proposed** to drop the proposal.
+8. **Unwrap** (if you did not use Accept + Unwrap): in Edit Mode, select all faces and unwrap with **UV > Unwrap**, method **Angle Based**.
 
 **Packing can wait.** You may pack now, for example to review the **Density** heatmap or to try a texture. Packing is quick to redo: pack again whenever zones, materials or density marks change. It becomes costly once texturing has started, because moving islands then means baking again and carrying the painting over. See [The Pipeline, step 8](README.md#8-packing-in-development).
 
@@ -128,10 +130,16 @@ The **Heatmap** panel (sidebar `N` > **FSS Tools** > **Heatmap**) displays a liv
 
 The overlay uses diverging colour schemes:
 
-- **Distortion & Density modes:** centred on **Neutral 1.0** (light grey / white):
-  - **Neutral 1.0 (light grey / white):** ideal shape or within the authored density range.
-  - **Above 1.0 (towards blue):** stretched or sheared triangles (in Distortion mode); over-dense texture resolution (in Density mode).
-  - **Below 1.0 (towards red):** under-dense texture resolution (in Density mode).
+- **Distortion mode:** white means no distortion; the colour shows which kind there is (full colour at 2.0):
+  - **Blue: shear.** The face is skewed in the UVs: squares turn into rhombuses, text leans, circles become ovals.
+  - **Green: area.** The face got more or less texture than the rest of its island: sharpness changes across the island.
+  - **Cyan: both.**
+  - **Both / Shear / Area** under the mode buttons shows both halves, or one of them alone when a colour is hard to read.
+- **Density mode:** centred on **Neutral 1.0** (light grey / white):
+  - **Neutral 1.0 (light grey / white):** within the authored density range.
+  - **Above 1.0 (towards blue):** over-dense texture resolution.
+  - **Below 1.0 (towards red):** under-dense texture resolution.
+- **Both modes:**
   - **Magenta (Error):** faces that cannot be measured because they have no area, in the UVs (collapsed to a point or a line) or on the model. Check them in the UV editor or clean up the mesh.
 - **Visibility mode:**
   - **1.0 (towards blue):** high visibility in plain view of the reference cameras.
@@ -144,11 +152,10 @@ The overlay uses diverging colour schemes:
 
 ### Modes
 
-1. **Distortion:**
-   - How much more each face is stretched in one direction than in the other: 1.0 keeps the face's shape, 2.0 stretches one direction twice as much as the other. A face that is only larger or smaller in the UVs, the same in every direction, stays at 1.0: that is density, not distortion.
-   - Object scale does not change it.
-   - The colours run from 1.0 (neutral) to 2.0 and more (blue).
-   - Dark blue means the face is sheared or stretched in the UVs. Add seams across strongly curved areas, so the island can flatten.
+1. **Distortion:** the two ways a face can change when the surface is flattened.
+   - **Shear (blue):** how much more each face is stretched in one direction than in the other: 1.0 keeps the face's shape, 2.0 stretches one direction twice as much as the other. Object scale does not change it. Dark blue: add seams across strongly curved areas, so the island can flatten.
+   - **Area (green):** how much a face's size in the UVs differs from the rest of its own island: 1.0 is the island's average, 2.0 is twice or half of it. This is what Auto Seam's [Distortion Limit](#distortion-limit) limits, as an average per island. Packing and density marks scale whole islands and do not change it; that is **Density**. Strong green: lower the Distortion Limit and propose again, or add a seam where the surface curves.
+   - The colours run from 1.0 (white) to 2.0 and more (full colour).
 2. **Density (Texel Density):**
    - Measures the triangle's UV area / 3D area relative to its texture set: the area-weighted median over every object in the scene that uses the same material (one atlas per material). The colours therefore do not change with what is selected.
    - Evaluated against the object's authored texel density range (set in the **UV Marks** panel, default 0.9 to 1.1):
@@ -166,17 +173,18 @@ The overlay uses diverging colour schemes:
 The panel shows a chart of the selected objects' surface:
 
 - **Colour band:** the same colours as on the model, with the values below it (Distortion 1.0 to 2.0 and more; Density 0.5 to 2.0; Visibility 0.0 to 1.0).
+- **Distortion, Both:** two histograms, shear (blue) above and area (green) below, each with its half of the band, and a small colour square in the corner (shear to the right, area upwards, cyan where both meet).
 - **Histogram above the band:** how much of the surface lies at each value, weighted by area. Bar heights use a square-root scale, so small tails stay visible; a tall bar at 1.0 with little else is a good result.
-- **Marks:** at 1.10 (our shape target) and 1.25 (Auto Seam's default [Distortion Limit](#distortion-limit); Auto Seam limits how much an island's triangles change in area on average, the heatmap shows how much each face is sheared, so faces above 1.25 can remain inside the limit) in Distortion mode; at 1.0 in Density mode; at 0.50 in Visibility mode.
+- **Marks:** for shear at 1.10 (our shape target) and 1.25; for area at the current [Distortion Limit](#distortion-limit) of Auto Seam; at 1.0 in Density mode; at 0.50 in Visibility mode.
 - **Range bar:** the middle 90 % of the surface (5 % lies below its left end, 5 % above its right end), with its values.
-- **Percentages:** the share of the surface over 1.10 and over 1.25, outside the density range, or never seen / undetermined.
+- **Percentages:** the share of the surface over 1.10 and over 1.25, outside the density range, or never seen / undetermined. For area, also **Islands over limit**: how many islands have an average area distortion above the current Distortion Limit, and their share of the surface.
 
 ### Viewport Legend
 
 A legend in the corner of the viewport displays:
 
 - The active mode (**Distortion**, **Density**, or **Visibility**) and colour scale.
-- For Distortion: the share of the selected objects' surface distorted more than **1.10** (our shape target) and more than **1.25** (Auto Seam's default [Distortion Limit](#distortion-limit); Auto Seam limits how much an island's triangles change in area on average, the heatmap shows how much each face is sheared, so faces above 1.25 can remain inside the limit).
+- For Distortion: the share of the selected objects' surface with shear or area above **1.25** (shear also above **1.10**, our shape target), and the islands over Auto Seam's current [Distortion Limit](#distortion-limit).
 - For Density: the share of the surface outside its object's density range (too low and too high).
 - For Visibility: the share of the surface never seen or undetermined.
 - **Error:** how many faces cannot be measured, and their share of the surface.

@@ -28,6 +28,10 @@ ALPHA = 0.75
 COLOR_NEUTRAL = np.array([0.92, 0.92, 0.92, ALPHA], dtype=np.float32)
 COLOR_BLUE = np.array([0.10, 0.35, 0.95, ALPHA], dtype=np.float32)
 COLOR_RED = np.array([0.95, 0.15, 0.15, ALPHA], dtype=np.float32)
+# Distortion mode: shear towards blue, area towards green, both towards cyan (red stays Density's "too low")
+COLOR_GREEN = np.array([0.15, 0.80, 0.30, ALPHA], dtype=np.float32)
+COLOR_CYAN = np.array([0.10, 0.80, 0.95, ALPHA], dtype=np.float32)
+AREA_TOP = 2.0  # area distortion shows fully green at twice or half the island's own density
 # faces that cannot be measured (no area in the UVs or the model), shown to artists as 'Error': a colour on neither scale
 COLOR_DEGENERATE = np.array([1.00, 0.00, 1.00, ALPHA], dtype=np.float32)
 # Visibility mode: meshes without data or stale in a neutral dark grey labelled 'No data'
@@ -208,10 +212,81 @@ def measures_to_colors(shape, rel_density, is_degenerate, mode):
     return colors
 
 
+def uv_islands(tri_verts, U):
+    """Island index per triangle: triangles that share an edge with equal UVs at both ends belong together."""
+    n = len(tri_verts)
+    if n == 0:
+        return np.zeros(0, dtype=np.int64)
+    i0, i1 = np.array([0, 1, 2]), np.array([1, 2, 0])
+    va, vb = tri_verts[:, i0].ravel(), tri_verts[:, i1].ravel()
+    ua, ub = U[:, i0].reshape(-1, 2), U[:, i1].reshape(-1, 2)
+    swap = va > vb
+    va, vb = np.where(swap, vb, va), np.where(swap, va, vb)
+    ua, ub = np.where(swap[:, None], ub, ua), np.where(swap[:, None], ua, ub)
+    keys = np.column_stack([va, vb, np.round(np.hstack([ua, ub]) * 1e6).astype(np.int64)])
+    _, inverse = np.unique(keys, axis=0, return_inverse=True)
+    inverse = inverse.ravel()
+    order = np.argsort(inverse, kind='stable')
+    # only edges with exactly two faces join (as uvmetrics): a non-manifold edge does not weld islands
+    same = (inverse[order][1:] == inverse[order][:-1]) & (np.bincount(inverse)[inverse[order][1:]] == 2)
+    owner = np.repeat(np.arange(n), 3)[order]
+    pa, pb = owner[:-1][same], owner[1:][same]
+    labels = np.arange(n)
+    while True:  # label propagation with pointer jumping; a few passes even on large shells
+        low = np.minimum(labels[pa], labels[pb])
+        new = labels.copy()
+        np.minimum.at(new, pa, low)
+        np.minimum.at(new, pb, low)
+        new = new[new]
+        if np.array_equal(new, labels):
+            return np.unique(labels, return_inverse=True)[1].ravel()
+        labels = new
+
+
+def area_distortion(uv_area, area3, islands, valid):
+    """Per face: its UV area / 3D area against its island's, folded so half and double both read 2.0. Auto Seam's
+    Distortion Limit is the island's average of this value."""
+    ok = valid & (uv_area > 0)
+    isl_uv = np.bincount(islands, np.where(ok, uv_area, 0.0))
+    isl_3d = np.bincount(islands, np.where(ok, area3, 0.0))
+    with np.errstate(divide='ignore', invalid='ignore'):
+        r = (uv_area / area3) / (isl_uv / isl_3d)[islands]
+        r = np.where(r < 1.0, 1.0 / r, r)
+    r[~ok] = np.nan
+    return r
+
+
+def island_area_means(area, islands):
+    """Per island: the average of its faces' area distortion, the value Auto Seam compares with its limit."""
+    ok = np.isfinite(area)
+    count = np.bincount(islands, ok.astype(np.float64))
+    with np.errstate(divide='ignore', invalid='ignore'):
+        return np.bincount(islands, np.where(ok, area, 0.0)) / count
+
+
+def distortion_colors(shear, area, is_degenerate, view):
+    """White = none; shear towards blue, area towards green, both towards cyan (a bilinear colour square)."""
+    s = np.clip(np.where(np.isfinite(shear), shear, 2.0) - 1.0, 0.0, 1.0)
+    a = np.clip((np.where(np.isfinite(area), area, AREA_TOP) - 1.0) / (AREA_TOP - 1.0), 0.0, 1.0)
+    if view == 'SHEAR':
+        a = np.zeros_like(a)
+    elif view == 'AREA':
+        s = np.zeros_like(s)
+    s, a = s[:, None], a[:, None]
+    colors = ((1 - s) * (1 - a) * COLOR_NEUTRAL + s * (1 - a) * COLOR_BLUE
+              + (1 - s) * a * COLOR_GREEN + s * a * COLOR_CYAN).astype(np.float32)
+    colors[is_degenerate] = COLOR_DEGENERATE
+    return colors
+
+
+DISTORTION_VIEWS = ('BOTH', 'SHEAR', 'AREA')
+
+
 class ObjectHeatmapCache:
     """Cached geometry, measures, and GPU batches for a single mesh object."""
 
-    def __init__(self, obj_name, P_local, tri_measures, rel_density, colors_shape, colors_density, colors_visibility=None, uv=None, vis_data=None):
+    def __init__(self, obj_name, P_local, tri_measures, rel_density, colors_shape, colors_density, colors_visibility=None, uv=None, vis_data=None,
+                 area=None, islands=None):
         self.obj_name = obj_name
         self.n_tris = len(P_local)
         # object space: the surface is drawn with the object's current matrix, so it follows moves
@@ -223,7 +298,12 @@ class ObjectHeatmapCache:
         self.nor = np.repeat(nor, 3, axis=0).astype(np.float32)  # flat shading: the face normal at every corner
         # UVs per corner, for the optional UV grid and cell labels
         self.uv = (uv.reshape(-1, 2) if uv is not None else np.zeros((len(self.pos), 2))).astype(np.float32)
-        self.colors_shape = np.repeat(colors_shape, 3, axis=0).astype(np.float32)
+        # Distortion mode: colours per view; colors_shape is the shear view, or a dict of all three views
+        if isinstance(colors_shape, dict):
+            self.colors_distortion = {view: np.repeat(c, 3, axis=0).astype(np.float32) for view, c in colors_shape.items()}
+        else:
+            self.colors_distortion = {view: np.repeat(colors_shape, 3, axis=0).astype(np.float32) for view in DISTORTION_VIEWS}
+        self.colors_shape = self.colors_distortion['SHEAR']
         self.colors_density = np.repeat(colors_density, 3, axis=0).astype(np.float32)
         if colors_visibility is not None:
             self.colors_visibility = np.repeat(colors_visibility, 3, axis=0).astype(np.float32)
@@ -233,22 +313,25 @@ class ObjectHeatmapCache:
         self.is_degenerate = tri_measures['is_degenerate']
         self.shape = tri_measures['shape']
         self.rel_density = rel_density
+        self.area = area if area is not None else np.full(len(P_local), np.nan)
+        self.islands = islands if islands is not None else np.zeros(len(P_local), dtype=np.int64)
         self.vis_data = vis_data or {}
         self.batches = {}  # mode -> GPUBatch
 
-    def get_batch(self, mode, shader):
+    def get_batch(self, mode, shader, view='BOTH'):
         if gpu is None or batch_for_shader is None:
             return None
-        if mode not in self.batches:
+        key = (mode, view) if mode == 'SHAPE' else mode
+        if key not in self.batches:
             if mode == 'SHAPE':
-                colors = self.colors_shape
+                colors = self.colors_distortion.get(view, self.colors_shape)
             elif mode == 'DENSITY':
                 colors = self.colors_density
             else:
                 colors = self.colors_visibility
-            self.batches[mode] = batch_for_shader(shader, 'TRIS', {'pos': self.pos, 'nor': self.nor, 'color': colors,
-                                                                   'uv': self.uv})
-        return self.batches[mode]
+            self.batches[key] = batch_for_shader(shader, 'TRIS', {'pos': self.pos, 'nor': self.nor, 'color': colors,
+                                                                  'uv': self.uv})
+        return self.batches[key]
 
 
 GLYPHS = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
@@ -588,6 +671,7 @@ def _object_triangles(obj, depsgraph, allow_no_uvs=False):
     return {
         'P3': (V @ M[:3, :3].T + M[:3, 3])[tri_verts],  # world space: measures include the object's scale
         'P_local': V[tri_verts],
+        'tri_verts': tri_verts,
         'U': U,
         'has_uvs': me.uv_layers.active is not None,
         'tri_poly': tri_poly,
@@ -715,11 +799,13 @@ def update_heatmap_cache(context, refresh=True):
                 'never_seen': np.zeros(len(item['P_local']), dtype=bool),
             }
 
+        islands = uv_islands(item['tri_verts'], item['U'])
+        area = area_distortion(m['uv_area'], m['area3'], islands, m['valid'] & ~m['is_degenerate'])
         _cache[name] = ObjectHeatmapCache(
             name, item['P_local'], m, rel_d,
-            measures_to_colors(m['shape'], rel_d, m['is_degenerate'], 'SHAPE'),
+            {view: distortion_colors(m['shape'], area, m['is_degenerate'], view) for view in DISTORTION_VIEWS},
             measures_to_colors(m['shape'], rel_d, m['is_degenerate'], 'DENSITY'),
-            colors_visibility=colors_vis, uv=item['U'], vis_data=vis_item_data)
+            colors_visibility=colors_vis, uv=item['U'], vis_data=vis_item_data, area=area, islands=islands)
 
     # Legend statistics over the selected objects shown
     entries = [_cache[obj.name] for obj in selected if obj.name in _cache]
@@ -736,6 +822,7 @@ def update_heatmap_cache(context, refresh=True):
     all_rel_d = np.concatenate([e.rel_density for e in entries])
     all_area3 = np.concatenate([e.area3 for e in entries])
     all_degen = np.concatenate([e.is_degenerate for e in entries])
+    all_area_d = np.concatenate([e.area for e in entries])
     valid_mask = (~all_degen) & (all_area3 > 0)
     total_valid_area = float(np.sum(all_area3[valid_mask]))
     total_area_all = float(np.sum(all_area3))
@@ -745,8 +832,13 @@ def update_heatmap_cache(context, refresh=True):
         # the object's density range maps to exactly 1.0
         share_under = float(np.sum(all_area3[valid_mask & (all_rel_d < 0.9999)])) / total_valid_area
         share_over = float(np.sum(all_area3[valid_mask & (all_rel_d > 1.0001)])) / total_valid_area
+        area_110 = float(np.sum(all_area3[valid_mask & (all_area_d > 1.10)])) / total_valid_area
+        area_125 = float(np.sum(all_area3[valid_mask & (all_area_d > 1.25)])) / total_valid_area
     else:
-        share_110 = share_125 = share_under = share_over = 0.0
+        share_110 = share_125 = share_under = share_over = area_110 = area_125 = 0.0
+    # per island: the average area distortion (Auto Seam's measure) and the island's 3D area, for "islands over limit"
+    island_means = np.concatenate([island_area_means(e.area, e.islands) for e in entries])
+    island_area3 = np.concatenate([np.bincount(e.islands, np.where(e.is_degenerate, 0.0, e.area3)) for e in entries])
 
     all_vis_has = np.concatenate([np.full(len(e.shape), e.vis_data.get('has_data', False), dtype=bool) for e in entries])
     all_vis_sc = np.concatenate([e.vis_data.get('scores', np.zeros(len(e.shape), dtype=np.float32)) for e in entries])
@@ -767,6 +859,10 @@ def update_heatmap_cache(context, refresh=True):
         'valid_area': total_valid_area,
         'share_above_110': share_110,
         'share_above_125': share_125,
+        'area_above_110': area_110,
+        'area_above_125': area_125,
+        'island_means': island_means,
+        'island_area3': island_area3,
         'share_outside': share_under + share_over,
         'share_under': share_under,
         'share_over': share_over,
@@ -774,6 +870,7 @@ def update_heatmap_cache(context, refresh=True):
         'degenerate_count': int(np.sum(all_degen)),
         # the distribution behind the panel's chart
         'chart_distortion': all_shape[chart_mask],
+        'chart_area_distortion': np.where(np.isfinite(all_area_d), all_area_d, 1.0)[chart_mask],
         'chart_density': all_rel_d[chart_mask],
         'chart_visibility': all_vis_sc[vis_valid_mask],
         'chart_area': all_area3[vis_valid_mask] if is_vis else all_area3[chart_mask],
@@ -827,8 +924,29 @@ def _weighted_quantile(values, weights, q):
     return float(values[order[idx]])
 
 
-def chart_data(mode, stats):
-    """Histogram, range bar and text of the chart, without drawing (testable in background)."""
+def islands_over_limit(stats, limit):
+    """(islands over the limit, all islands, share of the surface in them) from the per-island averages."""
+    means = stats.get('island_means')
+    areas = stats.get('island_area3')
+    if means is None or not len(means):
+        return 0, 0, 0.0
+    over = np.isfinite(means) & (means > limit + 1e-9)
+    total = float(areas.sum())
+    return int(over.sum()), len(means), (float(areas[over].sum()) / total if total > 0 else 0.0)
+
+
+def _histogram(values, areas, to_x):
+    hist, _ = np.histogram(to_x(values), bins=CHART_BINS, range=(0.0, 1.0), weights=areas)
+    return hist / areas.sum()
+
+
+def chart_data(mode, stats, view='SHEAR', limit=1.25):
+    """Histogram, range bar and text of the chart, without drawing (testable in background).
+
+    Distortion mode shows the shear, the area, or both (two histograms) by view; limit is Auto Seam's Distortion
+    Limit, against which islands are counted."""
+    if mode == 'SHAPE' and view in ('AREA', 'BOTH'):
+        return _distortion_chart(stats, view, limit)
     if mode == 'SHAPE':
         values = stats.get('chart_distortion')
     elif mode == 'DENSITY':
@@ -882,6 +1000,49 @@ def chart_data(mode, stats):
     }
 
 
+def _distortion_chart(stats, view, limit):
+    shear = stats.get('chart_distortion')
+    area = stats.get('chart_area_distortion')
+    areas = stats.get('chart_area')
+    if shear is None or area is None or areas is None or not len(area) or areas.sum() <= 0:
+        return None
+    to_x, ticks, labels = _chart_axis('SHAPE')
+    centres = (np.arange(CHART_BINS) + 0.5) / CHART_BINS
+    bin_values = 1.0 + centres
+    ones, none = np.ones(CHART_BINS), np.zeros(CHART_BINS, bool)
+    n_over, n_all, over_share = islands_over_limit(stats, limit)
+    island_line = f"Islands over limit {limit:.2f}: {n_over} of {n_all} ({over_share:.1%})"
+    a_low, a_high = _weighted_quantile(area, areas, 0.05), _weighted_quantile(area, areas, 0.95)
+    data = {
+        'share': _histogram(area, areas, to_x),
+        'colors': distortion_colors(ones, bin_values, none, 'AREA'),
+        'ticks': [float(to_x(t)) for t in ticks],
+        'tick_labels': labels,
+        'marks': [float(to_x(limit))],
+        'range': (float(to_x(a_low)), float(to_x(a_high))),
+        'range_text': f"90% of surface: {_axis_text('SHAPE', a_low)} to {_axis_text('SHAPE', a_high)}",
+        'title': 'Distortion: area',
+        'lines': [f"Over 1.10: {stats.get('area_above_110', 0.0):.1%}, over 1.25: {stats.get('area_above_125', 0.0):.1%}",
+                  island_line],
+    }
+    if view == 'BOTH':
+        s_low, s_high = _weighted_quantile(shear, areas, 0.05), _weighted_quantile(shear, areas, 0.95)
+        data.update({
+            'share2': data['share'], 'colors2': data['colors'], 'marks2': data['marks'],
+            'share': _histogram(shear, areas, to_x),
+            'colors': distortion_colors(bin_values, ones, none, 'SHEAR'),
+            'marks': [float(to_x(1.10)), float(to_x(1.25))],
+            'range': None,
+            'range_text': (f"90%: shear {_axis_text('SHAPE', s_low)}-{_axis_text('SHAPE', s_high)}, "
+                           f"area {_axis_text('SHAPE', a_low)}-{_axis_text('SHAPE', a_high)}"),
+            'title': 'Distortion: shear and area',
+            'lines': [f"Shear over 1.25: {stats.get('share_above_125', 0.0):.1%}",
+                      f"Area over 1.25: {stats.get('area_above_125', 0.0):.1%}",
+                      island_line],
+        })
+    return data
+
+
 def render_chart(data, size=CHART_SIZE):
     """Draw the chart card offscreen; returns RGBA float pixels (size x size x 4), bottom row first."""
     from mathutils import Matrix
@@ -901,26 +1062,57 @@ def render_chart(data, size=CHART_SIZE):
     boxes, colors = [], []
     boxes.append((0, 0, W, H))
     colors.append((0.16, 0.16, 0.16, 1.0))
-    peak = max(float(data['share'].max()), 1e-12)
-    for i, (s, c) in enumerate(zip(data['share'], data['colors'])):
-        if s <= 0:
-            continue
-        x0 = left + width * i / CHART_BINS
-        x1 = left + width * (i + 1) / CHART_BINS - 1
-        h = (hist_top - hist_bottom) * math.sqrt(s / peak)  # square-root scale: small tails stay visible
-        boxes.append((x0, hist_bottom, x1, hist_bottom + max(h, 1.0)))
-        colors.append((c[0], c[1], c[2], 1.0))
-    for i, c in enumerate(data['colors']):
-        boxes.append((left + width * i / CHART_BINS, band_bottom, left + width * (i + 1) / CHART_BINS, band_top))
-        colors.append((c[0], c[1], c[2], 1.0))
-    for m in data['marks']:
-        x = left + width * m
-        boxes.append((x - 0.5, band_bottom - 2, x + 0.5, hist_top))
-        colors.append((1.0, 0.75, 0.25, 1.0))
-    r0, r1 = data['range']
-    xr0, xr1 = left + width * r0, left + width * r1
-    boxes += [(xr0, 74, max(xr1, xr0 + 1), 76), (xr0 - 1, 70, xr0 + 1, 80), (xr1 - 1, 70, xr1 + 1, 80)]
-    colors += [(0.95, 0.95, 0.95, 1.0)] * 3
+
+    def histogram(shares, cols, bottom, top):
+        peak = max(float(shares.max()), 1e-12)
+        for i, (s, c) in enumerate(zip(shares, cols)):
+            if s <= 0:
+                continue
+            x0 = left + width * i / CHART_BINS
+            x1 = left + width * (i + 1) / CHART_BINS - 1
+            h = (top - bottom) * math.sqrt(s / peak)  # square-root scale: small tails stay visible
+            boxes.append((x0, bottom, x1, bottom + max(h, 1.0)))
+            colors.append((c[0], c[1], c[2], 1.0))
+
+    def band(cols, bottom, top):
+        for i, c in enumerate(cols):
+            boxes.append((left + width * i / CHART_BINS, bottom, left + width * (i + 1) / CHART_BINS, top))
+            colors.append((c[0], c[1], c[2], 1.0))
+
+    def marks(values, bottom, top):
+        for m in values:
+            x = left + width * m
+            boxes.append((x - 0.5, bottom, x + 0.5, top))
+            colors.append((1.0, 0.75, 0.25, 1.0))
+
+    if 'share2' in data:  # two rows: shear above, area below, each with its half of the colour band
+        split = (hist_bottom + hist_top) // 2
+        histogram(data['share'], data['colors'], split + 4, hist_top)
+        histogram(data['share2'], data['colors2'], hist_bottom, split)
+        band_split = (band_bottom + band_top) // 2
+        band(data['colors'], band_split, band_top)
+        band(data['colors2'], band_bottom, band_split)
+        marks(data['marks'], band_split, hist_top)
+        marks(data['marks2'], band_bottom - 2, split)
+        # the colour square: shear to the right, area upwards, cyan in the far corner
+        cells, sq, x_sq, y_sq = 6, 30, W - 12 - 30, H - 34
+        steps = np.linspace(0.0, 1.0, cells)
+        for i, sh in enumerate(steps):
+            for j, ar in enumerate(steps):
+                c = distortion_colors(np.array([1.0 + sh]), np.array([1.0 + ar * (AREA_TOP - 1.0)]),
+                                      np.zeros(1, bool), 'BOTH')[0]
+                boxes.append((x_sq + sq * i / cells, y_sq + sq * j / cells,
+                              x_sq + sq * (i + 1) / cells, y_sq + sq * (j + 1) / cells))
+                colors.append((c[0], c[1], c[2], 1.0))
+    else:
+        histogram(data['share'], data['colors'], hist_bottom, hist_top)
+        band(data['colors'], band_bottom, band_top)
+        marks(data['marks'], band_bottom - 2, hist_top)
+    if data.get('range') is not None:
+        r0, r1 = data['range']
+        xr0, xr1 = left + width * r0, left + width * r1
+        boxes += [(xr0, 74, max(xr1, xr0 + 1), 76), (xr0 - 1, 70, xr0 + 1, 80), (xr1 - 1, 70, xr1 + 1, 80)]
+        colors += [(0.95, 0.95, 0.95, 1.0)] * 3
     pos, col = rects(boxes, colors)
 
     shader = gpu.shader.from_builtin('SMOOTH_COLOR')
@@ -950,8 +1142,9 @@ def render_chart(data, size=CHART_SIZE):
                 blf.color(font, 0.95, 0.95, 0.95, 1.0)
                 blf.position(font, left, 54, 0)
                 blf.draw(font, data['range_text'])
+                step = 16 if len(data['lines']) <= 2 else 14
                 for i, line in enumerate(data['lines']):
-                    blf.position(font, left, 32 - 16 * i, 0)
+                    blf.position(font, left, 32 - step * i, 0)
                     blf.draw(font, line)
             pixels = np.array(fb.read_color(0, 0, W, H, 4, 0, 'FLOAT').to_list(), dtype=np.float32)
     finally:
@@ -959,16 +1152,22 @@ def render_chart(data, size=CHART_SIZE):
     return pixels.reshape(H, W, 4)
 
 
+def _distortion_view(scene):
+    """(Both / Shear / Area view of the Distortion mode, Auto Seam's Distortion Limit)."""
+    return getattr(scene, 'fss_uv_heatmap_distortion', 'BOTH'), getattr(scene, 'fss_uv_autoseam_limit', 1.25)
+
+
 def _update_chart(mode, stats):
     """Redraw the panel's chart preview; silently keeps the text fallback when no GPU is available."""
     global _chart_key
     if _previews is None:
         return
+    view, limit = _distortion_view(bpy.context.scene)
     key = (mode, stats.get('total_tris', 0), stats.get('valid_area', 0.0), stats.get('share_above_110', 0.0),
-           stats.get('share_outside', 0.0))
+           stats.get('share_outside', 0.0), view, round(limit, 4))
     if key == _chart_key and 'chart' in _previews:
         return
-    data = chart_data(mode, stats)
+    data = chart_data(mode, stats, view, limit)
     if data is None:
         return
     try:
@@ -1006,6 +1205,8 @@ def _draw_viewport_heatmap():
         update_heatmap_cache(context, refresh=False)
 
     mode = context.scene.fss_uv_heatmap_mode
+    view, _limit = _distortion_view(context.scene)
+    _update_chart(mode, _global_stats)  # follows the view and Auto Seam's limit; redraws only when they change
     shader = _heatmap_shader()
     glyph_texture = _glyphs()
     region = context.region_data
@@ -1022,7 +1223,7 @@ def _draw_viewport_heatmap():
             obj = objects.get(name)
             if entry is None or obj is None:
                 continue
-            batch = entry.get_batch(mode, shader)
+            batch = entry.get_batch(mode, shader, view)
             if batch is not None:
                 shader.uniform_float('mvp', region.perspective_matrix @ obj.matrix_world)
                 shader.uniform_float('normal_matrix',
@@ -1068,10 +1269,24 @@ def _draw_viewport_legend():
 
     # Scale explanation
     if mode == 'SHAPE':
-        lines.append(('Scale: 1.0 (neutral) to 2.0+ (blue), magenta = error', COLOR_TEXT_DIM, False))
+        view, limit = _distortion_view(context.scene)
         s110 = stats.get('share_above_110', 0.0)
         s125 = stats.get('share_above_125', 0.0)
-        lines.append((f'Surface over 1.10 (target): {s110:.1%} | over 1.25: {s125:.1%}', COLOR_TEXT_MAIN, False))
+        a110 = stats.get('area_above_110', 0.0)
+        a125 = stats.get('area_above_125', 0.0)
+        n_over, n_all, _share = islands_over_limit(stats, limit)
+        if view == 'BOTH':
+            lines.append(('Scale: white = none, blue = shear, green = area, cyan = both (full at 2.0), magenta = error',
+                          COLOR_TEXT_DIM, False))
+            lines.append((f'Shear over 1.25: {s125:.1%} | Area over 1.25: {a125:.1%} | '
+                          f'Islands over limit {limit:.2f}: {n_over} of {n_all}', COLOR_TEXT_MAIN, False))
+        elif view == 'AREA':
+            lines.append(('Area: 1.0 (neutral) to 2.0+ (green), magenta = error', COLOR_TEXT_DIM, False))
+            lines.append((f'Surface over 1.10: {a110:.1%} | over 1.25: {a125:.1%} | '
+                          f'Islands over limit {limit:.2f}: {n_over} of {n_all}', COLOR_TEXT_MAIN, False))
+        else:
+            lines.append(('Shear: 1.0 (neutral) to 2.0+ (blue), magenta = error', COLOR_TEXT_DIM, False))
+            lines.append((f'Surface over 1.10 (target): {s110:.1%} | over 1.25: {s125:.1%}', COLOR_TEXT_MAIN, False))
     elif mode == 'DENSITY':
         lines.append(('Scale: 0.5 (red) - 1.0 (neutral) - 2.0 (blue), magenta = error', COLOR_TEXT_DIM, False))
         s_out = stats.get('share_outside', 0.0)
@@ -1167,6 +1382,9 @@ class FSS_PT_UvHeatmap(bpy.types.Panel):
         if scene.fss_uv_heatmap_show:
             row = layout.row(align=True)
             row.prop(scene, 'fss_uv_heatmap_mode', expand=True)
+            if scene.fss_uv_heatmap_mode == 'SHAPE':
+                row = layout.row(align=True)
+                row.prop(scene, 'fss_uv_heatmap_distortion', expand=True)
             layout.prop(scene, 'fss_uv_heatmap_opacity', slider=True)
             row = layout.row(align=True)
             row.prop(scene, 'fss_uv_heatmap_grid', text='UV Grid', toggle=True)
@@ -1185,8 +1403,10 @@ class FSS_PT_UvHeatmap(bpy.types.Panel):
             elif stats.get('total_tris', 0) > 0:
                 # text fallback when the chart image is not available
                 if scene.fss_uv_heatmap_mode == 'SHAPE':
-                    box.label(text=f"Over 1.10 (target): {stats.get('share_above_110', 0.0):.1%} of surface")
-                    box.label(text=f"Over 1.25: {stats.get('share_above_125', 0.0):.1%} of surface")
+                    view, limit = _distortion_view(scene)
+                    data = chart_data('SHAPE', stats, view, limit)
+                    for line in (data['lines'] if data else []):
+                        box.label(text=line)
                 elif scene.fss_uv_heatmap_mode == 'DENSITY':
                     box.label(text=f"Outside density range: {stats.get('share_outside', 0.0):.1%} of surface")
                     box.label(text=f"  too low: {stats.get('share_under', 0.0):.1%}, too high: {stats.get('share_over', 0.0):.1%}")
@@ -1237,6 +1457,11 @@ def register():
         update=_on_mode_change,
     )
 
+    bpy.types.Scene.fss_uv_heatmap_distortion = bpy.props.EnumProperty(
+        name='Distortion', default='BOTH', options={'SKIP_SAVE'}, update=_on_mode_change,
+        items=[('BOTH', 'Both', 'Shear in blue, area in green, both together in cyan'),
+               ('SHEAR', 'Shear', 'How much each face is skewed in the UVs (1.0 = keeps its shape)'),
+               ('AREA', 'Area', "How much each face's size differs from the rest of its island (1.0 = same)")])
     bpy.types.Scene.fss_uv_heatmap_grid = bpy.props.BoolProperty(
         name='UV Grid', default=True, update=_on_mode_change,  # saved with the file, on by default
         description='Draw a grid in UV space over the heatmap: stretched UVs show as stretched cells')
@@ -1299,8 +1524,8 @@ def unregister():
     clear_cache()
     _shader = None
 
-    for prop in ('fss_uv_heatmap_show', 'fss_uv_heatmap_mode', 'fss_uv_heatmap_opacity', 'fss_uv_heatmap_grid',
-                 'fss_uv_heatmap_grid_cells', 'fss_uv_heatmap_grid_labels'):
+    for prop in ('fss_uv_heatmap_show', 'fss_uv_heatmap_mode', 'fss_uv_heatmap_distortion', 'fss_uv_heatmap_opacity',
+                 'fss_uv_heatmap_grid', 'fss_uv_heatmap_grid_cells', 'fss_uv_heatmap_grid_labels'):
         if hasattr(bpy.types.Scene, prop):
             delattr(bpy.types.Scene, prop)
 

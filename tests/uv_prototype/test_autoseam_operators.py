@@ -831,6 +831,88 @@ def test_distortion_limit():
     print("  -> PASS: limit in core, final check and report; 1.10 gives more seams than 1.60.")
 
 
+def test_accept_and_unwrap():
+    """Accept + Unwrap: seams accepted, Angle Based unwrap along them, decal faces keep their UVs, state restored."""
+    print("Test 14: Accept + Unwrap...")
+    bpy.ops.wm.read_homefile(use_empty=True)
+    bpy.ops.mesh.primitive_uv_sphere_add(segments=24, ring_count=12)
+    obj = bpy.context.active_object
+    me = obj.data
+    me.materials.append(bpy.data.materials.new('COCKPIT_FRONT_STD'))
+    me.materials.append(bpy.data.materials.new('COCKPIT_FRONT_DECAL'))
+    decal = np.zeros(len(me.polygons), bool)
+    decal[:24] = True  # one cap ring gets the decal material
+    me.polygons.foreach_set('material_index', decal.astype(np.int32))
+    uv = np.zeros(len(me.loops) * 2)
+    me.uv_layers.active.data.foreach_get('uv', uv)
+    decal_loops = np.zeros(len(me.loops), bool)
+    for p in me.polygons:
+        if decal[p.index]:
+            decal_loops[p.loop_start:p.loop_start + p.loop_total] = True
+    uv = uv.reshape(-1, 2)
+    uv[decal_loops] = 0.123  # a hand-made decal layout to keep
+    me.uv_layers.active.data.foreach_set('uv', uv.ravel())
+    me.update()
+    before = uv.copy()
+
+    other = create_cube('OtherSelected', location=(5, 0, 0))
+    bpy.ops.fss.uv_propose_seams()
+    proposed, _ = uv_autoseam.get_mesh_seam_counts(me)
+    assert proposed > 0, "the sphere needs proposed seams for this test"
+    other.select_set(False)
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    res = bpy.ops.fss.uv_accept_and_unwrap()
+    assert res == {'FINISHED'}, res
+    proposed_after, current_after = uv_autoseam.get_mesh_seam_counts(me)
+    assert proposed_after == 0 and current_after >= proposed, (proposed_after, current_after)
+
+    after = np.zeros(len(me.loops) * 2)
+    me.uv_layers.active.data.foreach_get('uv', after)
+    after = after.reshape(-1, 2)
+    assert np.allclose(after[decal_loops], before[decal_loops]), "decal faces must keep their UVs"
+    assert not np.allclose(after[~decal_loops], before[~decal_loops]), "the other faces must be unwrapped"
+    assert bpy.context.mode == 'OBJECT' and bpy.context.view_layer.objects.active == obj and obj.select_get()
+    assert not other.select_get(), "selection must be restored"
+
+    # the unwrapped islands follow the seams: no UV continuity across an accepted seam between two unwrapped faces
+    seams = np.zeros(len(me.edges), bool)
+    me.edges.foreach_get('use_seam', seams)
+    corner_uv = {}
+    for p in me.polygons:
+        if decal[p.index]:
+            continue
+        for li in p.loop_indices:
+            corner_uv[(p.index, me.loops[li].vertex_index)] = tuple(np.round(after[li], 6))
+    edge_faces = {}
+    for p in me.polygons:
+        if not decal[p.index]:
+            for ek in p.edge_keys:
+                edge_faces.setdefault(ek, []).append(p.index)
+    edge_index = {e.key: e.index for e in me.edges}
+    joined_across_seam = 0
+    for ek, faces in edge_faces.items():
+        if len(faces) == 2 and seams[edge_index[ek]]:
+            a, b = faces
+            if all(corner_uv[(a, v)] == corner_uv[(b, v)] for v in ek):
+                joined_across_seam += 1
+    assert joined_across_seam == 0, f"{joined_across_seam} seam edges kept continuous UVs"
+
+    # non-uniform scale is reported
+    assert uv_autoseam._uniform_scale(obj)
+    obj.scale = (1.0, 1.0, 2.0)
+    bpy.context.view_layer.update()
+    assert not uv_autoseam._uniform_scale(obj)
+
+    # from Edit Mode: works and returns to Edit Mode
+    obj.scale = (1.0, 1.0, 1.0)
+    bpy.ops.object.mode_set(mode='EDIT')
+    assert bpy.ops.fss.uv_accept_and_unwrap() == {'FINISHED'}
+    assert bpy.context.mode == 'EDIT_MESH'
+    bpy.ops.object.mode_set(mode='OBJECT')
+    print(f"  -> PASS: {proposed} seams accepted, decal UVs kept, islands follow seams, state restored.")
+
+
 def main():
     print("=" * 70)
     print("RUNNING FSS AUTO SEAM OPERATOR & EXPORT TESTS")
@@ -849,6 +931,7 @@ def main():
     test_decal_skip()
     test_report_attention_counts()
     test_distortion_limit()
+    test_accept_and_unwrap()
     print("=" * 70)
     print("ALL TESTS PASSED SUCCESSFULLY.")
     print("=" * 70)

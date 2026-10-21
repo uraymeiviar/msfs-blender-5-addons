@@ -122,6 +122,10 @@ Automated hard-surface seam placement for untextured geometry (`uv_autoseam.py` 
   allowed 1.05 to 2.0, slider 1.05 to 1.75) is passed as `limit` to `propose_seams` (every merge and
   verification test), to the final-unwrap check and to the report, which states it. Measured on the 17 reference
   objects in journal Session 87.
+- **Accept + Unwrap** (`fss.uv_accept_and_unwrap`, confirmation): accepts the proposed seams, then
+  `unwrap_angle_based` unwraps one user per mesh in a single multi-object Edit Mode pass with Angle Based (the
+  method the core verifies with); faces whose material is a skip class keep their UVs; mode, selection and active
+  object are restored; objects with non-uniform scale are named in a warning.
 - **Exclusions:** objects whose materials are all in decal, glass, windshield, invisible, or occluder
   classes (by name class or MSFS material type) are skipped automatically.
 - **Reporting:** overwrites the text datablock `FSS Auto Seam Report` with execution totals, listing meshes
@@ -141,8 +145,11 @@ mesh objects.
 - **Evaluated geometry:** loop triangles of the evaluated mesh, including copies from Mirror and Array modifiers;
   measures in world space, drawing in object space with the object's current matrix (it follows moves).
 - **Modes:**
-  - **Distortion:** per-triangle conformal distortion (\(\sigma_1 / \sigma_2 \ge 1.0\), scale-independent); neutral
-    1.0 (light grey) up to 2.0+ (blue).
+  - **Distortion**, views Both / Shear / Area (`fss_uv_heatmap_distortion`): shear is the per-triangle conformal
+    distortion (\(\sigma_1 / \sigma_2 \ge 1.0\), scale-independent), white to blue; area is the triangle's
+    \(A_{UV} / A_{3D}\) against its UV island's, folded to \(\ge 1.0\) (`uv_islands`, `area_distortion`; the
+    island average equals `uv_autoseam_core._area_distortion`), white to green up to `AREA_TOP` 2.0; both blend
+    bilinearly to cyan. The chart counts islands whose average is over Auto Seam's current Distortion Limit.
   - **Density:** per-triangle texel density (\(A_{UV} / A_{3D}\)) relative to its texture set, the area-weighted
     median over every object in the view layer that uses the same material, read against the object's authored
     density range (inside the range neutral 1.0, above up to 2.0x blue, below down to 0.5x red, log scale).
