@@ -130,9 +130,18 @@ The density, direction, and skip buttons act on all selected objects. The **Min*
 
 Automated UV seam proposal for hard-surface meshes. See [uv.md](uv.md) for the complete guide, workflow, readable reports, and limits.
 
-## UV Heatmap
+## Visibility Test
 
-Colours the selected objects by how well their UVs fit: **Distortion** (does each face keep its shape?) or **Density** (does it get the right amount of texture?), with a distribution chart in the panel and an optional UV grid with cell labels. See [uv.md](uv.md#uv-heatmap-distortion-and-texel-density) for how to read it.
+Analyses pilot and copilot camera visibility across animation states to determine unoccluded solid angles for every face and UV island. Writes `<blend_name>.visibility` to guide the automatic packer and the Heatmap. See [visibility.md](visibility.md) for full settings and workflow.
+
+## Heatmap
+
+Colours the selected objects directly in the 3D viewport:
+- **Distortion:** Does each face keep its shape? (Conformal singular-value ratio)
+- **Density:** Does each face get the right amount of texture relative to the texture set median and object marks?
+- **Visibility:** How well is each face seen from the reference cameras (from `<blend_name>.visibility`)?
+
+Includes a distribution chart in the panel and an optional UV grid with cell labels. See [uv.md](uv.md#heatmap) for how to read it.
 
 ## Checks
 

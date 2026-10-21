@@ -15,7 +15,8 @@ repository are in [../AGENTS.md](../AGENTS.md).
 | `merge.py` | **Merge Tree** | Export-time merge groups (`@MERGE_<name>` / `@NOMERGE_<name>`), New Merge Group, tree preview and console details |
 | `uv_marks.py` | **UV Marks** | Authoring marks for UV unwrapping and packing: per-object texel density range (`fss_uv_density`, default 0.9 to 1.1, presets Lower 0.7 to 0.8 and Higher 1.5 to 1.65), island direction (`fss_uv_direction`: Free, Upright, Flip, Quarter), and Skip Auto Seam mark (`fss_uv_skip_autoseam`), inherited from the nearest marked ancestor; per-material island margin as a fraction of the UV square (`fss_uv_margin`, default 0.002) |
 | `uv_autoseam.py`, `uv_autoseam_core.py` | **Auto Seam** | Proposes UV seams on hard surface meshes keeping the current seams, normal splits, and distortion limits; Accept Proposed, Discard Proposed, Clear Current, Edit Mode selection, and report in Text Editor |
-| `uv_heatmap.py` | **UV Heatmap** | Viewport heatmap: Distortion (conformal singular-value ratio) and Density (relative to material median and object range), RizomUV-style diverging colours, legend, and evaluated Mirror/Array support |
+| `visibility.py`, `visibility_core.py` | **Visibility Test** | Evaluates solid-angle visibility from scene cameras (Look Around cubemap / Fixed View frustum) across 2 to 10 animation states; writes `<blend_name>.visibility`, Select Never Seen, Select Stale, report in Text Editor |
+| `uv_heatmap.py` | **Heatmap** | Viewport heatmap: Distortion (conformal singular-value ratio), Density (relative to material median and object range), and Visibility (from `<blend_name>.visibility`), RizomUV-style diverging colours, legend, and evaluated Mirror/Array support |
 | `checks.py`, `name_check.py` | **Checks** | **Scan Names** (lists object and bone names that break FSS naming rules and renames them in batch; `@MERGE_` / `@NOMERGE_` allowed) and **Fix Broken Bone Parents** |
 
 ## Tags

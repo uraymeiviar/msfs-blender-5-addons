@@ -94,27 +94,35 @@ Repeated problems on one mesh are grouped into one line, with the count, the lar
 - **UV Marks panel:** density and direction marks in the **UV Marks** panel are for the packing step and the UV Heatmap; the **Skip Auto Seam** mark in that panel tells Auto Seam to skip marked objects.
 - **Undo:** a full run on multiple objects reverts in a single undo step (`Ctrl + Z`).
 
-## UV Heatmap: Distortion and Texel Density
+## Heatmap: Distortion, Texel Density, and Visibility
 
-The **UV Heatmap** panel (sidebar `N` > **FSS Tools** > **UV Heatmap**) displays a live per-face distortion overlay directly on the 3D surface in the viewport. It helps review UV quality, identify stretched charts, and verify texel density distribution before packing or texturing.
+The **Heatmap** panel (sidebar `N` > **FSS Tools** > **Heatmap**) displays a live per-face overlay directly on the 3D surface in the viewport. It helps review UV distortion, verify texel density distribution before packing or texturing, and inspect pilot camera visibility scores.
 
 ### Turning It On
 
-- Click **Show UV Heatmap** in the panel to toggle the overlay on selected mesh objects.
-- Switch between **Distortion** and **Density** modes.
-- The heatmap updates by itself when an object's UVs or geometry change (after an unwrap, as soon as you leave Edit Mode), and when the selection changes. Moving an object keeps its colours on it. Click **Refresh** after changing an object's scale or materials, or whenever the colours look out of date.
+- Click **Show Heatmap** in the panel to toggle the overlay on selected mesh objects.
+- Switch between **Distortion**, **Density**, and **Visibility** modes.
+- The heatmap updates by itself when an object's UVs or geometry change (after an unwrap, as soon as you leave Edit Mode), when the selection changes, or when the `.visibility` file changes. Moving an object keeps its colours on it. Click **Refresh** after changing an object's scale or materials, or whenever the colours look out of date.
 - **Opacity** sets how strongly the heatmap colours cover the plain grey shading of the surface (0.3 to 1.0).
 - **UV Grid** draws a grid in UV space over the heatmap (8, 16, 32 or 64 cells across the UV square), with a label in each cell (column letter, row number, for example B7). Good UVs give square cells with upright labels; stretched UVs stretch the cells and their labels the same way, and the labels show where each part of the texture ends up. Labels appear when cells are large enough on screen to read; zoom in, or choose fewer cells. The grid is on by default, and its settings (on or off, cells, labels) are saved with the file.
 - While the heatmap is on, its objects are shown with **Display As: Wire** and the heatmap draws their surface itself. Their own display setting comes back when the heatmap is off, when you deselect them, and before the file is saved.
 
 ### How to Read the Colours
 
-The overlay uses a diverging colour scheme centred on **Neutral 1.0**:
+The overlay uses diverging colour schemes:
 
-- **Neutral 1.0 (light grey / white):** ideal shape or within the authored density range.
-- **Above 1.0 (towards blue):** stretched or sheared triangles (in Distortion mode); over-dense texture resolution (in Density mode).
-- **Below 1.0 (towards red):** under-dense texture resolution (in Density mode).
-- **Magenta (Error):** faces that cannot be measured because they have no area, in the UVs (collapsed to a point or a line) or on the model. Check them in the UV editor or clean up the mesh.
+- **Distortion & Density modes:** centred on **Neutral 1.0** (light grey / white):
+  - **Neutral 1.0 (light grey / white):** ideal shape or within the authored density range.
+  - **Above 1.0 (towards blue):** stretched or sheared triangles (in Distortion mode); over-dense texture resolution (in Density mode).
+  - **Below 1.0 (towards red):** under-dense texture resolution (in Density mode).
+  - **Magenta (Error):** faces that cannot be measured because they have no area, in the UVs (collapsed to a point or a line) or on the model. Check them in the UV editor or clean up the mesh.
+- **Visibility mode:**
+  - **1.0 (towards blue):** high visibility in plain view of the reference cameras.
+  - **0.5 (neutral grey):** moderate visibility or peripheral coverage.
+  - **0.0 (towards red):** low visibility or grazing angles.
+  - **Magenta:** never seen (score 0.000 across all cameras and animation states).
+  - **Cyan:** undetermined sub-pixel parts whose score was inherited from their parent.
+  - **Dark Grey (No data):** meshes missing from `<blend_name>.visibility` or whose face counts are stale.
 - Faces are shaded lightly by their angle to the view, so a neutral face turned away looks light grey, not white.
 
 ### Modes
@@ -131,26 +139,31 @@ The overlay uses a diverging colour scheme centred on **Neutral 1.0**:
      - Above the range: turns blue on a log scale up to 2.0x.
      - Below the range: turns red on a log scale down to 0.5x.
    - If an object is marked with a higher density preset (such as the glareshield at 1.5 to 1.65), it remains neutral when its density matches that authored target.
+3. **Visibility:**
+   - Evaluates solid angle visibility scores from `<blend_name>.visibility` (generated via the **Visibility Test** panel).
+   - Works directly on 3D geometry and does not require an active UV map.
+   - Blue highlights geometry seen clearly by the pilot or copilot; red and magenta indicate occluded geometry beneath panels or behind structures.
 
 ### Distribution Chart in the Panel
 
 The panel shows a chart of the selected objects' surface:
 
-- **Colour band:** the same colours as on the model, with the values below it (Distortion 1.0 to 2.0 and more; Density 0.5 to 2.0, with 1.0 inside the object's range).
+- **Colour band:** the same colours as on the model, with the values below it (Distortion 1.0 to 2.0 and more; Density 0.5 to 2.0; Visibility 0.0 to 1.0).
 - **Histogram above the band:** how much of the surface lies at each value, weighted by area. Bar heights use a square-root scale, so small tails stay visible; a tall bar at 1.0 with little else is a good result.
-- **Marks:** at 1.10 (our shape target) and 1.25 (the limit Auto Seam uses to accept an island) in Distortion mode; at 1.0 in Density mode.
+- **Marks:** at 1.10 (our shape target) and 1.25 (the limit Auto Seam uses to accept an island) in Distortion mode; at 1.0 in Density mode; at 0.50 in Visibility mode.
 - **Range bar:** the middle 90 % of the surface (5 % lies below its left end, 5 % above its right end), with its values.
-- **Percentages:** the share of the surface over 1.10 and over 1.25, or outside the density range (too low, too high).
+- **Percentages:** the share of the surface over 1.10 and over 1.25, outside the density range, or never seen / undetermined.
 
 ### Viewport Legend
 
 A legend in the corner of the viewport displays:
 
-- The active mode (**Distortion** or **Density**) and colour scale.
+- The active mode (**Distortion**, **Density**, or **Visibility**) and colour scale.
 - For Distortion: the share of the selected objects' surface distorted more than **1.10** (our shape target) and more than **1.25** (the limit Auto Seam uses to accept an island).
 - For Density: the share of the surface outside its object's density range (too low and too high).
+- For Visibility: the share of the surface never seen or undetermined.
 - **Error:** how many faces cannot be measured, and their share of the surface.
-- Skipped objects: mesh objects without active UV maps are safely skipped and listed in the legend without interrupting the tool.
+- Skipped objects: mesh objects without active UV maps are safely skipped in Distortion and Density modes and listed in the legend without interrupting the tool (in Visibility mode, meshes without UVs are displayed).
 
 ### Non-Destructive and Modifiers
 

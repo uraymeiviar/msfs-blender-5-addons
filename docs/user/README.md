@@ -39,8 +39,8 @@ Steps marked **in development** describe what the tool will do, and how to get t
 | [3. Units](#3-units-what-is-one-piece) | LOD hints, Viewport LOD | a modelling decision | `lods.md` |
 | [4. Merge Tree](#4-merge-tree) | Tags, Merge Tree | available | `modeling.md` |
 | [5. LOD](#5-lod) | LOD | available | `lods.md` |
-| [6. Seams and Unwrap](#6-seams-and-unwrap) | Auto Seam, UV Marks, UV Heatmap | available | `uv-mapping.md` |
-| [7. Visibility Scoring](#7-visibility-scoring-in-development) | visibility tool | in development: UV Marks by hand | `uv-mapping.md` |
+| [6. Seams and Unwrap](#6-seams-and-unwrap) | Auto Seam, UV Marks, Heatmap | available | `uv-mapping.md` |
+| [7. Visibility Scoring](#7-visibility-scoring) | Visibility Test | available | [visibility.md](visibility.md) |
 | [8. Packing](#8-packing-in-development) | packer | in development: Blender's Pack Islands | `uv-mapping.md` |
 | [9. Texturing](#9-texturing) | Substance Painter | outside Blender | `texturing.md`, `baking.md` |
 | [10. Export and Deploy](#10-export-and-deploy) | exporter, deploy scripts | available | `blender-export.md` |
@@ -138,19 +138,23 @@ Steps marked **in development** describe what the tool will do, and how to get t
 
 **Redo when:** the heatmap shows stretched islands, or a part changes shape. A new unwrap changes the islands, so packing follows; on a textured set it costs rework.
 
-### 7. Visibility Scoring (in development)
+### 7. Visibility Scoring
 
-**Why:** texture space is limited. Parts the pilot sees deserve more texture than parts hidden behind other parts or behind the seat.
+**Why:** texture space is limited. Parts the flight crew sees deserve more texture than parts hidden behind other parts or beneath the seats.
 
-**What the tool will do:** from the cameras you define (for the cockpit the pilot and copilot eyes; for the exterior your own exterior cameras) and over the animation states, measure how much of each face is actually visible, weighted by how far the head has to turn from the camera's default view. The result is a factor from 0 to 1 per face that depends neither on distance nor on size: a small knob in plain view scores as high as a large panel. It is kept in a separate `.visibility` file next to the `.blend`; new seams or a new unwrap do not make it out of date, a change to the faces does.
+**Do:**
+- Open sidebar `N` > **FSS Tools** > **Visibility Test**.
+- Ensure the scene's reference cameras (e.g. `CAM_PILOT`, `CAM_COPILOT`) are included in the camera list, set to **Look Around** (or **Fixed View** for dedicated instrument views).
+- Set **States** (default 5, evenly sampling animations across 0%, 25%, 50%, 75%, and 100%).
+- Click **Update Visibility**. The analysis evaluates the scene and writes `<blend_name>.visibility` next to the `.blend`.
+- Review never-seen parts via **Select Never Seen** or inspect stale meshes via **Select Stale**.
+- See [visibility.md](visibility.md) for full options and [Heatmap](uv.md#heatmap) in **Visibility** mode to inspect scores in the 3D viewport.
 
-The packer then gives each island a texel density (pixels per centimetre) of zone multiplier × object mark × visibility × the target density, within a lower and an upper bound. An island's visibility is the average over its faces that are seen, so a partly hidden island keeps the density its visible part needs. Faces never seen in the analysed views and states get a small minimum and are listed for you to judge (switch positions and other parts shown only under some conditions are not seen in every state); nothing is deleted. Parts too small to measure take the value of the part they belong to.
+**Check:**
+- Turn on **Heatmap** with **Mode: Visibility**. Prominent panels and switches show blue (0.5 to 1.0); occluded surfaces show red to magenta.
+- **FSS Visibility Report** in Blender's Text Editor lists summary percentiles, never-seen objects, and resolved sub-pixel parts.
 
-**Meanwhile, by hand:** set the texel density marks in [UV Marks](fss-tools.md#uv-marks) from your own judgement of what the pilot sees: **Higher** (1.5 to 1.65) for prominent parts such as the glareshield and main panel, **Lower** (0.7 to 0.8) for parts that are hardly seen, the default 0.9 to 1.1 for the rest. Marks on an empty apply to everything below it.
-
-**Check:** the marks match what you see from the pilot camera.
-
-**Redo when:** your cameras, animations or the faces change (new seams or a new unwrap do not count), or you change your mind about what deserves detail. It only changes densities, which take effect at the next packing.
+**Redo when:** you change mesh geometry, camera positions, or control animations. Updating visibility recalculates the `.visibility` file, which the automatic packer reads during UV packing.
 
 ### 8. Packing (in development)
 

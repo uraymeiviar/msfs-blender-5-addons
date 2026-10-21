@@ -6,6 +6,7 @@ RizomUV-style diverging colour bar: neutral 1.0, red below, blue above.
 """
 
 import math
+from pathlib import Path
 import numpy as np
 import bpy
 import blf
@@ -20,6 +21,7 @@ except ImportError:
 
 from .tags import _editable
 from .uv_marks import density
+from . import visibility_core
 
 # Color definitions (RGBA, blended over viewport shading)
 ALPHA = 0.75
@@ -28,6 +30,8 @@ COLOR_BLUE = np.array([0.10, 0.35, 0.95, ALPHA], dtype=np.float32)
 COLOR_RED = np.array([0.95, 0.15, 0.15, ALPHA], dtype=np.float32)
 # faces that cannot be measured (no area in the UVs or the model), shown to artists as 'Error': a colour on neither scale
 COLOR_DEGENERATE = np.array([1.00, 0.00, 1.00, ALPHA], dtype=np.float32)
+# Visibility mode: meshes without data or stale in a neutral dark grey labelled 'No data'
+COLOR_NO_DATA = np.array([0.30, 0.30, 0.30, ALPHA], dtype=np.float32)
 
 # Text / Legend settings
 TEXT_FONT = 0
@@ -207,7 +211,7 @@ def measures_to_colors(shape, rel_density, is_degenerate, mode):
 class ObjectHeatmapCache:
     """Cached geometry, measures, and GPU batches for a single mesh object."""
 
-    def __init__(self, obj_name, P_local, tri_measures, rel_density, colors_shape, colors_density, uv=None):
+    def __init__(self, obj_name, P_local, tri_measures, rel_density, colors_shape, colors_density, colors_visibility=None, uv=None, vis_data=None):
         self.obj_name = obj_name
         self.n_tris = len(P_local)
         # object space: the surface is drawn with the object's current matrix, so it follows moves
@@ -221,17 +225,27 @@ class ObjectHeatmapCache:
         self.uv = (uv.reshape(-1, 2) if uv is not None else np.zeros((len(self.pos), 2))).astype(np.float32)
         self.colors_shape = np.repeat(colors_shape, 3, axis=0).astype(np.float32)
         self.colors_density = np.repeat(colors_density, 3, axis=0).astype(np.float32)
+        if colors_visibility is not None:
+            self.colors_visibility = np.repeat(colors_visibility, 3, axis=0).astype(np.float32)
+        else:
+            self.colors_visibility = np.repeat(np.tile(COLOR_NO_DATA, (len(P_local), 1)), 3, axis=0).astype(np.float32)
         self.area3 = tri_measures['area3']
         self.is_degenerate = tri_measures['is_degenerate']
         self.shape = tri_measures['shape']
         self.rel_density = rel_density
+        self.vis_data = vis_data or {}
         self.batches = {}  # mode -> GPUBatch
 
     def get_batch(self, mode, shader):
         if gpu is None or batch_for_shader is None:
             return None
         if mode not in self.batches:
-            colors = self.colors_shape if mode == 'SHAPE' else self.colors_density
+            if mode == 'SHAPE':
+                colors = self.colors_shape
+            elif mode == 'DENSITY':
+                colors = self.colors_density
+            else:
+                colors = self.colors_visibility
             self.batches[mode] = batch_for_shader(shader, 'TRIS', {'pos': self.pos, 'nor': self.nor, 'color': colors,
                                                                    'uv': self.uv})
         return self.batches[mode]
@@ -534,15 +548,19 @@ def _on_load_post(_dummy):
     _chart_key = None
 
 
-def _object_triangles(obj, depsgraph):
+def _object_triangles(obj, depsgraph, allow_no_uvs=False):
     """Loop triangles of the evaluated mesh: world and object space corners, UVs and material per triangle.
 
-    None when the object has no faces or no active UV map.
+    None when the object has no faces or (if not allow_no_uvs) no active UV map.
     """
-    if not obj.data or not len(obj.data.polygons) or obj.data.uv_layers.active is None:
+    if not obj.data or not len(obj.data.polygons):
+        return None
+    if not allow_no_uvs and obj.data.uv_layers.active is None:
         return None
     me = obj.evaluated_get(depsgraph).data
-    if not me or not len(me.polygons) or me.uv_layers.active is None:
+    if not me or not len(me.polygons):
+        return None
+    if not allow_no_uvs and me.uv_layers.active is None:
         return None
     me.calc_loop_triangles()
     n_tris = len(me.loop_triangles)
@@ -554,17 +572,25 @@ def _object_triangles(obj, depsgraph):
     me.loop_triangles.foreach_get('loops', tri_loops.ravel())
     tri_mat = np.empty(n_tris, dtype=np.int32)
     me.loop_triangles.foreach_get('material_index', tri_mat)
+    tri_poly = np.empty(n_tris, dtype=np.int32)
+    me.loop_triangles.foreach_get('polygon_index', tri_poly)
     V = np.empty((len(me.vertices), 3), dtype=np.float64)
     me.vertices.foreach_get('co', V.ravel())
     M = np.array(obj.matrix_world, dtype=np.float64)
-    uv_data = np.empty((len(me.loops), 2), dtype=np.float64)
-    me.uv_layers.active.data.foreach_get('uv', uv_data.ravel())
+    if me.uv_layers.active is not None:
+        uv_data = np.empty((len(me.loops), 2), dtype=np.float64)
+        me.uv_layers.active.data.foreach_get('uv', uv_data.ravel())
+        U = uv_data[tri_loops]
+    else:
+        U = np.zeros((n_tris, 3, 2), dtype=np.float64)
     slot_names = [slot.material.name if slot.material else '' for slot in obj.material_slots]
     mat_keys = np.array([slot_names[i] if 0 <= i < len(slot_names) else '' for i in tri_mat], dtype=object)
     return {
         'P3': (V @ M[:3, :3].T + M[:3, 3])[tri_verts],  # world space: measures include the object's scale
         'P_local': V[tri_verts],
-        'U': uv_data[tri_loops],
+        'U': U,
+        'has_uvs': me.uv_layers.active is not None,
+        'tri_poly': tri_poly,
         'mat_keys': mat_keys,
     }
 
@@ -611,15 +637,26 @@ def update_heatmap_cache(context, refresh=True):
         _ref_cache.clear()
     depsgraph = context.evaluated_depsgraph_get()
 
+    mode = context.scene.fss_uv_heatmap_mode
+    is_vis = (mode == 'VISIBILITY')
+
+    vis_file = Path(bpy.data.filepath).with_suffix('.visibility') if bpy.data.filepath else None
+    vis_meta, vis_data_arrays, stale_meshes = None, None, []
+    if vis_file and vis_file.exists():
+        try:
+            vis_meta, vis_data_arrays, stale_meshes = visibility_core.load_visibility_file(vis_file, scene_meshes=bpy.data.meshes)
+        except Exception:
+            pass
+
     selected = [obj for obj in context.selected_objects if _editable(obj) and obj.type == 'MESH']
     skipped_no_uvs = []
     new_items = {}
     for obj in selected:
         if obj.name in _cache:
             continue
-        tris = _object_triangles(obj, depsgraph)
+        tris = _object_triangles(obj, depsgraph, allow_no_uvs=is_vis)
         if tris is None:
-            if obj.data and len(obj.data.polygons):
+            if obj.data and len(obj.data.polygons) and not is_vis:
                 skipped_no_uvs.append(obj.name)
             continue
         (low, high), _ = density(obj)
@@ -634,10 +671,42 @@ def update_heatmap_cache(context, refresh=True):
         m = item['measures']
         rel_d, _ = compute_relative_density(m['raw_density'], m['area3'], m['is_degenerate'], item['mat_keys'],
                                             [item['density_range']] * len(item['mat_keys']), _ref_cache)
+
+        colors_vis = None
+        vis_item_data = {'has_data': False}
+        if vis_meta and vis_data_arrays:
+            obj_inst = context.view_layer.objects.get(name)
+            m_name = obj_inst.data.name if (obj_inst and obj_inst.data) else ""
+            safe_name = m_name.replace('/', '_').replace('\\', '_')
+            sc_key = f"{safe_name}__face_scores"
+            if m_name and m_name not in stale_meshes and sc_key in vis_data_arrays:
+                face_sc = vis_data_arrays[sc_key]
+                face_ud = vis_data_arrays.get(f"{safe_name}__face_undetermined", np.zeros(len(face_sc), dtype=bool))
+                face_nv = vis_data_arrays.get(f"{safe_name}__face_never_seen", np.zeros(len(face_sc), dtype=bool))
+                poly_colors = visibility_core.compute_heatmap_colors(face_sc, face_ud, face_nv, alpha=ALPHA)
+                tp = np.clip(item['tri_poly'], 0, len(poly_colors) - 1)
+                colors_vis = poly_colors[tp]
+                vis_item_data = {
+                    'has_data': True,
+                    'scores': face_sc[tp],
+                    'undetermined': face_ud[tp],
+                    'never_seen': face_nv[tp],
+                }
+
+        if colors_vis is None:
+            colors_vis = np.tile(COLOR_NO_DATA, (len(item['P_local']), 1))
+            vis_item_data = {
+                'has_data': False,
+                'scores': np.zeros(len(item['P_local']), dtype=np.float32),
+                'undetermined': np.zeros(len(item['P_local']), dtype=bool),
+                'never_seen': np.zeros(len(item['P_local']), dtype=bool),
+            }
+
         _cache[name] = ObjectHeatmapCache(
             name, item['P_local'], m, rel_d,
             measures_to_colors(m['shape'], rel_d, m['is_degenerate'], 'SHAPE'),
-            measures_to_colors(m['shape'], rel_d, m['is_degenerate'], 'DENSITY'), item['U'])
+            measures_to_colors(m['shape'], rel_d, m['is_degenerate'], 'DENSITY'),
+            colors_visibility=colors_vis, uv=item['U'], vis_data=vis_item_data)
 
     # Legend statistics over the selected objects shown
     entries = [_cache[obj.name] for obj in selected if obj.name in _cache]
@@ -648,7 +717,7 @@ def update_heatmap_cache(context, refresh=True):
         _global_stats = {'skipped_no_uvs': skipped_no_uvs, 'total_tris': 0, 'valid_area': 0.0,
                          'share_above_110': 0.0, 'share_above_125': 0.0, 'share_outside': 0.0,
                          'share_under': 0.0, 'share_over': 0.0, 'share_degenerate': 0.0, 'degenerate_count': 0,
-                         'selection': selection}
+                         'selection': selection, 'share_never_seen': 0.0, 'share_undetermined': 0.0, 'no_data_count': 0}
         return
     all_shape = np.concatenate([e.shape for e in entries])
     all_rel_d = np.concatenate([e.rel_density for e in entries])
@@ -665,6 +734,18 @@ def update_heatmap_cache(context, refresh=True):
         share_over = float(np.sum(all_area3[valid_mask & (all_rel_d > 1.0001)])) / total_valid_area
     else:
         share_110 = share_125 = share_under = share_over = 0.0
+
+    all_vis_has = np.concatenate([np.full(len(e.shape), e.vis_data.get('has_data', False), dtype=bool) for e in entries])
+    all_vis_sc = np.concatenate([e.vis_data.get('scores', np.zeros(len(e.shape), dtype=np.float32)) for e in entries])
+    all_vis_ud = np.concatenate([e.vis_data.get('undetermined', np.zeros(len(e.shape), dtype=bool)) for e in entries])
+    all_vis_nv = np.concatenate([e.vis_data.get('never_seen', np.zeros(len(e.shape), dtype=bool)) for e in entries])
+
+    vis_valid_mask = all_vis_has & (~all_vis_ud) & (~all_vis_nv) & (all_area3 > 0)
+    total_vis_area = float(np.sum(all_area3[all_vis_has])) if np.any(all_vis_has) else 0.0
+
+    share_nv = float(np.sum(all_area3[all_vis_has & all_vis_nv])) / total_vis_area if total_vis_area > 0 else 0.0
+    share_ud = float(np.sum(all_area3[all_vis_has & all_vis_ud])) / total_vis_area if total_vis_area > 0 else 0.0
+
     chart_mask = valid_mask & np.isfinite(all_shape) & np.isfinite(all_rel_d)
     _global_stats = {
         'selection': selection,
@@ -681,7 +762,11 @@ def update_heatmap_cache(context, refresh=True):
         # the distribution behind the panel's chart
         'chart_distortion': all_shape[chart_mask],
         'chart_density': all_rel_d[chart_mask],
-        'chart_area': all_area3[chart_mask],
+        'chart_visibility': all_vis_sc[vis_valid_mask],
+        'chart_area': all_area3[vis_valid_mask] if is_vis else all_area3[chart_mask],
+        'share_never_seen': share_nv,
+        'share_undetermined': share_ud,
+        'no_data_count': sum(1 for e in entries if not e.vis_data.get('has_data', False)),
     }
     _update_chart(context.scene.fss_uv_heatmap_mode, _global_stats)
 
@@ -701,14 +786,20 @@ def _chart_axis(mode):
         def to_x(v):
             return np.clip((np.asarray(v, dtype=np.float64) - 1.0) / 1.0, 0.0, 1.0)
         return to_x, [1.0, 1.10, 1.25, 1.5, 2.0], ['1.0', '1.10', '1.25', '1.5', '2.0+']
-
-    def to_x(v):
-        return np.clip((np.log2(np.maximum(np.asarray(v, dtype=np.float64), 1e-12)) + 1.0) / 2.0, 0.0, 1.0)
-    return to_x, [0.5, 0.71, 1.0, 1.41, 2.0], ['0.5-', '0.71', '1.0', '1.41', '2.0+']
+    elif mode == 'DENSITY':
+        def to_x(v):
+            return np.clip((np.log2(np.maximum(np.asarray(v, dtype=np.float64), 1e-12)) + 1.0) / 2.0, 0.0, 1.0)
+        return to_x, [0.5, 0.71, 1.0, 1.41, 2.0], ['0.5-', '0.71', '1.0', '1.41', '2.0+']
+    else:  # VISIBILITY
+        def to_x(v):
+            return np.clip(np.asarray(v, dtype=np.float64), 0.0, 1.0)
+        return to_x, [0.0, 0.25, 0.5, 0.75, 1.0], ['0.0', '0.25', '0.5', '0.75', '1.0']
 
 
 def _axis_text(mode, value):
     """A value as the chart's axis shows it: beyond the scale's ends as '2.0+' or '0.5-'."""
+    if mode == 'VISIBILITY':
+        return f"{value:.2f}"
     if value > 2.0:
         return '2.0+'
     if mode != 'SHAPE' and value < 0.5:
@@ -725,7 +816,13 @@ def _weighted_quantile(values, weights, q):
 
 def chart_data(mode, stats):
     """Histogram, range bar and text of the chart, without drawing (testable in background)."""
-    values = stats.get('chart_distortion' if mode == 'SHAPE' else 'chart_density')
+    if mode == 'SHAPE':
+        values = stats.get('chart_distortion')
+    elif mode == 'DENSITY':
+        values = stats.get('chart_density')
+    else:
+        values = stats.get('chart_visibility')
+
     areas = stats.get('chart_area')
     if values is None or areas is None or not len(values) or areas.sum() <= 0:
         return None
@@ -740,13 +837,25 @@ def chart_data(mode, stats):
         lines = [f"Over 1.10 (target): {stats.get('share_above_110', 0.0):.1%}",
                  f"Over 1.25 (limit): {stats.get('share_above_125', 0.0):.1%}"]
         marks = [1.10, 1.25]
-    else:
+    elif mode == 'DENSITY':
         bin_values = 2.0 ** (centres * 2.0 - 1.0)
         colors = measures_to_colors(np.ones(CHART_BINS), bin_values, np.zeros(CHART_BINS, bool), 'DENSITY')
         lines = [f"Too low: {stats.get('share_under', 0.0):.1%}", f"Too high: {stats.get('share_over', 0.0):.1%}"]
         marks = [1.0]
+    else:  # VISIBILITY
+        t = centres / 0.5 - 1.0
+        pos = (t >= 0).ravel()
+        colors = np.empty((CHART_BINS, 4), dtype=np.float32)
+        colors[pos] = (1.0 - t[pos, None]) * COLOR_NEUTRAL + t[pos, None] * COLOR_BLUE
+        colors[~pos] = (1.0 + t[~pos, None]) * COLOR_NEUTRAL + (-t[~pos, None]) * COLOR_RED
+        colors[:, 3] = ALPHA
+        lines = [f"Never seen: {stats.get('share_never_seen', 0.0):.1%}",
+                 f"Undetermined: {stats.get('share_undetermined', 0.0):.1%}"]
+        marks = [0.5]
+
     low = _weighted_quantile(values, areas, 0.05)
     high = _weighted_quantile(values, areas, 0.95)
+    title = 'Distortion' if mode == 'SHAPE' else ('Texel density' if mode == 'DENSITY' else 'Visibility')
     return {
         'share': share,
         'colors': colors,
@@ -755,7 +864,7 @@ def chart_data(mode, stats):
         'marks': [float(to_x(m)) for m in marks],
         'range': (float(to_x(low)), float(to_x(high))),
         'range_text': f"90% of surface: {_axis_text(mode, low)} to {_axis_text(mode, high)}",
-        'title': 'Distortion' if mode == 'SHAPE' else 'Texel density',
+        'title': title,
         'lines': lines,
     }
 
@@ -936,8 +1045,13 @@ def _draw_viewport_legend():
     lines = []
 
     # Title & mode
-    mode_text = 'Distortion' if mode == 'SHAPE' else 'Texel Density'
-    lines.append((f'UV Heatmap: {mode_text}', COLOR_TEXT_MAIN, True))
+    if mode == 'SHAPE':
+        mode_text = 'Distortion'
+    elif mode == 'DENSITY':
+        mode_text = 'Texel Density'
+    else:
+        mode_text = 'Visibility'
+    lines.append((f'Heatmap: {mode_text}', COLOR_TEXT_MAIN, True))
 
     # Scale explanation
     if mode == 'SHAPE':
@@ -945,12 +1059,19 @@ def _draw_viewport_legend():
         s110 = stats.get('share_above_110', 0.0)
         s125 = stats.get('share_above_125', 0.0)
         lines.append((f'Surface over 1.10 (target): {s110:.1%} | over 1.25 (limit): {s125:.1%}', COLOR_TEXT_MAIN, False))
-    else:
+    elif mode == 'DENSITY':
         lines.append(('Scale: 0.5 (red) - 1.0 (neutral) - 2.0 (blue), magenta = error', COLOR_TEXT_DIM, False))
         s_out = stats.get('share_outside', 0.0)
         s_und = stats.get('share_under', 0.0)
         s_ovr = stats.get('share_over', 0.0)
         lines.append((f'Surface outside its density range: {s_out:.1%} (too low: {s_und:.1%}, too high: {s_ovr:.1%})', COLOR_TEXT_MAIN, False))
+    else:
+        lines.append(('Scale: 0.0 (red) - 0.5 (neutral) - 1.0 (blue), magenta = never seen, cyan = undetermined', COLOR_TEXT_DIM, False))
+        s_nv = stats.get('share_never_seen', 0.0)
+        s_ud = stats.get('share_undetermined', 0.0)
+        lines.append((f'Never seen: {s_nv:.1%} | Undetermined: {s_ud:.1%}', COLOR_TEXT_MAIN, False))
+        if stats.get('no_data_count', 0) > 0:
+            lines.append((f'No data (or stale): {stats.get("no_data_count", 0)} object(s) in dark grey', COLOR_TEXT_WARN, False))
 
     # Degenerate info
     deg_cnt = stats.get('degenerate_count', 0)
@@ -1017,7 +1138,7 @@ class FSS_OT_UvHeatmapRefresh(bpy.types.Operator):
 
 class FSS_PT_UvHeatmap(bpy.types.Panel):
     bl_idname = 'FSS_PT_uv_heatmap'
-    bl_label = 'UV Heatmap'
+    bl_label = 'Heatmap'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'FSS Tools'
@@ -1027,7 +1148,7 @@ class FSS_PT_UvHeatmap(bpy.types.Panel):
         scene = context.scene
 
         row = layout.row(align=True)
-        row.prop(scene, 'fss_uv_heatmap_show', text='Show UV Heatmap', icon='RESTRICT_VIEW_OFF' if scene.fss_uv_heatmap_show else 'RESTRICT_VIEW_ON')
+        row.prop(scene, 'fss_uv_heatmap_show', text='Show Heatmap', icon='RESTRICT_VIEW_OFF' if scene.fss_uv_heatmap_show else 'RESTRICT_VIEW_ON')
         row.operator(FSS_OT_UvHeatmapRefresh.bl_idname, text='', icon='FILE_REFRESH')
 
         if scene.fss_uv_heatmap_show:
@@ -1053,15 +1174,20 @@ class FSS_PT_UvHeatmap(bpy.types.Panel):
                 if scene.fss_uv_heatmap_mode == 'SHAPE':
                     box.label(text=f"Over 1.10 (target): {stats.get('share_above_110', 0.0):.1%} of surface")
                     box.label(text=f"Over 1.25 (limit): {stats.get('share_above_125', 0.0):.1%} of surface")
-                else:
+                elif scene.fss_uv_heatmap_mode == 'DENSITY':
                     box.label(text=f"Outside density range: {stats.get('share_outside', 0.0):.1%} of surface")
                     box.label(text=f"  too low: {stats.get('share_under', 0.0):.1%}, too high: {stats.get('share_over', 0.0):.1%}")
+                else:
+                    box.label(text=f"Never seen: {stats.get('share_never_seen', 0.0):.1%} of surface")
+                    box.label(text=f"Undetermined: {stats.get('share_undetermined', 0.0):.1%} of surface")
+                    if stats.get('no_data_count', 0) > 0:
+                        box.label(text=f"No data / stale: {stats.get('no_data_count', 0)} object(s)", icon='INFO')
                 if stats.get('degenerate_count', 0) > 0:
                     box.label(text=f"Error: {stats.get('share_degenerate', 0.0):.1%} ({stats.get('degenerate_count', 0)} faces without area)", icon='ERROR')
             elif stats.get('skipped_no_uvs'):
                 box.label(text=f"Skipped (no UVs): {', '.join(stats.get('skipped_no_uvs'))}", icon='CANCEL')
             else:
-                box.label(text='Select mesh object(s) with UVs', icon='INFO')
+                box.label(text='Select mesh object(s)', icon='INFO')
 
 
 CLASSES = (
@@ -1078,10 +1204,10 @@ def register():
     _previews = bpy.utils.previews.new()
 
     bpy.types.Scene.fss_uv_heatmap_show = bpy.props.BoolProperty(
-        name='Show UV Heatmap',
+        name='Show Heatmap',
         default=False,
         options={'SKIP_SAVE'},
-        description='Display UV distortion heatmap overlay on selected mesh objects in the 3D viewport',
+        description='Display heatmap overlay on selected mesh objects in the 3D viewport',
         update=_on_toggle_show,
     )
 
@@ -1091,6 +1217,7 @@ def register():
             ('SHAPE', 'Distortion', 'Distortion of each face\'s shape in the UVs (1.0 neutral, > 1.0 stretched or '
                                     'sheared)'),
             ('DENSITY', 'Density', 'Texel density relative to material median and object range (0.5 red, 1.0 neutral, 2.0 blue)'),
+            ('VISIBILITY', 'Visibility', 'Visibility from artist cameras (0.0 red, 0.5 neutral, 1.0 blue)'),
         ],
         default='SHAPE',
         options={'SKIP_SAVE'},
