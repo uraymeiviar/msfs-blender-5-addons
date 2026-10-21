@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="680" height="564" viewBox="0 0 680 564" role="img" font-family="Segoe UI, Arial, sans-serif">
+  <title>LOD export flow</title>
+  <desc>The saved blend file is exported once per LOD file: reload the full model, remove parts by marks and size, remove small loose pieces, merge each merge group, write the LOD file; repeat for the next LOD; stop at the first empty LOD. The blend file is never changed.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect width="680" height="564" fill="#FFFFFF"/>
+  <g dominant-baseline="central" text-anchor="middle">
+    <rect x="220" y="30" width="240" height="56" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+    <text x="340" y="48" font-size="14" font-weight="600" fill="#444441">COCKPIT.blend</text>
+    <text x="340" y="68" font-size="12" fill="#5F5E5A">Saved, full model</text>
+    <line x1="340" y1="86" x2="340" y2="108" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <rect x="120" y="110" width="440" height="370" rx="12" fill="none" stroke="#888780" stroke-width="0.75" stroke-dasharray="5 4"/>
+    <text x="140" y="134" font-size="14" font-weight="600" fill="#444441" text-anchor="start">For each LOD file, _LOD00 to _LOD06</text>
+    <rect x="190" y="152" width="300" height="44" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+    <text x="340" y="174" font-size="14" font-weight="600" fill="#444441">Reload the full model</text>
+    <line x1="340" y1="196" x2="340" y2="214" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <rect x="190" y="216" width="300" height="44" rx="8" fill="#FAECE7" stroke="#993C1D" stroke-width="0.75"/>
+    <text x="340" y="238" font-size="14" font-weight="600" fill="#712B13">Remove parts: marks and size</text>
+    <line x1="340" y1="260" x2="340" y2="278" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <rect x="190" y="280" width="300" height="44" rx="8" fill="#FAECE7" stroke="#993C1D" stroke-width="0.75"/>
+    <text x="340" y="302" font-size="14" font-weight="600" fill="#712B13">Remove small loose pieces</text>
+    <line x1="340" y1="324" x2="340" y2="342" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <rect x="190" y="344" width="300" height="44" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+    <text x="340" y="366" font-size="14" font-weight="600" fill="#3C3489">Merge each merge group</text>
+    <line x1="340" y1="388" x2="340" y2="406" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <rect x="190" y="408" width="300" height="44" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+    <text x="340" y="430" font-size="14" font-weight="600" fill="#085041">Write COCKPIT_LODnn.gltf</text>
+    <text x="340" y="468" font-size="12" fill="#5F5E5A">↻ repeat for the next LOD</text>
+    <rect x="120" y="500" width="440" height="44" rx="8" fill="#FFFFFF" stroke="#B4B2A9" stroke-width="0.75"/>
+    <text x="340" y="522" font-size="14" fill="#2C2C2A">Stops at the first empty LOD; the .blend is never changed</text>
+  </g>
+</svg>

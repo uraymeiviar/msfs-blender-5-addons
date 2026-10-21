@@ -28,7 +28,7 @@ The cockpit and the exterior go through the same steps. They differ in their cam
 - **Check:** how you know the step is done.
 - **Redo when:** what makes the step worth doing again, and what that costs.
 
-The order follows what each step needs from the ones before it: packing needs the texture sets (step 2) and the densities (step 7); the LOD export needs the units you modelled (step 3). It is not a fixed sequence. Everything before texturing is cheap to change, and you will go back and forth: a new part, a moved zone or a changed mark means running the later steps again. Texturing is where changes start to cost: once a texture set is painted, changing its UVs, zone or material means baking again and carrying the painting over. Settle what feeds a texture set before you paint it.
+The order follows what each step needs from the ones before it: packing needs the texture sets (step 2) and the densities (step 7); the LOD export needs the loose pieces you modelled (step 3). It is not a fixed sequence. Everything before texturing is cheap to change, and you will go back and forth: a new part, a moved zone or a changed mark means running the later steps again. Texturing is where changes start to cost: once a texture set is painted, changing its UVs, zone or material means baking again and carrying the painting over. Settle what feeds a texture set before you paint it.
 
 Steps marked **in development** describe what the tool will do, and how to get the same result by hand until it exists.
 
@@ -36,7 +36,7 @@ Steps marked **in development** describe what the tool will do, and how to get t
 | :--- | :--- | :--- | :--- |
 | [1. Scene, Hierarchy and Names](#1-scene-hierarchy-and-names) | Tools, Empty Bounds, Checks | available | `modeling.md` |
 | [2. Zones and Materials](#2-zones-and-materials-in-development) | zone tool | in development: by hand | `materials.md`, `texturing.md` |
-| [3. Units](#3-units-what-is-one-piece) | LOD hints, Viewport LOD | a modelling decision | `lods.md` |
+| [3. Loose Pieces](#3-loose-pieces-what-disappears-together) | LOD hints, Viewport LOD | a modelling decision | `lods.md` |
 | [4. Merge Tree](#4-merge-tree) | Tags, Merge Tree | available | `modeling.md` |
 | [5. LOD](#5-lod) | LOD | available | `lods.md` |
 | [6. Seams and Unwrap](#6-seams-and-unwrap) | Auto Seam, UV Marks, Heatmap | available | `uv-mapping.md` |
@@ -51,8 +51,11 @@ Steps marked **in development** describe what the tool will do, and how to get t
 
 **Do:**
 
-- The scene name is the `.blend` file name (for example `COCKPIT`); it is used in the material names (step 2).
-- Give the model one root empty, with the zones (step 2) and parts below it.
+- The scene name is the `.blend` file name (for example `COCKPIT`); it is used in the root's name (below) and in the material names (step 2).
+- Give the model one root empty, `EMPTY_ROOT_<SCENE>` (for example `EMPTY_ROOT_COCKPIT`, `EMPTY_ROOT_CABIN`, `EMPTY_ROOT_WING`), with the zones (step 2) and parts below it. The root is the anchor of the scene:
+  - **Its position relative to the aircraft datum** (the world origin) places the scene in the aircraft. Everything below it moves with it: a longer variant's cockpit is the same cockpit with its root moved forward.
+  - **Place it at the centre of the LOD sphere**, inside the scene, never on the datum. MSFS measures how large the model is on screen from that centre, so a camera there always sees `_LOD00`. MSFS works out the centre itself, from the geometry and every origin; the root does not set it, but a root far outside the geometry would move and enlarge the sphere (the root is exported, and its origin counts like every other). Compare it with **Show LOD Sphere** (step 5).
+  - To move the root without moving what is below it, turn on **Options > Transform > Affect Only: Parents** in the 3D Viewport header, move it, and turn the option off again.
 - Use **Add Empty Parent** to group parts without moving them, and **Origin to Bounding Box** to bring origins back into their geometry (not on objects whose own transform is animated). See [Tools](fss-tools.md#tools).
 - Run **Scan Names** and **Fix Broken Bone Parents** in [Checks](fss-tools.md#checks).
 - **Empty Bounds** shows what each empty contains; use it to check the hierarchy. See [Empty Bounds](fss-tools.md#empty-bounds).
@@ -63,13 +66,23 @@ Steps marked **in development** describe what the tool will do, and how to get t
 
 ### 2. Zones and Materials (in development)
 
-**Why:** every material an object uses is one draw call, and every material has its own texture set. A **zone** is a part of the model with its own materials and texture sets, for example the overhead panel, the pedestal or the cabin rear. Zones are your choice; they depend on the scene. Within a zone there is one material, and one texture set, per **material class** (standard, emissive, decal, glass and so on). Packing (step 8) packs one texture set at a time, so zones and materials must be decided before UVs are packed.
+**Why:** a **zone** is a part of the scene that is seen together, for example the forward cockpit (main panel, glareshield, pedestal) and the rear cockpit (behind the seats, the aft ceiling), or the front and rear cabin. Zones are your choice; they depend on the scene. Each zone has its own materials and texture sets, for three reasons:
 
-**What the tool will do:** zones as empties named `@ZONE_<NAME>` below the root; materials named `<SCENE>_<ZONE>_<CLASS>`, for example `COCKPIT_OVHD_STD` or `COCKPIT_OVHD_DECAL`; the texture size taken from the zone's material (4K if none is set). Classes follow the MSFS material types: `STD`, `STD_EM`, `DECAL`, `DECAL_EM`, `DECAL_FROST`, `DECAL_BLEND`, `GLASS`, `WNDSHIELD`, `INVIS`, `OCCLUDER`, `SCREEN`, `ANISO`, `CLEARCOAT`, `PORTHOLE`, `PARALLAX`, `FRESNEL`, `PROPELLER`.
+- **Video memory:** a texture stays loaded as long as any part of it may be on screen. If forward and rear parts share a texture, the rear half stays in memory while the pilot looks forward, although it is never seen. Separate zones keep what is out of view from holding memory for what is in view. See "When Separate Textures Are Better" in `texturing.md` of the MSFS Authoring Guide.
+- **Texel density:** each zone will get its own density multiplier, so the packer can give the rarely seen rear zone less texture and the forward zone more (step 7).
+- **Culling:** MSFS leaves out what is out of view by each node's bounding box. An object with parts both at the windshield and at the rear has a box across the whole cockpit, and is never left out. Zones make such objects easy to find: select a zone's empty, and [Empty Bounds](fss-tools.md#empty-bounds) shows its box reaching into the other zone. They also keep merge groups apart (step 4).
+
+Within a zone there is one material, and one texture set, per **material class** (standard, emissive, decal, glass and so on). Packing (step 8) packs one texture set at a time, so it follows the zones and materials.
+
+**What the tool will do:** zones as empties named `@ZONE_<NAME>` below the root, every part below one zone:
+
+![EMPTY_ROOT_COCKPIT contains the zones @ZONE_FWD and @ZONE_AFT. @ZONE_FWD uses the materials COCKPIT_FWD_STD and so on, and holds the merge group @MERGE_MAIN_PANEL: the panel shell and screws merge into one mesh, while the animated SWITCH_APU and the tagged MFD_SCREEN stay their own nodes. @ZONE_AFT uses COCKPIT_AFT_STD and so on.](images/scene-hierarchy.svg)
+
+Materials are named `<SCENE>_<ZONE>_<CLASS>`: the scene from the root, the zone from its empty, the class from the MSFS material type. Objects below `@ZONE_FWD` with a standard material use `COCKPIT_FWD_STD`. The texture size is taken from the zone's material (4K if none is set). Classes follow the MSFS material types: `STD`, `STD_EM`, `DECAL`, `DECAL_EM`, `DECAL_FROST`, `DECAL_BLEND`, `GLASS`, `WNDSHIELD`, `INVIS`, `OCCLUDER`, `SCREEN`, `ANISO`, `CLEARCOAT`, `PORTHOLE`, `PARALLAX`, `FRESNEL`, `PROPELLER`.
 
 **Meanwhile, by hand:**
 
-- Group each zone's parts under one empty with an ordinary name (the `@ZONE_` prefix is not supported by the exporter yet).
+- Create the zone empties now, named `@ZONE_<NAME>` below the root, and put every part below one of them. The export drops the leading `@`: `@ZONE_FWD` becomes the node `ZONE_FWD`.
 - Name the materials `<SCENE>_<ZONE>_<CLASS>`, one per zone and class, and set each material's MSFS type to match its class. Auto Seam already skips objects whose materials are all decal, glass, windshield, invisible or occluder, by these class names or by the MSFS type.
 - Keep the number of materials low: see `materials.md` in the MSFS Authoring Guide.
 
@@ -77,15 +90,24 @@ Steps marked **in development** describe what the tool will do, and how to get t
 
 **Redo when:** a zone turns out too full or nearly empty for its texture. Each change here changes a texture set, so packing follows, and repainting if the set was already textured.
 
-### 3. Units: What Is One Piece
+### 3. Loose Pieces: What Disappears Together
 
-**Why:** the LOD export removes whole **parts** (objects with their children) and, inside a mesh, **loose pieces** (connected geometry) when they are too small to see at a LOD. So the topology you model decides what disappears together. A floor plate and its screws are different units: each screw should be able to disappear on its own. But a screw whose head and body are not connected is two loose pieces: the head disappears first, then the body, which looks wrong. See [How the Automatic LODs Work](lod.md#how-the-automatic-lods-work).
+**Why:** a LOD deploy exports your `.blend` once for each LOD file, every time from the full model: first it removes what is too small to see at that LOD, then it merges (step 4) and exports. Lower LODs have fewer vertices only because things are removed; nothing is simplified.
+
+![For each LOD file, the deploy reloads the full model from the saved .blend, removes parts by marks and size, removes small loose pieces, merges each merge group and writes COCKPIT_LODnn.gltf; it stops at the first empty LOD, and the .blend is never changed.](images/lod-export-flow.svg)
+
+Two kinds of things are removed by their size:
+
+- **parts:** an object with everything below it, sized by the box around all of it;
+- **loose pieces:** connected geometry inside one mesh. Geometry that shares no vertices with the rest is its own loose piece, however you combined it: in one object, joined with `Ctrl+J`, or in a merge group. Each loose piece is sized and removed on its own.
+
+So the topology you model decides what disappears together. A floor plate and its screws should come apart: each screw can disappear on its own. But a screw whose head and body are not connected is two loose pieces: the head disappears first, then the body, which looks wrong. See [How the Automatic LODs Work](lod.md#how-the-automatic-lods-work).
 
 **Do:**
 
 - **Connect** what must disappear together: join the head and body of the screw with a few edges or faces, so they become one loose piece.
 - **Separate** what should be able to disappear on its own: split it into its own loose piece, or its own object, so the size rule can remove it while the rest stays.
-- This is a modelling decision about units and assemblies; no tool decides it for you. The LOD panel's hints (step 5) show which loose pieces would be dropped at each LOD.
+- This is a modelling decision about what belongs together; no tool decides it for you. The LOD panel's hints (step 5) show which loose pieces would be dropped at each LOD.
 
 **Check:** with the viewport LOD preview (step 5), small assemblies disappear as a whole, not piece by piece.
 
@@ -162,6 +184,8 @@ Steps marked **in development** describe what the tool will do, and how to get t
 ### 8. Packing (in development)
 
 **Why:** each texture set (step 2) is one texture. All islands that use it must fit into it, at the texel density each part should get (step 7), with enough space between islands that they do not bleed into each other at lower mip levels.
+
+![Seams, from Auto Seam or by hand, and the unwrap produce the UV islands; each island's visibility comes from the scores of its seen faces. The density mark range from UV Marks times the zone multiplier times the island visibility gives a density ratio range without unit; that ratio times the target density gives the island's density range in pixels per centimetre. The zone also decides the texture set: the packer packs one texture set per zone and class, each island inside its range.](images/zone-visibility-packing.svg)
 
 **What the tool will do:** pack each texture set from its materials and zones, scale each island to its density range, turn islands only as their **direction** mark allows, keep mirrored or shared parts stacked, and use each material's **margin**.
 
@@ -246,9 +270,10 @@ If your version is newer than 0.24.1, some labels or buttons may differ from thi
 | **Mark** | Something you put on an object to tell an automatic tool what it cannot work out itself: an override or a hint. Marks live in the `.blend`; MSFS never sees them. Three kinds: **LOD marks** in the [LOD](lod.md#marks) panel (from which LOD a part is left out or shown, or **Keep**); **UV marks** in the [UV Marks](fss-tools.md#uv-marks) panel (the target density for packing, how islands may turn, **Skip Auto Seam**), inherited by the objects below; and **tags**. |
 | **Material class** | The kind of material (standard, emissive, decal, glass and so on), the last part of a material name `<SCENE>_<ZONE>_<CLASS>`. |
 | **Merge group** | An object named `@MERGE_<name>` whose subtree becomes one mesh at export. |
-| **Name prefix** | `@MERGE_`, `@NOMERGE_` (see [Merge Tree](fss-tools.md#merge-tree)), and the planned `@ZONE_`: a prefix in an object's name that the export acts on. The prefix never reaches the glTF. |
+| **Name prefix** | `@MERGE_`, `@NOMERGE_` (see [Merge Tree](fss-tools.md#merge-tree)) and `@ZONE_` (step 2): a prefix in an object's name that the tools act on. The export removes `@MERGE_` and `@NOMERGE_` entirely, and the leading `@` of any other name: `@ZONE_FWD` becomes `ZONE_FWD`. |
 | **Origin** | The object's own point (orange dot in Blender). In the glTF it becomes the node position. |
 | **Part** | An object together with all objects below it in the hierarchy. |
+| **Root** | The empty `EMPTY_ROOT_<SCENE>` at the top of a scene's hierarchy: the anchor that places the scene relative to the aircraft datum. |
 | **Tag** | A mark you define yourself: a label that classifies objects, for example `SCREEN`. You select objects by tag, and a tag's **Don't Merge** and **Keep** settings apply to every object that carries it. |
 | **Texture set** | The textures of one material, shared by every object that uses it; one zone and class. |
 | **Zone** | A part of the model with its own materials and texture sets, chosen by you for the scene. |

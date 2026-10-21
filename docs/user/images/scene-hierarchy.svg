@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="680" height="440" viewBox="0 0 680 440" role="img" font-family="Segoe UI, Arial, sans-serif">
+  <title>Scene hierarchy</title>
+  <desc>EMPTY_ROOT_COCKPIT, with its origin at the LOD sphere centre, contains the zones @ZONE_FWD and @ZONE_AFT. @ZONE_FWD uses the materials COCKPIT_FWD_STD and so on, and contains the merge group @MERGE_MAIN_PANEL: the panel shell and screws merge into one mesh per LOD, while the animated SWITCH_APU and MFD_SCREEN, tagged SCREEN, stay their own nodes. @ZONE_AFT uses COCKPIT_AFT_STD and so on, for the seats and aft panels.</desc>
+  <rect width="680" height="440" fill="#FFFFFF"/>
+  <g dominant-baseline="central">
+    <rect x="40" y="20" width="600" height="390" rx="20" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+    <text x="64" y="46" font-size="14" font-weight="600" fill="#444441">EMPTY_ROOT_COCKPIT</text>
+    <text x="64" y="64" font-size="12" fill="#5F5E5A">Origin at the LOD sphere centre</text>
+    <rect x="60" y="84" width="380" height="306" rx="12" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+    <text x="80" y="108" font-size="14" font-weight="600" fill="#085041">@ZONE_FWD</text>
+    <text x="80" y="126" font-size="12" fill="#0F6E56">Materials COCKPIT_FWD_STD, ...</text>
+    <rect x="80" y="144" width="340" height="226" rx="10" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+    <text x="100" y="168" font-size="14" font-weight="600" fill="#3C3489">@MERGE_MAIN_PANEL</text>
+    <text x="100" y="186" font-size="12" fill="#534AB7">One mesh per LOD at export</text>
+    <rect x="100" y="206" width="300" height="40" rx="6" fill="#FFFFFF" stroke="#B4B2A9" stroke-width="0.75"/>
+    <text x="116" y="226" font-size="14" fill="#2C2C2A">PANEL_SHELL, screws: merged</text>
+    <rect x="100" y="258" width="300" height="40" rx="6" fill="#FFFFFF" stroke="#B4B2A9" stroke-width="0.75"/>
+    <text x="116" y="278" font-size="14" fill="#2C2C2A">SWITCH_APU: animated, own node</text>
+    <rect x="100" y="310" width="300" height="40" rx="6" fill="#FFFFFF" stroke="#B4B2A9" stroke-width="0.75"/>
+    <text x="116" y="330" font-size="14" fill="#2C2C2A">MFD_SCREEN: tag SCREEN, own node</text>
+    <rect x="460" y="84" width="160" height="306" rx="12" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+    <text x="480" y="108" font-size="14" font-weight="600" fill="#085041">@ZONE_AFT</text>
+    <text x="480" y="126" font-size="12" fill="#0F6E56">COCKPIT_AFT_STD, ...</text>
+    <rect x="476" y="206" width="128" height="40" rx="6" fill="#FFFFFF" stroke="#B4B2A9" stroke-width="0.75"/>
+    <text x="540" y="226" font-size="14" fill="#2C2C2A" text-anchor="middle">Seats, aft panels</text>
+  </g>
+</svg>
