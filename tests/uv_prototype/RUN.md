@@ -463,3 +463,33 @@ then render the resulting UV meshes side-by-side using `matplotlib`:
 .\venv\Scripts\python.exe -I generate_side_by_side_images.py
 ```
 
+## 11. Visibility-Based Texel Demand Prototype (`visibility_proto.py`)
+
+Measures per-face texel demand (screen pixels per square metre of 3D surface area) from reference cameras across multiple animation passes, using background GPU face-ID rendering.
+
+Decisions implemented:
+- **Storage:** External `<blend_name>.visibility` file alongside the `.blend` (Option 1).
+- **Mirror Modifiers:** Evaluated geometry with mirrored face mapping; takes $\max(\text{orig}, \text{mirrored})$ demand per face (Option 2B).
+- **Animations:** 3 global animation passes at 0%, 50%, and 100% travel across all NLA tracks simultaneously (Option 3A).
+- **Reference Demand:** Area-weighted median demand of the primary forward view from the pilot camera defines 1.0 (Option 4B).
+- **Aggregation:** $\max$ per face across camera views and animation passes; area-weighted 90th percentile per object (Option 5). Never-seen faces receive 0 demand and are reported as delete candidates.
+
+### Commands
+
+Execute from the repository root with Blender 5.2.2 LTS in background mode:
+
+```powershell
+$B = "G:\e-jets-e2\tools\blender\blender.exe"
+
+# 1. Run synthetic validation on 4 known cases (Front vs Back, Shell Occlusion, Half-Covered, Recessed Niche)
+& $B -b --factory-startup --python tests/uv_prototype/visibility_proto.py -- --synthetic
+
+# 2. Run complete analysis on E2 Cockpit copy (2 cameras, 3 passes, renders heatmap images and checks glTF export)
+& $B -b "tests/_work/uv_visibility/COCKPIT_copy.blend" --factory-startup --python tests/uv_prototype/visibility_proto.py -- --cockpit
+```
+
+Outputs written to `tests/_work/uv_visibility/`:
+- `<blend_name>.visibility`: Compressed NPZ archive containing JSON metadata, per-mesh demand/pixels/area arrays, and per-object summaries.
+- `pilot_demand.png`: 1080p offscreen render of the cockpit from the pilot camera coloured by texel demand.
+- `outside_demand.png`: 1080p offscreen render from an exterior isometric view highlighting never-seen exterior surfaces (dark grey) and interior demand.
+
