@@ -1009,6 +1009,19 @@ class FSS_OT_UvProposeSeams(bpy.types.Operator):
         return {'PASS_THROUGH'}
 
 
+def _in_object_mode(context, work):
+    """Run work() with the mesh data current: in Edit Mode the mesh's own attributes are not filled (Blender keeps
+    an editing copy), so switch to Object Mode for the work and back afterwards."""
+    was_edit = context.mode == 'EDIT_MESH'
+    if was_edit:
+        bpy.ops.object.mode_set(mode='OBJECT')
+    try:
+        return work()
+    finally:
+        if was_edit:
+            bpy.ops.object.mode_set(mode='EDIT')
+
+
 class FSS_OT_UvClearAutoSeams(bpy.types.Operator):
     bl_idname = 'fss.uv_clear_auto_seams'
     bl_label = 'Clear Auto Seams'
@@ -1024,9 +1037,8 @@ class FSS_OT_UvClearAutoSeams(bpy.types.Operator):
         for o in context.selected_objects:
             if o.type == 'MESH' and _editable(o) and o.data:
                 meshes.add(o.data)
-        cleared_total = 0
-        for m in sorted(meshes, key=lambda m: m.name):
-            cleared_total += clear_auto_seams(m)
+        cleared_total = _in_object_mode(context, lambda: sum(clear_auto_seams(m)
+                                                             for m in sorted(meshes, key=lambda m: m.name)))
         self.report({'INFO'}, f"Cleared auto seams on {len(meshes)} mesh(es)")
         return {'FINISHED'}
 
@@ -1046,9 +1058,8 @@ class FSS_OT_UvKeepAsArtistSeams(bpy.types.Operator):
         for o in context.selected_objects:
             if o.type == 'MESH' and _editable(o) and o.data:
                 meshes.add(o.data)
-        kept_total = 0
-        for m in sorted(meshes, key=lambda m: m.name):
-            kept_total += keep_as_artist_seams(m)
+        kept_total = _in_object_mode(context, lambda: sum(keep_as_artist_seams(m)
+                                                          for m in sorted(meshes, key=lambda m: m.name)))
         self.report({'INFO'}, f"Converted auto seams to artist seams on {len(meshes)} mesh(es)")
         return {'FINISHED'}
 

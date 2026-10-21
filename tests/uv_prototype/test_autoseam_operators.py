@@ -282,6 +282,36 @@ def test_keep_as_artist_seams():
     print("  -> PASS: Kept seams remain preserved as artist seams in subsequent runs.")
 
 
+def test_keep_and_clear_from_edit_mode():
+    """Keep as Artist Seams and Clear Auto Seams work when clicked in Edit Mode, and the change survives leaving it."""
+    print("Test 5b: Keep and Clear from Edit Mode...")
+    bpy.ops.wm.read_homefile(use_empty=True)
+    obj = create_cube("EditModeObj")
+    me = obj.data
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.fss.uv_propose_seams()
+    auto_cnt, artist_cnt = uv_autoseam.get_mesh_seam_counts(me)
+    assert auto_cnt > 0
+
+    bpy.ops.object.mode_set(mode='EDIT')
+    assert bpy.ops.fss.uv_keep_as_artist_seams() == {'FINISHED'}
+    assert bpy.context.mode == 'EDIT_MESH', "the button returns to Edit Mode"
+    bpy.ops.object.mode_set(mode='OBJECT')
+    assert uv_autoseam.AUTO_SEAM_ATTR not in me.attributes, "leaving Edit Mode must not bring the mark back"
+    kept_auto, kept_artist = uv_autoseam.get_mesh_seam_counts(me)
+    assert (kept_auto, kept_artist) == (0, artist_cnt + auto_cnt), (kept_auto, kept_artist)
+
+    bpy.ops.fss.uv_propose_seams()  # new auto seams on top of the kept ones
+    bpy.ops.object.mode_set(mode='EDIT')
+    assert bpy.ops.fss.uv_clear_auto_seams() == {'FINISHED'}
+    assert bpy.context.mode == 'EDIT_MESH'
+    bpy.ops.object.mode_set(mode='OBJECT')
+    cleared_auto, cleared_artist = uv_autoseam.get_mesh_seam_counts(me)
+    assert cleared_auto == 0 and cleared_artist == kept_artist, (cleared_auto, cleared_artist)
+    print("  -> PASS: Keep and Clear work from Edit Mode and the change survives leaving it.")
+
+
 def test_select_operators_in_edit_mode():
     """Verify Select Auto Seams and Select Artist Seams in Edit Mode."""
     print("Test 6: Select operators in Edit Mode...")
@@ -767,6 +797,7 @@ def main():
     test_artist_seams_preservation()
     test_second_propose_replaces_only_auto_seams()
     test_keep_as_artist_seams()
+    test_keep_and_clear_from_edit_mode()
     test_select_operators_in_edit_mode()
     test_state_restoration()
     test_e2_objects_run()
