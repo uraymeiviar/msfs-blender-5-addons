@@ -29,15 +29,31 @@ The **Auto Seam** panel (sidebar `N` > **FSS Tools** > **Auto Seam**) proposes s
 
 Accept, Discard and Clear act on whole objects, also when clicked in Edit Mode. **Ctrl+Z** undoes each of them.
 
+## Distortion Limit
+
+The **Distortion Limit** slider above **Propose Seams** sets how much an island may stretch before the tool cuts it:
+
+- **Lower (towards Less distortion):** islands keep their shape better, but there are more islands, more seams and more vertices (every seam splits vertices, which count toward the MSFS LOD vertex limit).
+- **Higher (towards Fewer islands):** fewer islands, seams and vertices, but more stretch inside the islands.
+- **1.25** is the default, used before the slider existed. **1.0** would mean no stretch at all, which only flat pieces can manage; the slider therefore starts above it.
+- The slider moves from 1.10 to 1.60, the range that has been measured. You can type values from 1.05 to 2.0; outside 1.10 to 1.60 the results are untested.
+- It mostly changes **large shells** (overhead, floor, trim panels). Small parts such as knobs and buttons usually keep the same islands at any value, because your seams and the material borders already decide them.
+- One step does not always change a single object the expected way: the tool merges pieces one at a time, so a looser limit can occasionally end with a few more islands on one mesh. Over many objects, higher always meant fewer islands.
+- The setting is saved with the `.blend` and applies to the next **Propose Seams**; the report states the limit it used.
+- The limit measures how much the area of the triangles in an island changes on average; the [Heatmap](#heatmap-distortion-texel-density-and-visibility)'s **Distortion** mode measures how much each face is sheared. An island inside the limit can still show some blue faces in the heatmap.
+
+On 17 cockpit test parts, 1.10 gave about 15 % more islands and 26 % more extra vertices than 1.25, and 1.60 about 16 % fewer islands and 27 % fewer extra vertices.
+
 ## The Workflow
 
 1. **Mark your critical seams by hand** (optional): wherever you want a specific texture layout, for example along panel joints, visible exterior cuts, or mirrored symmetry edges.
 2. **Select objects** in Object Mode.
-3. **Propose Seams:** a dialog lists the meshes to process, shared meshes, and any skipped objects. Click **OK** to run.
-4. **Review in Edit Mode** (`Tab`) with **Select Proposed** and **Select Current**, and with the **Heatmap** after a test unwrap.
-5. **Adjust if needed:** add seams by hand, or remove unwanted ones.
-6. **Accept Proposed** when you are happy, or **Discard Proposed** to drop the proposal.
-7. **Unwrap:** in Edit Mode, select all faces and unwrap with **UV > Unwrap** (Angle Based).
+3. **Set the Distortion Limit** if the default does not suit the part (see [Distortion Limit](#distortion-limit)).
+4. **Propose Seams:** a dialog lists the meshes to process, shared meshes, and any skipped objects. Click **OK** to run.
+5. **Review in Edit Mode** (`Tab`) with **Select Proposed** and **Select Current**, and with the **Heatmap** after a test unwrap.
+6. **Adjust if needed:** add seams by hand, or remove unwanted ones.
+7. **Accept Proposed** when you are happy, or **Discard Proposed** to drop the proposal.
+8. **Unwrap:** in Edit Mode, select all faces and unwrap with **UV > Unwrap** (Angle Based).
 
 **Packing can wait.** You may pack now, for example to review the **Density** heatmap or to try a texture. Packing is quick to redo: pack again whenever zones, materials or density marks change. It becomes costly once texturing has started, because moving islands then means baking again and carrying the painting over. See [The Pipeline, step 8](README.md#8-packing-in-development).
 
@@ -68,6 +84,7 @@ To open the full report: switch any workspace area to the **Text Editor**, click
 
 1. **Summary at the top:**
    - Total meshes processed and total runtime in seconds.
+   - The **Distortion Limit** used for the run.
    - Number of meshes needing attention (and how many are clean).
 2. **Meshes needing attention first:** any mesh with high distortion, unflattenable charts, or overlapping triangles is listed at the top so you can address issues quickly.
 3. **Clean meshes:** listed below the attention block.

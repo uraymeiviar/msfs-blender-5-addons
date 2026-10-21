@@ -129,7 +129,7 @@ The density, direction, and skip buttons act on all selected objects. The **Min*
 
 ## Auto Seam
 
-Automated UV seam proposal for hard-surface meshes. See [uv.md](uv.md) for the complete guide, workflow, readable reports, and limits.
+Automated UV seam proposal for hard-surface meshes, with a **Distortion Limit** slider between less distortion and fewer islands. See [uv.md](uv.md) for the complete guide, workflow, readable reports, and limits.
 
 ## Visibility Test
 

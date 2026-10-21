@@ -764,7 +764,8 @@ def test_report_attention_counts():
     # 1. Summary at the top
     assert lines[0].startswith("# FSS Auto Seam Report")
     assert lines[1] == "# Meshes processed: 2 in 1.57s"
-    assert lines[2] == "# Meshes needing attention: 1 (1 clean)"
+    assert lines[2] == "# Distortion limit: 1.25"
+    assert lines[3] == "# Meshes needing attention: 1 (1 clean)"
 
     # 2. Meshes needing attention listed first
     att_pos = -1
@@ -797,6 +798,39 @@ def test_report_attention_counts():
     print("  -> PASS: Report summary, attention ordering, plain wording, and separate over_limits verified.")
 
 
+def test_distortion_limit():
+    """The panel's Distortion Limit reaches the core and the report; a higher limit gives fewer seams."""
+    print("Test 13: Distortion limit...")
+    bpy.ops.wm.read_homefile(use_empty=True)
+    scene = bpy.context.scene
+    assert abs(scene.fss_uv_autoseam_limit - 1.25) < 1e-6, "default limit must stay 1.25"
+    bpy.ops.mesh.primitive_uv_sphere_add(segments=24, ring_count=12)
+    obj = bpy.context.active_object
+    counts = {}
+    for limit in (1.10, 1.60):
+        scene.fss_uv_autoseam_limit = limit
+        uv_autoseam.clear_auto_seams(obj.data)
+        bpy.ops.fss.uv_propose_seams()
+        text = bpy.data.texts[uv_autoseam.REPORT_TEXT_NAME].as_string()
+        assert f"# Distortion limit: {limit:.2f}" in text, f"report must state limit {limit}"
+        counts[limit] = uv_autoseam.get_mesh_seam_counts(obj.data)[0]
+        _, _, rep = uv_autoseam.propose(obj, limit=limit)
+        assert rep['limit'] == limit
+        assert all(i['distortion'] > limit or i['overlap'] for i in rep['islands_over_limits'])
+    print(f"  proposed seams: {counts}")
+    assert counts[1.10] > counts[1.60], "a lower limit must give more seams on a sphere"
+
+    # the report's 'too stretched' line follows the run's limit
+    report = {'mesh': 'M', 'objects': ['O'], 'islands': 2, 'extra_vertices_vs_shading': 0, 'time': 0.1,
+              'unverified_charts': [], 'islands_over_limits': [{'faces': 9, 'distortion': 1.45, 'overlap': False}],
+              'over_limits_count': 1, 'sliver_overlaps': 0, 'warnings': []}
+    for limit, expected in ((1.40, True), (1.50, False)):
+        uv_autoseam.write_report_text([dict(report, limit=limit)], run_time=0.1)
+        text = bpy.data.texts[uv_autoseam.REPORT_TEXT_NAME].as_string()
+        assert ("too stretched" in text) == expected, f"limit {limit}: 'too stretched' expected {expected}"
+    print("  -> PASS: limit in core, final check and report; 1.10 gives more seams than 1.60.")
+
+
 def main():
     print("=" * 70)
     print("RUNNING FSS AUTO SEAM OPERATOR & EXPORT TESTS")
@@ -814,6 +848,7 @@ def main():
     test_uv_maps_unchanged_after_propose()
     test_decal_skip()
     test_report_attention_counts()
+    test_distortion_limit()
     print("=" * 70)
     print("ALL TESTS PASSED SUCCESSFULLY.")
     print("=" * 70)

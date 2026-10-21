@@ -18,9 +18,9 @@ import bpy
 import bmesh
 
 try:
-    from .uv_autoseam_core import propose_seams, _area_distortion, _overlap_pairs, _tri_area3
+    from .uv_autoseam_core import THR, propose_seams, _area_distortion, _overlap_pairs, _tri_area3
 except ImportError:
-    from uv_autoseam_core import propose_seams, _area_distortion, _overlap_pairs, _tri_area3
+    from uv_autoseam_core import THR, propose_seams, _area_distortion, _overlap_pairs, _tri_area3
 
 try:
     from .tags import _editable
@@ -296,7 +296,7 @@ def keep_as_artist_seams(mesh):
     return count
 
 
-def _evaluate_final_unwrap(orig_me, work_me, tri_to_orig_poly, eval_seams, temp_scene):
+def _evaluate_final_unwrap(orig_me, work_me, tri_to_orig_poly, eval_seams, temp_scene, limit=THR):
     """Evaluate final unwrap on an isolated copy of orig_me to detect islands over limits."""
     eval_me = orig_me.copy()
     eval_me.name = f"__fss_autoseam_eval_{orig_me.name}__"
@@ -387,7 +387,7 @@ def _evaluate_final_unwrap(orig_me, work_me, tri_to_orig_poly, eval_seams, temp_
                 sliver = (a0 < 1e-8) & (a1 < 1e-8)
                 non_sliver_ov = int(np.count_nonzero(~sliver))
 
-            if d > 1.25 or non_sliver_ov > 0:
+            if d > limit or non_sliver_ov > 0:
                 islands_over.append({
                     'island': isl_idx,
                     'faces': len(plist),
@@ -449,6 +449,8 @@ def write_report_text(mesh_reports, run_time):
     lines = []
     lines.append(f"# FSS Auto Seam Report - {time.strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append(f"# Meshes processed: {total_meshes} in {run_time:.2f}s")
+    if mesh_reports:
+        lines.append(f"# Distortion limit: {mesh_reports[0].get('limit', THR):.2f}")
     lines.append(f"# Meshes needing attention: {attention_count} ({clean_count} clean)\n")
 
     def format_mesh_block(r, needs_attention):
@@ -472,7 +474,7 @@ def write_report_text(mesh_reports, run_time):
             charts = [u for u in unv if math.isfinite(u.get('distortion', 0.0)) and u.get('faces', 1) > 2]
             overlapping = [i for i in over if i.get('overlap', False) and math.isfinite(i.get('distortion', 0.0))]
             stretched = [i for i in over if not i.get('overlap', False) and math.isfinite(i.get('distortion', 0.0))
-                         and i.get('distortion', 0.0) > 1.25]
+                         and i.get('distortion', 0.0) > r.get('limit', THR)]
 
             def worst(items):
                 return max(x.get('distortion', 0.0) for x in items)
@@ -529,7 +531,7 @@ def write_report_text(mesh_reports, run_time):
     txt.write("\n".join(lines).rstrip() + "\n")
 
 
-def propose(obj, cache=None, measurement_arrays=False, use_temp_scene=True, **kwargs):
+def propose(obj, cache=None, measurement_arrays=False, use_temp_scene=True, limit=THR, **kwargs):
     """Propose automatic UV seams on obj without modifying the object or mesh.
 
     Parameters:
@@ -540,6 +542,7 @@ def propose(obj, cache=None, measurement_arrays=False, use_temp_scene=True, **kw
                             and work seam/nsplit arrays in report for benchmark runner.
         use_temp_scene: bool (default True). When True, runs propose_seams inside an isolated
                         temporary scene containing only the work object for speed.
+        limit: distortion limit for the core's charts and the final check (the panel's Distortion Limit).
 
     Returns:
         (proposed_orig_edges, diagonal_cuts, report):
@@ -659,7 +662,7 @@ def propose(obj, cache=None, measurement_arrays=False, use_temp_scene=True, **kw
             work_obj.select_set(True)
 
         # Run core propose_seams passing diagonals as no_cut
-        auto_edges, stats = propose_seams(work_obj, work_artist_seam, work_nsplit, no_cut=work_no_cut)
+        auto_edges, stats = propose_seams(work_obj, work_artist_seam, work_nsplit, no_cut=work_no_cut, limit=limit)
 
         # Map proposed cuts back to original edges; count cuts on diagonals
         proposed_orig_edges = []
@@ -721,7 +724,7 @@ def propose(obj, cache=None, measurement_arrays=False, use_temp_scene=True, **kw
         if proposed_orig_edges:
             eval_seams[proposed_orig_edges] = True
         islands_over, final_island_cnt = _evaluate_final_unwrap(
-            orig_me, work_me, tri_to_orig_poly, eval_seams, temp_scene
+            orig_me, work_me, tri_to_orig_poly, eval_seams, temp_scene, limit
         )
 
         report = {
@@ -747,6 +750,7 @@ def propose(obj, cache=None, measurement_arrays=False, use_temp_scene=True, **kw
             'islands_over_limits': islands_over,
             'over_limits_count': len(islands_over),
             'final_islands_count': final_island_cnt,
+            'limit': limit,
         }
 
         if measurement_arrays:
@@ -913,7 +917,7 @@ class FSS_OT_UvProposeSeams(bpy.types.Operator):
                 s_box.label(text=f"  ... and {len(self._skipped) - 10} more")
 
     def _process_single_mesh(self, context, mesh, rep_obj, obj_list, cache):
-        prop_edges, diag_cuts, rep = propose(rep_obj, cache=cache)
+        prop_edges, diag_cuts, rep = propose(rep_obj, cache=cache, limit=context.scene.fss_uv_autoseam_limit)
         write_proposal(mesh, prop_edges)
         res = {
             'mesh': mesh.name,
@@ -926,6 +930,7 @@ class FSS_OT_UvProposeSeams(bpy.types.Operator):
             'over_limits_count': rep.get('over_limits_count', len(rep.get('islands_over_limits', []))),
             'sliver_overlaps': rep['stats'].get('sliver_overlaps', 0),
             'warnings': rep.get('warnings', []),
+            'limit': rep.get('limit', THR),
         }
         return res
 
@@ -1188,6 +1193,13 @@ class FSS_PT_UvAutoSeam(bpy.types.Panel):
         sel_meshes = {o.data for o in context.selected_objects if o.type == 'MESH' and _editable(o) and o.data}
         box = layout.box()
         box.label(text=f"Selected: {len(sel_meshes)} editable mesh(es)")
+        col = box.column(align=True)
+        col.prop(context.scene, 'fss_uv_autoseam_limit', slider=True)
+        row = col.row()
+        row.label(text='Less distortion')
+        sub = row.row()
+        sub.alignment = 'RIGHT'
+        sub.label(text='Fewer islands')
         box.operator(FSS_OT_UvProposeSeams.bl_idname, text='Propose Seams', icon='UV_EDGESEL')
         row = box.row(align=True)
         row.operator(FSS_OT_UvKeepAsArtistSeams.bl_idname, text='Accept Proposed', icon='CHECKMARK')
@@ -1231,8 +1243,14 @@ CLASSES = (
 def register():
     for cls in CLASSES:
         bpy.utils.register_class(cls)
+    bpy.types.Scene.fss_uv_autoseam_limit = bpy.props.FloatProperty(
+        name='Distortion Limit', default=THR, min=1.05, max=2.0, soft_min=1.10, soft_max=1.60,
+        precision=2, step=5,
+        description='How much an island may stretch (1.0 = not at all). Higher: fewer islands and seam vertices, '
+                    'more stretch. Lower: less stretch, more islands. Mostly changes large shells')
 
 
 def unregister():
+    del bpy.types.Scene.fss_uv_autoseam_limit
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)

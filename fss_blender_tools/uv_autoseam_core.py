@@ -135,7 +135,7 @@ def _overlap_pairs(U, eps_rel=1e-6, max_pairs_chunk=200000):
     return np.concatenate(res) if res else np.zeros((0, 2), np.int64)
 
 
-def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
+def propose_seams(obj, artist_seam, normal_split=None, no_cut=None, limit=THR):
     """Propose automatic UV seams on obj.
 
     Parameters:
@@ -144,6 +144,7 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
         normal_split: optional boolean sequence of length len(obj.data.edges); True for shading splits.
         no_cut: optional boolean sequence of length len(obj.data.edges); True for edges that must
                 never be cut or act as chart boundaries (e.g. triangulation diagonals).
+        limit: largest mean area distortion a chart may have (1.0 = none); higher gives fewer charts.
 
     Returns:
         (auto_seam_edges, stats):
@@ -434,7 +435,6 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
             for d in cands:
                 fs = charts[d] | charts[c]
                 dist, ov, U = trial(fs, ed[d])
-                limit = THR
                 accepted = (dist <= limit) and not ov
                 if accepted:
                     charts[d] = fs
@@ -449,7 +449,7 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
                         seam[e] = False
                     return True
 
-                rej['dist' if dist > THR else 'ov'] += 1
+                rej['dist' if dist > limit else 'ov'] += 1
                 if ov:
                     rej['ov_flip' if last_flip[0] else 'ov_pair'] += 1
                 restore_seams(ed[d])
@@ -462,7 +462,7 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
             if len(fs) < MIN_SPLIT:
                 continue
             d, ov, U = trial(fs)
-            accepted = (d <= THR and not ov)
+            accepted = (d <= limit and not ov)
             if accepted:
                 verified[cid] = d
                 if last_trial[0]:
@@ -521,7 +521,7 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
             for group in groups:
                 d, ov, U = trial(sorted(group), cuts)
                 tree_trials += 1
-                bad = (ov or d > THR)
+                bad = (ov or d > limit)
                 if bad:
                     valid = False
                     break
@@ -631,7 +631,7 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
                     continue
                 d, ov, U = trial(charts[c])
                 n_c = len(components(sorted(charts[c]), lambda e: not forced[e]))
-                accepted = (d <= THR and not ov and n_c == 1)
+                accepted = (d <= limit and not ov and n_c == 1)
                 if accepted:
                     verified[c] = d
                     if last_trial[0]:
@@ -705,7 +705,7 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
             select_unwrap(fl, set_edges=corner_edges)
             U = read_uv(fl)
             d_new, dmax_new, ov_new = measure(fl, U)
-            accepted = (not ov_new) and (d_new <= max(THR, d_old * 1.05))
+            accepted = (not ov_new) and (d_new <= max(limit, d_old * 1.05))
             if accepted:
                 for e in corner_edges:
                     seam[e] = True
@@ -805,7 +805,7 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
             if c in verified:
                 if abs(d - verified[c]) > 0.01 * verified[c] or ov:
                     mism += 1
-            elif d > THR or ov:
+            elif d > limit or ov:
                 unver_bad += 1
 
         # Decision 49 / Decision 50: decompose an unverified chart via cost-aware cut paths
@@ -1061,14 +1061,14 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
             fl_init = sorted(fl_init)
             if len(fl_init) == 1:
                 d, ov, U = trial(fl_init)
-                if ov or d > THR:
+                if ov or d > limit:
                     crit = 'overlap' if ov else 'distortion'
                     unverified_charts.append({'chart': -1, 'faces': 1, 'distortion': float(d), 'overlap': bool(ov), 'criterion': crit})
                 return [(fl_init, d, U)]
 
             d, ov, U = trial(fl_init)
             n_c = len(components(fl_init, lambda e: not forced[e]))
-            if not ov and d <= THR and n_c == 1:
+            if not ov and d <= limit and n_c == 1:
                 return [(fl_init, d, U)]
 
             # Strategy 1: Seed pieces split (between forced and soft edges)
@@ -1091,7 +1091,7 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
                     U = read_uv(fl_init)
                     d_p, _, ov_p = measure(fl_init, U)
                     restore_seams(cand_cut)
-                    if not ov_p and d_p <= THR:
+                    if not ov_p and d_p <= limit:
                         cost = sum(cut_cost[e] for e in cand_cut)
                         verified_cands.append((1, cost, [(fl_init, d_p, U)], cand_cut))
                 elif len(cand_pieces) > 1:
@@ -1101,7 +1101,7 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
                         cp_s = sorted(cp)
                         d_p, ov_p, U_p = trial(cp_s)
                         n_cp = len(components(cp_s, lambda e: not forced[e]))
-                        if ov_p or d_p > THR or n_cp > 1:
+                        if ov_p or d_p > limit or n_cp > 1:
                             all_ok = False
                             break
                         p_res.append((cp_s, d_p, U_p))
@@ -1126,7 +1126,7 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
                     np_s = sorted(np_piece)
                     d_p, ov_p, U_p = trial(np_s)
                     n_cp = len(components(np_s, lambda e: not forced[e]))
-                    if ov_p or d_p > THR or n_cp > 1:
+                    if ov_p or d_p > limit or n_cp > 1:
                         all_ok = False
                         break
                     p_res.append((np_s, d_p, U_p))
@@ -1146,7 +1146,7 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
                         cp_s = sorted(cp)
                         d_p, ov_p, U_p = trial(cp_s)
                         n_cp = len(components(cp_s, lambda e: not forced[e]))
-                        if ov_p or d_p > THR or n_cp > 1:
+                        if ov_p or d_p > limit or n_cp > 1:
                             all_ok = False
                             break
                         p_res.append((cp_s, d_p, U_p))
@@ -1186,13 +1186,13 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
 
         # Repair pass per decision 49 (cuts only, no planar projection writes)
         t = time.perf_counter()
-        bad_charts = [c for c, v in per.items() if v[2] or (c not in verified and v[0] > THR) or len(components(sorted(charts[c]), lambda e: not forced[e])) > 1]
+        bad_charts = [c for c, v in per.items() if v[2] or (c not in verified and v[0] > limit) or len(components(sorted(charts[c]), lambda e: not forced[e])) > 1]
         for c in bad_charts:
             fl = sorted(charts[c])
             decomp = decompose_chart(fl)
             for i, (pc, d_pc, U_pc) in enumerate(decomp):
                 pc_sorted = sorted(pc)
-                is_ver = (d_pc <= THR) and (len(components(pc_sorted, lambda e: not forced[e])) == 1)
+                is_ver = (d_pc <= limit) and (len(components(pc_sorted, lambda e: not forced[e])) == 1)
                 _, _, o_pc = measure(pc_sorted, U_pc)
                 is_ver = is_ver and not o_pc
                 if i == 0:
@@ -1241,7 +1241,7 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
                 Rl = sorted(R)
                 dW, mW, oW = measure(Wl, read_uv(Wl))
                 dR, mR, oR = measure(Rl, read_uv(Rl))
-                if max(mW, mR) < m0 and not oW and not oR and dW <= THR and dR <= THR and len(components(Wl, lambda e: not forced[e])) == 1 and len(components(Rl, lambda e: not forced[e])) == 1:
+                if max(mW, mR) < m0 and not oW and not oR and dW <= limit and dR <= limit and len(components(Wl, lambda e: not forced[e])) == 1 and len(components(Rl, lambda e: not forced[e])) == 1:
                     charts[nid[0]] = W
                     fc[Wl] = nid[0]
                     charts[c] = R
@@ -1411,7 +1411,7 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
                     pc = sorted(pc)
                     U = read_uv(pc)
                     d1, m1, o1 = measure(pc, U)
-                    if o1 or d1 > THR or m1 > m0:
+                    if o1 or d1 > limit or m1 > m0:
                         ok = False
                         break
                     fi = fill_of(U)
@@ -1483,7 +1483,7 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
                 U_c = U_all[fl]
                 d, dmax, ov = measure(fl, U_c)
                 n_c = len(components(fl, lambda e: not forced[e]))
-                if ov or d > THR or n_c > 1:
+                if ov or d > limit or n_c > 1:
                     failing.append(c)
 
             if not failing:
@@ -1501,7 +1501,7 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
                     unsplit_charts.add(c)
                 for i, (pc, d_pc, U_pc) in enumerate(decomp):
                     pc_sorted = sorted(pc)
-                    is_ver = (d_pc <= THR) and (len(components(pc_sorted, lambda e: not forced[e])) == 1)
+                    is_ver = (d_pc <= limit) and (len(components(pc_sorted, lambda e: not forced[e])) == 1)
                     _, _, o_pc = measure(pc_sorted, U_pc)
                     is_ver = is_ver and not o_pc
                     if i == 0:
@@ -1540,8 +1540,8 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None):
                 sliver = (a0 < 1e-8) & (a1 < 1e-8)
                 total_sliver_overlaps += int(np.count_nonzero(sliver))
             n_c = len(components(fl, lambda e: not forced[e]))
-            if ov or d > THR or n_c > 1:
-                crit = 'overlap' if ov else ('distortion' if d > THR else 'disconnected')
+            if ov or d > limit or n_c > 1:
+                crit = 'overlap' if ov else ('distortion' if d > limit else 'disconnected')
                 final_unverified.append({
                     'chart': int(c),
                     'faces': len(fl),
