@@ -26,8 +26,24 @@ The cockpit and the exterior go through the same steps. They differ in their cam
 - **Why:** what MSFS needs, and why the step comes at this point.
 - **Do:** what to do, and which tool helps.
 - **Check:** how you know the step is done.
+- **Redo when:** what makes the step worth doing again, and what that costs.
+
+The order follows what each step needs from the ones before it: packing needs the texture sets (step 2) and the densities (step 7); the LOD export needs the units you modelled (step 3). It is not a fixed sequence. Everything before texturing is cheap to change, and you will go back and forth: a new part, a moved zone or a changed mark means running the later steps again. Texturing is where changes start to cost: once a texture set is painted, changing its UVs, zone or material means baking again and carrying the painting over. Settle what feeds a texture set before you paint it.
 
 Steps marked **in development** describe what the tool will do, and how to get the same result by hand until it exists.
+
+| Step | Tools | Tool status | MSFS Authoring Guide |
+| :--- | :--- | :--- | :--- |
+| [1. Scene, Hierarchy and Names](#1-scene-hierarchy-and-names) | Tools, Empty Bounds, Checks | available | `modeling.md` |
+| [2. Zones and Materials](#2-zones-and-materials-in-development) | zone tool | in development: by hand | `materials.md`, `texturing.md` |
+| [3. Units](#3-units-what-is-one-piece) | LOD hints, Viewport LOD | a modelling decision | `lods.md` |
+| [4. Merge Tree](#4-merge-tree) | Tags, Merge Tree | available | `modeling.md` |
+| [5. LOD](#5-lod) | LOD | available | `lods.md` |
+| [6. Seams and Unwrap](#6-seams-and-unwrap) | Auto Seam, UV Marks, UV Heatmap | available | `uv-mapping.md` |
+| [7. Visibility Scoring](#7-visibility-scoring-in-development) | visibility tool | in development: UV Marks by hand | `uv-mapping.md` |
+| [8. Packing](#8-packing-in-development) | packer | in development: Blender's Pack Islands | `uv-mapping.md` |
+| [9. Texturing](#9-texturing) | Substance Painter | outside Blender | `texturing.md`, `baking.md` |
+| [10. Export and Deploy](#10-export-and-deploy) | exporter, deploy scripts | available | `blender-export.md` |
 
 ### 1. Scene, Hierarchy and Names
 
@@ -41,7 +57,9 @@ Steps marked **in development** describe what the tool will do, and how to get t
 - Run **Scan Names** and **Fix Broken Bone Parents** in [Checks](fss-tools.md#checks).
 - **Empty Bounds** shows what each empty contains; use it to check the hierarchy. See [Empty Bounds](fss-tools.md#empty-bounds).
 
-**Check:** Scan Names lists nothing you did not intend; the LOD panel's **Export Settings** show no warning about origins outside the geometry (see [lod.md](lod.md#origins-outside-the-geometry)).
+**Check:** Scan Names lists nothing you did not intend. For the origins, press **Refresh LOD Counts** in the [LOD](lod.md) panel (no LOD marks are needed for it; for an interior, first enter **Exterior Diameter** under **Export Settings**, or Refresh stops with "exterior diameter missing"): its **Export Settings** show no warning about origins outside the geometry, and **Show LOD Sphere** draws the sphere around the model, not far beyond it. See [Origins Outside the Geometry](lod.md#origins-outside-the-geometry).
+
+**Redo when:** you add or rename parts. Renaming a node that the model XML, a `.cfg` or an attachment refers to also means updating that reference.
 
 ### 2. Zones and Materials (in development)
 
@@ -51,11 +69,13 @@ Steps marked **in development** describe what the tool will do, and how to get t
 
 **Meanwhile, by hand:**
 
-- Group each zone's parts under one empty with an ordinary name (the `@ZONE_` marker is not supported by the exporter yet).
+- Group each zone's parts under one empty with an ordinary name (the `@ZONE_` prefix is not supported by the exporter yet).
 - Name the materials `<SCENE>_<ZONE>_<CLASS>`, one per zone and class, and set each material's MSFS type to match its class. Auto Seam already skips objects whose materials are all decal, glass, windshield, invisible or occluder, by these class names or by the MSFS type.
 - Keep the number of materials low: see `materials.md` in the MSFS Authoring Guide.
 
 **Check:** every material name follows the pattern; no `Material.001` copies are left.
+
+**Redo when:** a zone turns out too full or nearly empty for its texture. Each change here changes a texture set, so packing follows, and repainting if the set was already textured.
 
 ### 3. Units: What Is One Piece
 
@@ -69,18 +89,24 @@ Steps marked **in development** describe what the tool will do, and how to get t
 
 **Check:** with the viewport LOD preview (step 5), small assemblies disappear as a whole, not piece by piece.
 
+**Redo when:** the LOD preview shows small assemblies disappearing piece by piece.
+
 ### 4. Merge Tree
 
-**Why:** many small objects mean many draw calls. A merge group joins a subtree into one mesh at export, while every part stays a separate, editable object in the `.blend`. Merging happens after the LOD step, per LOD: a panel is merged with its screws in `_LOD00` and without them where they are too small.
+**Why:** every mesh costs at least one draw call, one per material it uses (see `how-msfs-renders.md` in the MSFS Authoring Guide), so a cockpit of thousands of small static objects costs thousands. The usual answer in Blender is to join them, but a joined mesh is flattened: you can no longer select, move, mark or unwrap one part on its own. A merge group defers the join to the export: in the `.blend` every part stays its own object, and the export joins the group into one mesh, separately for each LOD (a panel with its screws in `_LOD00`, without them where they are too small).
 
-**Do:**
+**Do:** decide what to merge as you would decide what to join by hand, aiming for as few draw calls as the model allows. The rules are in `modeling.md` ("When to Merge") of the MSFS Authoring Guide; in short:
 
-- Put `@MERGE_<name>` on a high level of the hierarchy, for example the floor or the overhead panel, not on single small parts. Everything below it merges, except what must stay separate.
-- What stays separate on its own: animated, skinned and bone-parented objects, meshes with shape keys, lights and cameras. See [What Stays Separate](fss-tools.md#what-stays-separate).
-- What you must keep separate yourself: anything the model XML refers to that is not animated, such as gauge screens and clickspots. Use a [tag](fss-tools.md#tags) with **Don't Merge** (for example `SCREEN`) on those objects, or name them `@NOMERGE_<name>`.
+- Merge what is static and drawn together: parts that never move on their own, that nothing refers to by name, that are seen together and share materials. Merging parts with different materials saves nodes, not draw calls.
+- Keep separate what has a life of its own: a switch, a lever or a door with its handle must move on its own, which it cannot do as part of the panel's mesh. The merge keeps animated, skinned and bone-parented objects, meshes with shape keys, lights and cameras separate by itself. See [What Stays Separate](fss-tools.md#what-stays-separate).
+- The merge cannot see the model XML: a gauge screen or a clickspot that is not animated would be merged away. Give it a [tag](fss-tools.md#tags) with **Don't Merge** (for example `SCREEN`), or name it `@NOMERGE_<name>`.
+- Keep each merge group inside one zone (step 2): a group that spans two zones becomes one mesh across both, so MSFS cannot leave one zone out of view without the other, and the mesh carries both zones' materials. The Merge Tree does not check this yet.
+- Put `@MERGE_<name>` on the empty above a set of parts that may become one mesh. A group can be large, a whole panel with everything on it: what must stay separate inside it stays separate by itself or by its tag, so you rarely need many small groups.
 - Use **Refresh** in [Merge Tree](fss-tools.md#merge-tree) to see the groups, their materials, and why objects were kept separate.
 
-**Check:** the Merge Tree shows the groups you expect, every referenced node is kept separate, and the multiple-materials warnings are intended.
+**Check:** the Merge Tree shows the groups you expect, each inside one zone; every referenced node is kept separate, and the multiple-materials warnings are intended.
+
+**Redo when:** you add parts, or the model XML starts referring to a node that is merged away. Merging happens only at export, so it never touches UVs or textures.
 
 ### 5. LOD
 
@@ -95,6 +121,8 @@ Steps marked **in development** describe what the tool will do, and how to get t
 
 **Check:** no LOD shows a vertex warning after **Refresh LOD Counts**; the preview looks right at each level. Set the preview to **Off** before exporting by hand.
 
+**Redo when:** geometry, marks or the LOD sphere change: press **Refresh LOD Counts**. LODs are built at export from the full model, so this never touches UVs or textures.
+
 ### 6. Seams and Unwrap
 
 **Why:** MSFS stores UVs with limited precision, and at most two UV maps per mesh reach the export. Seams decide where the texture splits; badly placed seams show in front of the pilot. The rules are in `uv-mapping.md` of the MSFS Authoring Guide.
@@ -108,6 +136,8 @@ Steps marked **in development** describe what the tool will do, and how to get t
 
 **Check:** the heatmap's chart shows most of the surface near 1.0, with little above 1.25; nothing shows in magenta (Error).
 
+**Redo when:** the heatmap shows stretched islands, or a part changes shape. A new unwrap changes the islands, so packing follows; on a textured set it costs rework.
+
 ### 7. Visibility Scoring (in development)
 
 **Why:** texture space is limited. Parts the pilot sees deserve more texture than parts hidden behind other parts or behind the seat.
@@ -119,6 +149,8 @@ The packer then gives each island a texel density (pixels per centimetre) of zon
 **Meanwhile, by hand:** set the texel density marks in [UV Marks](fss-tools.md#uv-marks) from your own judgement of what the pilot sees: **Higher** (1.5 to 1.65) for prominent parts such as the glareshield and main panel, **Lower** (0.7 to 0.8) for parts that are hardly seen, the default 0.9 to 1.1 for the rest. Marks on an empty apply to everything below it.
 
 **Check:** the marks match what you see from the pilot camera.
+
+**Redo when:** your cameras, animations or the faces change (new seams or a new unwrap do not count), or you change your mind about what deserves detail. It only changes densities, which take effect at the next packing.
 
 ### 8. Packing (in development)
 
@@ -133,13 +165,21 @@ The packer then gives each island a texel density (pixels per centimetre) of zon
 
 **Check:** the heatmap's **Density** mode shows each texture set near 1.0, except where you chose otherwise.
 
+**Redo when:** zones, materials, density marks or visibility scores change. It's quick to repeat until texturing has started.
+
 ### 9. Texturing
 
-**Why:** texture memory is the budget that matters most for frame rate. The texture sizes, atlas rules and memory budget are in `texturing.md` of the MSFS Authoring Guide.
+**Why:** texture memory is the budget that matters most for frame rate. The texture sizes, atlas rules and memory budget are in `texturing.md` of the MSFS Authoring Guide. Baked ambient occlusion and sky light go into the texture set's occlusion channel; see `baking.md`.
 
 **Do:** texture each texture set in Substance Painter from the packed UVs. Use material values (colour, metallic, roughness) instead of a texture where a flat value is enough.
 
 For tiling patterns (brushed metal, fabric, grip), use tri-planar projection instead of UV projection: islands are packed at different densities, and a UV-projected pattern would change size from island to island.
+
+Bake ambient occlusion once the texture set's packing is final: a bake follows the UVs. Move moving parts away from their panels before baking, so no shadow is baked under a button that moves, and leave clickspots, collision meshes and decals out of the bake.
+
+Instanced parts (screws, identical knobs) share their texture and get generic AO in it; unique AO per copy needs a second UV map and gives up the instancing. See "AO Versus Instancing" in `baking.md`.
+
+**Redo when:** the UVs of a textured set change: bakes are redone and the painting carried over. This step is why changes to the earlier steps get expensive.
 
 ### 10. Export and Deploy
 
@@ -152,6 +192,15 @@ For tiling patterns (brushed metal, fabric, grip), use tri-planar projection ins
 - After a deploy, check the console: the LOD lines, merge warnings, and vertex warnings.
 
 **Check:** the model loads in the simulator, LODs switch where intended, and every referenced node is found.
+
+**Redo when:** after every change you want to see in the simulator. The deploy exports the saved `.blend`, so save first.
+
+## Alongside the Pipeline
+
+Some work has no step of its own, because it runs through several:
+
+- **Animation** (`animation.md` in the MSFS Authoring Guide): an animated part stays its own node through the merge (step 4), and its origin is its pivot, so do not move it with Origin to Bounding Box (step 1). The visibility analysis (step 7) will look at each animation at several points of its own length (0, 50 and 100 % by default): animate before scoring visibility, or score again afterwards.
+- **Clickspots and collision** (`clickspots-and-collision.md`): meshes with an invisible material. MSFS recognises them by the material type and never draws them, so their seams and UVs have no effect: Auto Seam skips them to save time, and they need no packing, but unwrapping them does no harm. Give them an invisible material of their own, the `INVIS` class (step 2), never a zone's visible material. Keep the ones the model XML refers to by name separate with a **Don't Merge** tag or `@NOMERGE_` (step 4).
 
 ## Where to Find the Tools
 
@@ -187,11 +236,12 @@ If your version is newer than 0.24.1, some labels or buttons may differ from thi
 | **Deploy** | Exporting a `.blend` to glTF with the aircraft repository's scripts and copying the files into the simulator package. The deploy runs Blender in the background. |
 | **LOD** | Level of detail. `_LOD00` is the full model; `_LOD01` to `_LOD06` are lighter versions MSFS shows when the model is small on screen. |
 | **Loose piece** | A connected piece of geometry inside one mesh. Pieces that only touch without sharing vertices count as separate. |
-| **Mark** | A setting stored on an object (a custom property) that tells a tool how to treat it, for example "hidden from LOD 3". |
+| **Mark** | Something you put on an object to tell an automatic tool what it cannot work out itself: an override or a hint. Marks live in the `.blend`; MSFS never sees them. Three kinds: **LOD marks** in the [LOD](lod.md#marks) panel (from which LOD a part is left out or shown, or **Keep**); **UV marks** in the [UV Marks](fss-tools.md#uv-marks) panel (the target density for packing, how islands may turn, **Skip Auto Seam**), inherited by the objects below; and **tags**. |
 | **Material class** | The kind of material (standard, emissive, decal, glass and so on), the last part of a material name `<SCENE>_<ZONE>_<CLASS>`. |
 | **Merge group** | An object named `@MERGE_<name>` whose subtree becomes one mesh at export. |
+| **Name prefix** | `@MERGE_`, `@NOMERGE_` (see [Merge Tree](fss-tools.md#merge-tree)), and the planned `@ZONE_`: a prefix in an object's name that the export acts on. The prefix never reaches the glTF. |
 | **Origin** | The object's own point (orange dot in Blender). In the glTF it becomes the node position. |
 | **Part** | An object together with all objects below it in the hierarchy. |
-| **Tag** | A free label on an object, used to select objects and to tell tools how to treat them. |
+| **Tag** | A mark you define yourself: a label that classifies objects, for example `SCREEN`. You select objects by tag, and a tag's **Don't Merge** and **Keep** settings apply to every object that carries it. |
 | **Texture set** | The textures of one material, shared by every object that uses it; one zone and class. |
 | **Zone** | A part of the model with its own materials and texture sets, chosen by you for the scene. |

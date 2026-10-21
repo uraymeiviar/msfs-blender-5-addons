@@ -14,6 +14,7 @@ Task journals of this repository: design, decisions, progress and hand-offs, one
 | [20261014.fss-blender-tools-tags-and-merge.md](20261014.fss-blender-tools-tags-and-merge.md) | Tags and export-time merge groups | In review |
 | [20261017.export-performance.md](20261017.export-performance.md) | Export speed of the LOD deploy | Phase 2 done |
 | [20261019.automated-uv-unwrap.md](20261019.automated-uv-unwrap.md) | UV auto-seam, unwrap and packing; material classes and zones; visibility-based texel density | Design agreed, UV Marks implemented |
+| [20261021.artist-pipeline-guide.md](20261021.artist-pipeline-guide.md) | The artist guide's pipeline (`docs/user/`): reasoning, redo points, terms | In progress |
 
 The first five were started in the FSS aircraft repository (`codes/wasm/doc/journal/`) and moved here; their copies
 there end with a session pointing here.

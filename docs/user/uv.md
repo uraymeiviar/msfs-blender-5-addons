@@ -1,15 +1,15 @@
-# Auto Seam: Automated UV Seams
+# UV: Auto Seam and UV Heatmap
 
 [Artist Guide](README.md) / **uv.md**
 ***
 
-The **Auto Seam** panel (sidebar `N` > **FSS Tools** > **Auto Seam**) proposes automatic UV seams for hard-surface meshes. It is designed to save time on complex, untextured cockpit and airframe parts.
+This page covers two panels: **Auto Seam**, which proposes UV seams, and [UV Heatmap](#uv-heatmap-distortion-and-texel-density), which shows how well the UVs fit.
 
-Using Auto Seam is completely **optional**. It works alongside manual seams: it never removes or overwrites seams you made yourself, unless you click **Clear Current**.
+The **Auto Seam** panel (sidebar `N` > **FSS Tools** > **Auto Seam**) proposes seams for hard-surface meshes, so you mark by hand only the seams that matter to you. It works alongside your own seams: it never removes or changes them, unless you click **Clear Current**.
 
 ## How It Works
 
-- The tool analyzes the 3D surface, sharp edges, and normal splits of your mesh to find natural seams where islands can flatten with minimal distortion.
+- The tool looks at the shape of the surface, its sharp edges and its split normals, and places seams where the islands can be flattened with little distortion.
 - A mesh has two kinds of seams:
   - **Proposed** seams: written by the tool and not accepted yet (marked with the edge attribute `fss_auto_seam`);
   - **Current** seams: every other seam, whether you marked it by hand or accepted it from an earlier proposal.
@@ -37,7 +37,9 @@ Accept, Discard and Clear act on whole objects, also when clicked in Edit Mode. 
 4. **Review in Edit Mode** (`Tab`) with **Select Proposed** and **Select Current**, and with the **UV Heatmap** after a test unwrap.
 5. **Adjust if needed:** add seams by hand, or remove unwanted ones.
 6. **Accept Proposed** when you are happy, or **Discard Proposed** to drop the proposal.
-7. **Unwrap and Pack:** in Edit Mode, select all faces and unwrap with **UV > Unwrap** (Angle Based). Then pack your islands.
+7. **Unwrap:** in Edit Mode, select all faces and unwrap with **UV > Unwrap** (Angle Based).
+
+**Packing can wait.** You may pack now, for example to review the **Density** heatmap or to try a texture. Packing is quick to redo: pack again whenever zones, materials or density marks change. It becomes costly once texturing has started, because moving islands then means baking again and carrying the painting over. See [The Pipeline, step 8](README.md#8-packing-in-development).
 
 **To replace the current seams with a fresh proposal:** **Clear Current**, then **Propose Seams**, then **Accept Proposed**. The order matters: proposing first would let the old seams steer the proposal.
 
@@ -86,7 +88,7 @@ Repeated problems on one mesh are grouped into one line, with the count, the lar
 
 ## Limits and What to Watch Out For
 
-- **Modal interface:** Blender processes one mesh per step with progress shown in the status bar. The interface is blocked while a single mesh is calculated. Large shells (such as `OVERHEAD_SHELL`) can take 2 to 2.5 minutes to process. Press **Esc** to cancel between meshes (finished meshes keep their results).
+- **Blender waits while a mesh is calculated:** Blender processes one mesh per step with progress shown in the status bar. The interface is blocked while a single mesh is calculated. Large shells (such as `OVERHEAD_SHELL`) can take 2 to 2.5 minutes to process. Press **Esc** to cancel between meshes (finished meshes keep their results).
 - **Modifiers:** seams are placed on the base mesh before **Mirror** and **Array** modifiers. The generated sides inherit the same seam positions.
 - **Object scale:** Blender's Angle-Based unwrap operates in object space. If an object has non-uniform scale (`1.0, 1.0, 2.0`), unwrap will stretch unless you apply scale (`Ctrl + A > Scale`).
 - **UV Marks panel:** density and direction marks in the **UV Marks** panel are for the packing step and the UV Heatmap; the **Skip Auto Seam** mark in that panel tells Auto Seam to skip marked objects.
@@ -118,10 +120,10 @@ The overlay uses a diverging colour scheme centred on **Neutral 1.0**:
 ### Modes
 
 1. **Distortion:**
-   - Measures the ratio of the larger to the smaller singular value of the affine 3D-to-UV mapping for each triangle (\(\sigma_1 / \sigma_2 \ge 1.0\)).
-   - Completely independent of object scale.
-   - Values scale from 1.0 (neutral) to 2.0+ (blue).
-   - If an area shows dark blue, the geometry is distorted or sheared in UV space. Add manual seams across high-curvature areas to allow the island to relax flatter.
+   - How much more each face is stretched in one direction than in the other: 1.0 keeps the face's shape, 2.0 stretches one direction twice as much as the other. A face that is only larger or smaller in the UVs, the same in every direction, stays at 1.0: that is density, not distortion.
+   - Object scale does not change it.
+   - The colours run from 1.0 (neutral) to 2.0 and more (blue).
+   - Dark blue means the face is sheared or stretched in the UVs. Add seams across strongly curved areas, so the island can flatten.
 2. **Density (Texel Density):**
    - Measures the triangle's UV area / 3D area relative to its texture set: the area-weighted median over every object in the scene that uses the same material (one atlas per material). The colours therefore do not change with what is selected.
    - Evaluated against the object's authored texel density range (set in the **UV Marks** panel, default 0.9 to 1.1):

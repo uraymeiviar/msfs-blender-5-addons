@@ -63,11 +63,9 @@ The **Viewport LOD** row shows in the viewport what an export would put in each 
 Notes:
 
 - Loose pieces that the export drops are not shown in the viewport, only counted in the panel.
-- Saving the file undoes the preview first and puts it back afterwards, and opening a file switches it off, so a saved file always contains every object as you made it. The deploy scripts therefore always export the full model.
+- **Saving and opening:** saving undoes the preview first and puts it back afterwards; opening a file switches it **Off** (older files saved with hidden objects are cleaned too). A saved file therefore always contains every object as you made it, and the deploy scripts export the full model.
 - Choosing a LOD after the last written one shows "LODnn: not written (first empty LODmm)".
 - The preview only looks at **visible** objects, as the export does. Hidden objects are not part of the model.
-- **Files are saved without the preview:** the preview is undone before saving and restored afterwards. Opening a file saved with a preview (including older files with hidden objects) cleans it and sets **Viewport LOD** to **Off**, so all objects stay visible to every export path.
-
 ## Refresh LOD Counts
 
 Press **Refresh LOD Counts** after editing geometry, marks or settings. It measures the model, counts vertices and fills the hints. It does not export anything. The results are cached until the next Refresh; after a change the panel asks for a new Refresh.
@@ -225,7 +223,7 @@ It ends with the vertex count of the file, the screen range the LOD is meant for
 
 - **Forgot to Refresh:** cut-offs, counts, hints and the LOD sphere are from the last **Refresh LOD Counts**. The export always measures again, so it is correct, but the panel may be out of date.
 - **Far origins:** the most common cause of LODs switching at strange distances. Check the warning in **Export Settings** and **Show LOD Sphere**.
-- **Files saved with a preview:** files are saved without the preview; opening any file resets **Viewport LOD** to **Off** and restores original display types.
+- **Exporting by hand with the preview on:** with **Excluded: Hidden**, objects absent from the previewed LOD are hidden, and an export of visible objects only leaves them out. Set **Viewport LOD** to **Off** first. The deploy scripts are not affected.
 - **Important small parts disappear:** give them **Keep** (or a tag with **Keep**).
 - **A LOD stays red although many parts are hidden:** the vertices sit in a few large meshes. Hide those meshes from that LOD, or split them; the tools do not reduce polygons.
 - **Interior export stops with "exterior diameter missing":** enter **Exterior Diameter (m)**.
