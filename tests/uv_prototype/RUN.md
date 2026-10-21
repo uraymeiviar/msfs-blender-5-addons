@@ -465,14 +465,17 @@ then render the resulting UV meshes side-by-side using `matplotlib`:
 
 ## 11. Visibility-Based Texel Demand Prototype (`visibility_proto.py`)
 
-Measures per-face texel demand (screen pixels per square metre of 3D surface area) from reference cameras across multiple animation passes, using background GPU face-ID rendering.
+Measures per-face visibility score (spherical solid angle visible fraction $\Omega_{\text{vis}, w} / \Omega_{\text{unocc}} \in [0, 1]$) from reference cameras across multiple animation states, using background GPU face-ID rendering (Round 2, Sessions 69 & 70).
 
 Decisions implemented:
-- **Storage:** External `<blend_name>.visibility` file alongside the `.blend` (Option 1).
-- **Mirror Modifiers:** Evaluated geometry with mirrored face mapping; takes $\max(\text{orig}, \text{mirrored})$ demand per face (Option 2B).
-- **Animations:** 3 global animation passes at 0%, 50%, and 100% travel across all NLA tracks simultaneously (Option 3A).
-- **Reference Demand:** Area-weighted median demand of the primary forward view from the pilot camera defines 1.0 (Option 4B).
-- **Aggregation:** $\max$ per face across camera views and animation passes; area-weighted 90th percentile per object (Option 5). Never-seen faces receive 0 demand and are reported as delete candidates.
+- **Visibility Model:** Spherical solid angle visible fraction independent of distance (Decision 72).
+- **Direction Weight:** MSFS free-look weight $w = \max(\text{floor}, \cos(\theta)^\text{falloff})$ to camera default forward; floor 0.2, falloff 1.0 (Decision 73). Fixed-view frustum mode kept as per-camera option.
+- **Animations:** Normalized percentage states of each action's own frame range (Decision 69), default 3 states (0%, 50%, 100%), option for 5 states.
+- **Material Classes:** Invisible/collision/occluder materials omitted from rendering and scoring; decal/glass/windshield rendered in a second pass with depth write disabled (`depth_mask=False`, depth test `LESS_EQUAL`) so they are scored without occluding underlying panels (Decision 77).
+- **Mirror Modifiers:** Evaluated geometry with mirrored face mapping; takes $\max(\text{orig}, \text{mirrored})$ visibility score per face (Decision 68).
+- **Aggregation:** $\max$ per face across camera views and animation states; area-weighted 90th percentile per UV island and per object (Decision 71). Never-seen faces receive score 0.0 and are reported as "never seen in the analysed views and states" (Decision 74).
+- **Storage:** External `<blend_name>.visibility` file alongside the `.blend` with schema version 2 (Decision 67).
+- **Color Scale:** Never seen in magenta (error color); $0.0 < s \le 0.5$ graded red to neutral grey; $0.5 < s \le 1.0$ graded neutral grey to blue.
 
 ### Commands
 
@@ -481,15 +484,21 @@ Execute from the repository root with Blender 5.2.2 LTS in background mode:
 ```powershell
 $B = "G:\e-jets-e2\tools\blender\blender.exe"
 
-# 1. Run synthetic validation on 4 known cases (Front vs Back, Shell Occlusion, Half-Covered, Recessed Niche)
+# 1. Run synthetic validation on 7 known cases (Distance Invariance, Half-Covered, Direction Weight, Back Face, Invisible Collider, Decal Pass, Action 100-200)
 & $B -b --factory-startup --python tests/uv_prototype/visibility_proto.py -- --synthetic
 
-# 2. Run complete analysis on E2 Cockpit copy (2 cameras, 3 passes, renders heatmap images and checks glTF export)
+# 2. Run complete analysis on E2 Cockpit copy (2 look-around cameras, 3 percentage states, renders graded heatmap images and checks glTF export)
 & $B -b "tests/_work/uv_visibility/COCKPIT_copy.blend" --factory-startup --python tests/uv_prototype/visibility_proto.py -- --cockpit
 ```
 
-Outputs written to `tests/_work/uv_visibility/`:
-- `<blend_name>.visibility`: Compressed NPZ archive containing JSON metadata, per-mesh demand/pixels/area arrays, and per-object summaries.
-- `pilot_demand.png`: 1080p offscreen render of the cockpit from the pilot camera coloured by texel demand.
-- `outside_demand.png`: 1080p offscreen render from an exterior isometric view highlighting never-seen exterior surfaces (dark grey) and interior demand.
+Optional CLI parameters:
+- `--states 3` or `--states 5`: Number of normalized animation states (default 3: 0%, 50%, 100%).
+- `--floor 0.2`: Minimum direction weight for side/rear views (default 0.2).
+- `--falloff 1.0`: Cosine power falloff for direction weight (default 1.0).
+- `--cube-res 1024`: Face resolution of the look-around cube map (default 1024).
+- `--out-dir tests/_work/uv_visibility`: Output directory for `.visibility` file and PNG images.
 
+Outputs written to `tests/_work/uv_visibility/`:
+- `<blend_name>.visibility`: Compressed NPZ archive (schema version 2) containing JSON metadata, camera configurations, animation states, per-mesh scores/areas/islands, and per-object summaries.
+- `pilot_demand.png`: 1080p offscreen render from the pilot camera colored by graded visibility score (blue = high forward view, neutral grey = mid score, red = glancing angle, magenta = never seen).
+- `outside_demand.png`: 1080p offscreen render from an exterior isometric view highlighting never-seen exterior fuselage/structure (magenta) and interior instruments (blue/grey).
