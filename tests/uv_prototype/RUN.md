@@ -465,19 +465,18 @@ then render the resulting UV meshes side-by-side using `matplotlib`:
 
 ## 11. Visibility-Based Texel Demand Prototype (`visibility_proto.py`)
 
-Measures per-face visibility sums (weighted visible solid angle $\Omega_{\text{vis}, w}$ and unoccluded solid angle $\Omega_{\text{unocc}}$) from reference cameras across multiple animation states, using background GPU face-ID rendering and group scoring (Round 3, Sessions 72 & 73, Decision 78).
+Measures per-face visibility sums (weighted visible solid angle $\Omega_{\text{vis}, w}$ and unoccluded solid angle $\Omega_{\text{unocc}}$) from artist-defined reference cameras across multiple animation states, computing per-face patch scores, undetermined hierarchy resolution, and seen-face island values (Round 4, Sessions 75 & 76, Decisions 79, 80, 81).
 
 Decisions implemented:
-- **Visibility Model & Sums:** Accumulates per-face weighted visible solid angle and unoccluded solid angle across views and instances; stores no ratio at the face level (Decision 78).
-- **Group Scoring:** Computes $\sum \Omega_{\text{vis}, w} / \sum \Omega_{\text{unocc}} \in [0, 1]$ per group (UV islands and objects) per view and instance, taking the maximum over views and instances. Groups smaller than 10 reference pixels fall back to their object's score (Decision 78).
-- **Direction Weight:** MSFS free-look weight $w = \max(\text{floor}, \cos(\theta)^\text{falloff})$ to camera default forward; floor 0.2, falloff 1.0 (Decision 73). Fixed-view frustum mode kept as per-camera option.
-- **Animations:** Normalized percentage states of each action's own frame range (Decision 69), default 3 states (0%, 50%, 100%), option for 5 states.
-- **Material Classes:** Invisible/collision/occluder materials (e.g. `InvisibleCollider` clickspots) omitted completely from geometry extraction, analytical calculations, counts, and rendering (Decision 77, Finding 2). Decal/glass/windshield rendered in a second pass with depth write disabled (`depth_mask=False`, depth test `LESS_EQUAL`) so they are scored without occluding underlying panels.
-- **Original Face Attribute Transfer:** Adds temporary integer attribute `_fss_orig_face_idx` to base meshes, automatically transferred through modifiers (Triangulate, Mirror, Subsurf) to evaluated polygons, cleaned up in `finally` (Finding 3). No modulo or clamp index fallbacks.
-- **Instances & Mirror Modifiers:** Every object using a mesh and every Mirror copy is an instance; takes $\max$ over instances and views (Decisions 68, 78).
-- **Never-Seen Reporting:** Groups with zero visible solid angle above the size threshold reported as "never seen in the analysed views and states" (Decision 74).
-- **Storage:** External `<blend_name>.visibility` file alongside the `.blend` with schema version 3 (compressed NPZ with views, options, mesh instances, and `(N_views, N_instances, N_faces)` float32 arrays).
-- **Color Scale:** Never seen in magenta (error color); $0.0 < s \le 0.5$ graded red to neutral grey; $0.5 < s \le 1.0$ graded neutral grey to blue. Rendered by island score with fallback to object score; clickspots omitted.
+- **Cameras from CLI Only (Decision 80):** Reference cameras come strictly from CLI via `--cameras NAME[:MODE],...` (mode `LOOK_AROUND` default, or `FIXED_VIEW`). Analysis stops with an error if none are provided; no camera fallbacks.
+- **Mesh Face Adjacency & Connected Components:** Extracted from the original base mesh edges, excluding invisible material classes (Decision 79).
+- **Per-Face Patch Scores (Decision 79):** Faces $\ge 10\text{ px}$ unoccluded solid angle use their own patch; smaller faces grow BFS rings of mesh neighbours through original geometry until the patch reaches the 10 px threshold. Per view and instance, patch ratio $\sum \Omega_{\text{vis}, w} / \sum \Omega_{\text{unocc}}$ is taken, then the maximum over views and instances.
+- **Undetermined Pieces & Hierarchy Fallback (Decision 79):** Connected pieces $< 10\text{ px}$ as a whole are undetermined, never "never seen". They resolve up the hierarchy: own object $\to$ parent subtree $\to$ neutral fallback 1.0. No object $< 10\text{ px}$ appears in rankings with a measured score or as never-seen.
+- **Seen-Face Island Values (Decision 79):** Island value at packing time is the area-weighted average over seen faces ($s > 0$, including undetermined faces with their inherited score). Measured hidden faces ($s = 0$) are left out, preserving visible surface sharpness on partly hidden islands (e.g. glareshield `CockpitShell.010` island 4). Islands with no seen faces are marked never-seen.
+- **Staleness Verification (Finding 4):** Saves mesh polygon counts in `.visibility` metadata (schema version 4). On load, compares against scene meshes and flags modified meshes as stale.
+- **Resolution Check (1,024 vs 4,096 px):** Bucketed by face and island size; undetermined-only islands reported as a separate row (Finding 1). Meets $\le 0.02$ area-weighted mean difference for groups $\ge 10\text{ px}$.
+- **Offscreen Heatmap Renders (Step 9):** Surfaces colored by per-face score: undetermined in cyan `(0.0, 0.85, 0.85)`, never-seen in magenta `(1.0, 0.0, 1.0)`, and visible faces in graded red-to-neutral-grey-to-blue ramp. Clickspots excluded.
+- **Synthetic Validation (15 Cases):** Tests distance invariance, half-covered panels, direction weight falloff, back-facing surfaces, invisible boxes, decals, actions on arbitrary frame ranges, fine grid patches, mirror copies, triangulate modifiers, linked duplicates, partly hidden islands, child parts with parent, standalone small parts, and mesh staleness detection.
 
 ### Commands
 
@@ -486,24 +485,25 @@ Execute from the repository root with Blender 5.2.2 LTS in background mode:
 ```powershell
 $B = "G:\e-jets-e2\tools\blender\blender.exe"
 
-# 1. Run synthetic validation on 11 test cases (Distance Invariance, Half-Covered, Direction Weight, Back Face, Invisible Collider, Decal Pass, Action 100-200, Multi-Face Grid Invariance, Mirror Blocked, Triangulate Modifier, Linked Duplicates)
+# 1. Run synthetic validation on 15 test cases
 & $B -b --factory-startup --python tests/uv_prototype/visibility_proto.py -- --synthetic
 
 # 2. Run resolution check comparing 1,024 vs 4,096 px cube face resolution on the cockpit copy
-& $B -b "tests/_work/uv_visibility/COCKPIT_copy.blend" --factory-startup --python tests/uv_prototype/visibility_proto.py -- --resolution-check
+& $B -b "tests/_work/uv_visibility/COCKPIT_copy.blend" --factory-startup --python tests/uv_prototype/visibility_proto.py -- --resolution-check --cameras CAM_PILOT_CLOSE:LOOK_AROUND,CAM_COPILOT:LOOK_AROUND
 
 # 3. Run complete analysis on E2 Cockpit copy (2 look-around cameras, 3 percentage states, renders graded heatmap images and checks glTF export)
-& $B -b "tests/_work/uv_visibility/COCKPIT_copy.blend" --factory-startup --python tests/uv_prototype/visibility_proto.py -- --cockpit
+& $B -b "tests/_work/uv_visibility/COCKPIT_copy.blend" --factory-startup --python tests/uv_prototype/visibility_proto.py -- --cockpit --cameras CAM_PILOT_CLOSE:LOOK_AROUND,CAM_COPILOT:LOOK_AROUND
 ```
 
 Optional CLI parameters:
-- `--states 3` or `--states 5`: Number of normalized animation states (default 3: 0%, 50%, 100%).
+- `--cameras NAME[:MODE],...`: Mandatory list of reference cameras (e.g. `--cameras CAM_PILOT_CLOSE:LOOK_AROUND,CAM_COPILOT:LOOK_AROUND`).
+- `--states 1`, `--states 3`, or `--states 5`: Number of normalized animation states (default 3: 0%, 50%, 100%).
 - `--floor 0.2`: Minimum direction weight for side/rear views (default 0.2).
 - `--falloff 1.0`: Cosine power falloff for direction weight (default 1.0).
 - `--cube-res 1024`: Face resolution of the look-around cube map (default 1024).
 - `--out-dir tests/_work/uv_visibility`: Output directory for `.visibility` file and PNG images.
 
 Outputs written to `tests/_work/uv_visibility/`:
-- `<blend_name>.visibility`: Compressed NPZ archive (schema version 3) containing JSON metadata, camera configurations, animation states, per-mesh arrays `(N_views, N_instances, N_faces)`, and group summaries.
-- `pilot_demand.png`: 1080p offscreen render from the pilot camera colored by group visibility score (blue = high forward view, neutral grey = mid score, red = glancing angle; clickspots omitted).
+- `<blend_name>.visibility`: Compressed NPZ archive (schema version 4) containing JSON metadata, camera configurations, animation states, per-mesh arrays `(N_views, N_instances, N_faces)`, mesh face counts, and summaries.
+- `pilot_demand.png`: 1080p offscreen render from the pilot camera colored by per-face visibility score (undetermined in cyan, never-seen in magenta, visible graded).
 - `outside_demand.png`: 1080p offscreen render from an exterior isometric view highlighting never-seen exterior fuselage/structure (magenta) and interior instruments (blue/grey).
