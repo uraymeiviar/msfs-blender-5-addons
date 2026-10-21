@@ -1098,14 +1098,14 @@ def register():
     )
 
     bpy.types.Scene.fss_uv_heatmap_grid = bpy.props.BoolProperty(
-        name='UV Grid', default=False, options={'SKIP_SAVE'}, update=_on_mode_change,
+        name='UV Grid', default=True, update=_on_mode_change,  # saved with the file, on by default
         description='Draw a grid in UV space over the heatmap: stretched UVs show as stretched cells')
     bpy.types.Scene.fss_uv_heatmap_grid_cells = bpy.props.EnumProperty(
-        name='Cells', default='16', options={'SKIP_SAVE'}, update=_on_mode_change,
+        name='Cells', default='16', update=_on_mode_change,
         description='Number of grid cells across the UV square',
         items=[('8', '8 x 8', ''), ('16', '16 x 16', ''), ('32', '32 x 32', ''), ('64', '64 x 64', '')])
     bpy.types.Scene.fss_uv_heatmap_grid_labels = bpy.props.BoolProperty(
-        name='Cell Labels', default=True, options={'SKIP_SAVE'}, update=_on_mode_change,
+        name='Cell Labels', default=True, update=_on_mode_change,
         description='Label each grid cell (column letter, row number) so you can see where a cell ends up')
     bpy.types.Scene.fss_uv_heatmap_opacity = bpy.props.FloatProperty(
         name='Opacity', default=ALPHA, min=0.3, max=1.0, precision=2, options={'SKIP_SAVE'},
