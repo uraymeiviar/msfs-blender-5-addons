@@ -16,6 +16,7 @@ import time
 import numpy as np
 import bpy
 import bmesh
+from bpy.app.handlers import persistent
 
 try:
     from .uv_autoseam_core import THR, propose_seams, _area_distortion, _overlap_pairs, _tri_area3
@@ -172,6 +173,97 @@ def get_shading_splits(obj):
         bpy.context.view_layer.update()
 
 
+# While Propose Seams or Accept + Unwrap runs, the panel shows this progress instead of its buttons
+_progress = None  # dict: verb, index, count, mesh, faces, done_faces, total_faces, stage, within
+_cancel_requested = False
+_count_cache = {}  # mesh name -> (proposed, current) seam counts, dropped when the mesh changes
+
+
+def progress_factor(p):
+    """Share of the run done, weighted by faces, including the share of the mesh in work."""
+    return min((p['done_faces'] + p['within'] * p['faces']) / max(p['total_faces'], 1), 1.0)
+
+
+def _redraw_panels():
+    for window in bpy.context.window_manager.windows:
+        for area in window.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+
+
+def _redraw_sidebar_now():
+    """Draw the sidebar at once while Blender is busy inside one mesh (no event loop runs then). Only the sidebar is
+    drawn: during a mesh the window shows the core's temporary scene, which the viewport must not show."""
+    wm = bpy.context.window_manager
+    for window in wm.windows:
+        for area in window.screen.areas:
+            if area.type != 'VIEW_3D':
+                continue
+            for region in area.regions:
+                if region.type == 'UI' and region.width > 1:
+                    try:
+                        with bpy.context.temp_override(window=window, area=area, region=region):
+                            bpy.ops.wm.redraw_timer(type='DRAW_SWAP', iterations=1)
+                    except Exception:  # no window to draw into (background) or a refused context
+                        pass
+                    return
+
+
+def _on_core_progress(stage, within):
+    if _progress is None:
+        return
+    _progress['stage'], _progress['within'] = stage, within
+    bpy.context.workspace.status_text_set(
+        f"FSS Auto Seam: {_progress['index']}/{_progress['count']} meshes ({_progress['mesh']}: {stage})...")
+    _redraw_sidebar_now()
+
+
+def selected_seam_counts(context):
+    """(proposed, current) seam counts over the selected meshes, cached per mesh until it changes."""
+    proposed = current = 0
+    for me in {o.data for o in context.selected_objects if o.type == 'MESH' and _editable(o) and o.data}:
+        counts = _count_cache.get(me.name)
+        if counts is None:
+            counts = _count_cache[me.name] = get_mesh_seam_counts(me)
+        proposed += counts[0]
+        current += counts[1]
+    return proposed, current
+
+
+def seam_buttons(context):
+    """The Auto Seam buttons to show: none while a run is in progress; Accept and Discard only with proposed seams,
+    Clear Current only with current seams (in Edit Mode the counts cannot be read, so all are shown)."""
+    if _progress is not None:
+        return set()
+    if context.mode != 'OBJECT':
+        return {'PROPOSE', 'ACCEPT', 'ACCEPT_UNWRAP', 'DISCARD', 'CLEAR'}
+    proposed, current = selected_seam_counts(context)
+    shown = {'PROPOSE'}
+    if proposed:
+        shown |= {'ACCEPT', 'ACCEPT_UNWRAP', 'DISCARD'}
+    if current:
+        shown.add('CLEAR')
+    return shown
+
+
+@persistent
+def _on_depsgraph_update_post(_scene, depsgraph=None):
+    if depsgraph is None or not _count_cache:
+        return
+    for update in depsgraph.updates:
+        data = getattr(update.id, 'data', None) if isinstance(update.id, bpy.types.Object) else update.id
+        if isinstance(data, bpy.types.Mesh):
+            _count_cache.pop(data.name, None)
+
+
+@persistent
+def _on_load_post(_dummy):
+    global _progress, _cancel_requested
+    _count_cache.clear()
+    _progress = None
+    _cancel_requested = False
+
+
 def get_mesh_seam_masks(mesh):
     """Return (artist_seams_mask, auto_seams_mask) boolean arrays for mesh edges.
 
@@ -206,6 +298,7 @@ def write_proposal(mesh, proposed_orig_edges):
     2. Sets use_seam and fss_auto_seam boolean edge attribute on the proposal.
     Artist seams are never changed.
     """
+    _count_cache.pop(mesh.name, None)
     ne = len(mesh.edges)
     if ne == 0:
         return
@@ -244,6 +337,7 @@ def clear_auto_seams(mesh):
     Clears use_seam on edges marked fss_auto_seam and removes the fss_auto_seam attribute.
     Artist seams are never changed.
     """
+    _count_cache.pop(mesh.name, None)
     attr = mesh.attributes.get(AUTO_SEAM_ATTR)
     if attr is None:
         return 0
@@ -270,6 +364,7 @@ def clear_auto_seams(mesh):
 
 def clear_current_seams(mesh):
     """Remove the current seams (every seam not marked fss_auto_seam); proposed seams stay."""
+    _count_cache.pop(mesh.name, None)
     current, proposed = get_mesh_seam_masks(mesh)
     count = int(np.count_nonzero(current))
     if count:
@@ -283,6 +378,7 @@ def keep_as_artist_seams(mesh):
 
     Seams remain set on use_seam and are treated as artist seams from then on.
     """
+    _count_cache.pop(mesh.name, None)
     attr = mesh.attributes.get(AUTO_SEAM_ATTR)
     if attr is None:
         return 0
@@ -531,7 +627,7 @@ def write_report_text(mesh_reports, run_time):
     txt.write("\n".join(lines).rstrip() + "\n")
 
 
-def propose(obj, cache=None, measurement_arrays=False, use_temp_scene=True, limit=THR, **kwargs):
+def propose(obj, cache=None, measurement_arrays=False, use_temp_scene=True, limit=THR, progress=None, **kwargs):
     """Propose automatic UV seams on obj without modifying the object or mesh.
 
     Parameters:
@@ -543,6 +639,7 @@ def propose(obj, cache=None, measurement_arrays=False, use_temp_scene=True, limi
         use_temp_scene: bool (default True). When True, runs propose_seams inside an isolated
                         temporary scene containing only the work object for speed.
         limit: distortion limit for the core's charts and the final check (the panel's Distortion Limit).
+        progress: optional function(stage_name, fraction of this mesh), passed to the core.
 
     Returns:
         (proposed_orig_edges, diagonal_cuts, report):
@@ -662,7 +759,8 @@ def propose(obj, cache=None, measurement_arrays=False, use_temp_scene=True, limi
             work_obj.select_set(True)
 
         # Run core propose_seams passing diagonals as no_cut
-        auto_edges, stats = propose_seams(work_obj, work_artist_seam, work_nsplit, no_cut=work_no_cut, limit=limit)
+        auto_edges, stats = propose_seams(work_obj, work_artist_seam, work_nsplit, no_cut=work_no_cut, limit=limit,
+                                          progress=progress)
 
         # Map proposed cuts back to original edges; count cuts on diagonals
         proposed_orig_edges = []
@@ -917,7 +1015,8 @@ class FSS_OT_UvProposeSeams(bpy.types.Operator):
                 s_box.label(text=f"  ... and {len(self._skipped) - 10} more")
 
     def _process_single_mesh(self, context, mesh, rep_obj, obj_list, cache):
-        prop_edges, diag_cuts, rep = propose(rep_obj, cache=cache, limit=context.scene.fss_uv_autoseam_limit)
+        prop_edges, diag_cuts, rep = propose(rep_obj, cache=cache, limit=context.scene.fss_uv_autoseam_limit,
+                                             progress=_on_core_progress if _progress is not None else None)
         write_proposal(mesh, prop_edges)
         res = {
             'mesh': mesh.name,
@@ -948,6 +1047,7 @@ class FSS_OT_UvProposeSeams(bpy.types.Operator):
 
         # Modal execution in interactive Blender when invoked
         if not bpy.app.background and getattr(self, '_is_invoked', False):
+            global _progress, _cancel_requested
             wm = context.window_manager
             self._timer = wm.event_timer_add(0.01, window=context.window)
             wm.modal_handler_add(self)
@@ -955,7 +1055,13 @@ class FSS_OT_UvProposeSeams(bpy.types.Operator):
             self._mesh_reports = []
             self._cache = {}
             self._t_start = time.perf_counter()
+            self._announced = False
+            _cancel_requested = False
+            _progress = {'verb': 'Proposing', 'index': 0, 'count': len(self._unique_meshes), 'mesh': '', 'faces': 0,
+                         'done_faces': 0, 'total_faces': sum(len(m.polygons) for m in self._unique_meshes),
+                         'stage': '', 'within': 0.0}
             context.workspace.status_text_set(f"FSS Auto Seam: 0/{len(self._unique_meshes)} meshes...")
+            _redraw_panels()
             return {'RUNNING_MODAL'}
 
         # Synchronous execution for background scripts, headless runs, or direct execute calls
@@ -984,45 +1090,83 @@ class FSS_OT_UvProposeSeams(bpy.types.Operator):
         )
         return {'FINISHED'}
 
-    def modal(self, context, event):
-        if event.type == 'ESC':
-            context.window_manager.event_timer_remove(self._timer)
-            context.workspace.status_text_set(None)
-            run_time = time.perf_counter() - self._t_start
-            write_report_text(self._mesh_reports, run_time)
-            self.report({'INFO'}, f"Auto-seam cancelled by Esc ({self._mesh_idx}/{len(self._unique_meshes)} meshes). See '{REPORT_TEXT_NAME}'.")
+    def _finish(self, context, cancelled=False):
+        global _progress, _cancel_requested
+        context.window_manager.event_timer_remove(self._timer)
+        context.workspace.status_text_set(None)
+        _progress = None
+        _cancel_requested = False
+        _redraw_panels()
+        run_time = time.perf_counter() - self._t_start
+        write_report_text(self._mesh_reports, run_time)
+        if cancelled:
+            self.report({'INFO'}, f"Auto-seam cancelled ({self._mesh_idx}/{len(self._unique_meshes)} meshes). "
+                                  f"See '{REPORT_TEXT_NAME}'.")
             return {'FINISHED'}
+        tot_islands = sum(r['islands'] for r in self._mesh_reports)
+        tot_extra = sum(r['extra_vertices_vs_shading'] for r in self._mesh_reports)
+        attention_count = sum(
+            1 for r in self._mesh_reports
+            if r.get('unverified_charts') or r.get('islands_over_limits') or r.get('warnings')
+        )
+        attention_str = f" ({attention_count} need attention)" if attention_count > 0 else " (all clean)"
+        self.report(
+            {'INFO'},
+            f"Auto-seam completed: {len(self._unique_meshes)} mesh(es), "
+            f"{tot_islands} islands (+{tot_extra} extra verts) in {run_time:.2f}s{attention_str}. "
+            f"See '{REPORT_TEXT_NAME}'."
+        )
+        return {'FINISHED'}
+
+    def modal(self, context, event):
+        if event.type == 'ESC' or _cancel_requested:
+            return self._finish(context, cancelled=True)
 
         if event.type == 'TIMER':
-            if self._mesh_idx < len(self._unique_meshes):
-                mesh = self._unique_meshes[self._mesh_idx]
-                rep_obj = self._mesh_to_objs[mesh][0]
-                rep = self._process_single_mesh(context, mesh, rep_obj, self._mesh_to_objs[mesh], self._cache)
-                self._mesh_reports.append(rep)
-                self._mesh_idx += 1
-                context.workspace.status_text_set(f"FSS Auto Seam: {self._mesh_idx}/{len(self._unique_meshes)} meshes ({mesh.name})...")
+            if self._mesh_idx >= len(self._unique_meshes):
+                return self._finish(context)
+            mesh = self._unique_meshes[self._mesh_idx]
+            if not self._announced:
+                # show which mesh comes next before Blender blocks on it
+                _progress.update(index=self._mesh_idx + 1, mesh=mesh.name, faces=len(mesh.polygons), stage='Starting',
+                                 within=0.0)
+                context.workspace.status_text_set(
+                    f"FSS Auto Seam: {self._mesh_idx + 1}/{len(self._unique_meshes)} meshes ({mesh.name})...")
+                _redraw_panels()
+                self._announced = True
                 return {'RUNNING_MODAL'}
-            else:
-                context.window_manager.event_timer_remove(self._timer)
-                context.workspace.status_text_set(None)
-                run_time = time.perf_counter() - self._t_start
-                write_report_text(self._mesh_reports, run_time)
-                tot_islands = sum(r['islands'] for r in self._mesh_reports)
-                tot_extra = sum(r['extra_vertices_vs_shading'] for r in self._mesh_reports)
-                attention_count = sum(
-                    1 for r in self._mesh_reports
-                    if r.get('unverified_charts') or r.get('islands_over_limits') or r.get('warnings')
-                )
-                attention_str = f" ({attention_count} need attention)" if attention_count > 0 else " (all clean)"
-                self.report(
-                    {'INFO'},
-                    f"Auto-seam completed: {len(self._unique_meshes)} mesh(es), "
-                    f"{tot_islands} islands (+{tot_extra} extra verts) in {run_time:.2f}s{attention_str}. "
-                    f"See '{REPORT_TEXT_NAME}'."
-                )
-                return {'FINISHED'}
+            rep_obj = self._mesh_to_objs[mesh][0]
+            try:
+                rep = self._process_single_mesh(context, mesh, rep_obj, self._mesh_to_objs[mesh], self._cache)
+            except Exception as ex:
+                self._finish(context, cancelled=True)
+                self.report({'ERROR'}, f"Auto-seam stopped at '{mesh.name}': {ex}")
+                return {'CANCELLED'}
+            self._mesh_reports.append(rep)
+            self._mesh_idx += 1
+            self._announced = False
+            _progress['done_faces'] += len(mesh.polygons)
+            _progress['within'] = 0.0
+            return {'RUNNING_MODAL'}
 
         return {'PASS_THROUGH'}
+
+
+class FSS_OT_UvCancelAutoSeam(bpy.types.Operator):
+    bl_idname = 'fss.uv_cancel_auto_seam'
+    bl_label = 'Cancel'
+    bl_description = ('Stop Propose Seams after the mesh in work (as Esc); finished meshes keep their proposed '
+                      'seams')
+    bl_options = {'INTERNAL'}
+
+    @classmethod
+    def poll(cls, context):
+        return _progress is not None and _progress.get('verb') == 'Proposing'
+
+    def execute(self, context):
+        global _cancel_requested
+        _cancel_requested = True
+        return {'FINISHED'}
 
 
 def _in_object_mode(context, work):
@@ -1136,10 +1280,37 @@ class FSS_OT_UvAcceptAndUnwrap(bpy.types.Operator):
         return context.window_manager.invoke_confirm(self, event)
 
     def execute(self, context):
+        global _progress
         meshes, mesh_to_objs, _shared, _replaced, skipped = _gather_candidate_objects(context)
         if not meshes:
             self.report({'WARNING'}, 'Nothing to unwrap: ' + '; '.join(f'{n}: {r}' for n, r in skipped[:5]))
             return {'CANCELLED'}
+        self._work = (meshes, mesh_to_objs, skipped)
+        if bpy.app.background:
+            return self._run(context)
+        # draw "Unwrapping" first: the unwrap is one Blender call, Blender waits until it is done
+        _progress = {'verb': 'Unwrapping', 'index': 1, 'count': len(meshes), 'mesh': '', 'faces': 0,
+                     'done_faces': 0, 'total_faces': 1, 'stage': '', 'within': 0.0}
+        _redraw_panels()
+        context.workspace.status_text_set(f"FSS Auto Seam: unwrapping {len(meshes)} mesh(es)...")
+        self._timer = context.window_manager.event_timer_add(0.05, window=context.window)
+        context.window_manager.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        global _progress
+        if event.type != 'TIMER':
+            return {'RUNNING_MODAL'}
+        context.window_manager.event_timer_remove(self._timer)
+        try:
+            return self._run(context)
+        finally:
+            _progress = None
+            context.workspace.status_text_set(None)
+            _redraw_panels()
+
+    def _run(self, context):
+        meshes, mesh_to_objs, skipped = self._work
         accepted = _in_object_mode(context, lambda: sum(keep_as_artist_seams(m) for m in meshes))
         objects = [mesh_to_objs[m][0] for m in meshes]  # shared mesh data is unwrapped once
         unwrap_angle_based(context, objects)
@@ -1248,6 +1419,21 @@ class FSS_PT_UvAutoSeam(bpy.types.Panel):
         layout = self.layout
         obj = context.active_object
 
+        if _progress is not None:
+            # a run is in progress: only the progress, no buttons (the scene may be the core's temporary one)
+            p = _progress
+            box = layout.box()
+            if p['verb'] == 'Proposing':
+                box.progress(factor=progress_factor(p), type='BAR',
+                             text=f"Proposing {p['index']} of {p['count']}: {p['mesh']}")
+                box.label(text=f"{p['stage'] or 'Starting'} ({p['faces']:,} faces)", icon='TIME')
+                box.operator(FSS_OT_UvCancelAutoSeam.bl_idname, text='Cancel', icon='CANCEL')
+                box.label(text='Cancel and Esc stop after the mesh in work')
+            else:
+                box.progress(factor=progress_factor(p), type='BAR', text=f"Unwrapping {p['count']} mesh(es)")
+                box.label(text='Blender waits until the unwrap is done', icon='TIME')
+            return
+
         box = layout.box()
         if obj is None:
             box.label(text='No active object', icon='INFO')
@@ -1257,7 +1443,7 @@ class FSS_PT_UvAutoSeam(bpy.types.Panel):
         else:
             box.label(text=f"{obj.name} ({obj.data.name})", icon='MESH_DATA')
             if context.mode == 'OBJECT':
-                auto_cnt, artist_cnt = get_mesh_seam_counts(obj.data)
+                auto_cnt, artist_cnt = _count_cache.get(obj.data.name) or get_mesh_seam_counts(obj.data)
                 box.label(text=f"Proposed: {auto_cnt} | Current: {artist_cnt}")
             else:
                 box.label(text="(Seam counts shown in Object Mode)")
@@ -1272,13 +1458,18 @@ class FSS_PT_UvAutoSeam(bpy.types.Panel):
         sub = row.row()
         sub.alignment = 'RIGHT'
         sub.label(text='Fewer islands')
+        shown = seam_buttons(context)
         box.operator(FSS_OT_UvProposeSeams.bl_idname, text='Propose Seams', icon='UV_EDGESEL')
-        row = box.row(align=True)
-        row.operator(FSS_OT_UvKeepAsArtistSeams.bl_idname, text='Accept Proposed', icon='CHECKMARK')
-        row.operator(FSS_OT_UvAcceptAndUnwrap.bl_idname, text='Accept + Unwrap', icon='UV')
-        row = box.row(align=True)
-        row.operator(FSS_OT_UvClearAutoSeams.bl_idname, text='Discard Proposed', icon='X')
-        row.operator(FSS_OT_UvClearCurrentSeams.bl_idname, text='Clear Current', icon='TRASH')
+        if shown & {'ACCEPT', 'ACCEPT_UNWRAP'}:
+            row = box.row(align=True)
+            row.operator(FSS_OT_UvKeepAsArtistSeams.bl_idname, text='Accept Proposed', icon='CHECKMARK')
+            row.operator(FSS_OT_UvAcceptAndUnwrap.bl_idname, text='Accept + Unwrap', icon='UV')
+        if shown & {'DISCARD', 'CLEAR'}:
+            row = box.row(align=True)
+            if 'DISCARD' in shown:
+                row.operator(FSS_OT_UvClearAutoSeams.bl_idname, text='Discard Proposed', icon='X')
+            if 'CLEAR' in shown:
+                row.operator(FSS_OT_UvClearCurrentSeams.bl_idname, text='Clear Current', icon='TRASH')
 
         if context.mode == 'EDIT_MESH':
             row = box.row(align=True)
@@ -1308,6 +1499,7 @@ CLASSES = (
     FSS_OT_UvClearAutoSeams,
     FSS_OT_UvKeepAsArtistSeams,
     FSS_OT_UvAcceptAndUnwrap,
+    FSS_OT_UvCancelAutoSeam,
     FSS_OT_UvClearCurrentSeams,
     FSS_OT_UvSelectAutoSeams,
     FSS_OT_UvSelectArtistSeams,
@@ -1318,6 +1510,10 @@ CLASSES = (
 def register():
     for cls in CLASSES:
         bpy.utils.register_class(cls)
+    for handlers, handler in ((bpy.app.handlers.depsgraph_update_post, _on_depsgraph_update_post),
+                              (bpy.app.handlers.load_post, _on_load_post)):
+        if handler not in handlers:
+            handlers.append(handler)
     bpy.types.Scene.fss_uv_autoseam_limit = bpy.props.FloatProperty(
         name='Distortion Limit', default=THR, min=1.05, max=2.0, soft_min=1.05, soft_max=1.75,
         precision=2, step=5,
@@ -1326,6 +1522,10 @@ def register():
 
 
 def unregister():
+    for handlers, handler in ((bpy.app.handlers.depsgraph_update_post, _on_depsgraph_update_post),
+                              (bpy.app.handlers.load_post, _on_load_post)):
+        if handler in handlers:
+            handlers.remove(handler)
     del bpy.types.Scene.fss_uv_autoseam_limit
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)

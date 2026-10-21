@@ -30,6 +30,12 @@ MS_ITER = 50
 FILL_MIN = 0.5
 FILL_GAIN = 1.25
 TREE_FACES = 512
+# Progress inside one mesh: stages in order with their share of the run time, from OVERHEAD_SHELL,
+# COCKPIT_SHELL_FLOOR and @MERGE_PEDESTAL_SHELL together (journal Session 90); single meshes differ a lot
+PROGRESS_STAGES = (('Seeding', 0.15), ('Merging', 0.42), ('Strips', 0.12), ('Smoothing', 0.02), ('Wall cuts', 0.03),
+                   ('Final unwrap', 0.01), ('Repair', 0.04), ('Worst triangles', 0.01), ('Rings and frames', 0.02),
+                   ('Final check', 0.18))
+PROGRESS_INTERVAL = 0.25  # seconds between progress reports: the caller may redraw, which costs a few milliseconds
 
 
 def _tri_area3(P3):
@@ -135,7 +141,7 @@ def _overlap_pairs(U, eps_rel=1e-6, max_pairs_chunk=200000):
     return np.concatenate(res) if res else np.zeros((0, 2), np.int64)
 
 
-def propose_seams(obj, artist_seam, normal_split=None, no_cut=None, limit=THR):
+def propose_seams(obj, artist_seam, normal_split=None, no_cut=None, limit=THR, progress=None):
     """Propose automatic UV seams on obj.
 
     Parameters:
@@ -145,6 +151,8 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None, limit=THR):
         no_cut: optional boolean sequence of length len(obj.data.edges); True for edges that must
                 never be cut or act as chart boundaries (e.g. triangulation diagonals).
         limit: largest mean area distortion a chart may have (1.0 = none); higher gives fewer charts.
+        progress: optional function(stage_name, fraction 0..1 of this mesh), called at most every
+                  PROGRESS_INTERVAL seconds from the trial unwraps and at each stage.
 
     Returns:
         (auto_seam_edges, stats):
@@ -181,6 +189,24 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None, limit=THR):
 
         T0 = time.perf_counter()
         tm = {}
+        progress_at = [0, 0.0, 0.0]  # stage index, share of the stage done, time of the last report
+
+        def report(force=False):
+            now = time.perf_counter()
+            if progress is None or (not force and now - progress_at[2] < PROGRESS_INTERVAL):
+                return
+            progress_at[2] = now
+            i = progress_at[0]
+            start = sum(w for _, w in PROGRESS_STAGES[:i])
+            progress(PROGRESS_STAGES[i][0], start + PROGRESS_STAGES[i][1] * min(max(progress_at[1], 0.0), 1.0))
+
+        def stage(i):
+            progress_at[0], progress_at[1] = i, 0.0
+            report(force=True)
+
+        def advance(done, total):
+            progress_at[1] = done / total if total else 1.0
+            report()
 
         bm = bmesh.from_edit_mesh(me)
         bm.faces.ensure_lookup_table()
@@ -400,6 +426,7 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None, limit=THR):
 
         def trial(faces, clear_edges=(), set_edges=()):
             t0 = time.perf_counter()
+            report()
             fl = list(faces)
             select_unwrap(fl, clear_edges, set_edges)
             U = read_uv(fl)
@@ -457,7 +484,10 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None, limit=THR):
 
         recompute_seams()
         n_split = 0
-        for cid in list(charts.keys()):
+        stage(0)
+        seed_ids = list(charts.keys())
+        for i_seed, cid in enumerate(seed_ids):
+            advance(i_seed, len(seed_ids))
             fs = list(charts[cid])
             if len(fs) < MIN_SPLIT:
                 continue
@@ -493,11 +523,15 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None, limit=THR):
         tree_start = time.perf_counter()
         leaf_faces = {c: set(fs) for c, fs in charts.items()}
         tree_trials = 0
+        stage(1)
+        leaves_done = [0]
 
         def solve(ids):
             nonlocal tree_trials
             if len(ids) == 1:
                 c = ids[0]
+                leaves_done[0] += 1
+                advance(leaves_done[0], len(leaf_faces))
                 return [(leaf_faces[c], chart_uv.get(c))]
             centers = np.array([P3all[list(leaf_faces[c])].mean((0, 1)) for c in ids])
             normals = np.array([FN[list(leaf_faces[c])].mean(0) for c in ids])
@@ -567,7 +601,9 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None, limit=THR):
         strips = sorted([c for c in charts if is_strip(c)], key=lambda c: area3[list(charts[c])].sum())
         absorbed = 0
         strip_mode = True
-        for c in strips:
+        stage(2)
+        for i_strip, c in enumerate(strips):
+            advance(i_strip, len(strips))
             if c not in charts:
                 continue
             if time.perf_counter() - T0 > BUDGET * 1.5:
@@ -585,7 +621,9 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None, limit=THR):
         charts0 = {k: set(v) for k, v in charts.items()}
         chart_uv0 = {k: (v[0], v[1].copy()) for k, v in chart_uv.items()}
         moved = 0
+        stage(3)
         for it in range(5):
+            advance(it, 5)
             ch = 0
             for f in range(nF):
                 cnt = {}
@@ -660,7 +698,10 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None, limit=THR):
         wall_box_charts = set()
         wall_box_faces = set()
         wall_charts_tried = wall_cuts_applied = wall_fallback_applied = 0
-        for c in list(charts.keys()):
+        stage(4)
+        wall_ids = list(charts.keys())
+        for i_wall, c in enumerate(wall_ids):
+            advance(i_wall, len(wall_ids))
             if c not in charts:
                 continue
             fl = sorted(charts[c])
@@ -780,6 +821,7 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None, limit=THR):
 
         # Final unwrap of all charts with keep_trials
         t = time.perf_counter()
+        stage(5)
         recompute_seams()
         allf = list(range(nF))
         reused = missing = 0
@@ -1187,7 +1229,9 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None, limit=THR):
         # Repair pass per decision 49 (cuts only, no planar projection writes)
         t = time.perf_counter()
         bad_charts = [c for c, v in per.items() if v[2] or (c not in verified and v[0] > limit) or len(components(sorted(charts[c]), lambda e: not forced[e])) > 1]
-        for c in bad_charts:
+        stage(6)
+        for i_bad, c in enumerate(bad_charts):
+            advance(i_bad, len(bad_charts))
             fl = sorted(charts[c])
             decomp = decompose_chart(fl)
             for i, (pc, d_pc, U_pc) in enumerate(decomp):
@@ -1218,6 +1262,7 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None, limit=THR):
 
         # Worst-triangle pass (Decision 49: NO minimize_stretch)
         t = time.perf_counter()
+        stage(7)
         worst_before = max(v[1] for v in per.values())
         n_bad_before = sum(1 for v in per.values() if v[1] > WORST)
         split_ok = 0
@@ -1292,7 +1337,10 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None, limit=THR):
             return float(a / max(((x.max(1) - x.min(1)) * (y.max(1) - y.min(1))).min(), 1e-30))
 
         frame_protected_skipped = 0
-        for c in list(charts.keys()):
+        stage(8)
+        ring_ids = list(charts.keys())
+        for i_ring, c in enumerate(ring_ids):
+            advance(i_ring, len(ring_ids))
             if time.perf_counter() - T0 > BUDGET * 2.5:
                 break
             if c in wall_box_charts or bool(charts[c] & wall_box_faces):
@@ -1456,7 +1504,9 @@ def propose_seams(obj, artist_seam, normal_split=None, no_cut=None, limit=THR):
         gate_rounds = 0
         gate_repaired = 0
         unsplit_charts = set()
+        stage(9)
         while gate_rounds < 10:
+            advance(gate_rounds, 10)
             gate_rounds += 1
             recompute_seams()
             bm = bmesh.from_edit_mesh(me)

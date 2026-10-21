@@ -913,6 +913,70 @@ def test_accept_and_unwrap():
     print(f"  -> PASS: {proposed} seams accepted, decal UVs kept, islands follow seams, state restored.")
 
 
+def test_progress_and_buttons():
+    """Progress inside a mesh (same seams with and without it), the panel's buttons by seam counts, Cancel."""
+    print("Test 15: Progress, buttons and Cancel...")
+    from fss_blender_tools import uv_autoseam_core
+    bpy.ops.wm.read_homefile(use_empty=True)
+    objs = load_e2_test_objects()
+    bpy.ops.mesh.primitive_uv_sphere_add(segments=24, ring_count=12)
+    objs.append(bpy.context.active_object)
+    interval = uv_autoseam_core.PROGRESS_INTERVAL
+    uv_autoseam_core.PROGRESS_INTERVAL = 0.0
+    names = [n for n, _ in uv_autoseam_core.PROGRESS_STAGES]
+    try:
+        for obj in objs:
+            calls = []
+            edges_with, _, _ = uv_autoseam.propose(obj, progress=lambda st, f: calls.append((st, f)))
+            edges_without, _, _ = uv_autoseam.propose(obj)
+            assert sorted(edges_with) == sorted(edges_without), f"{obj.name}: progress changed the proposal"
+            assert calls, f"{obj.name}: no progress reported"
+            fractions = [f for _, f in calls]
+            assert all(0.0 <= f <= 1.0 for f in fractions), fractions
+            assert all(b >= a - 1e-12 for a, b in zip(fractions, fractions[1:])), f"{obj.name}: progress went back"
+            order = [names.index(st) for st, _ in calls]
+            assert order == sorted(order), f"{obj.name}: stages out of order"
+            assert calls[-1][0] == 'Final check', calls[-1]
+            print(f"  {obj.name}: {len(calls)} reports, stages {sorted(set(st for st, _ in calls), key=names.index)}")
+    finally:
+        uv_autoseam_core.PROGRESS_INTERVAL = interval
+
+    p = {'done_faces': 50, 'within': 0.5, 'faces': 50, 'total_faces': 100}
+    assert abs(uv_autoseam.progress_factor(p) - 0.75) < 1e-12
+
+    # buttons follow the selected meshes' seam counts
+    bpy.ops.wm.read_homefile(use_empty=True)
+    bpy.ops.mesh.primitive_uv_sphere_add(segments=24, ring_count=12)
+    obj = bpy.context.active_object
+    me = obj.data
+    me.edges.foreach_set('use_seam', np.zeros(len(me.edges), bool))
+    me.update()
+    uv_autoseam._count_cache.clear()
+    assert uv_autoseam.seam_buttons(bpy.context) == {'PROPOSE'}, uv_autoseam.seam_buttons(bpy.context)
+    bpy.ops.fss.uv_propose_seams()
+    assert uv_autoseam.seam_buttons(bpy.context) == {'PROPOSE', 'ACCEPT', 'ACCEPT_UNWRAP', 'DISCARD'}
+    bpy.ops.fss.uv_keep_as_artist_seams()
+    assert uv_autoseam.seam_buttons(bpy.context) == {'PROPOSE', 'CLEAR'}
+    bpy.ops.fss.uv_clear_current_seams('EXEC_DEFAULT')
+    assert uv_autoseam.seam_buttons(bpy.context) == {'PROPOSE'}
+    bpy.ops.object.mode_set(mode='EDIT')
+    assert len(uv_autoseam.seam_buttons(bpy.context)) == 5, "Edit Mode shows every button"
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+    # while a run is in progress: no buttons; Cancel only then
+    assert not bpy.ops.fss.uv_cancel_auto_seam.poll()
+    uv_autoseam._progress = {'verb': 'Proposing', 'index': 1, 'count': 2, 'mesh': 'M', 'faces': 10,
+                             'done_faces': 0, 'total_faces': 20, 'stage': 'Merging', 'within': 0.5}
+    try:
+        assert uv_autoseam.seam_buttons(bpy.context) == set()
+        assert bpy.ops.fss.uv_cancel_auto_seam() == {'FINISHED'}
+        assert uv_autoseam._cancel_requested
+    finally:
+        uv_autoseam._progress = None
+        uv_autoseam._cancel_requested = False
+    print("  -> PASS: same seams with progress, progress in order, buttons by counts, Cancel only during a run.")
+
+
 def main():
     print("=" * 70)
     print("RUNNING FSS AUTO SEAM OPERATOR & EXPORT TESTS")
@@ -932,6 +996,7 @@ def main():
     test_report_attention_counts()
     test_distortion_limit()
     test_accept_and_unwrap()
+    test_progress_and_buttons()
     print("=" * 70)
     print("ALL TESTS PASSED SUCCESSFULLY.")
     print("=" * 70)

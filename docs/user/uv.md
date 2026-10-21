@@ -30,6 +30,9 @@ The **Auto Seam** panel (sidebar `N` > **FSS Tools** > **Auto Seam**) proposes s
 
 Accept, Accept + Unwrap, Discard and Clear act on whole objects, also when clicked in Edit Mode. **Ctrl+Z** undoes each of them.
 
+- **Only useful buttons are shown** (in Object Mode): Accept Proposed, Accept + Unwrap and Discard Proposed when the selected objects have proposed seams; Clear Current when they have current seams. In Edit Mode all buttons are shown.
+- **While a run is in progress,** a progress bar replaces the buttons and the Distortion Limit slider: "Proposing 12 of 275: OVERHEAD_SHELL", the stage the tool is in (for example Merging) and the mesh's face count. The status bar shows the same. **Cancel** (or **Esc**) stops after the mesh in work; finished meshes keep their proposed seams. Accept + Unwrap shows "Unwrapping" while Blender unwraps.
+
 ## Distortion Limit
 
 The **Distortion Limit** slider above **Propose Seams** sets how much an island may stretch before the tool cuts it:
@@ -107,7 +110,8 @@ Repeated problems on one mesh are grouped into one line, with the count, the lar
 
 ## Limits and What to Watch Out For
 
-- **Blender waits while a mesh is calculated:** Blender processes one mesh per step with progress shown in the status bar. The interface is blocked while a single mesh is calculated. Large shells (such as `OVERHEAD_SHELL`) can take 2 to 2.5 minutes to process. Press **Esc** to cancel between meshes (finished meshes keep their results).
+- **Blender waits while a mesh is calculated:** the tool works on one mesh at a time, and Blender takes no input while a mesh is calculated; Cancel and Esc act when that mesh is done. The progress bar still moves during a mesh, by stage (Seeding, Merging, Strips, … Final check); its share per stage is an average over large shells, so on a single mesh it can run fast in one stage and slow in another. Large shells (such as `OVERHEAD_SHELL`) take 2 to 4 minutes, and parts such as the side windows and side consoles up to about 11 minutes, where the tool stops searching and lists the rest for you. If Windows says Blender is not responding, choose **Wait**: Blender is still working.
+- **Run time is very uneven:** on 275 cockpit meshes, 8 meshes took 84 % of the 58 minutes. Selecting those large meshes separately lets you work on the rest quickly.
 - **Modifiers:** seams are placed on the base mesh before **Mirror** and **Array** modifiers. The generated sides inherit the same seam positions.
 - **Object scale:** Blender's Angle-Based unwrap operates in object space. If an object has non-uniform scale (`1.0, 1.0, 2.0`), unwrap will stretch unless you apply scale (`Ctrl + A > Scale`).
 - **UV Marks panel:** density and direction marks in the **UV Marks** panel are for the packing step and the Heatmap; the **Skip Auto Seam** mark in that panel tells Auto Seam to skip marked objects.

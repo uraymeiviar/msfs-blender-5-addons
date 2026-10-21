@@ -113,6 +113,13 @@ Automated hard-surface seam placement for untextured geometry (`uv_autoseam.py` 
 
 - **Non-destructive:** proposes seams without modifying existing artist seams or changing UV maps.
   Proposed seams are tagged with the boolean edge attribute `fss_auto_seam` and written as Blender edge seams.
+- **Progress:** while Propose Seams or Accept + Unwrap runs, the panel shows only a progress bar (module state
+  `_progress`; weighted by face count) and Cancel (`fss.uv_cancel_auto_seam`, acts between meshes like Esc). Inside
+  one mesh the core reports its stage through `propose_seams(progress=...)`, at most every `PROGRESS_INTERVAL`
+  (0.25 s), from the trial unwraps and each stage start (`PROGRESS_STAGES` with measured average shares); the
+  operator then draws only the sidebar with `bpy.ops.wm.redraw_timer(type='DRAW_SWAP')`, because the window shows the
+  core's temporary scene during a mesh. Buttons are shown by the selected meshes' seam counts (`seam_buttons`,
+  cached per mesh in `_count_cache`, dropped by the seam writers and the depsgraph handler).
 - **Workflow:** **Propose Seams** computes seams modally with progress reporting. Seams are **proposed** (marked
   `fss_auto_seam`) or **current** (all others; internally artist seams). **Accept Proposed** removes the mark,
   **Discard Proposed** removes the proposed seams, **Clear Current** removes the current ones (confirmation), and
