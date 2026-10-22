@@ -811,6 +811,30 @@ def test_packer_interface_and_cache():
     np.testing.assert_array_equal(first_cached['face_undetermined'], uncached['face_undetermined'])
     np.testing.assert_array_equal(first_cached['face_never_seen'], uncached['face_never_seen'])
 
+    # 4. score_face_set verification
+    isl0_faces = np.flatnonzero(first_cached['face_scores'] >= 0.0)
+    score_set = visibility_core.score_face_set(obj12, isl0_faces, vis_data=first_cached)
+    assert abs(score_set - isl_val) < 1e-6, f"score_face_set ({score_set}) != island_values[0] ({isl_val})"
+
+    score_set_direct = visibility_core.score_face_set(obj12, isl0_faces)
+    assert abs(score_set_direct - isl_val) < 1e-6, "score_face_set direct mismatch"
+
+    assert visibility_core.score_face_set(obj12, []) == 0.0
+    assert visibility_core.score_face_set(None, [0]) == 1.0
+
+    # 5. material_has_textures verification
+    mat_textured = bpy.data.materials.new("TEST_TEX")
+    mat_textured.node_tree.nodes.new("ShaderNodeTexImage")
+    assert visibility_core.material_has_textures(mat_textured) is True
+
+    mat_untextured = bpy.data.materials.new("TEST_NO_TEX")
+    assert visibility_core.material_has_textures(mat_untextured) is False
+    assert visibility_core.material_has_textures(None) is False
+
+    mat_invis = bpy.data.materials.new("TEST_INVIS")
+    mat_invis.msfs_material_type = "msfs_invisible"
+    assert visibility_core.material_has_textures(mat_invis) is False
+
     print(f"PASS: test_packer_interface_and_cache (200 calls, {loads} disk load)")
 
 

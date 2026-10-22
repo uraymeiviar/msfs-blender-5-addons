@@ -8,7 +8,7 @@ bl_info = {
     "author": "Flight Sim Studio",
     "description": "Authoring checks and helpers for MSFS aircraft (tools, empty bounds, lod, tags, merge tree, uv marks, uv auto seams, heatmap, visibility, checks)",
     "blender": (5, 2, 0),
-    "version": (0, 28, 1),
+    "version": (0, 28, 2),
     "location": "3D View > Sidebar > FSS Tools",
     "category": "Object",
 }

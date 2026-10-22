@@ -64,6 +64,39 @@ def classify_material(mat):
     return 'OPAQUE'
 
 
+def material_has_textures(mat):
+    """Check if a material uses/holds image textures (has texture nodes/properties).
+    
+    Materials without textures (such as msfs_invisible, msfs_environment_occluder,
+    collision shapes, or untextured solid-color materials) are skipped during packing.
+    """
+    if mat is None:
+        return False
+
+    mtype = getattr(mat, 'msfs_material_type', None)
+    if (mtype is None or mtype == 'NONE') and 'msfs_material_type' in mat:
+        mtype = mat['msfs_material_type']
+
+    if mtype in {'msfs_invisible', 'msfs_environment_occluder', 'msfs_collision'}:
+        return False
+
+    tree = getattr(mat, 'node_tree', None)
+    if tree:
+        for node in tree.nodes:
+            if node.type == 'TEX_IMAGE':
+                return True
+
+    msfs_props = (
+        'msfs_base_color_texture', 'msfs_comp_texture', 'msfs_normal_texture',
+        'msfs_emissive_texture', 'msfs_detail_color_texture', 'msfs_detail_comp_texture',
+        'msfs_detail_normal_texture', 'msfs_blend_mask_texture',
+    )
+    if any(getattr(mat, p, None) for p in msfs_props):
+        return True
+
+    return False
+
+
 def is_invisible_object(obj):
     """Check if object name or all of its materials designate invisible/collision geometry."""
     name_upper = obj.name.upper()
@@ -1838,35 +1871,20 @@ def get_object_visibility(obj, uv_name=None, vis_path=None, use_cache=True):
     d_omega_px = 4.0 / (ref_cube_res * ref_cube_res)
     omega_threshold = min_px_thresh * d_omega_px
 
+    vis_data_ctx = {
+        'stale': False,
+        'face_scores': face_scores,
+        'orig_areas': orig_areas,
+        'vis_omega': vis_omega,
+        'unocc_omega': unocc_omega,
+        'omega_threshold': omega_threshold,
+    }
+
     island_values = {}
     for isl_id in unique_isls:
         isl_mask = (island_ids == isl_id)
         isl_faces = np.flatnonzero(isl_mask)
-        f_sc = face_scores[isl_faces]
-        f_ar = orig_areas[isl_faces]
-
-        seen_mask = (f_sc > 0.0)
-        seen_area = float(np.sum(f_ar[seen_mask]))
-        seen_faces = isl_faces[seen_mask]
-
-        if seen_area > 0.0:
-            r4_avg = float(np.sum(f_sc[seen_mask] * f_ar[seen_mask]) / seen_area)
-            if unocc_omega is not None and vis_omega is not None:
-                seen_unocc = np.sum(unocc_omega[:, :, seen_faces], axis=-1)
-                max_seen_unocc = float(np.max(seen_unocc))
-                if max_seen_unocc >= omega_threshold:
-                    seen_vis = np.sum(vis_omega[:, :, seen_faces], axis=-1)
-                    valid = seen_unocc > 1e-12
-                    ratio = np.where(valid, np.clip(seen_vis / np.maximum(seen_unocc, 1e-12), 0.0, 1.0), 0.0)
-                    isl_val = float(np.max(ratio))
-                else:
-                    isl_val = r4_avg
-            else:
-                isl_val = r4_avg
-        else:
-            isl_val = 0.0
-
-        island_values[int(isl_id)] = isl_val
+        island_values[int(isl_id)] = score_face_set(obj, isl_faces, vis_data=vis_data_ctx)
 
     obj_meta = meta.get('object_summaries', {}).get(obj.name, {})
     obj_score = obj_meta.get('score', 1.0)
@@ -1884,4 +1902,62 @@ def get_object_visibility(obj, uv_name=None, vis_path=None, use_cache=True):
         'face_scores': face_scores,
         'face_undetermined': face_undetermined,
         'face_never_seen': face_never_seen,
+        'vis_omega': vis_omega,
+        'unocc_omega': unocc_omega,
+        'orig_areas': orig_areas,
+        'omega_threshold': omega_threshold,
     }
+
+
+def score_face_set(obj, face_indices, vis_data=None, vis_path=None, use_cache=True):
+    """Compute Decision 82 visibility score for an arbitrary set of original face indices.
+
+    Uses discrete sum ratio (visible solid angle / unoccluded solid angle) over seen faces,
+    or area-weighted average fallback if unoccluded solid angle is below threshold (10 reference pixels).
+    Falls back to 1.0 if visibility data is missing or stale.
+    """
+    if obj is None or obj.type != 'MESH' or not obj.data:
+        return 1.0
+
+    if vis_data is None:
+        vis_data = get_object_visibility(obj, vis_path=vis_path, use_cache=use_cache)
+
+    if vis_data.get('stale', True):
+        return 1.0
+
+    face_indices = np.asarray(face_indices, dtype=np.int32)
+    if len(face_indices) == 0:
+        return 0.0
+
+    face_scores = vis_data.get('face_scores')
+    orig_areas = vis_data.get('orig_areas')
+    if face_scores is None or orig_areas is None:
+        return 1.0
+
+    vis_omega = vis_data.get('vis_omega')
+    unocc_omega = vis_data.get('unocc_omega')
+    omega_threshold = vis_data.get('omega_threshold', 10.0 * 4.0 / (1024 * 1024))
+
+    f_sc = face_scores[face_indices]
+    f_ar = orig_areas[face_indices]
+
+    seen_mask = (f_sc > 0.0)
+    seen_area = float(np.sum(f_ar[seen_mask]))
+    seen_faces = face_indices[seen_mask]
+
+    if seen_area > 0.0:
+        r4_avg = float(np.sum(f_sc[seen_mask] * f_ar[seen_mask]) / seen_area)
+        if unocc_omega is not None and vis_omega is not None:
+            seen_unocc = np.sum(unocc_omega[:, :, seen_faces], axis=-1)
+            max_seen_unocc = float(np.max(seen_unocc))
+            if max_seen_unocc >= omega_threshold:
+                seen_vis = np.sum(vis_omega[:, :, seen_faces], axis=-1)
+                valid = seen_unocc > 1e-12
+                ratio = np.where(valid, np.clip(seen_vis / np.maximum(seen_unocc, 1e-12), 0.0, 1.0), 0.0)
+                return float(np.max(ratio))
+            else:
+                return r4_avg
+        else:
+            return r4_avg
+    else:
+        return 0.0
