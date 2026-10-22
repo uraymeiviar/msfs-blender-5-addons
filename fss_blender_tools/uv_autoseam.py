@@ -191,13 +191,15 @@ def _redraw_panels():
                 area.tag_redraw()
 
 
-def _redraw_sidebar_now():
+def _redraw_sidebar_now(spaces=('VIEW_3D',)):
     """Draw the sidebar at once while Blender is busy inside one mesh (no event loop runs then). Only the sidebar is
-    drawn: during a mesh the window shows the core's temporary scene, which the viewport must not show."""
+    drawn: during a mesh the window shows the core's temporary scene, which the viewport must not show. spaces: the
+    editors whose first visible sidebar is drawn (the packer's progress also shows in the UV editor)."""
     wm = bpy.context.window_manager
+    todo = set(spaces)
     for window in wm.windows:
         for area in window.screen.areas:
-            if area.type != 'VIEW_3D':
+            if area.type not in todo:
                 continue
             for region in area.regions:
                 if region.type == 'UI' and region.width > 1:
@@ -206,7 +208,10 @@ def _redraw_sidebar_now():
                             bpy.ops.wm.redraw_timer(type='DRAW_SWAP', iterations=1)
                     except Exception:  # no window to draw into (background) or a refused context
                         pass
-                    return
+                    todo.discard(area.type)
+                    if not todo:
+                        return
+                    break
 
 
 def _on_core_progress(stage, within):

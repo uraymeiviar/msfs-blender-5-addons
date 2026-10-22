@@ -8,8 +8,8 @@ bl_info = {
     "author": "Flight Sim Studio",
     "description": "Authoring checks and helpers for MSFS aircraft (zones and merge tree, tags, lod, uv tools: seams, packing per texture set with its marks, visibility scoring; utilities: general tools, empty bounds, heatmap, checks)",
     "blender": (5, 2, 0),
-    "version": (0, 32, 0),
-    "location": "3D View > Sidebar > FSS Tools",
+    "version": (0, 33, 0),
+    "location": "3D View > Sidebar > FSS Tools; UV Editor > Sidebar > FSS Tools (Packing)",
     "category": "Object",
 }
 

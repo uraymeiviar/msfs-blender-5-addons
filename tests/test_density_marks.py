@@ -1,7 +1,8 @@
 """Density marks multiply down the hierarchy (UV journal decisions 105 to 110): the scene freedom applied once, marks
 on zones and objects multiplied, presets as factors, Clear, unmarked = x1, parent_density() and density(); the
 migration of the marks of versions before 0.31.0 (custom-property density marks, fss_zone_density, margin fractions)
-at file load and at register, idempotent; the Result drawn by the Packing panel; texture size and margin defaults.
+at file load and at register, idempotent; the Result drawn by the Packing panel; texture size (square) and margin
+defaults.
 
 To run:
 "<blender>" -b --factory-startup --python tests/test_density_marks.py
@@ -80,13 +81,13 @@ def test_defaults():
     assert abs(scene.fss_uv_target_density - 20.48) < 1e-6, scene.fss_uv_target_density
     assert close(uv_marks.scene_freedom(scene), (0.9, 1.1)), uv_marks.scene_freedom(scene)
     material = bpy.data.materials.new('DEFAULTS')
-    assert (material.fss_uv_texture_width, material.fss_uv_texture_height) == ('4096', '4096')
-    assert uv_marks.texture_size(material) == (4096, 4096)
+    assert material.fss_uv_texture_size == '4096' and uv_marks.texture_size(material) == 4096
     assert uv_marks.margin(material) == 8
-    sizes = [item.identifier for item in bpy.types.Material.bl_rna.properties['fss_uv_texture_width'].enum_items]
+    sizes = [item.identifier for item in bpy.types.Material.bl_rna.properties[uv_marks.SIZE_PROP].enum_items]
     assert sizes == ['256', '512', '1024', '2048', '4096', '8192'], sizes
-    material.fss_uv_texture_height = '1024'
-    assert uv_marks.texture_size(material) == (4096, 1024)
+    material.fss_uv_texture_size = '1024'
+    assert uv_marks.texture_size(material) == 1024
+    assert not any(hasattr(material, key) for key in uv_marks.OLD_SIZE_KEYS)  # square only (decision 120)
     obj = new_object('UNMARKED')
     assert not getattr(obj, uv_marks.OWN_PROP) and uv_marks.own_density(obj) is None
     print("PASS: test_defaults (20.48 px/cm, freedom 0.9-1.1, 4096 x 4096, 8 px)")
@@ -280,22 +281,24 @@ def test_panel():
     for prop in ((scene, 'fss_uv_target_density', ''), (scene, 'fss_uv_density_freedom_min', 'Min'),
                  (scene, 'fss_uv_density_freedom_max', 'Max'), (knob, uv_marks.OWN_PROP, 'own mark'),
                  (knob, uv_marks.MIN_PROP, 'Min'), (knob, uv_marks.MAX_PROP, 'Max'),
-                 (materials[0], 'fss_uv_texture_width', ''), (materials[0], 'fss_uv_texture_height', ''),
-                 (materials[0], 'fss_uv_margin_px', '')):
+                 (materials[0], uv_marks.SIZE_PROP, ''), (materials[0], 'fss_uv_margin_px', '')):
         assert prop in props, (prop, props)
     texts = [kwargs.get('text') for name, _args, kwargs in calls if name == 'operator']
-    # the presets, the directions, then Pack per texture set shown and Check All (decisions 114, 115)
-    assert texts == ['Lower', 'Higher', 'Clear', 'Free', 'Upright', 'Flip', 'Quarter', 'Clear'] + ['Pack'] * 5 + [
-        'Check All'], texts
+    # the presets, the directions, then Pack of the texture set below the list and Check All (decisions 114, 115, 121)
+    assert texts == ['Lower', 'Higher', 'Clear', 'Free', 'Upright', 'Flip', 'Quarter', 'Clear', 'Pack', 'Check All'], (
+        texts)
     assert 'Select Marked' not in texts and not hasattr(bpy.types, 'FSS_OT_uv_select_marked')
     sets = [label for label in labels if label and label.startswith('Texture set: ')]
-    assert sets == [f'Texture set: KNOB_MAT_{index}' for index in range(5)], sets
-    assert '... 2 more' in labels, labels
+    assert sets == ['Texture set: KNOB_MAT_0'], sets
+    # all 7 texture sets are in the list (a UIList over bpy.data.materials, filtered to the selection's)
+    assert [name for name, _args, _kwargs in calls].count('template_list') == 1 and not [
+        label for label in labels if label and label.startswith('... ')], labels
+    assert [m.name for m in uv_marks.texture_set_materials(bpy.context)] == [f'KNOB_MAT_{index}' for index in range(7)]
     # Root of the scene: the scene freedom; outside every zone
     bpy.context.view_layer.objects.active = o['root']
     _calls, labels = draw_packing()
     assert (after(labels, 'Parent'), after(labels, 'Zone')) == ('x0.90 - x1.10 (scene freedom)', 'none')
-    print("PASS: test_panel (Parent, Zone, Visibility, Result 20.74 - 27.88 px/cm, 5 of 7 texture sets)")
+    print("PASS: test_panel (Parent, Zone, Visibility, Result 20.74 - 27.88 px/cm, 7 texture sets in the list)")
 
 
 def test_panel_visibility():

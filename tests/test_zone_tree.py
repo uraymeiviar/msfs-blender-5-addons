@@ -234,7 +234,7 @@ def test_gltf_leak():
         mat = bpy.data.materials.new('ZONE_LEAK_MAT')
         mat['fss_probe'] = 1
         mat['artist_mat_note'] = 1
-        mat.fss_uv_texture_width = '2048'
+        mat.fss_uv_texture_size = '2048'
         mat.fss_uv_margin_px = 12
         mesh_obj.data.materials.append(mat)
         mesh_obj.data['fss_probe'] = 1

@@ -520,6 +520,10 @@ scaled to the density lo + t (hi - lo), with one t per set, and then packed with
 
 The source objects' selection, modes, pins and active UV maps are not touched; only the packed UVs are written.
 
+The prototype reads a texture width and height per material, which FSS Blender Tools 0.33.0 replaced by one square
+size (decision 120): run it against 0.32.0 (commit 149f1f3) to repeat Session 97. The packer is
+`fss_blender_tools/uv_pack.py`.
+
 ### Commands
 
 Run from the repository root, one Blender at a time (`tasklist | grep -i blender`):

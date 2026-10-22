@@ -13,6 +13,8 @@ All panels are in the 3D Viewport sidebar (`N`), tab **FSS Tools**, from top to 
 
 Each section opens and closes on its own; Blender remembers that in the `.blend`.
 
+The **UV Editor**'s sidebar (`N`) has an **FSS Tools** tab too, with the **Packing** section (without Visibility Scoring).
+
 ## Zones & Merge Tree
 
 Merge groups join many small objects into one mesh at export, while every part stays a separate, editable object in the `.blend`. Fewer meshes means fewer draw calls in the simulator. Zones hold the merge groups: the panel lists each zone with its groups, and edits the zone's density mark.
@@ -94,6 +96,8 @@ Automated UV seam proposal for hard-surface meshes, with a **Distortion Limit** 
 
 How much texture each part gets, the settings of each texture set, and the packer. The marks are also read by the heatmap's Density mode. The section is closed by default. Every field takes effect as you change it; there is no Apply button.
 
+The same section is also in the **UV Editor**'s sidebar (**N**), tab **FSS Tools** > **Packing**, so you can pack and see the result side by side. **Visibility Scoring** is only in the 3D viewport's section.
+
 - **Target density** (for the scene): the texel density at factor 1.0, in pixels per centimetre. The default 20.48 is 2048 pixels per metre.
 - **Density freedom Min / Max** (for the scene, default 0.90 and 1.10): how far the packer may scale any island down or up. It applies once, at the top of the hierarchy.
 - **Active object box:** for the active object, how its density comes together:
@@ -109,8 +113,9 @@ How much texture each part gets, the settings of each texture set, and the packe
     - **Flip:** 0 or 180 degrees only.
     - **Quarter:** 90-degree steps only.
     - **Clear:** remove the mark (inherit from the parent, else Free).
-- **Texture set** boxes: one per material of the selected objects, the active object's first (up to 5, then the number of the others; select fewer objects to reach those):
-  - **Size:** the width and height of the texture set, 256 to 8192 pixels (default 4096 × 4096). Choose the size; **Pack** and **Check All** report when the islands do not fit at their density, or leave space, and which size would fit.
+- **Texture set list:** every material of the selected objects, the active object's first. Each row shows the material and its last result (see **Last run**; empty before the first run). The list shows 5 rows and scrolls; drag its lower edge to show more, or type in its filter field to find a material by name. A lock marks a set with **Keep UVs**, a warning sign a set whose last run found faces without area or triangles without UV area. With nothing selected, the section says so.
+- **Texture set box**, below the list: the row you clicked (before you click one, the first row):
+  - **Size:** the texture set's size, square, 256 to 8192 pixels per side (default 4096 × 4096). Choose the size; **Pack** and **Check All** report when the islands do not fit at their density, or leave space, and which size would fit. Files from versions before 0.33.0 had a width and a height: the larger of the two becomes the size when the file opens.
   - **Margin:** the space around each island, in pixels of this texture set (default 8). 8 pixels keep islands apart down to the second mip level after the 4 × 4 block compression of the textures; below 4 pixels the box warns that compressed blocks bleed across islands.
   - **Keep UVs:** leave this texture set alone: **Pack** is greyed out and **Check All** lists it as **kept**. For fur and hair cards, decal sheets and colliders, whose UVs map onto a strand or label sheet on purpose. It is stored on the material.
   - **Pack:** packs the texture set (see [Pack](#pack) below). It replaces the UVs of every face with this material; **Ctrl + Z** undoes it.
@@ -119,7 +124,8 @@ How much texture each part gets, the settings of each texture set, and the packe
     - **needs x1.40: 8192 x 8192:** the islands need 1.4 times the texture's side; the size names the smallest one that holds them.
     - **does not fit even at 8192 (x2.51):** not even 8192 pixels per side would hold them.
     - **kept:** Keep UVs is on.
-- **Check All:** below the texture set boxes. Measures every texture set of the scene's view layer as **Pack** would, but writes no UVs, and fills each set's **Last run**. Use it as the overview of which texture sizes give a consistent density. While it runs, the section shows a progress bar instead of its fields; **Cancel** or **Esc** stops after the texture set in work.
+  - Below **Last run**, a warning when the last run found islands with triangles without UV area, or objects with faces without area (see the [Packing Report](#packing-report)).
+- **Check All:** below the texture set box. Measures every texture set of the scene's view layer as **Pack** would, but writes no UVs, and fills each set's **Last run**. Use it as the overview of which texture sizes give a consistent density. While it runs, the section shows a progress bar instead of its fields; **Cancel** or **Esc** stops after the texture set in work.
 
 #### Pack
 
@@ -143,6 +149,7 @@ How much texture each part gets, the settings of each texture set, and the packe
 - the number of islands, and those packed by their bounding box (when Blender's outline of an island fails);
 - islands kept unchanged, and islands not checked for density (a sliver in the UVs, or no 3D area);
 - **WARNING faces without area:** objects of the set with faces that have no area. Fix them with [Find Faces Without Area](#find-faces-without-area);
+- **WARNING triangles without UV area:** the number of islands of the set that contain a triangle with area on the model but none in the UVs (a needle: its corners on one line in the UVs), and their objects. Such islands land far out of the layout, so k and the needed size grow; the set is still packed. Re-unwrap those parts (for example **Accept + Unwrap**, or Blender's **Unwrap**) and pack again; [Find Faces Without UV Area](#find-faces-without-uv-area) selects them;
 - after **Pack**, the objects that were included but not selected;
 - the time.
 
@@ -237,7 +244,15 @@ The check does not read the MSFS project: it cannot know which names the XML use
 
 #### Find Faces Without Area
 
-A face without area (its corners on one point or one line, at most 0.000001 cm²) has no surface to texture, but its UVs can still reach far out and push the islands of its texture set apart when packing. **Find Faces Without Area** checks every mesh object of the view layer and selects the visible ones with such faces, the first one active; it also selects those faces in their meshes, so **Tab** into Edit Mode shows them. The message counts the faces and objects (hidden objects are counted, not selected); the system console lists each object. Fix the geometry, for example with **Mesh > Clean Up > Degenerate Dissolve** or **Merge by Distance**, then run the check again. It works in Object Mode.
+A face without area (its corners on one point or one line, at most 0.000001 cm²) has no surface to texture, and re-unwrapping does not give it one. **Find Faces Without Area** checks every mesh object of the view layer and selects the visible ones with such faces, the first one active; it also selects those faces in their meshes, so **Tab** into Edit Mode shows them. The message counts the faces and objects (hidden objects are counted, not selected); the system console lists each object. Fix the geometry, for example with **Mesh > Clean Up > Degenerate Dissolve** or **Merge by Distance**, then run the check again. It works in Object Mode.
+
+#### Find Faces Without UV Area
+
+A face whose model has area but whose UVs have none, or only part of it: one of its triangles lies on one line (or one point) in the UVs, inside an island that otherwise has area. Such a needle covers no texels, but the packer cannot pack around it: the island lands far out of the layout and the texture set needs a larger texture than its islands would (on the cockpit, these triangles turned a set that needed about 1.15 times 4096 into one that does not fit even at 8192). **Find Faces Without UV Area** checks every mesh object of the view layer with a UV map, per texture set at its **Size**, and selects the visible objects with such faces, the first one active, and those faces in their meshes, so **Tab** into Edit Mode shows them. The message counts the faces, the islands and the objects (hidden objects are counted, not selected); the system console lists each object.
+
+- **Threshold:** a triangle counts when its UV area is at most 0.000001 pixel² of its texture set, or when it is a line (its UV area at most 0.00001 × its longest UV edge squared, the rule the packer uses for islands that are lines). Triangles without area on the model are left to **Find Faces Without Area**; islands with no UV area at all are not counted (the packer leaves them unchanged and lists them in its report).
+- **Fix:** re-unwrap those parts, for example with **Accept + Unwrap** in [Seams](#seams) or Blender's **Unwrap**, then run the check again and pack.
+- It works in Object Mode. On the cockpit it takes about 3 seconds.
 
 #### Fix Broken Bone Parents
 

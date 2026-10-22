@@ -1,5 +1,5 @@
 """UV packing per texture set: Blender's Pack Islands wrapped in our own steps (journal 20261019.automated-uv-unwrap.md,
-decisions 112 to 117; the method was measured with tests/uv_prototype/pack_density_proto.py, Sessions 97 and 98).
+decisions 112 to 121; the method was measured with tests/uv_prototype/pack_density_proto.py, Sessions 97 and 98).
 
 A texture set is every face of one material over all mesh objects of the view layer, selected or not (decisions 100
 and 114), with the mesh's active UV map; a mesh shared by several objects is packed once, with the material slots of
@@ -10,8 +10,11 @@ and the layout then spills into [0, k] x [0, k] (decision 112).
 
 Packing runs on a temporary mesh per set with Pack Islands at scale=False, so the source objects' selection, modes,
 pins and active UV maps are never touched. pack() writes only the UVs of the set's faces back; measure() writes
-nothing. Islands without UV area (lines, points) are left out and keep their UVs. No UI here: the operators and the
-panel rows are in uv_marks, the Find Faces Without Area check in checks.
+nothing. Islands without UV area (lines, points) are left out and keep their UVs. Textures are square (decision
+120). Triangles with 3D area but no UV area inside islands that have UV area (needles) push islands far out of the
+layout; the packer still packs and the report lists them (decision 118). The core takes a material, not the
+selection, so any way of choosing a texture set can call it. No UI here: the operators and the panel rows are in
+uv_marks, the Find Faces Without Area and Find Faces Without UV Area checks in checks.
 """
 
 import math
@@ -23,7 +26,7 @@ import numpy as np
 from . import uv_marks, visibility_core  # uv_marks imports this module too (its operators call pack and measure)
 
 REPORT_TEXT_NAME = 'FSS Packing Report'
-MIN_SIZE, MAX_SIZE = 256, 8192  # texture sizes per side (decisions 9 and 110)
+MIN_SIZE, MAX_SIZE = 256, 8192  # square texture sizes (decisions 9, 110 and 120)
 GAP_TOL = 1e-3  # px: a gap below margin - GAP_TOL is a violation
 MARGIN_EXTRA = 0.1  # px added to the requested gap (Blender's ADD margin came out 0.016 px short of 2 x margin at 64 px)
 ANCHOR_PX = 0.5  # size of the two anchor triangles that set the ORIGINAL_AABB region, in px
@@ -33,19 +36,23 @@ COLLAPSE_Q = 20.0  # UV bbox diagonal / (3D bbox diagonal x density) at the area
 PROXY_ROUNDS = 3  # rounds of packing offending islands through their bounding box before the AABB fallback
 SEARCH_PACKS = 6  # packs of the search for t after the two at t = 1 and t = 0
 FACE_AREA_MIN_CM2 = 1e-6  # world-space face area in cm^2 at or below which a face has no area (decision 117)
+# UV area in px^2 of the set's texture at or below which a triangle with 3D area has none in UV (decision 118), the
+# island threshold applied per triangle (with FLAT_RATIO for lines, MeshData.uv_zero_faces). Measured on the cockpit:
+# no gap in the distribution above it; leaving out the faces with such triangles takes Cockpit_STD from k 2.51 to
+# 1.16, wider thresholds (1e-3 and 0.1 px^2) to no less
+UV_TRI_AREA_MIN_PX2 = 1e-6
 
 
 def next_pow2(x):
     return 1 << max(0, int(math.ceil(math.log2(max(x, 1e-9)))))
 
 
-def needed_size(k, width, height):
-    """((width, height) or None, fits): the power-of-two size per side that holds a layout of k times the texture,
-    clamped to 256 at the bottom; None and False when a side would need more than 8192."""
-    w, h = k * width, k * height
-    if max(w, h) > MAX_SIZE * (1 + 1e-9):
+def needed_size(k, size):
+    """(size or None, fits): the power-of-two size that holds a layout of k times the texture, clamped to 256 at the
+    bottom; None and False when it would need more than 8192."""
+    if k * size > MAX_SIZE * (1 + 1e-9):
         return None, False
-    return (max(next_pow2(w), MIN_SIZE), max(next_pow2(h), MIN_SIZE)), True
+    return max(next_pow2(k * size), MIN_SIZE), True
 
 
 # ------------------------------------------------------------------------------------------------------------------
@@ -261,16 +268,51 @@ class MeshData:
         self.CO = co.reshape(-1, 3)
         self.tri_verts = self.LV[self.TL]
 
-    def face_areas_world(self, matrix_world, cm2_per_bu2):
-        """Face areas in cm^2, from world-space vertices (non-uniform scale exact) and the mesh's triangulation."""
+    def tri_areas_world(self, matrix_world, cm2_per_bu2):
+        """Triangle areas in cm^2, from world-space vertices (non-uniform scale exact)."""
         M = np.array(matrix_world, dtype=np.float64)
         W = self.CO @ M[:3, :3].T + M[:3, 3]
         P = W[self.tri_verts]
-        a = 0.5 * np.linalg.norm(np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0]), axis=1)
-        return np.bincount(self.TP, weights=a, minlength=self.nf) * cm2_per_bu2
+        return 0.5 * np.linalg.norm(np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0]), axis=1) * cm2_per_bu2
+
+    def face_areas_world(self, matrix_world, cm2_per_bu2):
+        """Face areas in cm^2, from world-space vertices and the mesh's triangulation."""
+        return np.bincount(self.TP, weights=self.tri_areas_world(matrix_world, cm2_per_bu2), minlength=self.nf)
 
     def face_uv_areas(self):
         return np.bincount(self.TP, weights=tri_area(self.UV[self.TL]), minlength=self.nf)
+
+    def uv_zero_faces(self, matrix_world, size, cm2_per_bu2):
+        """Per face: True where a triangle has 3D area (above FACE_AREA_MIN_CM2) but no UV area, a needle in UV
+        (decision 118): at most UV_TRI_AREA_MIN_PX2 on a texture of `size` px, or a line, at most FLAT_RATIO x its
+        longest UV edge squared (the islands' rule). A triangle without 3D area is the geometry's fault (Find Faces
+        Without Area); re-unwrapping does not give it UV area."""
+        T = self.UV[self.TL] * size
+        a_uv = tri_area(T)
+        edge2 = np.max([((T[:, (i + 1) % 3] - T[:, i]) ** 2).sum(1) for i in range(3)], axis=0)
+        # near zero: also a line whose float32 UVs were rotated (a packed needle is a few 1e-3 px wide, not 0)
+        tri = (self.tri_areas_world(matrix_world, cm2_per_bu2) > FACE_AREA_MIN_CM2) & (
+            (a_uv <= UV_TRI_AREA_MIN_PX2) | (a_uv <= FLAT_RATIO * edge2))
+        faces = np.zeros(self.nf, bool)
+        faces[self.TP[tri]] = True
+        return faces
+
+    def island_uv_extent(self, faces, isl, size):
+        """Per island of a face subset: UV area in px^2 and UV bounding-box diagonal in px on a texture of `size`."""
+        ni = int(isl.max()) + 1 if len(isl) else 0
+        a_uv = np.bincount(isl, weights=self.face_uv_areas()[faces], minlength=ni) * size * size
+        fl = np.zeros(self.nf, bool)
+        fl[faces] = True
+        lsel = np.flatnonzero(fl[self.loop_face])
+        loc = np.full(self.nf, -1, np.int64)
+        loc[faces] = np.arange(len(faces))
+        return a_uv, _bbox_diag(self.UV[lsel] * size, isl[loc[self.loop_face[lsel]]], ni)
+
+
+def without_uv_area(a_uv, p_uv):
+    """Islands without UV area (lines and points, left out of packing): UV area (px^2) at most ZERO_AREA_PX2, or at
+    most FLAT_RATIO x the UV bounding-box diagonal (px) squared."""
+    return (a_uv <= ZERO_AREA_PX2) | (a_uv <= FLAT_RATIO * p_uv ** 2)
 
 
 def _cm_per_unit(scene):
@@ -386,16 +428,24 @@ def part_islands(md, faces):
     return isl.ravel(), bl, isl.ravel()[local[md.loop_face[bl]]]
 
 
+def uv_zero_faces(md, users, faces, size, cm2_per_bu2):
+    """(the faces of `faces` with a triangle without UV area inside an island that has UV area, number of such
+    islands): the needles that push islands out of the layout (decision 118). Islands as the packer forms them; an
+    island with no UV area at all is not packed (it keeps its UVs), so its triangles do not count."""
+    isl, _bl, _bl_isl = part_islands(md, faces)
+    a_uv, p_uv = md.island_uv_extent(faces, isl, size)
+    hit = md.uv_zero_faces(users[0].matrix_world, size, cm2_per_bu2)[faces] & ~without_uv_area(a_uv, p_uv)[isl]
+    return faces[hit], len(np.unique(isl[hit]))
+
+
 class TextureSet:
     """One material's islands with their density ranges, packed on a temporary mesh."""
 
     def __init__(self, material, parts, scene, vis_cache):
         self.name = material.name if material is not None else '(no material)'
         self.material = material
-        self.W, self.H = uv_marks.texture_size(material)
+        self.size = uv_marks.texture_size(material)
         self.margin_px = int(uv_marks.margin(material))
-        self.S = float(max(self.W, self.H))
-        self.ax, self.ay = self.W / self.S, self.H / self.S  # region in normalised square-pixel space
         target = uv_marks.target_density(scene)
         bu_cm = _cm_per_unit(scene)
         cm2 = bu_cm * bu_cm
@@ -408,22 +458,22 @@ class TextureSet:
         self.stale_meshes = []
         self.linked_range_differs = 0
         self.no_area_objects = []  # objects with faces of the set without 3D area (decision 117)
+        uv_zero = []  # per part and island: it has a triangle without UV area (decision 118)
         n_isl = 0
         for pi, (md, users, faces) in enumerate(parts):
             isl, bl, bl_isl = part_islands(md, faces)
             ni = int(isl.max()) + 1 if len(isl) else 0
-            uv_a = np.bincount(isl, weights=md.face_uv_areas()[faces], minlength=ni) * self.W * self.H
-            # bounding-box diagonals: UV in square pixels (S), 3D in cm (first user)
+            # UV area and bounding-box diagonal in pixels; 3D bounding-box diagonal in cm (first user)
+            uv_a, p_uv = md.island_uv_extent(faces, isl, self.size)
             fl = np.zeros(md.nf, bool)
             fl[faces] = True
             lsel = np.flatnonzero(fl[md.loop_face])
             loc = np.full(md.nf, -1, np.int64)
             loc[faces] = np.arange(len(faces))
-            li = isl[loc[md.loop_face[lsel]]]
             Mw = np.array(users[0].matrix_world, dtype=np.float64)
             Wc = (md.CO @ Mw[:3, :3].T + Mw[:3, 3])[md.LV[lsel]] * bu_cm
-            p_uv = _bbox_diag(md.UV[lsel] * self.S, li, ni)
-            p_3d = _bbox_diag(Wc, li, ni)
+            p_3d = _bbox_diag(Wc, isl[loc[md.loop_face[lsel]]], ni)
+            uv_zero.append(np.bincount(isl, weights=md.uv_zero_faces(Mw, self.size, cm2)[faces], minlength=ni) > 0)
             # visibility per island (decision 82 via score_face_set, floor of decision 111); 1.0 when missing or stale
             vis_data = vis_cache.get(md.me.name)
             if vis_data is None:
@@ -470,10 +520,7 @@ class TextureSet:
         self.lo = np.array([r[3] for r in rows])
         self.hi = np.array([r[4] for r in rows])
         self.dirs = np.array([r[5] for r in rows])
-        self.cur = np.sqrt(self.a_uv / np.maximum(self.a3, 1e-30))  # as the UVs sit on the W x H texture
-        # the unwrap is conformal in UV space (u and v of equal length): packing works on that shape in square-pixel
-        # space (X = u W / S, Y = v H / S after the pack), so the current density there uses S x S
-        self.cur_sq = self.cur * self.S / math.sqrt(self.W * self.H)
+        self.cur = np.sqrt(self.a_uv / np.maximum(self.a3, 1e-30))  # px/cm as the UVs sit on the texture
         self.p_uv = np.array([r[6] for r in rows])
         self.p_3d = np.array([r[7] for r in rows])
         # degenerate: no 3D area (scale 1, kept out of the density check)
@@ -482,14 +529,15 @@ class TextureSet:
         # (factors up to 21,294 on the cockpit, one sliver 129,000 px long). Test: the UV bounding-box diagonal at
         # the area-based scale against the 3D bounding-box diagonal x density (an unrolled cylinder gives ~2.2).
         # Above COLLAPSE_Q the island is scaled so that the two diagonals match and is kept out of the density check.
-        self.cur_sq_len = self.p_uv / np.maximum(self.p_3d, 1e-30)
-        diag_q = self.cur_sq_len / np.maximum(self.cur_sq, 1e-30)
+        self.cur_len = self.p_uv / np.maximum(self.p_3d, 1e-30)
+        diag_q = self.cur_len / np.maximum(self.cur, 1e-30)
         self.collapsed = ~self.degenerate & (diag_q > COLLAPSE_Q)
         # zero UV area (a line or a point): Blender's packer ignores or rescales such islands and drops them anywhere
         # (measured: gap 0 to packed islands, a 1 px line made 8.6 px long), and no scale gives them a density. They
         # are left out: UVs unchanged, no metrics.
-        flat = self.a_uv * self.S * self.S / (self.W * self.H) <= FLAT_RATIO * self.p_uv ** 2
-        self.zero_area = (self.a_uv <= ZERO_AREA_PX2) | flat
+        self.zero_area = without_uv_area(self.a_uv, self.p_uv)
+        # triangles without UV area inside islands that have UV area (decision 118): packed, and reported
+        self.uv_zero = (np.concatenate(uv_zero) if uv_zero else np.zeros(0, bool)) & ~self.zero_area
         self.upright = np.isin(self.dirs, ['UPRIGHT', 'FLIP'])  # FLIP: pinned as UPRIGHT (no 180-degree rule)
         self.quarter = bool((self.dirs == 'QUARTER').any())
         self.proxy = np.zeros(self.n, bool)  # islands packed through their proxy quad
@@ -590,10 +638,7 @@ class TextureSet:
 
     def px(self, uv):
         """UV -> pixels of the set's texture."""
-        return uv * np.array([self.W, self.H])
-
-    def to_uv(self, Q):
-        return Q / np.array([self.ax, self.ay])
+        return uv * self.size
 
     def densities(self, t):
         return self.lo + t * (self.hi - self.lo)
@@ -601,15 +646,15 @@ class TextureSet:
     def island_scale(self, t):
         """Linear UV scale per island for density t, 1.0 for degenerate islands."""
         d = self.densities(t)
-        f = np.where(self.collapsed, d / np.maximum(self.cur_sq_len, 1e-30), d / np.maximum(self.cur_sq, 1e-30))
+        f = np.where(self.collapsed, d / np.maximum(self.cur_len, 1e-30), d / np.maximum(self.cur, 1e-30))
         return np.where(self.degenerate, 1.0, f)
 
     # ---- one pack --------------------------------------------------------------------------------------------------
     def _prepared_uv(self, t):
-        """Normalised square-pixel coordinates (u W / S, v H / S) of every loop, each island scaled about its own
-        centre to density t and spread on shelves so that no two islands overlap (merge_overlap must not merge
-        islands that only touch after scaling). Returns (coords, region corner)."""
-        P = self.uv0.copy()  # conformal island shapes; to_uv() divides by (ax, ay) after the pack
+        """UVs of every loop, each island scaled about its own centre to density t and spread on shelves so that no
+        two islands overlap (merge_overlap must not merge islands that only touch after scaling). Returns (UVs, side
+        of the square region)."""
+        P = self.uv0.copy()
         li = self.loop_isl
         lo = np.full((self.n, 2), np.inf)
         hi = np.full((self.n, 2), -np.inf)
@@ -621,10 +666,9 @@ class TextureSet:
         lo = c + (lo - c) * f[:, None]
         hi = c + (hi - c) * f[:, None]
         size = hi - lo
-        g = 4.0 * (self.margin_px + 2) / self.S
+        g = 4.0 * (self.margin_px + 2) / self.size
         order = np.argsort(-size[:, 1], kind='stable')
-        aspect = self.ax / self.ay
-        row_w = math.sqrt(float(((size[:, 0] + g) * (size[:, 1] + g)).sum()) * aspect)
+        row_w = math.sqrt(float(((size[:, 0] + g) * (size[:, 1] + g)).sum()))
         row_w = max(row_w, float(size[:, 0].max()) + g)
         off = np.zeros((self.n, 2))
         x = y = g
@@ -638,16 +682,13 @@ class TextureSet:
             x += size[u, 0] + g
             row_h = max(row_h, size[u, 1])
         P = P - lo[li] + off[li]
-        sw = float(P[:, 0].max()) + g
-        sh = float(P[:, 1].max()) + g
-        ry = max(sh, sw / aspect)
-        return P, (ry * aspect, ry)
+        return P, max(float(P[:, 0].max()), float(P[:, 1].max())) + g
 
     def pack(self, t, shape_method='CONCAVE'):
-        """Pack at density t; returns (final coords in normalised space, k, extent px (x, y), prepared coords)."""
-        P, (rx, ry) = self._prepared_uv(t)
-        a = ANCHOR_PX / self.S
-        anchors = np.array([[0, 0], [a, 0], [0, a], [rx - a, ry], [rx, ry - a], [rx, ry]], dtype=np.float64)
+        """Pack at density t; returns (final UVs, k, extent px (x, y), prepared UVs)."""
+        P, r = self._prepared_uv(t)
+        a = ANCHOR_PX / self.size
+        anchors = np.array([[0, 0], [a, 0], [0, a], [r - a, r], [r, r - a], [r, r]], dtype=np.float64)
         n = self.n
         lo = np.full((n, 2), np.inf)
         hi = np.full((n, 2), -np.inf)
@@ -691,7 +732,7 @@ class TextureSet:
             bpy.ops.uv.pack_islands(udim_source='ORIGINAL_AABB', rotate=True,
                                     rotate_method='CARDINAL' if self.quarter else 'ANY', scale=False,
                                     merge_overlap=True, margin_method='ADD',
-                                    margin=(self.margin_px + MARGIN_EXTRA) * 0.5 / self.S,
+                                    margin=(self.margin_px + MARGIN_EXTRA) * 0.5 / self.size,
                                     pin=use_pin, pin_method='ROTATION', shape_method=shape_method)
         finally:
             bpy.ops.object.mode_set(mode='OBJECT')
@@ -714,12 +755,12 @@ class TextureSet:
             d = P[pl] - c0[li]
             Q[pl] = np.stack([ca * d[:, 0] - sa * d[:, 1], sa * d[:, 0] + ca * d[:, 1]], 1) + c1[li]
         zl = self.zero_area[self.loop_isl]
-        Q[zl] = self.uv0[zl] * np.array([self.ax, self.ay])
+        Q[zl] = self.uv0[zl]
         Qp = Q[~zl]
-        ext = Qp.max(0) * self.S
+        ext = Qp.max(0) * self.size
         if Qp.min() < -1e-7:
-            ext = ext + np.maximum(0, -Qp.min(0) * self.S)
-        k = max(ext[0] / self.W, ext[1] / self.H)
+            ext = ext + np.maximum(0, -Qp.min(0) * self.size)
+        k = float(ext.max()) / self.size
         return Q, k, ext, P
 
 
@@ -788,7 +829,7 @@ def evaluate(ts, res):
     """Metrics of a pack, from the coordinates written back (pixel space of the texture): gaps and overlaps, the
     density of every island against its range, size and fill. Returns (metrics, islands named in a violation or an
     overlap)."""
-    px = ts.px(ts.to_uv(res['Q']))
+    px = ts.px(res['Q'])
     tri = px[ts.TLt]
     seg = px[ts.seg_loops]
     kt = ~ts.zero_area[ts.tri_isl]
@@ -803,7 +844,7 @@ def evaluate(ts, res):
     up_err = 0.0
     if ts.upright.any():
         e_new = seg[:, 1] - seg[:, 0]
-        pre_seg = ts.px(ts.to_uv(res['pre']))[ts.seg_loops]
+        pre_seg = ts.px(res['pre'])[ts.seg_loops]
         e_old = pre_seg[:, 1] - pre_seg[:, 0]
         sel = ts.upright[ts.seg_isl] & (np.linalg.norm(e_old, axis=1) > 1e-3)
         if sel.any():
@@ -811,14 +852,14 @@ def evaluate(ts, res):
                              (e_old[sel] * e_new[sel]).sum(1))
             up_err = float(np.abs(ang).max())
     k = res['k']
-    need, fits = needed_size(k, ts.W, ts.H)
+    need, fits = needed_size(k, ts.size)
     area_px = float(a_uv[~ts.zero_area].sum())
     m.update({
         't': res['t'], 'k': k, 'extent_px': [float(res['ext'][0]), float(res['ext'][1])],
         'needed_size': need, 'fits_8192': fits,
         # fill of the needed size; beyond 8192 of the layout's k square (never above 100 % unless islands overlap)
-        'fill_pct': 100.0 * area_px / (need[0] * need[1] if need else k * k * ts.W * ts.H),
-        'fill_current_pct': 100.0 * area_px / (ts.W * ts.H),
+        'fill_pct': 100.0 * area_px / ((need if need else k * ts.size) ** 2),
+        'fill_current_pct': 100.0 * area_px / (ts.size * ts.size),
         'density_out_of_range_max': float(dev.max()) if len(dev) else 0.0,
         'density_out_of_range_max_ge100px': float(dev[big].max()) if big.any() else 0.0,
         'density_out_of_range_mean': float((dev * ts.a3[ok]).sum() / max(ts.a3[ok].sum(), 1e-30)) if len(dev) else 0.0,
@@ -829,7 +870,7 @@ def evaluate(ts, res):
 
 def write_back(ts, res):
     """Write the chosen layout into the source meshes' active UV maps (only the set's loops)."""
-    uv = ts.to_uv(res['Q'])
+    uv = res['Q']
     off = 0
     for pi, (md, _users, _faces) in enumerate(ts.parts):
         lsel = ts.loop_src[pi]
@@ -875,9 +916,8 @@ def _restore_state(context, state):
 def _run(material, write, progress=None, vis_cache=None):
     context = bpy.context
     t0 = time.perf_counter()
-    W, H = uv_marks.texture_size(material)
     result = {'set': set_name(material), 'material': material.name if material is not None else None,
-              'size': (W, H), 'margin_px': int(uv_marks.margin(material)), 'written': False}
+              'size': uv_marks.texture_size(material), 'margin_px': int(uv_marks.margin(material)), 'written': False}
     if is_kept(material):
         result.update(mode='kept', time_s=0.0)
         return result
@@ -904,7 +944,8 @@ def _run(material, write, progress=None, vis_cache=None):
         result.update({
             'zero_area_islands': int(ts.zero_area.sum()), 'zero_area_objects': ts.objects_of(ts.zero_area),
             'collapsed_islands': int(ts.collapsed.sum()), 'degenerate_islands': int(ts.degenerate.sum()),
-            'no_area_objects': ts.no_area_objects, 'stale_visibility_meshes': len(ts.stale_meshes),
+            'no_area_objects': ts.no_area_objects, 'uv_zero_islands': int(ts.uv_zero.sum()),
+            'uv_zero_objects': ts.objects_of(ts.uv_zero), 'stale_visibility_meshes': len(ts.stale_meshes),
             'linked_users_range_differs': ts.linked_range_differs, 'quarter': ts.quarter,
             'upright_islands': int(ts.upright.sum()),
         })
@@ -945,12 +986,12 @@ def result_text(result):
         return 'nothing to pack'
     if not result['fits_8192']:
         return f"does not fit even at {MAX_SIZE} (x{result['k']:.2f})"
-    w, h = result['needed_size']
+    need = result['needed_size']
     if mode == 'overflow':
-        return f"needs x{result['k']:.2f}: {w} x {h}"
+        return f"needs x{result['k']:.2f}: {need} x {need}"
     fill = result['fill_current_pct']
     text = f"fits {fill:.0f} %" if fill >= 9.5 else f"fits {fill:.1f} %"
-    return text + (f', {w} x {h} would do' if (w, h) != tuple(result['size']) else '')
+    return text + (f', {need} x {need} would do' if need != result['size'] else '')
 
 
 def _mode_text(result):
@@ -971,20 +1012,20 @@ def _set_block(r, selected=None):
     if r['mode'] == 'kept':
         lines.append('  Keep UVs: left out, UVs unchanged')
         return lines
-    W, H = r['size']
+    size = r['size']
     if r['mode'] == 'empty':
-        lines.append(f"  Size {W} x {H}; {r.get('islands', 0)} island(s), "
+        lines.append(f"  Size {size} x {size}; {r.get('islands', 0)} island(s), "
                      f"{r.get('zero_area_islands', 0)} without UV area (kept unchanged)")
         return lines
     need = r['needed_size']
-    need_text = f'{need[0]} x {need[1]}' if need else f'more than {MAX_SIZE} on a side'
+    need_text = f'{need} x {need}' if need else f'more than {MAX_SIZE}'
     gap = r['min_gap_px']
     lines += [
-        f"  Mode {_mode_text(r)}; size {W} x {H}, margin {r['margin_px']} px",
+        f"  Mode {_mode_text(r)}; size {size} x {size}, margin {r['margin_px']} px",
         f"  t {r['t']:.3f}, k {r['k']:.3f} (layout {r['extent_px'][0]:.0f} x {r['extent_px'][1]:.0f} px), "
         f"needed {need_text}",
         f"  Fill {r['fill_pct']:.1f} % of {'the needed size' if need else 'the layout'} "
-        f"({r['fill_current_pct']:.1f} % of {W} x {H})",
+        f"({r['fill_current_pct']:.1f} % of {size} x {size})",
         f"  Smallest gap {'more than 2 x margin' if gap is None else f'{gap:.2f} px'}; "
         f"margin violations {r['margin_violations']}, overlapping triangle pairs {r['overlap_tri_pairs']}",
         f"  Density outside its range: max {100 * r['density_out_of_range_max']:.2f} % "
@@ -1004,6 +1045,11 @@ def _set_block(r, selected=None):
         lines.append(f"  WARNING faces without area in {len(r['no_area_objects'])} object(s): "
                      f"{_names(r['no_area_objects'])}. They can push islands far out; fix the geometry "
                      "(Utilities > Checks > Find Faces Without Area)")
+    if r['uv_zero_islands']:
+        lines.append(f"  WARNING triangles without UV area in {r['uv_zero_islands']} island(s) of "
+                     f"{len(r['uv_zero_objects'])} object(s): {_names(r['uv_zero_objects'])}. They push islands out "
+                     "of the layout (k and the needed size grow); re-unwrap those parts, for example with Accept + "
+                     "Unwrap (Utilities > Checks > Find Faces Without UV Area selects them)")
     if r['stale_visibility_meshes']:
         lines.append(f"  Visibility x1.00 for {r['stale_visibility_meshes']} mesh(es) without current visibility data")
     if selected is not None:

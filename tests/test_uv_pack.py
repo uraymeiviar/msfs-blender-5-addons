@@ -1,8 +1,9 @@
-"""The UV packer per texture set (UV journal decisions 112 to 117): density first with one t per set, underflow,
-fit and overflow with k and the needed size (256 to 8192, "does not fit even at 8192"), direction marks, non-square
-textures, linked duplicates, islands split by material, islands without UV area kept, Pack and its undo, Check All
-writing nothing, Keep UVs, objects included that were not selected, Find Faces Without Area, the report text and the
-Packing rows. The synthetic cases are those of tests/uv_prototype/pack_density_proto.py, run through uv_pack.
+"""The UV packer per texture set (UV journal decisions 112 to 121): density first with one t per set, underflow,
+fit and overflow with k and the needed size (256 to 8192, "does not fit even at 8192"), direction marks, linked
+duplicates, islands split by material, islands without UV area kept, Pack and its undo, Check All writing nothing,
+Keep UVs, objects included that were not selected, Find Faces Without Area, Find Faces Without UV Area and the report's
+needle warning, the migration to square sizes, the texture set list and the Packing panel in the 3D viewport and the
+UV editor. The synthetic cases are those of tests/uv_prototype/pack_density_proto.py, run through uv_pack.
 
 To run:
 "<blender>" -b --factory-startup --python tests/test_uv_pack.py
@@ -81,10 +82,9 @@ def quad_obj(name, rects, mats=None, scale=(1, 1, 1), uv_rects=None, mesh=None):
     return obj
 
 
-def mat(name, w=4096, h=4096, margin=8):
+def mat(name, size=4096, margin=8):
     m = bpy.data.materials.new(name)
-    m.fss_uv_texture_width = str(w)
-    m.fss_uv_texture_height = str(h)
+    m.fss_uv_texture_size = str(size)
     m.fss_uv_margin_px = margin
     return m
 
@@ -130,7 +130,7 @@ def test_underflow_and_sizes():
     ext = max(r['extent_px'])
     need = r['needed_size']
     assert r['mode'] == 'underflow' and r['t'] == 1.0 and r['packs'] == 1 and ok(r), r
-    assert need[0] >= ext and need[0] / 2 < ext and need == (4096, 4096), (ext, need)
+    assert need >= ext and need / 2 < ext and need == 4096, (ext, need)
     text = uv_pack.result_text(r)
     assert text.startswith('fits ') and text.endswith(' %') and 'would do' not in text, text
     # a tiny set: the needed size is clamped to 256 at the bottom
@@ -138,7 +138,7 @@ def test_underflow_and_sizes():
     m = mat('TINY')
     quad_obj('TI', [(0, 0, 0.02, 0.02), (1, 0, 0.03, 0.01)], mats=[m, m])
     r = uv_pack.measure(m)
-    assert r['mode'] == 'underflow' and r['k'] * 4096 < 128 and r['needed_size'] == (256, 256), r
+    assert r['mode'] == 'underflow' and r['k'] * 4096 < 128 and r['needed_size'] == 256, r
     assert r['fill_pct'] <= 100.0 and uv_pack.result_text(r).endswith('256 x 256 would do'), uv_pack.result_text(r)
     print(f"PASS: test_underflow_and_sizes (t=1, 1 pack, extent {ext:.0f} px needs 4096; tiny set k={r['k']:.4f} "
           f"needs 256 x 256, not {uv_pack.next_pow2(r['k'] * 4096)})")
@@ -146,19 +146,19 @@ def test_underflow_and_sizes():
 
 def test_fit():
     reset(0.8, 1.25)
-    m = mat('MID', 1024, 1024)
+    m = mat('MID', 1024)
     rng = np.random.default_rng(5)
     rects = [(i * 0.5, 0, float(s), float(s)) for i, s in enumerate(rng.uniform(0.05, 0.12, 24))]
     quad_obj('MI', rects, mats=[m] * len(rects))
     r = uv_pack.measure(m)
     assert r['mode'] == 'fit' and 0 < r['t'] < 1 and r['k'] <= 1 and ok(r), r
-    assert r['needed_size'] == (1024, 1024) and r['fill_pct'] == r['fill_current_pct'], r
+    assert r['needed_size'] == 1024 and r['fill_pct'] == r['fill_current_pct'], r
     print(f"PASS: test_fit (t={r['t']:.3f}, k={r['k']:.4f}, {r['packs']} packs, fill {r['fill_pct']:.1f} %)")
 
 
 def test_overflow_and_clamp():
     reset(0.9, 1.1)
-    m = mat('OVER', 1024, 1024)
+    m = mat('OVER', 1024)
     rng = np.random.default_rng(5)
     rng.uniform(0.05, 0.12, 24)
     rects = [(i * 0.8, 0, float(s), float(s * 0.7)) for i, s in enumerate(rng.uniform(0.15, 0.4, 20))]
@@ -166,11 +166,11 @@ def test_overflow_and_clamp():
     r = uv_pack.measure(m)
     k_check = max(r['extent_px']) / 1024
     assert r['mode'] == 'overflow' and r['t'] == 0 and r['k'] > 1 and abs(k_check - r['k']) < 1e-6 and ok(r), r
-    assert r['needed_size'] == (uv_pack.next_pow2(r['k'] * 1024),) * 2 and r['fits_8192'], r
-    assert uv_pack.result_text(r) == f"needs x{r['k']:.2f}: {r['needed_size'][0]} x {r['needed_size'][1]}"
+    assert r['needed_size'] == uv_pack.next_pow2(r['k'] * 1024) and r['fits_8192'], r
+    assert uv_pack.result_text(r) == f"needs x{r['k']:.2f}: {r['needed_size']} x {r['needed_size']}"
     k1 = r['k']
     # the same islands at 4096 px for 1024 px of texture: k x 4096 is above 8192
-    m.fss_uv_texture_width = m.fss_uv_texture_height = '4096'
+    m.fss_uv_texture_size = '4096'
     bpy.context.scene.fss_uv_target_density = 20.48 * 4
     obj.data.update()
     r = uv_pack.measure(m)
@@ -203,23 +203,6 @@ def test_directions():
     print(f"PASS: test_directions (UPRIGHT and FLIP keep their rotation, {max(angles):.1e} rad; QUARTER packs CARDINAL)")
 
 
-def test_non_square():
-    reset()
-    m = mat('WIDE', 4096, 2048)
-    rects = [(i * 0.5, 0, 0.2, 0.2) for i in range(8)] + [(0, 1, 1.2, 0.3)]
-    obj = quad_obj('NS', rects, mats=[m] * len(rects))
-    r = uv_pack.pack(m)
-    uv = uvs(obj)
-    q = uv.reshape(-1, 4, 2) * np.array([4096, 2048])
-    l1 = np.linalg.norm(q[:8, 1] - q[:8, 0], axis=1)
-    l2 = np.linalg.norm(q[:8, 3] - q[:8, 0], axis=1)
-    sq = float(np.abs(l1 / l2 - 1).max())
-    dens = [quad_density(qq, w * 100, h * 100) for qq, (_x, _y, w, h) in zip(q, rects)]
-    err = max(abs(d - 20.48) / 20.48 for d in dens)
-    assert sq < 1e-4 and err < 1e-4 and ok(r) and (uv >= 0).all() and (uv <= 1).all(), (sq, err, r)
-    print(f"PASS: test_non_square (4096 x 2048: side ratio error {sq:.1e}, density error {err:.1e}, {r['mode']})")
-
-
 def test_linked_and_split():
     reset()
     m = mat('LINK')
@@ -230,7 +213,7 @@ def test_linked_and_split():
     assert r['islands'] == 2 and r['objects'] == ['LA', 'LB', 'LC'] and ok(r), r
     # an island spanning two materials is split, each half at its density in its own texture
     reset()
-    ma, mb = mat('SPLIT_A'), mat('SPLIT_B', 2048, 2048)
+    ma, mb = mat('SPLIT_A'), mat('SPLIT_B', 2048)
     me = bpy.data.meshes.new('SP')
     me.from_pydata([(0, 0, 0), (0.3, 0, 0), (0.6, 0, 0), (0.6, 0.3, 0), (0.3, 0.3, 0), (0, 0.3, 0)], [],
                    [(0, 1, 4, 5), (1, 2, 3, 4)])
@@ -262,9 +245,10 @@ def test_zero_area_and_spike():
     after = uvs(zo)
     assert r['zero_area_islands'] == 1 and np.abs(after[4:] - before[4:]).max() < 1e-7 and ok(r), r
     assert np.abs(after[:4] - before[:4]).max() > 1e-3  # the other island moved
+    assert r['uv_zero_islands'] == 0, r  # the line island is left out, so its triangles are no needles
     # islands with a zero-area spike (a degenerate UV triangle sticking out) among small islands
     reset()
-    m = mat('SPIKE', 1024, 1024)
+    m = mat('SPIKE', 1024)
     verts, faces, uv_co = [], [], []
     for i in range(6):
         b = len(verts)
@@ -282,9 +266,10 @@ def test_zero_area_and_spike():
     quad_obj('SPK', None, mesh=me)
     quad_obj('SPK_SMALL', [(i * 0.3, 3, 0.04 + 0.01 * (i % 4), 0.05) for i in range(40)], mats=[m] * 40)
     r = uv_pack.measure(m)
-    assert ok(r), r
+    # the spikes are needles (3D area, no UV area) inside islands with area (decision 118)
+    assert ok(r) and r['uv_zero_islands'] == 6 and r['uv_zero_objects'] == ['SPK'], r
     print(f"PASS: test_zero_area_and_spike (line island kept unchanged; spike set gap {r['min_gap_px']:.2f} px, "
-          f"0 overlaps, {r['shape_method']})")
+          f"0 overlaps, {r['shape_method']}, 6 needle islands reported)")
 
 
 def build_shared():
@@ -401,6 +386,8 @@ def test_faces_without_area():
     uv_pack.write_report([r], 'Check All', 0.1)
     report = bpy.data.texts[uv_pack.REPORT_TEXT_NAME].as_string()
     assert 'WARNING faces without area in 1 object(s): BROKEN' in report, report
+    # a triangle without 3D area is not a needle: the UV check leaves it to this check
+    assert checks.faces_without_uv_area(bpy.context.view_layer)[0] == {} and r['uv_zero_islands'] == 0, r
     print(f"PASS: test_faces_without_area (threshold {uv_pack.FACE_AREA_MIN_CM2:g} cm2: BROKEN found and selected, its "
           "face 1 selected; the packer's report warns)")
 
@@ -422,38 +409,208 @@ class _Layout:
         return call
 
 
+def draw_panel(cls_name='FSS_PT_uv_marks'):
+    calls = []
+    getattr(bpy.types, cls_name).draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+    labels = [kw.get('text') for name, _a, kw in calls if name == 'label']
+    return calls, labels
+
+
+def draw_row(material):
+    """The texture set list's row of a material, through FSS_UL_TextureSets.draw_item."""
+    calls = []
+    uv_marks.FSS_UL_TextureSets.draw_item(None, bpy.context, _Layout(calls), bpy.data, material, 0, None, '', 0)
+    return [(kw.get('text'), kw.get('icon')) for name, _a, kw in calls if name == 'label']
+
+
 def test_panel_rows():
     a, b, c, shared, private, fur = build_shared()
     c.select_set(True)
     uv_marks._results.clear()
+    bpy.context.window_manager.fss_uv_pack_active = -1
     r = uv_pack.measure(shared)
     uv_marks._results['SHARED'] = r
-    calls = []
-    bpy.types.FSS_PT_uv_marks.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
-    labels = [kw.get('text') for name, _a, kw in calls if name == 'label']
+    calls, labels = draw_panel()
+    lists = [(args, kw) for name, args, kw in calls if name == 'template_list']
+    assert lists == [(('FSS_UL_texture_sets', '', bpy.data, 'materials', bpy.context.window_manager,
+                       'fss_uv_pack_active'), {'rows': 5})], lists
+    # the list's rows: the selection's texture sets, the active object's first; name and last result
+    assert [m_.name for m_ in uv_marks.texture_set_materials(bpy.context)] == ['SHARED', 'PRIVATE', 'FUR']
+    rows = [draw_row(m_) for m_ in (shared, private, fur)]
+    assert rows == [[('SHARED', 'MATERIAL'), (uv_pack.result_text(r) + ' (checked)', None)],
+                    [('PRIVATE', 'MATERIAL'), ('', None)], [('FUR', 'LOCKED'), ('kept', None)]], rows
+    # below the list, the active row's details; no active row yet: the first (the active object's first material)
     sets = [label for label in labels if label and label.startswith('Texture set: ')]
-    assert sets == ['Texture set: SHARED', 'Texture set: PRIVATE', 'Texture set: FUR'], sets
     packs = [args[1].material for name, args, _kw in calls if name == '_op' and args[0] == 'fss.uv_pack_texture_set']
-    assert packs == ['SHARED', 'PRIVATE', 'FUR'], packs
-    keeps = [args for name, args, kw in calls if name == 'prop' and args[1] == 'fss_uv_keep_uvs']
-    assert [m_.name for m_, _p in keeps] == ['SHARED', 'PRIVATE', 'FUR'], keeps
-    last = [labels[i + 1] for i, label in enumerate(labels) if label == 'Last run']
-    assert last == [uv_pack.result_text(r) + ' (checked)', 'not packed or checked yet', 'kept'], last
+    props = [(args[0].name, args[1]) for name, args, _kw in calls
+             if name == 'prop' and isinstance(args[0], bpy.types.Material)]
+    assert sets == ['Texture set: SHARED'] and packs == ['SHARED'], (sets, packs)
+    assert props == [('SHARED', 'fss_uv_texture_size'), ('SHARED', 'fss_uv_margin_px'), ('SHARED', 'fss_uv_keep_uvs')]
+    last = labels[labels.index('Last run') + 1]
+    assert last == uv_pack.result_text(r) + ' (checked)', last
     ops = [kw.get('text') for name, _a, kw in calls if name == 'operator']
-    assert 'Check All' in ops and ops.count('Pack') == 3, ops
+    assert ops == ['Lower', 'Higher', 'Clear', 'Free', 'Upright', 'Flip', 'Quarter', 'Clear', 'Pack', 'Check All'], ops
+    # the active row: FUR
+    bpy.context.window_manager.fss_uv_pack_active = list(bpy.data.materials).index(fur)
+    calls, labels = draw_panel()
+    assert [label for label in labels if label and label.startswith('Texture set: ')] == ['Texture set: FUR']
+    assert labels[labels.index('Last run') + 1] == 'kept'
+    # nothing selected: no list, a hint
+    for obj in bpy.context.selected_objects:
+        obj.select_set(False)
+    bpy.context.view_layer.objects.active = None
+    calls, labels = draw_panel()
+    assert not [1 for name, _a, _kw in calls if name == 'template_list']
+    assert 'Select objects to list their texture sets' in labels, labels
     # while running, only the progress
     uv_marks._progress = {'verb': 'Checking', 'index': 2, 'count': 3, 'set': 'PRIVATE', 'stage': 'concave pack 1',
                           'steps': 1}
     try:
-        calls = []
-        bpy.types.FSS_PT_uv_marks.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+        calls, _labels = draw_panel()
     finally:
         uv_marks._progress = None
     names = [name for name, _a, _kw in calls]
     ops = [kw.get('text') for name, _a, kw in calls if name == 'operator']
     assert 'progress' in names and ops == ['Cancel'], (names, ops)
-    print(f"PASS: test_panel_rows (3 texture sets of the selection, active first; Keep UVs, Pack, Last run "
-          f"'{last[0]}', 'kept'; Check All; progress with Cancel only while running)")
+    print(f"PASS: test_panel_rows (list of 3 texture sets, active object's first; rows with the last result; details "
+          f"of the active row: size, margin, Keep UVs, Pack, Last run '{last}'; FUR when active; progress only while "
+          "running)")
+
+
+def test_texture_set_list():
+    # more than 5 texture sets: every one is listed, in order, none capped
+    reset()
+    many = [mat(f'MANY_{index}') for index in range(7)]
+    a = quad_obj('MANY_A', [(i * 0.5, 0, 0.2, 0.2) for i in range(7)], mats=many)
+    extra = mat('EXTRA_B')
+    b = quad_obj('MANY_B', [(0, 2, 0.2, 0.2)], mats=[extra])
+    outside = mat('NOT_SELECTED')
+    quad_obj('MANY_C', [(0, 4, 0.2, 0.2)], mats=[outside])
+    for obj in bpy.context.view_layer.objects:
+        obj.select_set(obj in (a, b))
+    bpy.context.view_layer.objects.active = b
+    expected = ['EXTRA_B'] + [f'MANY_{index}' for index in range(7)]
+    flags, order = uv_marks.texture_set_rows(bpy.context, bpy.data.materials)
+    materials = list(bpy.data.materials)
+    assert sorted(order) == list(range(len(materials))), order  # a permutation: Blender's new index per item
+    shown = [materials[i].name for _o, i in sorted((order[i], i) for i in range(len(materials)) if flags[i])]
+    assert shown == expected, shown
+    # through the list class (as Blender calls it while drawing), with the name filter
+    bit = 1 << 30  # UIList.bitflag_filter_item (UILST_FLT_ITEM), an instance attribute only
+    ul = SimpleNamespace(bitflag_filter_item=bit, filter_name='')
+    flt, neworder = uv_marks.FSS_UL_TextureSets.filter_items(ul, bpy.context, bpy.data, 'materials')
+    assert sorted(m_.name for m_, f in zip(materials, flt) if f) == sorted(expected) and neworder == order
+    ul.filter_name = 'MANY_1'
+    flt, _order = uv_marks.FSS_UL_TextureSets.filter_items(ul, bpy.context, bpy.data, 'materials')
+    assert [m_.name for m_, f in zip(materials, flt) if f] == ['MANY_1'], flt
+    # drawing wrote nothing: the material count and the active index are unchanged
+    before = (len(bpy.data.materials), bpy.context.window_manager.fss_uv_pack_active)
+    calls, labels = draw_panel()
+    assert (len(bpy.data.materials), bpy.context.window_manager.fss_uv_pack_active) == before
+    assert not [label for label in labels if label and 'more' in label], labels
+    print(f"PASS: test_texture_set_list ({len(expected)} texture sets of 2 selected objects listed, the active "
+          "object's first; NOT_SELECTED filtered out; the name filter works; drawing writes nothing)")
+
+
+def test_uv_editor_panel():
+    # decision 119: the same Packing section in the UV editor's sidebar, drawn by the same code
+    build_shared()
+    view3d, image = bpy.types.FSS_PT_uv_marks, bpy.types.FSS_PT_uv_marks_image
+    assert (image.bl_space_type, image.bl_region_type, image.bl_category, image.bl_label) == (
+        'IMAGE_EDITOR', 'UI', 'FSS Tools', 'Packing'), image
+    assert view3d.bl_space_type == 'VIEW_3D' and view3d.draw is image.draw  # one draw function, not a copy
+    calls_3d, _labels = draw_panel('FSS_PT_uv_marks')
+    calls_uv, labels = draw_panel('FSS_PT_uv_marks_image')
+    strip = [[(name, kw.get('text')) for name, _a, kw in calls] for calls in (calls_3d, calls_uv)]
+    assert strip[0] == strip[1] and 'Texture set: SHARED' in labels, strip[1]
+    texts = [kw.get('text') for name, _a, kw in calls_uv if name == 'operator']
+    assert 'Pack' in texts and 'Check All' in texts and 'Lower' in texts, texts
+    # Visibility Scoring stays in the 3D viewport
+    assert bpy.types.FSS_PT_visibility.bl_parent_id == 'FSS_PT_uv_marks'
+    # the redraw helper tags the UV editor too
+    assert set(uv_marks.SPACES) == {'VIEW_3D', 'IMAGE_EDITOR'}
+    print(f"PASS: test_uv_editor_panel (IMAGE_EDITOR UI 'FSS Tools' > Packing draws the same {len(strip[1])} calls "
+          "as the 3D viewport's)")
+
+
+def test_square_size_migration():
+    reset()
+    sizes = {'OLD_2048_1024': (3, 2), 'OLD_HEIGHT_8192': (None, 5), 'OLD_WIDTH_512': (1, None)}
+    for name, (width, height) in sizes.items():
+        material = bpy.data.materials.new(name)
+        system = material.bl_system_properties_get(do_create=True)
+        for key, value in zip(uv_marks.OLD_SIZE_KEYS, (width, height)):
+            if value is not None:
+                system[key] = value  # the enum's item index, as 0.30.0 to 0.32.0 stored it
+    scripted = bpy.data.materials.new('OLD_SCRIPTED')
+    scripted['fss_uv_texture_width'] = '8192'  # a custom property written by a script
+    untouched = mat('NEW_1024', 1024)
+    report = uv_marks.run_migration()
+    got = {m_.name: uv_marks.texture_size(m_) for m_ in bpy.data.materials}
+    assert got == {'OLD_2048_1024': 2048, 'OLD_HEIGHT_8192': 8192, 'OLD_WIDTH_512': 4096, 'OLD_SCRIPTED': 8192,
+                   'NEW_1024': 1024}, got
+    assert report['size'] == 4 and report['kept'] == 0, report
+    for m_ in bpy.data.materials:
+        system = m_.bl_system_properties_get()
+        for key in uv_marks.OLD_SIZE_KEYS:
+            assert key not in m_ and (system is None or key not in system), (m_.name, key)
+    assert uv_marks._migration['size'] == 4
+    # idempotent: a second run converts nothing and changes nothing
+    again = uv_marks.run_migration()
+    assert again['size'] == 0 and {m_.name: uv_marks.texture_size(m_) for m_ in bpy.data.materials} == got, again
+    # an old key written again next to a square size: the square size is kept, the old key removed
+    untouched.bl_system_properties_get()['fss_uv_texture_width'] = 5
+    kept = uv_marks.run_migration()
+    assert kept['kept'] == 1 and kept['size'] == 0 and uv_marks.texture_size(untouched) == 1024, kept
+    assert 'fss_uv_texture_width' not in untouched.bl_system_properties_get()
+    print(f"PASS: test_square_size_migration (2048 x 1024 -> 2048, height 8192 -> 8192, width 512 -> 4096, scripted "
+          f"8192; {report['size']} converted, second run none, a newer size kept)")
+
+
+def test_faces_without_uv_area():
+    reset()
+    m = mat('NEEDLE', 1024)
+    me = bpy.data.meshes.new('NEEDLE')
+    # a quad and a triangle with 3D area whose UVs lie on the quad's edge line: a needle inside the quad's island
+    me.from_pydata([(0, 0, 0), (0.2, 0, 0), (0.2, 0.2, 0), (0, 0.2, 0), (0.5, 0.1, 0)], [],
+                   [(0, 1, 2, 3), (1, 4, 2)])
+    uvl = me.uv_layers.new(name='UVMap')
+    lv = np.zeros(len(me.loops), np.int64)
+    me.loops.foreach_get('vertex_index', lv)
+    uvl.data.foreach_set('uv', (np.array([(0, 0), (0.2, 0), (0.2, 0.2), (0, 0.2), (0.2, 1.0)]) * 0.1)[lv].ravel())
+    me.materials.append(m)
+    needle = quad_obj('NEEDLE', None, mesh=me)
+    clean = quad_obj('CLEAN', [(1, 0, 0.2, 0.2)], mats=[m])
+    # an island with no UV area at all (a line) is left out of packing: its triangles are not needles
+    quad_obj('LINE', [(2, 0, 0.2, 0.2)], mats=[m], uv_rects=[(0.5, 0.5, 0.3, 0.0)])
+    found, faces, islands = checks.faces_without_uv_area(bpy.context.view_layer)
+    assert list(found) == [needle] and found[needle].tolist() == [1] and (faces, islands) == (1, 1), found
+    clean.select_set(True)
+    assert bpy.ops.fss.find_faces_without_uv_area() == {'FINISHED'}
+    assert [o.name for o in bpy.context.selected_objects] == ['NEEDLE'] and bpy.context.active_object == needle
+    sel = [p.select for p in needle.data.polygons]
+    assert sel == [False, True], sel
+    # the reports list it per texture set: Pack's and Check All's
+    r = uv_pack.measure(m)
+    assert r['uv_zero_islands'] == 1 and r['uv_zero_objects'] == ['NEEDLE'] and r['zero_area_islands'] == 1, r
+    for obj in bpy.context.view_layer.objects:
+        obj.select_set(obj == clean)
+    bpy.context.view_layer.objects.active = clean
+    assert bpy.ops.fss.uv_pack_texture_set(material='NEEDLE') == {'FINISHED'}
+    warning = ('WARNING triangles without UV area in 1 island(s) of 1 object(s): NEEDLE. They push islands out of the '
+               'layout')
+    for kind in ('Pack', 'Check All'):
+        if kind == 'Check All':
+            assert bpy.ops.fss.uv_pack_check_all() == {'FINISHED'}
+        report = bpy.data.texts[uv_pack.REPORT_TEXT_NAME].as_string()
+        block = report[report.index('## NEEDLE: '):]
+        assert f'# {kind}: 1 texture set(s)' in report and warning in block and 'Accept + Unwrap' in block, report
+    assert draw_row(m)[0] == ('NEEDLE', 'ERROR')
+    _calls, labels = draw_panel()
+    assert '1 island(s) with triangles without UV area: re-unwrap them' in labels, labels
+    print(f"PASS: test_faces_without_uv_area (threshold {uv_pack.UV_TRI_AREA_MIN_PX2:g} px2: NEEDLE found and its face "
+          "1 selected, the line island not counted; Pack and Check All reports warn per texture set; the row and "
+          "the details flag it)")
 
 
 def main():
@@ -462,14 +619,17 @@ def main():
     test_fit()
     test_overflow_and_clamp()
     test_directions()
-    test_non_square()
     test_linked_and_split()
     test_zero_area_and_spike()
     test_pack_operator_and_undo()
     test_edit_mode()
     test_check_all_and_keep()
     test_faces_without_area()
+    test_faces_without_uv_area()
+    test_square_size_migration()
     test_panel_rows()
+    test_texture_set_list()
+    test_uv_editor_panel()
     print("ALL TESTS PASSED")
 
 

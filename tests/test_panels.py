@@ -1,5 +1,5 @@
-"""The FSS Tools sidebar layout: top-level panels in pipeline order, UV Tools and Utilities with their sections, and
-every panel drawing without errors.
+"""The FSS Tools sidebar layout: top-level panels in pipeline order, UV Tools and Utilities with their sections, Packing
+in the UV editor's sidebar too, and every panel drawing without errors.
 
 To run:
 "<blender>" -b --factory-startup --python tests/test_panels.py
@@ -45,6 +45,10 @@ EXPECTED = {
     'FSS_PT_uv_heatmap': ("Heatmap", 'FSS_PT_utilities', 2),
     'FSS_PT_checks': ("Checks", 'FSS_PT_utilities', 3),
 }
+# The UV editor's sidebar: Packing again (UV journal decision 119), drawn by the same code
+EXPECTED_IMAGE_EDITOR = {
+    'FSS_PT_uv_marks_image': ("Packing", '', 0),
+}
 
 
 def fss_panels():
@@ -54,19 +58,23 @@ def fss_panels():
 
 def test_layout():
     panels = fss_panels()
-    for idname, (label, parent, order) in EXPECTED.items():
+    for idname, (label, parent, order) in {**EXPECTED, **EXPECTED_IMAGE_EDITOR}.items():
         cls = panels.get(idname)
+        space = 'IMAGE_EDITOR' if idname in EXPECTED_IMAGE_EDITOR else 'VIEW_3D'
         assert cls is not None, f"{idname} not registered"
         assert cls.bl_label == label, (idname, cls.bl_label, label)
         assert getattr(cls, 'bl_parent_id', '') == parent, (idname, getattr(cls, 'bl_parent_id', ''), parent)
         assert getattr(cls, 'bl_order', 0) == order, (idname, getattr(cls, 'bl_order', 0), order)
         assert getattr(bpy.types, idname, None) is not None, f"{idname} not in bpy.types"
+        assert (cls.bl_space_type, cls.bl_region_type) == (space, 'UI'), (idname, cls.bl_space_type)
+    assert bpy.types.FSS_PT_uv_marks.draw is bpy.types.FSS_PT_uv_marks_image.draw
     # Every other FSS panel is a subpanel of one of these (the LOD subpanels)
     for idname, cls in panels.items():
-        if idname not in EXPECTED:
+        if idname not in EXPECTED and idname not in EXPECTED_IMAGE_EDITOR:
             assert getattr(cls, 'bl_parent_id', '') in panels, (idname, getattr(cls, 'bl_parent_id', ''))
     top = sorted((order, label) for label, parent, order in EXPECTED.values() if not parent)
-    print(f"PASS: test_layout ({len(panels)} panels; top level: {', '.join(label for _o, label in top)})")
+    print(f"PASS: test_layout ({len(panels)} panels; top level: {', '.join(label for _o, label in top)}; UV editor: "
+          "Packing)")
 
 
 class _Layout:
@@ -108,15 +116,20 @@ def test_draw_all():
     assert 'Skip Auto Seam' not in texts, texts
     # Density marks are live fields with factor presets: no Apply, no Select Marked (decision 109)
     assert 'Apply' not in texts and 'Select Marked' not in texts and {'Lower', 'Higher'} <= set(texts), texts
-    assert 'Check All' in texts, texts  # the packer (decision 115); the Pack rows need a material
+    assert 'Check All' in texts, texts  # the packer (decision 115); Pack needs a material
+    uv_editor = []
+    bpy.types.FSS_PT_uv_marks_image.draw(SimpleNamespace(layout=_Layout(uv_editor)), bpy.context)
+    assert [(name, kwargs.get('text')) for name, _args, kwargs in uv_editor] == [
+        (name, kwargs.get('text')) for name, _args, kwargs in packing]
     checks_calls = []
     bpy.types.FSS_PT_checks.draw(SimpleNamespace(layout=_Layout(checks_calls)), bpy.context)
     ops = [args[0] for name, args, _kwargs in checks_calls if name == 'operator']
-    assert 'fss.find_faces_without_area' in ops, ops
+    assert 'fss.find_faces_without_area' in ops and 'fss.find_faces_without_uv_area' in ops, ops
     steps = bpy.context.scene.fss_visibility.bl_rna.properties['states']
     assert steps.name == 'Animation Steps', steps.name
     print(f"PASS: test_draw_all ({len(drawn)} panels drawn; Skip Auto Seam in Seams only; Packing without Apply and "
-          "Select Marked, with Check All; Find Faces Without Area in Checks; 'Animation Steps')")
+          "Select Marked, with Check All, the same in the UV editor; Find Faces Without Area and Find Faces Without UV "
+          "Area in Checks; 'Animation Steps')")
 
 
 def main():

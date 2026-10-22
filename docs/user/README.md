@@ -5,7 +5,7 @@
 
 This guide is for 3D artists who build Flight Sim Studio (FSS) aircraft in Blender 5.2. It assumes you already model, unwrap, animate, texture and export in Blender. It explains what MSFS needs on top of that, the order in which we prepare a model for it, and which of our tools help at each step and why.
 
-It matches **FSS Blender Tools 0.32.0** and the FSS exporter based on Asobo exporter 8.4.1.
+It matches **FSS Blender Tools 0.33.0** and the FSS exporter based on Asobo exporter 8.4.1.
 
 - **The pipeline** (below): the steps from a new model to a deployed one, in order.
 - **The reference pages:** what each panel and button does, linked from the steps:
@@ -190,13 +190,14 @@ So the topology you model decides what disappears together. A floor plate and it
 
 **What the tool does:** **Pack** packs one texture set: every face with its material in the scene, selected or not. It scales each island to its density range (target density × the density marks × the island's visibility), at one common position inside the ranges for the whole set, turns islands only as their **direction** mark allows, and keeps each material's **margin** in pixels. When the islands do not fit the texture **size**, it still writes them at their density, reaching beyond the texture, and says which size they need; when they leave space even at the top of their ranges, it says which smaller size would do. **Check All** does the same for every texture set without writing UVs. See [Packing](fss-tools.md#packing).
 
-**Do:** in **FSS Tools** > **UV Tools** > **Packing**:
+**Do:** in **FSS Tools** > **UV Tools** > **Packing** (the same section is in the UV Editor's sidebar, tab **FSS Tools**):
 
-1. Set **Target density** and the density marks (step 7 explains them), and each texture set's **Size** and **Margin**.
+1. Set **Target density** and the density marks (step 7 explains them). Select the objects; the list shows their texture sets. Click a row and set that set's **Size** (square: 256 to 8192 pixels per side) and **Margin**.
 2. Tick **Keep UVs** on texture sets that must not be packed: fur and hair cards, decal sheets, colliders.
-3. **Check All**, then read each set's **Last run** and the **FSS Packing Report**. Change sizes or marks until each set fits at a size you accept.
-4. Select an object of a texture set and press its **Pack**. **Ctrl + Z** undoes it.
-5. If the report warns about **faces without area**, run [Find Faces Without Area](fss-tools.md#find-faces-without-area) and fix them.
+3. Before packing, run [Find Faces Without UV Area](fss-tools.md#find-faces-without-uv-area) (**Utilities** > **Checks**) and re-unwrap the parts it selects (for example **Accept + Unwrap**): their islands would land far out of the layout and make the set need a larger texture.
+4. **Check All**, then read each set's **Last run** and the **FSS Packing Report**. If a set's report warns about **triangles without UV area**, re-unwrap the objects it names and check again. Change sizes or marks until each set fits at a size you accept.
+5. Click the set's row and press **Pack**. **Ctrl + Z** undoes it.
+6. If the report warns about **faces without area**, run [Find Faces Without Area](fss-tools.md#find-faces-without-area) and fix them.
 
 **Check:**
 
