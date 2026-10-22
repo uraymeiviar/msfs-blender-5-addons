@@ -40,7 +40,6 @@ for name in ADDONS:
     assert Path(sys.modules[name].__file__).resolve().is_relative_to(REPO_ROOT), sys.modules[name].__file__
 
 SCRATCH_DIR = REPO_ROOT / 'tests' / '_work' / 'zone_tree_scratch'
-KNOWN_LEAK_WITH_EXTRAS = True
 
 
 def new_empty(name, parent=None):
@@ -211,11 +210,17 @@ def test_draw_smoke():
     print(f"PASS: test_draw_smoke ({len(settings.items)} rows and their details)")
 
 
-def node_extras_hits(gltf):
+def fss_extras_keys(value, path=''):
+    """Every key starting with fss_ inside any extras of the glTF, with where it was found."""
     hits = []
-    for node in gltf.get('nodes', []):
-        if merge.ZONE_DENSITY_KEY in json.dumps(node.get('extras', {})):
-            hits.append(node.get('name'))
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == 'extras' and isinstance(item, dict):
+                hits += [f"{path}/{name}" for name in item if name.startswith('fss_')]
+            hits += fss_extras_keys(item, f"{path}/{key}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            hits += fss_extras_keys(item, f"{path}[{index}]")
     return hits
 
 
@@ -228,6 +233,13 @@ def test_gltf_leak():
         o = build_scene()
         o['fwd'].fss_zone_density = 2.5
         o['fwd']['artist_note'] = 1  # a plain custom property: shows that extras were written at all
+        # FSS keys on a material and on mesh data, beside the scene's registered fss_merge and fss_viewport_lod
+        mesh_obj = next(obj for obj in bpy.context.scene.objects if obj.type == 'MESH' and obj.visible_get())
+        mat = bpy.data.materials.new('ZONE_LEAK_MAT')
+        mat['fss_probe'] = 1
+        mat['artist_mat_note'] = 1
+        mesh_obj.data.materials.append(mat)
+        mesh_obj.data['fss_probe'] = 1
         path = SCRATCH_DIR / f"zones_extras_{int(extras)}.gltf"
         bpy.ops.export_scene.gltf(filepath=str(path), export_format='GLTF_SEPARATE', use_visible=True,
                                   export_extras=extras)
@@ -235,21 +247,17 @@ def test_gltf_leak():
         gltf = json.loads(text)
         names = {node.get('name') for node in gltf.get('nodes', [])}
         assert 'ZONE_FWD' in names, sorted(names)
-        results[extras] = (merge.ZONE_DENSITY_KEY in text, node_extras_hits(gltf), 'artist_note' in text)
+        results[extras] = (merge.ZONE_DENSITY_KEY in text, fss_extras_keys(gltf),
+                           'artist_note' in text and 'artist_mat_note' in text)
         print(f"  export_extras={extras}: {len(gltf.get('nodes', []))} nodes, fss_zone_density in file: "
-              f"{results[extras][0]}, in node extras: {results[extras][1]}, custom property written: "
+              f"{results[extras][0]}, fss_ keys in extras: {results[extras][1]}, custom properties written: "
               f"{results[extras][2]}")
-    assert results[True][2], "export_extras=True wrote no extras: the leak check would prove nothing"
-    in_text, hits, _custom = results[False]
-    assert not in_text and not hits, f"fss_zone_density leaked into the glTF (export_extras=False): {hits}"
-    # Known leak, reported for review (journal 20261014 Session 8): with Custom Properties on, Blender 5.2's glTF
-    # exporter also writes registered properties (bl_system_properties_get) as extras. Deploys export without
-    # extras. When it is fixed, this fails: set KNOWN_LEAK_WITH_EXTRAS to False.
-    in_text, hits, _custom = results[True]
-    assert (in_text and bool(hits)) == KNOWN_LEAK_WITH_EXTRAS, (
-        f"export_extras=True: fss_zone_density in node extras {hits}, expected leak {KNOWN_LEAK_WITH_EXTRAS}")
-    if KNOWN_LEAK_WITH_EXTRAS:
-        print(f"  KNOWN LEAK: export_extras=True writes fss_zone_density into the extras of {hits}")
+    # With Include Extras, Blender 5.2 also writes registered properties; the FSS export hooks drop every fss_ key
+    # from the extras of nodes, meshes, materials and the scene, and keep the artist's own custom properties
+    assert results[True][2], "export_extras=True wrote no custom properties: the leak check would prove nothing"
+    for extras in (True, False):
+        in_text, hits, _custom = results[extras]
+        assert not in_text and not hits, f"fss_ keys reached the glTF (export_extras={extras}): {hits}"
     print("PASS: test_gltf_leak")
 
 

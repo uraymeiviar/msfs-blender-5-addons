@@ -822,19 +822,6 @@ def test_packer_interface_and_cache():
     assert visibility_core.score_face_set(obj12, []) == 0.0
     assert visibility_core.score_face_set(None, [0]) == 1.0
 
-    # 5. material_has_textures verification
-    mat_textured = bpy.data.materials.new("TEST_TEX")
-    mat_textured.node_tree.nodes.new("ShaderNodeTexImage")
-    assert visibility_core.material_has_textures(mat_textured) is True
-
-    mat_untextured = bpy.data.materials.new("TEST_NO_TEX")
-    assert visibility_core.material_has_textures(mat_untextured) is False
-    assert visibility_core.material_has_textures(None) is False
-
-    mat_invis = bpy.data.materials.new("TEST_INVIS")
-    mat_invis.msfs_material_type = "msfs_invisible"
-    assert visibility_core.material_has_textures(mat_invis) is False
-
     print(f"PASS: test_packer_interface_and_cache (200 calls, {loads} disk load)")
 
 

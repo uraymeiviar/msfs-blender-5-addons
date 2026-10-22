@@ -64,39 +64,6 @@ def classify_material(mat):
     return 'OPAQUE'
 
 
-def material_has_textures(mat):
-    """Check if a material uses/holds image textures (has texture nodes/properties).
-    
-    Materials without textures (such as msfs_invisible, msfs_environment_occluder,
-    collision shapes, or untextured solid-color materials) are skipped during packing.
-    """
-    if mat is None:
-        return False
-
-    mtype = getattr(mat, 'msfs_material_type', None)
-    if (mtype is None or mtype == 'NONE') and 'msfs_material_type' in mat:
-        mtype = mat['msfs_material_type']
-
-    if mtype in {'msfs_invisible', 'msfs_environment_occluder', 'msfs_collision'}:
-        return False
-
-    tree = getattr(mat, 'node_tree', None)
-    if tree:
-        for node in tree.nodes:
-            if node.type == 'TEX_IMAGE':
-                return True
-
-    msfs_props = (
-        'msfs_base_color_texture', 'msfs_comp_texture', 'msfs_normal_texture',
-        'msfs_emissive_texture', 'msfs_detail_color_texture', 'msfs_detail_comp_texture',
-        'msfs_detail_normal_texture', 'msfs_blend_mask_texture',
-    )
-    if any(getattr(mat, p, None) for p in msfs_props):
-        return True
-
-    return False
-
-
 def is_invisible_object(obj):
     """Check if object name or all of its materials designate invisible/collision geometry."""
     name_upper = obj.name.upper()

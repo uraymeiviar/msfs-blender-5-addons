@@ -461,6 +461,17 @@ def run(context, exported, selected_export, log):
     return merged, created
 
 
+def _strip_fss_extras(gltf2_element):
+    """FSS settings are tool data, not model data: drop them from the extras that Include Extras writes (Blender 5.2
+    writes registered properties such as fss_zone_density too). Other custom properties stay."""
+    extras = getattr(gltf2_element, "extras", None)
+    if isinstance(extras, dict):
+        for key in [key for key in extras if key.startswith("fss_")]:
+            del extras[key]
+        if not extras:
+            gltf2_element.extras = None
+
+
 class glTF2ExportUserExtension:
     """Found by the glTF exporter on every enabled add-on; pre_export_hook runs before it collects the objects."""
 
@@ -468,11 +479,19 @@ class glTF2ExportUserExtension:
         # Unmerged roots and @NOMERGE_ nodes still export: the markers never reach the glTF. Runs after the MSFS
         # exporter's node hook (enabled first), which writes msfs_original_name into the node name.
         gltf2_node.name = strip_markers(gltf2_node.name)
+        _strip_fss_extras(gltf2_node)
 
     def gather_mesh_hook(self, gltf2_mesh, blender_mesh, blender_object, vertex_groups, modifiers, materials,
                          export_settings):
         # Mesh data is often named after its object, marker included
         gltf2_mesh.name = strip_markers(gltf2_mesh.name)
+        _strip_fss_extras(gltf2_mesh)
+
+    def gather_material_hook(self, gltf2_material, blender_material, export_settings):
+        _strip_fss_extras(gltf2_material)
+
+    def gather_scene_hook(self, gltf2_scene, blender_scene, export_settings):
+        _strip_fss_extras(gltf2_scene)
 
     def pre_export_hook(self, export_settings):
         context = bpy.context
