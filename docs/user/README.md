@@ -5,16 +5,16 @@
 
 This guide is for 3D artists who build Flight Sim Studio (FSS) aircraft in Blender 5.2. It assumes you already model, unwrap, animate, texture and export in Blender. It explains what MSFS needs on top of that, the order in which we prepare a model for it, and which of our tools help at each step and why.
 
-It matches **FSS Blender Tools 0.29.1** and the FSS exporter based on Asobo exporter 8.4.1.
+It matches **FSS Blender Tools 0.30.0** and the FSS exporter based on Asobo exporter 8.4.1.
 
 - **The pipeline** (below): the steps from a new model to a deployed one, in order.
 - **The reference pages:** what each panel and button does, linked from the steps:
 
   | Page | Contents |
   | :--- | :--- |
-  | [fss-tools.md](fss-tools.md) | The **FSS Tools** sidebar tab: **Tools**, **Empty Bounds**, **Tags**, **Zones & Merge Tree**, **UV Marks**, **Auto Seam**, **Heatmap**, **Visibility Test**, **Checks** |
+  | [fss-tools.md](fss-tools.md) | The **FSS Tools** sidebar tab: **Zones & Merge Tree**, **Tags**, **UV Tools** (**Seams**, **Packing** with **Visibility Scoring**) and **Utilities** (**General**, **Empty Bounds**, **Heatmap**, **Checks**) |
   | [lod.md](lod.md) | The **LOD** panel: automatic LODs, marks, size cut-offs, quota and hints, the LOD sphere, viewport preview, and exporting with LODs |
-  | [uv.md](uv.md) | The **Auto Seam** panel (proposed and current seams, workflow, reports, limits) and the **Heatmap** panel (distortion, texel density and visibility on the model, the distribution chart, the UV grid) |
+  | [uv.md](uv.md) | Auto Seam in **UV Tools > Seams** (proposed and current seams, workflow, reports, limits) and the **Heatmap** in **Utilities** (distortion, texel density and visibility on the model, the distribution chart, the UV grid) |
   | [exporter.md](exporter.md) | The exporter: export target MSFS 2024 or MSFS 2020, one `.blend` for both simulators, materials, instancing, legacy normals |
 
 - **The MSFS rules behind the steps** (draw calls, LOD limits, materials, texture budgets, with their SDK sources) are in the aircraft repository's **MSFS Authoring Guide**, `doc/msfs-authoring/`. This guide links its steps to those rules by topic.
@@ -39,8 +39,8 @@ Steps marked **in development** describe what the tool will do, and how to get t
 | [3. Loose Pieces](#3-loose-pieces-what-disappears-together) | LOD hints, Viewport LOD | a modelling decision | `lods.md` |
 | [4. Merge Tree](#4-merge-tree) | Tags, Zones & Merge Tree | available | `modeling.md` |
 | [5. LOD](#5-lod) | LOD | available | `lods.md` |
-| [6. Seams and Unwrap](#6-seams-and-unwrap) | Auto Seam, UV Marks, Heatmap | available | `uv-mapping.md` |
-| [7. Visibility Scoring](#7-visibility-scoring) | Visibility Test | available | [visibility.md](visibility.md) |
+| [6. Seams and Unwrap](#6-seams-and-unwrap) | UV Tools > Seams, Utilities > Heatmap | available | `uv-mapping.md` |
+| [7. Visibility Scoring](#7-visibility-scoring) | UV Tools > Packing > Visibility Scoring | available | [visibility.md](visibility.md) |
 | [8. Packing](#8-packing-in-development) | packer | in development: Blender's Pack Islands | `uv-mapping.md` |
 | [9. Texturing](#9-texturing) | Substance Painter | outside Blender | `texturing.md`, `baking.md` |
 | [10. Export and Deploy](#10-export-and-deploy) | exporter, deploy scripts | available | `blender-export.md` |
@@ -56,8 +56,8 @@ Steps marked **in development** describe what the tool will do, and how to get t
   - **Its position relative to the aircraft datum** (the world origin) places the scene in the aircraft. Everything below it moves with it: a longer variant's cockpit is the same cockpit with its root moved forward.
   - **Place it at the centre of the LOD sphere**, inside the scene, never on the datum. MSFS measures how large the model is on screen from that centre, so a camera there always sees `_LOD00`. MSFS works out the centre itself, from the geometry and every origin; the root does not set it, but a root far outside the geometry would move and enlarge the sphere (the root is exported, and its origin counts like every other). Compare it with **Show LOD Sphere** (step 5).
   - To move the root without moving what is below it, turn on **Options > Transform > Affect Only: Parents** in the 3D Viewport header, move it, and turn the option off again.
-- Use **Add Empty Parent** to group parts without moving them, and **Origin to Bounding Box** to bring origins back into their geometry (not on objects whose own transform is animated). See [Tools](fss-tools.md#tools).
-- Run **Scan Names** and **Fix Broken Bone Parents** in [Checks](fss-tools.md#checks).
+- Use **Add Empty Parent** to group parts without moving them, and **Origin to Bounding Box** to bring origins back into their geometry (not on objects whose own transform is animated). See [General](fss-tools.md#general) in **Utilities**.
+- Run **Scan Names** and **Fix Broken Bone Parents** in [Checks](fss-tools.md#checks) (**Utilities**).
 - **Empty Bounds** shows what each empty contains; use it to check the hierarchy. See [Empty Bounds](fss-tools.md#empty-bounds).
 
 **Check:** Scan Names lists nothing you did not intend. For the origins, press **Refresh LOD Counts** in the [LOD](lod.md) panel (no LOD marks are needed for it; for an interior, first enter **Exterior Diameter** under **Export Settings**, or Refresh stops with "exterior diameter missing"): its **Export Settings** show no warning about origins outside the geometry, and **Show LOD Sphere** draws the sphere around the model, not far beyond it. See [Origins Outside the Geometry](lod.md#origins-outside-the-geometry).
@@ -153,7 +153,7 @@ So the topology you model decides what disappears together. A floor plate and it
 **Do:**
 
 - Mark the seams that matter to you by hand: panel joints, visible cuts, symmetry edges.
-- **Auto Seam** proposes seams for hard-surface parts around yours. Review them, **Accept Proposed** or **Discard Proposed**. Objects such as fur, cables or decal soups get the **Skip Auto Seam** mark in [UV Marks](fss-tools.md#uv-marks). See [uv.md](uv.md).
+- **Auto Seam** (**UV Tools > Seams**) proposes seams for hard-surface parts around yours. Review them, **Accept Proposed** or **Discard Proposed**. Objects such as fur, cables or decal soups get the **Skip Auto Seam** mark in the same section. See [uv.md](uv.md).
 - Unwrap with Blender's **Unwrap** (Angle Based). Apply the object's scale first where you can: Blender unwraps in object space.
 - Check with the **Heatmap** in **Distortion** mode and the **UV Grid**: cells should stay square, labels upright. See [Heatmap](uv.md#heatmap-distortion-texel-density-and-visibility).
 
@@ -165,20 +165,20 @@ So the topology you model decides what disappears together. A floor plate and it
 
 **Why:** texture space is limited. Parts the pilot sees deserve more texture than parts hidden behind other parts or behind the seat.
 
-**What it measures:** from the cameras you include (for the cockpit the pilot and copilot eyes; for the exterior your own exterior cameras) and over the animation states, how much of each face is actually visible, weighted by how far the head has to turn from the camera's default view. The score is a factor from 0 to 1 per face that depends neither on distance nor on size: a small knob in plain view scores as high as a large panel. Parts too small to measure (screw heads, small labels) take the value of the part they belong to.
+**What it measures:** from the cameras you include (for the cockpit the pilot and copilot eyes; for the exterior your own exterior cameras) and over the animation steps, how much of each face is actually visible, weighted by how far the head has to turn from the camera's default view. The score is a factor from 0 to 1 per face that depends neither on distance nor on size: a small knob in plain view scores as high as a large panel. Parts too small to measure (screw heads, small labels) take the value of the part they belong to.
 
-**How packing uses it:** each island gets a texel density (pixels per centimetre) within its object's density range from [UV Marks](fss-tools.md#uv-marks) × zone multiplier × visibility × the target density. An island's visibility comes from its seen faces only, so a partly hidden island keeps the density its visible part needs. Faces never seen in the analysed views and states get a small minimum density; nothing is deleted.
+**How packing uses it:** each island gets a texel density (pixels per centimetre) within its object's density range from the UV marks in [Packing](fss-tools.md#packing) × zone multiplier × visibility × the target density. An island's visibility comes from its seen faces only, so a partly hidden island keeps the density its visible part needs. Faces never seen in the analysed views and steps get a small minimum density; nothing is deleted.
 
 **Do:**
 
-- In **FSS Tools** > **Visibility Test**, tick **Include** for your cameras and set each to **Look Around** (the head can turn) or **Fixed View** (only what the camera's own frame shows).
-- Set **States** (default 5: 0, 25, 50, 75 and 100 % of each animation).
+- In **FSS Tools** > **UV Tools** > **Packing** > **Visibility Scoring**, tick **Include** for your cameras and set each to **Look Around** (the head can turn) or **Fixed View** (only what the camera's own frame shows).
+- Set **Animation Steps** (default 5: 0, 25, 50, 75 and 100 % of each animation).
 - Save the `.blend`, then **Update Visibility**. The results go to `<blend name>.visibility` beside the `.blend`. See [visibility.md](visibility.md).
 
 **Check:**
 
 - The [Heatmap](uv.md#heatmap-distortion-texel-density-and-visibility) in **Visibility** mode: what the pilot looks at is blue, what is hidden or far to the side is red, never seen is magenta.
-- **Select Never Seen** and judge the list: switch positions and parts shown only under some conditions are not seen in every analysed state. Hide or delete only what really is never visible.
+- **Select Never Seen** and judge the list: switch positions and parts shown only under some conditions are not seen in every analysed step. Hide or delete only what really is never visible.
 
 **Redo when:** cameras, animations or the geometry change; the panel lists stale meshes. New seams or a new unwrap do not count: the scores belong to faces, not islands.
 
@@ -193,7 +193,7 @@ So the topology you model decides what disappears together. A floor plate and it
 **Meanwhile, by hand:** for each texture set, select the objects that use its material, then in the UV editor:
 
 1. **Average Islands Scale**, then scale up the islands of parts marked **Higher** and down those marked **Lower**.
-2. **Pack Islands** with the material's margin from [UV Marks](fss-tools.md#uv-marks), and rotation off for parts marked **Upright** (brushed metal, grain, text).
+2. **Pack Islands** with the material's margin from [Packing](fss-tools.md#packing), and rotation off for parts marked **Upright** (brushed metal, grain, text).
 
 **Check:** the heatmap's **Density** mode shows each texture set near 1.0, except where you chose otherwise.
 
@@ -236,7 +236,7 @@ Some work has no step of its own, because it runs through several:
 
 ## Where to Find the Tools
 
-- **FSS Tools:** in the 3D Viewport, press `N` to open the sidebar, then pick the **FSS Tools** tab. The panels are, from top to bottom: **Tools**, **Empty Bounds**, **LOD**, **Tags**, **Zones & Merge Tree**, **UV Marks**, **Auto Seam**, **Heatmap**, **Visibility Test**, **Checks**.
+- **FSS Tools:** in the 3D Viewport, press `N` to open the sidebar, then pick the **FSS Tools** tab. The panels are, from top to bottom: **Zones & Merge Tree**, **Tags**, **LOD**, **UV Tools** (sections **Seams** and **Packing**, with **Visibility Scoring** inside Packing) and **Utilities** (sections **General**, **Empty Bounds**, **Heatmap** and **Checks**).
 - **Exporter:** in the same sidebar, tab **Microsoft Flight Simulator 2024 Tools**, panel **Export Target** (also shown in **File > Export > glTF 2.0**, section **Microsoft Flight Simulator (FSS)**).
 - **Material and object settings:** in the Properties editor, the MSFS panels of the Asobo add-on, plus **MSFS 2020 Object Parameters** and **MSFS 2020 Material Parameters** while the scene targets MSFS 2020.
 
@@ -268,7 +268,7 @@ If your version is newer than 0.24.1, some labels or buttons may differ from thi
 | **Deploy** | Exporting a `.blend` to glTF with the aircraft repository's scripts and copying the files into the simulator package. The deploy runs Blender in the background. |
 | **LOD** | Level of detail. `_LOD00` is the full model; `_LOD01` to `_LOD06` are lighter versions MSFS shows when the model is small on screen. |
 | **Loose piece** | A connected piece of geometry inside one mesh. Pieces that only touch without sharing vertices count as separate. |
-| **Mark** | Something you put on an object to tell an automatic tool what it cannot work out itself: an override or a hint. Marks live in the `.blend`; MSFS never sees them. Three kinds: **LOD marks** in the [LOD](lod.md#marks) panel (from which LOD a part is left out or shown, or **Keep**); **UV marks** in the [UV Marks](fss-tools.md#uv-marks) panel (the target density for packing, how islands may turn, **Skip Auto Seam**), inherited by the objects below; and **tags**. |
+| **Mark** | Something you put on an object to tell an automatic tool what it cannot work out itself: an override or a hint. Marks live in the `.blend`; MSFS never sees them. Three kinds: **LOD marks** in the [LOD](lod.md#marks) panel (from which LOD a part is left out or shown, or **Keep**); **UV marks** in **UV Tools** ([Packing](fss-tools.md#packing): the target density, how islands may turn; [Seams](fss-tools.md#seams): **Skip Auto Seam**), inherited by the objects below; and **tags**. |
 | **Material class** | The kind of material (standard, emissive, decal, glass and so on), the last part of a material name `<SCENE>_<ZONE>_<CLASS>`. |
 | **Merge group** | An object named `@MERGE_<name>` whose subtree becomes one mesh at export. |
 | **Name prefix** | `@MERGE_`, `@NOMERGE_` (see [Zones & Merge Tree](fss-tools.md#zones--merge-tree)) and `@ZONE_` (step 2): a prefix in an object's name that the tools act on. The export removes `@MERGE_` and `@NOMERGE_` entirely, and the leading `@` of any other name: `@ZONE_FWD` becomes `ZONE_FWD`. |

@@ -211,12 +211,28 @@ class FSS_OT_UvClearMargin(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def draw_skip_autoseam(layout, context):
+    """The Skip Auto Seam mark, drawn in the Seams section (UV Tools > Seams)."""
+    obj = context.active_object
+    box = layout.box()
+    if obj is not None:
+        is_skip, source = skip_autoseam(obj)
+        state = 'skipped' if is_skip else 'processed'
+        box.label(text=f'{obj.name}: {state} by Propose Seams ({_source_text(obj, source)})')
+    box.label(text=f'Mark {len(_selected(context))} selected object(s):')
+    row = box.row(align=True)
+    row.operator(FSS_OT_UvSetSkipAutoseam.bl_idname, text='Skip Auto Seam').action = 'SKIP'
+    row.operator(FSS_OT_UvSetSkipAutoseam.bl_idname, text='Clear').action = 'CLEAR'
+
+
 class FSS_PT_UvMarks(bpy.types.Panel):
     bl_idname = 'FSS_PT_uv_marks'
-    bl_label = 'UV Marks'
+    bl_label = 'Packing'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'FSS Tools'
+    bl_parent_id = 'FSS_PT_uv_tools'
+    bl_order = 1
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
@@ -232,11 +248,6 @@ class FSS_PT_UvMarks(bpy.types.Panel):
             box.label(text=f'Density {low:g} to {high:g} ({_source_text(obj, source)})')
             value, source = direction(obj)
             box.label(text=f'Direction {value.lower()} ({_source_text(obj, source)})')
-            is_skip, source = skip_autoseam(obj)
-            if is_skip:
-                box.label(text=f'Skip Auto Seam ({_source_text(obj, source)})')
-            else:
-                box.label(text=f'Auto Seam: process ({_source_text(obj, source)})')
 
         selected = _selected(context)
         box = layout.box()
@@ -253,10 +264,6 @@ class FSS_PT_UvMarks(bpy.types.Panel):
         row = box.row(align=True)
         for item in DIRECTIONS + [('CLEAR', 'Clear', '')]:
             row.operator(FSS_OT_UvSetDirection.bl_idname, text=item[1]).direction = item[0]
-        box.label(text='Auto Seam:')
-        row = box.row(align=True)
-        row.operator(FSS_OT_UvSetSkipAutoseam.bl_idname, text='Skip Auto Seam').action = 'SKIP'
-        row.operator(FSS_OT_UvSetSkipAutoseam.bl_idname, text='Clear').action = 'CLEAR'
         layout.operator(FSS_OT_UvSelectMarked.bl_idname, icon='RESTRICT_SELECT_OFF')
 
         materials = sorted({slot.material for obj in selected for slot in obj.material_slots if slot.material},

@@ -1409,10 +1409,12 @@ class FSS_OT_UvSelectArtistSeams(bpy.types.Operator):
 
 class FSS_PT_UvAutoSeam(bpy.types.Panel):
     bl_idname = 'FSS_PT_uv_autoseam'
-    bl_label = 'Auto Seam'
+    bl_label = 'Seams'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'FSS Tools'
+    bl_parent_id = 'FSS_PT_uv_tools'
+    bl_order = 0
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
@@ -1475,6 +1477,9 @@ class FSS_PT_UvAutoSeam(bpy.types.Panel):
             row = box.row(align=True)
             row.operator(FSS_OT_UvSelectAutoSeams.bl_idname, text='Select Proposed')
             row.operator(FSS_OT_UvSelectArtistSeams.bl_idname, text='Select Current')
+
+        from .uv_marks import draw_skip_autoseam
+        draw_skip_autoseam(layout, context)
 
         txt = bpy.data.texts.get(REPORT_TEXT_NAME)
         box = layout.box()

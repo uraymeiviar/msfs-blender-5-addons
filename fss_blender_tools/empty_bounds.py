@@ -403,6 +403,8 @@ class FSS_PT_EmptyBounds(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "FSS Tools"
+    bl_parent_id = "FSS_PT_utilities"
+    bl_order = 1
 
     def draw(self, context):
         layout = self.layout

@@ -6,15 +6,16 @@ Independent of the Asobo add-ons and of _addons_common, so upstream merges into 
 bl_info = {
     "name": "FSS Blender Tools",
     "author": "Flight Sim Studio",
-    "description": "Authoring checks and helpers for MSFS aircraft (tools, empty bounds, lod, tags, merge tree, uv marks, uv auto seams, heatmap, visibility, checks)",
+    "description": "Authoring checks and helpers for MSFS aircraft (zones and merge tree, tags, lod, uv tools: seams, packing marks, visibility scoring; utilities: general tools, empty bounds, heatmap, checks)",
     "blender": (5, 2, 0),
-    "version": (0, 29, 1),
+    "version": (0, 30, 0),
     "location": "3D View > Sidebar > FSS Tools",
     "category": "Object",
 }
 
 if "name_check" in locals():
     import importlib
+    panels = importlib.reload(panels)
     tools = importlib.reload(tools)
     empty_bounds = importlib.reload(empty_bounds)
     lod_rules = importlib.reload(lod_rules)
@@ -30,9 +31,11 @@ if "name_check" in locals():
     name_check = importlib.reload(name_check)
     checks = importlib.reload(checks)
 else:
-    from . import checks, empty_bounds, lod_rules, lod_model, lod, merge, name_check, tags, tools, uv_autoseam, uv_heatmap, uv_marks, visibility, visibility_core
+    from . import (checks, empty_bounds, lod_rules, lod_model, lod, merge, name_check, panels, tags, tools, uv_autoseam,
+                   uv_heatmap, uv_marks, visibility, visibility_core)
 
-MODULES = (tools, empty_bounds, lod, tags, merge, uv_marks, uv_autoseam, uv_heatmap, visibility, name_check, checks)
+# panels first: it registers the UV Tools and Utilities groups that the other modules' panels sit in
+MODULES = (panels, tools, empty_bounds, lod, tags, merge, uv_marks, uv_autoseam, uv_heatmap, visibility, name_check, checks)
 
 # The glTF exporter looks this name up on every enabled add-on: merge groups are merged in its pre-export hook
 glTF2ExportUserExtension = merge.glTF2ExportUserExtension

@@ -6,18 +6,19 @@ repository are in [../AGENTS.md](../AGENTS.md).
 
 ## Modules
 
-| Module | Panel | What it does |
+| Module | Panel (sidebar path) | What it does |
 | :--- | :--- | :--- |
-| `tools.py` | **Tools** | Scene helpers: **Add Empty Parent** (Manual / Suffix / Prefix naming rules), **Origin to Bounding Box** (minimum-volume OBB orientation with 8 corners, 6 face centers and 12 edge centers) |
-| `empty_bounds.py` | **Empty Bounds** | Draws the bounds of empties' subtrees (`All` / `Selected` / `Off`, `In Front`) and a clickable hierarchy text in the viewport |
+| `panels.py` | **UV Tools**, **Utilities** | The two group panels; every section below is a subpanel registered by its module (`bl_parent_id`), with `bl_order` setting the sidebar order: Zones & Merge Tree, Tags, LOD, UV Tools, Utilities |
+| `tools.py` | **Utilities > General** | Scene helpers: **Add Empty Parent** (Manual / Suffix / Prefix naming rules), **Origin to Bounding Box** (minimum-volume OBB orientation with 8 corners, 6 face centers and 12 edge centers) |
+| `empty_bounds.py` | **Utilities > Empty Bounds** | Draws the bounds of empties' subtrees (`All` / `Selected` / `Off`, `In Front`) and a clickable hierarchy text in the viewport |
 | `lod.py`, `lod_model.py`, `lod_rules.py` | **LOD** | Auto size culling (objects and loose mesh pieces), hidden-from / visible-from / Keep marks, Quota and Hints subpanel, scene export settings, and viewport membership preview |
 | `tags.py` | **Tags** | Generic object tags (`fss_tags`, semicolon-separated), per-row `[-]`/`[+]` assignment, selection, and per-tag skip-merge and Keep toggles |
 | `merge.py` | **Zones & Merge Tree** | Export-time merge groups (`@MERGE_<name>` / `@NOMERGE_<name>`), New Merge Group, tree preview of zones (`@ZONE_<NAME>`), groups and `@NOMERGE_` nodes with Unzoned and nesting warnings, console details; per-zone texel density multiplier (`fss_zone_density` on the zone empty, read with `zone_density()`) |
-| `uv_marks.py` | **UV Marks** | Authoring marks for UV unwrapping and packing: per-object texel density range (`fss_uv_density`, default 0.9 to 1.1, presets Lower 0.7 to 0.8 and Higher 1.5 to 1.65), island direction (`fss_uv_direction`: Free, Upright, Flip, Quarter), and Skip Auto Seam mark (`fss_uv_skip_autoseam`), inherited from the nearest marked ancestor; per-material island margin as a fraction of the UV square (`fss_uv_margin`, default 0.002) |
-| `uv_autoseam.py`, `uv_autoseam_core.py` | **Auto Seam** | Proposes UV seams on hard surface meshes keeping the current seams, normal splits, and distortion limits; Accept Proposed, Discard Proposed, Clear Current, Edit Mode selection, and report in Text Editor |
-| `visibility.py`, `visibility_core.py` | **Visibility Test** | Evaluates solid-angle visibility from scene cameras (Look Around cubemap / Fixed View frustum) across 2 to 10 animation states; writes `<blend_name>.visibility`, Select Never Seen, Select Stale, report in Text Editor |
-| `uv_heatmap.py` | **Heatmap** | Viewport heatmap: Distortion (conformal singular-value ratio), Density (relative to material median and object range), and Visibility (from `<blend_name>.visibility`), RizomUV-style diverging colours, legend, and evaluated Mirror/Array support |
-| `checks.py`, `name_check.py` | **Checks** | **Scan Names** (lists object and bone names that break FSS naming rules and renames them in batch; `@MERGE_` / `@NOMERGE_` allowed) and **Fix Broken Bone Parents** |
+| `uv_marks.py` | **UV Tools > Packing** (the Skip Auto Seam mark is drawn in Seams) | Authoring marks for UV unwrapping and packing: per-object texel density range (`fss_uv_density`, default 0.9 to 1.1, presets Lower 0.7 to 0.8 and Higher 1.5 to 1.65), island direction (`fss_uv_direction`: Free, Upright, Flip, Quarter), and Skip Auto Seam mark (`fss_uv_skip_autoseam`), inherited from the nearest marked ancestor; per-material island margin as a fraction of the UV square (`fss_uv_margin`, default 0.002) |
+| `uv_autoseam.py`, `uv_autoseam_core.py` | **UV Tools > Seams** | Proposes UV seams on hard surface meshes keeping the current seams, normal splits, and distortion limits; Accept Proposed, Discard Proposed, Clear Current, Edit Mode selection, and report in Text Editor |
+| `visibility.py`, `visibility_core.py` | **UV Tools > Packing > Visibility Scoring** | Evaluates solid-angle visibility from scene cameras (Look Around cubemap / Fixed View frustum) across 2 to 10 animation states; writes `<blend_name>.visibility`, Select Never Seen, Select Stale, report in Text Editor |
+| `uv_heatmap.py` | **Utilities > Heatmap** | Viewport heatmap: Distortion (conformal singular-value ratio), Density (relative to material median and object range), and Visibility (from `<blend_name>.visibility`), RizomUV-style diverging colours, legend, and evaluated Mirror/Array support |
+| `checks.py`, `name_check.py` | **Utilities > Checks** | **Scan Names** (lists object and bone names that break FSS naming rules and renames them in batch; `@MERGE_` / `@NOMERGE_` allowed) and **Fix Broken Bone Parents** |
 
 ## Tags
 

@@ -3,63 +3,15 @@
 [Artist Guide](README.md) / **fss-tools.md**
 ***
 
-All panels are in the 3D Viewport sidebar (`N`), tab **FSS Tools**. The **LOD** and **Auto Seam** panels have their own pages: [lod.md](lod.md) and [uv.md](uv.md).
+All panels are in the 3D Viewport sidebar (`N`), tab **FSS Tools**, from top to bottom in the order of the pipeline:
 
-## Tools
+- **Zones & Merge Tree**
+- **Tags**
+- **LOD**: its own page, [lod.md](lod.md)
+- **UV Tools**, with the sections **Seams** (Auto Seam, its own page [uv.md](uv.md)) and **Packing** (the UV marks for packing, with **Visibility Scoring** inside)
+- **Utilities**, with the sections **General**, **Empty Bounds**, **Heatmap** and **Checks**
 
-Helpers for parenting and object origins. Both work in Object Mode on the selected objects, and both can be undone.
-
-### Add Empty Parent
-
-Puts a new empty above each selected object.
-
-- The empty sits at the object's location and rotation, with scale 1. It is a small Plain Axes empty.
-- The empty takes over the object's old parent (also a parent bone) and its collections. The object becomes its child and does not move.
-- **Name:** pick the naming rule from the menu next to the button, then edit the text field:
-  - **Manual:** type the full name. Only for one selected object; the default is `<object name>_PARENT`. With several objects selected, the tool uses **Suffix**.
-  - **Suffix:** object name plus the suffix (default `_PARENT`).
-  - **Prefix:** prefix (default `PARENT_`) plus the object name.
-
-### Origin to Bounding Box
-
-Moves the origin of each selected object to a point of its tightest bounding box, without moving the geometry or the children.
-
-- The box is fitted to the object's own geometry (children are ignored) and can be rotated. The object's axes are turned to match the box, staying as close to the old axes as possible.
-- Pick the point in the menu next to the button: **Corners** (8), **Face-Center** (6, default **Bottom (-Z)**) or **Edge-Center** (12). Names describe the local axes, for example **Front (-Y)** or **Top Back Left (-X +Y +Z)**.
-- After the tool runs, Blender's transform orientation is set to **Local**, so the gizmo shows the new axes.
-- A mesh shared by several objects is first made single-user for the changed object.
-- Use it to bring an origin back into its geometry; far origins change the LOD switch distances (see [lod.md](lod.md#origins-outside-the-geometry)).
-
-Pitfall: the object's rotation values change. Do not use it on an object whose own transform is animated; the animation keys would no longer match.
-
-## Empty Bounds
-
-Draws, for each empty, a box around everything below it, and lists the parents of the active object. It only draws in the viewport: nothing is added to the scene or exported.
-
-- **All / Selected / Off:**
-  - **All:** boxes of every empty. While a non-empty object is selected, only the selection's parents: the direct parent solid (with a cross at its origin), the empties further up dashed.
-  - **Selected:** boxes of the selected empties and of the empties above any selected object.
-  - **Off:** no boxes.
-- **In Front:** draw the boxes over the geometry (on by default), so they stay visible inside the fuselage or cockpit.
-- **Hierarchy Text:** in the bottom-right corner of the viewport, the parent chain of the active object, root first (Object Mode only). Click a row to select that object; **Shift + click** adds it to or removes it from the selection.
-
-The boxes include hidden children.
-
-## Tags
-
-A tag is a free label you put on objects, for example `SCREEN` or `KEEP_LOD`. An object can have several tags. Tags replace extra collections for grouping, and two toggles tell the export what to do with tagged objects. Tags are stored in the object's custom property `fss_tags` (separated by `;`), so you can also read them under **Object Properties > Custom Properties**.
-
-- **Top row:** type one or more tag names (separate several with `;` or `,`), then **+** adds them to the selected objects, **-** removes them.
-- **Active object box:** the tags of the active object; **X** removes one from the active object only.
-- **Tag list** (every tag in the file, with the number of objects that carry it). Per row:
-  - **-** and **+** (only with a selection): remove the tag from, or add it to, the selected objects. They are greyed out when there is nothing to do and highlighted red when several objects are selected.
-  - **Select icon or tag name:** select the visible objects with this tag (**Shift + click** adds to the selection). Hidden objects are counted but not selected.
-  - **Don't Merge** (merge icon): objects with this tag, and everything below them, stay out of merge groups (see [Zones & Merge Tree](#zones--merge-tree)).
-  - **Keep:** objects with this tag are never hidden by the automatic LOD size rule, like the **Keep** mark (see [lod.md](lod.md#marks)).
-  - **Rename** (pencil): renames the tag on every object in the file, and in the Don't Merge and Keep settings.
-  - **Delete** (bin): asks for confirmation, then removes the tag from every object in the file. The objects stay.
-
-Tip: to tag a whole collection, right-click it in the Outliner, **Select Objects**, then press **+** on the tag row.
+Each section opens and closes on its own; Blender remembers that in the `.blend`.
 
 ## Zones & Merge Tree
 
@@ -112,11 +64,37 @@ Transparent materials (MSFS alpha mode Blend) never share a mesh with opaque one
 - **More than two UV maps** in a group: only two are exported. UV maps are matched by name; if members name them differently, they are matched by position, with a warning.
 - **A merged name equal to a kept object's name** gives a warning; rename one of them.
 
-## UV Marks
+## Tags
 
-Marks for automatic UV unwrapping, packing, and heatmap review. The panel is closed by default.
+A tag is a free label you put on objects, for example `SCREEN` or `KEEP_LOD`. An object can have several tags. Tags replace extra collections for grouping, and two toggles tell the export what to do with tagged objects. Tags are stored in the object's custom property `fss_tags` (separated by `;`), so you can also read them under **Object Properties > Custom Properties**.
 
-- **Active object box:** the effective texel density range, island direction, and Skip Auto Seam mark of the active object, and where each comes from: **own mark**, **from** an ancestor, or **default**. An object without its own mark takes the mark of its nearest marked parent (for example an empty that groups a door).
+- **Top row:** type one or more tag names (separate several with `;` or `,`), then **+** adds them to the selected objects, **-** removes them.
+- **Active object box:** the tags of the active object; **X** removes one from the active object only.
+- **Tag list** (every tag in the file, with the number of objects that carry it). Per row:
+  - **-** and **+** (only with a selection): remove the tag from, or add it to, the selected objects. They are greyed out when there is nothing to do and highlighted red when several objects are selected.
+  - **Select icon or tag name:** select the visible objects with this tag (**Shift + click** adds to the selection). Hidden objects are counted but not selected.
+  - **Don't Merge** (merge icon): objects with this tag, and everything below them, stay out of merge groups (see [Zones & Merge Tree](#zones--merge-tree)).
+  - **Keep:** objects with this tag are never hidden by the automatic LOD size rule, like the **Keep** mark (see [lod.md](lod.md#marks)).
+  - **Rename** (pencil): renames the tag on every object in the file, and in the Don't Merge and Keep settings.
+  - **Delete** (bin): asks for confirmation, then removes the tag from every object in the file. The objects stay.
+
+Tip: to tag a whole collection, right-click it in the Outliner, **Select Objects**, then press **+** on the tag row.
+
+## UV Tools
+
+Seams, then packing: the steps 6 to 8 of the [Artist Guide](README.md#the-pipeline).
+
+### Seams
+
+Automated UV seam proposal for hard-surface meshes, with a **Distortion Limit** slider between less distortion and fewer islands, and **Accept + Unwrap** (Angle Based). See [uv.md](uv.md) for the complete guide, workflow, readable reports, and limits.
+
+- **Skip Auto Seam / Clear:** marks the selected objects to be skipped by **Propose Seams** (for example fur, hair cards, wire bundles, cables, or decal soups). Children inherit the mark unless cleared or marked themselves. The box shows whether the active object is processed or skipped, and where that comes from (**own mark**, **from** an ancestor, or **default**).
+
+### Packing
+
+Marks for packing and for the heatmap's Density mode. The section is closed by default.
+
+- **Active object box:** the effective texel density range and island direction of the active object, and where each comes from: **own mark**, **from** an ancestor, or **default**. An object without its own mark takes the mark of its nearest marked parent (for example an empty that groups a door).
 - **Texel density range (x base):** how sharp the object's texture should be compared with the base density, as a range the packer may choose from. Type **Min** and **Max** and press **Apply**, or use a preset:
   - **Lower:** 0.7 to 0.8, for parts that are hardly seen.
   - **Higher:** 1.5 to 1.65, for prominent parts such as the glareshield.
@@ -127,21 +105,60 @@ Marks for automatic UV unwrapping, packing, and heatmap review. The panel is clo
   - **Flip:** 0 or 180 degrees only.
   - **Quarter:** 90-degree steps only.
   - **Clear:** remove the mark.
-- **Auto Seam (Skip Auto Seam / Clear):** marks the selected objects to be skipped by Auto Seam (for example fur, hair cards, wire bundles, cables, or decal soups). Children inherit the skip mark unless cleared or marked themselves. **Clear** removes the mark.
 - **Select Marked:** select every visible object with its own density, direction, or skip mark.
 - **Texture sets:** one row per material of the selection (up to 20) with its **Margin**, the space around each island as a fraction of the UV square (default 0.002). The line below shows what that means in pixels at 4K and 8K, and warns when the margin is under 4 px at 2K (texture compression works in 4 x 4 pixel blocks, so smaller margins bleed). A material with its own margin shows an arrow button that returns it to the default.
 
-The density, direction, and skip buttons act on all selected objects. The **Min** and **Max** fields are not saved with the file.
+The density and direction buttons act on all selected objects. The **Min** and **Max** fields are not saved with the file.
 
-## Auto Seam
+#### Visibility Scoring
 
-Automated UV seam proposal for hard-surface meshes, with a **Distortion Limit** slider between less distortion and fewer islands, and **Accept + Unwrap** (Angle Based). See [uv.md](uv.md) for the complete guide, workflow, readable reports, and limits.
+Measures, from the cameras you include and over the animation steps, how much of each face is visible, as a factor from 0 to 1 that does not depend on distance or size. Writes `<blend_name>.visibility` for the packer and the Heatmap's Visibility mode. See [visibility.md](visibility.md) for the settings and the workflow.
 
-## Visibility Test
+## Utilities
 
-Analyses pilot and copilot camera visibility across animation states to determine unoccluded solid angles for every face and UV island. Writes `<blend_name>.visibility` to guide the automatic packer and the Heatmap. See [visibility.md](visibility.md) for full settings and workflow.
+Tools that are not tied to one pipeline step.
 
-## Heatmap
+### General
+
+Helpers for parenting and object origins. Both work in Object Mode on the selected objects, and both can be undone.
+
+#### Add Empty Parent
+
+Puts a new empty above each selected object.
+
+- The empty sits at the object's location and rotation, with scale 1. It is a small Plain Axes empty.
+- The empty takes over the object's old parent (also a parent bone) and its collections. The object becomes its child and does not move.
+- **Name:** pick the naming rule from the menu next to the button, then edit the text field:
+  - **Manual:** type the full name. Only for one selected object; the default is `<object name>_PARENT`. With several objects selected, the tool uses **Suffix**.
+  - **Suffix:** object name plus the suffix (default `_PARENT`).
+  - **Prefix:** prefix (default `PARENT_`) plus the object name.
+
+#### Origin to Bounding Box
+
+Moves the origin of each selected object to a point of its tightest bounding box, without moving the geometry or the children.
+
+- The box is fitted to the object's own geometry (children are ignored) and can be rotated. The object's axes are turned to match the box, staying as close to the old axes as possible.
+- Pick the point in the menu next to the button: **Corners** (8), **Face-Center** (6, default **Bottom (-Z)**) or **Edge-Center** (12). Names describe the local axes, for example **Front (-Y)** or **Top Back Left (-X +Y +Z)**.
+- After the tool runs, Blender's transform orientation is set to **Local**, so the gizmo shows the new axes.
+- A mesh shared by several objects is first made single-user for the changed object.
+- Use it to bring an origin back into its geometry; far origins change the LOD switch distances (see [lod.md](lod.md#origins-outside-the-geometry)).
+
+Pitfall: the object's rotation values change. Do not use it on an object whose own transform is animated; the animation keys would no longer match.
+
+### Empty Bounds
+
+Draws, for each empty, a box around everything below it, and lists the parents of the active object. It only draws in the viewport: nothing is added to the scene or exported.
+
+- **All / Selected / Off:**
+  - **All:** boxes of every empty. While a non-empty object is selected, only the selection's parents: the direct parent solid (with a cross at its origin), the empties further up dashed.
+  - **Selected:** boxes of the selected empties and of the empties above any selected object.
+  - **Off:** no boxes.
+- **In Front:** draw the boxes over the geometry (on by default), so they stay visible inside the fuselage or cockpit.
+- **Hierarchy Text:** in the bottom-right corner of the viewport, the parent chain of the active object, root first (Object Mode only). Click a row to select that object; **Shift + click** adds it to or removes it from the selection.
+
+The boxes include hidden children.
+
+### Heatmap
 
 Colours the selected objects directly in the 3D viewport:
 - **Distortion:** Does each face keep its shape? (Conformal singular-value ratio)
@@ -150,11 +167,11 @@ Colours the selected objects directly in the 3D viewport:
 
 Includes a distribution chart in the panel and an optional UV grid with cell labels. See [uv.md](uv.md#heatmap-distortion-texel-density-and-visibility) for how to read it.
 
-## Checks
+### Checks
 
 Repairs for problems that break the export without an error message.
 
-### Scan Names
+#### Scan Names
 
 The object or bone name becomes the glTF node name, and the model XML, `.cfg` files and attachments find nodes by that exact name. **Scan Names** lists every object (and, with **Bones** on, every bone) whose name breaks the FSS naming rules:
 
@@ -178,6 +195,6 @@ How to use it:
 
 The check does not read the MSFS project: it cannot know which names the XML uses. Before renaming, make sure the old name is not referenced, or update the reference. Linked (library) items are listed but cannot be renamed here. Bones of an armature in Edit Mode are skipped.
 
-### Fix Broken Bone Parents
+#### Fix Broken Bone Parents
 
 When a bone-parented object gets a new parent through the parent field (instead of `Ctrl + P`), Blender keeps the old parent bone. Blender then reports "Failed to add relation Bone Parent" on every update, and the Relations panel cannot fix it. **Fix Broken Bone Parents** finds every such object in the file and resets it to normal object parenting, without moving it. It reports how many objects it fixed.

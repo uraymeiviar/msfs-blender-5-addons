@@ -1,4 +1,4 @@
-"""FSS Blender Tools: Visibility Test panel, settings and operators.
+"""FSS Blender Tools: Visibility Scoring panel (UV Tools > Packing), settings and operators.
 
 Enables artists to select cameras, configure animation states, run visibility analysis,
 and view inspection reports (Decisions 80, 81, 83, 86).
@@ -47,11 +47,11 @@ class FSS_VisibilitySettings(bpy.types.PropertyGroup):
     active_camera_index: IntProperty(default=0)
 
     states: IntProperty(
-        name="States",
+        name="Animation Steps",
         default=5,
         min=2,
         max=10,
-        description="Animation states evenly spaced over each action length (2 to 10, Decision 86)"
+        description="Animation steps evenly spaced over each animation's length: 2 gives 0 and 100 %, 5 gives 0, 25, 50, 75 and 100 % (Decision 86)"
     )
 
     floor: FloatProperty(
@@ -547,16 +547,17 @@ class FSS_UL_VisibilityCameraList(bpy.types.UIList):
 
 
 # ---------------------------------------------------------------------------
-# Visibility Test Panel (Decision 83)
+# Visibility Scoring Panel (Decision 83), a section of UV Tools > Packing
 # ---------------------------------------------------------------------------
 
 class FSS_PT_Visibility(bpy.types.Panel):
-    """Visibility Test panel in sidebar FSS Tools."""
+    """Visibility Scoring section of UV Tools > Packing in sidebar FSS Tools."""
     bl_idname = 'FSS_PT_visibility'
-    bl_label = 'Visibility Test'
+    bl_label = 'Visibility Scoring'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'FSS Tools'
+    bl_parent_id = 'FSS_PT_uv_marks'
 
     def draw(self, context):
         layout = self.layout

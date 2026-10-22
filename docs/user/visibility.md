@@ -1,6 +1,6 @@
-# Visibility Test
+# Visibility Scoring
 
-The **Visibility Test** panel in **FSS Tools** (sidebar `N` > **FSS Tools** > **Visibility Test**) analyses how much of each mesh and UV island is visible from reference cameras (such as the pilot and copilot viewpoints) across animation states.
+**Visibility Scoring** (sidebar `N` > **FSS Tools** > **UV Tools** > **Packing** > **Visibility Scoring**) analyses how much of each mesh and UV island is visible from reference cameras (such as the pilot and copilot viewpoints) across animation states.
 
 The analysis writes its results to an external compressed file, `<blend_name>.visibility`, beside the `.blend` file. It modifies no meshes, leaves no custom properties on exported objects, and does not alter glTF exports. The results are used by the **Heatmap** (Visibility mode) for visual review and will guide the automatic UV packer to distribute texel density where it matters most.
 
@@ -13,7 +13,7 @@ Texture space in MSFS is limited. Geometry positioned in plain sight of the flig
 The Visibility analyzer computes the solid angle of every face relative to the reference cameras:
 - **Distance Invariance:** Geometry at 0.5 m and 2.0 m receives identical visibility scores when unoccluded. Knobs and circuit breakers in plain view score as high as large bulkheads.
 - **Directional Weighting:** Faces directly in front of the camera receive full weight ($1.0$). As the view angle deviates from camera forward, weight falls off smoothly down to a configurable floor ($0.2$ default at $\ge 90^\circ$).
-- **Multi-State Animation Coverage:** Lever, yoke, and switch animations are sampled across $2$ to $10$ animation states, preventing parts revealed by moving controls from being misclassified as occluded.
+- **Animation Coverage:** Lever, yoke, and switch animations are sampled across $2$ to $10$ animation steps, preventing parts revealed by moving controls from being misclassified as occluded.
 - **Loose Parts and Decals:** Decals and glass do not occlude underlying opaque surfaces. Invisible collision and occlusion primitives are excluded from evaluation.
 - **Islands from Seen Faces:** at packing, an island's value comes from its seen faces only, so a partly hidden island keeps the density its visible part needs. The scores belong to faces, so new seams or a new unwrap need no update.
 - **Hierarchy Resolution:** Millimeter-scale fasteners and switches smaller than the raster resolution inherit visibility from their parent assembly, preventing false negatives.
@@ -31,11 +31,11 @@ A dynamic list synchronised with the scene cameras:
   - **Look Around (Default):** Evaluates a full $360^\circ$ spherical cubemap around the camera location, weighted by angle from the camera's default forward vector. Designed for pilot and copilot viewpoints where the flight crew can turn their heads.
   - **Fixed View:** Evaluates a single frustum matching the camera's focal length and sensor aspect ratio (at $2560 \times 1440$ resolution). Only what lies inside the camera's own frame counts, at full weight; use it for a view whose direction cannot change.
 
-### Animation States
-- **States:** Slider from $2$ to $10$ (default $5$). Evenly samples actions and NLA tracks across their duration:
-  - 2 states: $0\%$ and $100\%$
-  - 3 states: $0\%$, $50\%$, and $100\%$
-  - 5 states: $0\%$, $25\%$, $50\%$, $75\%$, and $100\%$
+### Animation Steps
+- **Animation Steps:** Slider from $2$ to $10$ (default $5$). Evenly samples actions and NLA tracks across their duration:
+  - 2 steps: $0\%$ and $100\%$
+  - 3 steps: $0\%$, $50\%$, and $100\%$
+  - 5 steps: $0\%$, $25\%$, $50\%$, $75\%$, and $100\%$
 
 ### Advanced Settings
 Expand **Advanced Settings** to inspect or fine-tune algorithmic parameters:
@@ -79,7 +79,7 @@ After an analysis run, the panel displays:
 ## Visualizing Visibility: The Heatmap
 
 To visualize visibility directly on the 3D model:
-1. Open sidebar `N` > **FSS Tools** > **Heatmap**.
+1. Open sidebar `N` > **FSS Tools** > **Utilities** > **Heatmap**.
 2. Enable **Show Heatmap**.
 3. Set **Mode** to **Visibility**.
 
@@ -87,6 +87,6 @@ To visualize visibility directly on the 3D model:
 - **Blue side ($0.5$ to $1.0$):** High visibility in plain view of the cameras.
 - **Neutral Grey ($0.5$):** Moderate visibility or peripheral coverage.
 - **Red side ($0.0$ to $0.5$):** Low visibility, grazing angles, or heavily occluded.
-- **Magenta:** Never seen ($0.000$ score across all cameras and animation states).
+- **Magenta:** Never seen ($0.000$ score across all cameras and animation steps).
 - **Cyan:** Undetermined sub-pixel geometry whose score was inherited from parent structures.
 - **Dark Grey (No Data):** Objects not present in the `.visibility` file or whose mesh geometry has become stale.
