@@ -13,7 +13,7 @@ All panels are in the 3D Viewport sidebar (`N`), tab **FSS Tools**, from top to 
 
 Each section opens and closes on its own; Blender remembers that in the `.blend`.
 
-The **UV Editor**'s sidebar (`N`) has an **FSS Tools** tab too, with the **Packing** section (without Visibility Scoring).
+The **UV Editor**'s sidebar (`N`) has an **FSS Tools** tab too, with the **Packing** section (without Visibility Scoring); it shows in the UV Editor only, not in the Image Editor's image view.
 
 ## Zones & Merge Tree
 
@@ -149,7 +149,7 @@ The same section is also in the **UV Editor**'s sidebar (**N**), tab **FSS Tools
 - the number of islands, and those packed by their bounding box (when Blender's outline of an island fails);
 - islands kept unchanged, and islands not checked for density (a sliver in the UVs, or no 3D area);
 - **WARNING faces without area:** objects of the set with faces that have no area. Fix them with [Find Faces Without Area](#find-faces-without-area);
-- **WARNING triangles without UV area:** the number of islands of the set that contain a triangle with area on the model but none in the UVs (a needle: its corners on one line in the UVs), and their objects. Such islands land far out of the layout, so k and the needed size grow; the set is still packed. Re-unwrap those parts (for example **Accept + Unwrap**, or Blender's **Unwrap**) and pack again; [Find Faces Without UV Area](#find-faces-without-uv-area) selects them;
+- **WARNING triangles without UV area:** the number of islands of the set that contain a triangle with area on the model but none in the UVs (a needle: its corners on one line in the UVs), and their objects, the one whose island spans the most layout pixels first (so the parts that push the layout out lead the list, not small screws). Such islands land far out of the layout, so k and the needed size grow; the set is still packed. Re-unwrap those parts (for example **Accept + Unwrap**, or Blender's **Unwrap**) and pack again; [Find Faces Without UV Area](#find-faces-without-uv-area) selects them;
 - after **Pack**, the objects that were included but not selected;
 - the time.
 

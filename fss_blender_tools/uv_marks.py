@@ -597,6 +597,16 @@ def texture_set_rows(context, materials):
     return flags, order
 
 
+def _get_active_index(wm):
+    """The list's active row is kept by material name: adding a material moves the indices of bpy.data.materials,
+    the name stays (a renamed material falls back to the first row)."""
+    return bpy.data.materials.find(wm.fss_uv_pack_active_name)
+
+
+def _set_active_index(wm, index):
+    wm.fss_uv_pack_active_name = bpy.data.materials[index].name if 0 <= index < len(bpy.data.materials) else ''
+
+
 def active_texture_set(context):
     """The texture set whose details are drawn below the list: the active row when it is one of the selection's,
     else the selection's first (the active object's first material); None without any."""
@@ -917,6 +927,11 @@ class FSS_PT_UvMarksImageEditor(_PackingSection, bpy.types.Panel):
     bl_region_type = 'UI'
     bl_category = 'FSS Tools'
 
+    @classmethod
+    def poll(cls, context):
+        # Only in the UV editor: the image viewer shows no UVs to pack against
+        return getattr(context.space_data, 'mode', 'UV') == 'UV'
+
 
 CLASSES = (FSS_OT_UvSetDensity, FSS_OT_UvSetDirection, FSS_OT_UvSetSkipAutoseam, FSS_OT_UvPackTextureSet,
            FSS_OT_UvPackCheckAll, FSS_OT_UvPackCancel, FSS_UL_TextureSets, FSS_PT_UvMarks, FSS_PT_UvMarksImageEditor)
@@ -960,8 +975,9 @@ def register():
         name='Keep UVs', default=False,
         description='Leave this texture set out of Pack and Check All and keep its UVs (fur and hair cards, decal '
                     'sheets, colliders)')
+    bpy.types.WindowManager.fss_uv_pack_active_name = bpy.props.StringProperty(name='Active Texture Set')
     bpy.types.WindowManager.fss_uv_pack_active = bpy.props.IntProperty(
-        name='Active Texture Set', default=-1,
+        name='Active Texture Set', get=_get_active_index, set=_set_active_index,
         description='The texture set whose size, margin, Keep UVs and Pack are shown below the list')
     for handlers, handler in HANDLERS:
         if handler not in handlers:
@@ -982,6 +998,7 @@ def unregister():
     _vis_cache.clear()
     _results.clear()
     del bpy.types.WindowManager.fss_uv_pack_active
+    del bpy.types.WindowManager.fss_uv_pack_active_name
     for name in (KEEP_UVS_PROP, 'fss_uv_margin_px', SIZE_PROP):
         delattr(bpy.types.Material, name)
     for name in ('fss_uv_density_freedom_max', 'fss_uv_density_freedom_min', 'fss_uv_target_density'):

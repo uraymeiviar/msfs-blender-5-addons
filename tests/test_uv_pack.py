@@ -508,8 +508,17 @@ def test_texture_set_list():
     calls, labels = draw_panel()
     assert (len(bpy.data.materials), bpy.context.window_manager.fss_uv_pack_active) == before
     assert not [label for label in labels if label and 'more' in label], labels
+    # the active row is kept by name: a new material moving the indices of bpy.data.materials keeps it
+    wm = bpy.context.window_manager
+    wm.fss_uv_pack_active = list(bpy.data.materials).index(bpy.data.materials['MANY_3'])
+    index_before = wm.fss_uv_pack_active
+    mat('AAA_FIRST')  # sorts before every other material
+    assert wm.fss_uv_pack_active != index_before and uv_marks.active_texture_set(bpy.context).name == 'MANY_3'
+    bpy.data.materials['MANY_3'].name = 'MANY_3_RENAMED'  # a renamed material falls back to the first row
+    assert uv_marks.active_texture_set(bpy.context).name == 'EXTRA_B'
     print(f"PASS: test_texture_set_list ({len(expected)} texture sets of 2 selected objects listed, the active "
-          "object's first; NOT_SELECTED filtered out; the name filter works; drawing writes nothing)")
+          "object's first; NOT_SELECTED filtered out; the name filter works; drawing writes nothing; the active row "
+          "follows its material when indices move)")
 
 
 def test_uv_editor_panel():
@@ -519,6 +528,9 @@ def test_uv_editor_panel():
     assert (image.bl_space_type, image.bl_region_type, image.bl_category, image.bl_label) == (
         'IMAGE_EDITOR', 'UI', 'FSS Tools', 'Packing'), image
     assert view3d.bl_space_type == 'VIEW_3D' and view3d.draw is image.draw  # one draw function, not a copy
+    # only in the UV editor, not in the image viewer
+    assert image.poll(SimpleNamespace(space_data=SimpleNamespace(mode='UV')))
+    assert not image.poll(SimpleNamespace(space_data=SimpleNamespace(mode='VIEW')))
     calls_3d, _labels = draw_panel('FSS_PT_uv_marks')
     calls_uv, labels = draw_panel('FSS_PT_uv_marks_image')
     strip = [[(name, kw.get('text')) for name, _a, kw in calls] for calls in (calls_3d, calls_uv)]
@@ -597,8 +609,8 @@ def test_faces_without_uv_area():
         obj.select_set(obj == clean)
     bpy.context.view_layer.objects.active = clean
     assert bpy.ops.fss.uv_pack_texture_set(material='NEEDLE') == {'FINISHED'}
-    warning = ('WARNING triangles without UV area in 1 island(s) of 1 object(s): NEEDLE. They push islands out of the '
-               'layout')
+    warning = ('WARNING triangles without UV area in 1 island(s) of 1 object(s), largest in the layout first: NEEDLE. '
+               'They push islands out of the layout')
     for kind in ('Pack', 'Check All'):
         if kind == 'Check All':
             assert bpy.ops.fss.uv_pack_check_all() == {'FINISHED'}
@@ -611,6 +623,17 @@ def test_faces_without_uv_area():
     print(f"PASS: test_faces_without_uv_area (threshold {uv_pack.UV_TRI_AREA_MIN_PX2:g} px2: NEEDLE found and its face "
           "1 selected, the line island not counted; Pack and Check All reports warn per texture set; the row and "
           "the details flag it)")
+
+
+def test_report_order():
+    # the report names the objects whose needle islands span the most layout pixels first, not by name
+    parts = [(None, [SimpleNamespace(name=n)], None) for n in ('A_SCREW', 'B_CEILING', 'C_BAR')]
+    ts = SimpleNamespace(p_uv=np.array([5.0, 900.0, 300.0, 40.0]), lo=np.array([20.0, 20.0, 20.0, 20.0]),
+                         cur=np.array([10.0, 10.0, 10.0, 10.0]), part_of=np.array([0, 1, 2, 0]), parts=parts)
+    mask = np.array([True, True, True, False])
+    names = uv_pack.TextureSet.objects_by_layout_size(ts, mask)
+    assert names == ['B_CEILING', 'C_BAR', 'A_SCREW'], names
+    print("PASS: test_report_order (B_CEILING 1800 px, C_BAR 600 px, A_SCREW 10 px: largest first)")
 
 
 def main():
@@ -630,6 +653,7 @@ def main():
     test_panel_rows()
     test_texture_set_list()
     test_uv_editor_panel()
+    test_report_order()
     print("ALL TESTS PASSED")
 
 

@@ -549,6 +549,17 @@ class TextureSet:
     def objects_of(self, mask):
         return sorted({o.name for p in np.unique(self.part_of[mask]).tolist() for o in self.parts[p][1]})
 
+    def objects_by_layout_size(self, mask):
+        """Objects of the masked islands, the one whose island spans the most layout pixels first: an island's UV
+        bounding-box diagonal at the bottom of its density range, so the long needles that push the layout out lead
+        the report, not the screws."""
+        span = self.p_uv * self.lo / np.maximum(self.cur, 1e-30)
+        best = {}
+        for i in np.flatnonzero(mask).tolist():
+            for o in self.parts[self.part_of[i]][1]:
+                best[o.name] = max(best.get(o.name, 0.0), float(span[i]))
+        return [name for name, _span in sorted(best.items(), key=lambda item: (-item[1], item[0]))]
+
     # ---- temporary mesh ------------------------------------------------------------------------------------------
     def build_temp(self):
         verts, loops_v, loop_uv, face_start, face_isl = [], [], [], [], []
@@ -945,7 +956,7 @@ def _run(material, write, progress=None, vis_cache=None):
             'zero_area_islands': int(ts.zero_area.sum()), 'zero_area_objects': ts.objects_of(ts.zero_area),
             'collapsed_islands': int(ts.collapsed.sum()), 'degenerate_islands': int(ts.degenerate.sum()),
             'no_area_objects': ts.no_area_objects, 'uv_zero_islands': int(ts.uv_zero.sum()),
-            'uv_zero_objects': ts.objects_of(ts.uv_zero), 'stale_visibility_meshes': len(ts.stale_meshes),
+            'uv_zero_objects': ts.objects_by_layout_size(ts.uv_zero), 'stale_visibility_meshes': len(ts.stale_meshes),
             'linked_users_range_differs': ts.linked_range_differs, 'quarter': ts.quarter,
             'upright_islands': int(ts.upright.sum()),
         })
@@ -1047,7 +1058,8 @@ def _set_block(r, selected=None):
                      "(Utilities > Checks > Find Faces Without Area)")
     if r['uv_zero_islands']:
         lines.append(f"  WARNING triangles without UV area in {r['uv_zero_islands']} island(s) of "
-                     f"{len(r['uv_zero_objects'])} object(s): {_names(r['uv_zero_objects'])}. They push islands out "
+                     f"{len(r['uv_zero_objects'])} object(s), largest in the layout first: "
+                     f"{_names(r['uv_zero_objects'])}. They push islands out "
                      "of the layout (k and the needed size grow); re-unwrap those parts, for example with Accept + "
                      "Unwrap (Utilities > Checks > Find Faces Without UV Area selects them)")
     if r['stale_visibility_meshes']:
