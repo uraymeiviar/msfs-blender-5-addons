@@ -54,19 +54,20 @@ A tag is a free label you put on objects, for example `SCREEN` or `KEEP_LOD`. An
 - **Tag list** (every tag in the file, with the number of objects that carry it). Per row:
   - **-** and **+** (only with a selection): remove the tag from, or add it to, the selected objects. They are greyed out when there is nothing to do and highlighted red when several objects are selected.
   - **Select icon or tag name:** select the visible objects with this tag (**Shift + click** adds to the selection). Hidden objects are counted but not selected.
-  - **Don't Merge** (merge icon): objects with this tag, and everything below them, stay out of merge groups (see [Merge Tree](#merge-tree)).
+  - **Don't Merge** (merge icon): objects with this tag, and everything below them, stay out of merge groups (see [Zones & Merge Tree](#zones--merge-tree)).
   - **Keep:** objects with this tag are never hidden by the automatic LOD size rule, like the **Keep** mark (see [lod.md](lod.md#marks)).
   - **Rename** (pencil): renames the tag on every object in the file, and in the Don't Merge and Keep settings.
   - **Delete** (bin): asks for confirmation, then removes the tag from every object in the file. The objects stay.
 
 Tip: to tag a whole collection, right-click it in the Outliner, **Select Objects**, then press **+** on the tag row.
 
-## Merge Tree
+## Zones & Merge Tree
 
-Merge groups join many small objects into one mesh at export, while every part stays a separate, editable object in the `.blend`. Fewer meshes means fewer draw calls in the simulator.
+Merge groups join many small objects into one mesh at export, while every part stays a separate, editable object in the `.blend`. Fewer meshes means fewer draw calls in the simulator. Zones hold the merge groups: the panel lists each zone with its groups, and sets the zone's texel density multiplier.
 
 ### Name Prefixes
 
+- **`@ZONE_<NAME>`:** a zone empty (see [step 2 of the Artist Guide](README.md#2-zones-and-materials-in-development)). Every merge group belongs below one zone; a zone never lies inside a merge group or inside another zone.
 - **`@MERGE_<name>`:** an object (empty or mesh) with this name prefix starts a merge group. At export, it and its subtree become one mesh named `<name>`. A mesh root merges its own geometry too.
 - **`@NOMERGE_<name>`:** an object inside a group with this prefix stays out of the merge, with its subtree, and is exported as `<name>`.
 - The prefixes never reach the glTF: exported names are always without them.
@@ -95,13 +96,18 @@ Transparent materials (MSFS alpha mode Blend) never share a mesh with opaque one
 
 - **Merge on Export:** turns merging on or off for the scene (on by default).
 - **New Merge Group:** select objects with the same parent (or the same parent bone), press the button and type a name (for example `OVHD_PANEL`). It creates the empty `@MERGE_OVHD_PANEL` at the parent's position and moves the objects under it without moving them in the world.
-- **Refresh:** lists the merge groups of the visible objects, nested as in the scene, with objects, materials and kept-separate counts per group. Click a row to select that group's root. Below the list, the active group shows its materials, a transparency split, its UV map names, and why objects were kept separate.
+- **Refresh:** lists the zones and merge groups of the visible objects. Click a row to select that object. The list does not follow later changes in the scene; press **Refresh** again.
+  - **Zone rows** (`@ZONE_` empties, without the prefix): the number of merge groups and objects below the zone, and the zone's **density multiplier** (default 1.0, from 0.1 to 10). The packer (in development) will multiply the texel density of everything below the zone by it: 2.0 for twice the texels per metre, 0.5 for half. A change is stored on the zone empty at once, without **Refresh**.
+  - **Merge group rows**, below their zone and nested as in the scene, with objects, materials and kept-separate counts per group. Below the list, the active group shows its materials, a transparency split, its UV map names, and why objects were kept separate.
+  - **`@NOMERGE_` rows**, one level below the group they belong to: these objects stay their own nodes under the merged mesh.
+  - **Unzoned** (warning): merge groups with no zone above them. Move them below a `@ZONE_` empty.
+  - **Warnings on zone rows:** a zone inside a merge group (it would be merged into the group's mesh) or inside another zone.
 - **Print Details:** prints every group, and every object kept separate with its reason, to the system console (**Window > Toggle System Console**).
 
 ### Merge Pitfalls
 
 - **Merging only happens in a deploy** (or the MSFS 2024 multi-exporter), where the exported objects are throwaway copies. A plain **File > Export > glTF 2.0** of the open file leaves the groups unmerged and warns.
-- **The merge does not read the model XML.** An object the XML refers to (a screen, a clickspot, an animation target) is merged away unless it is animated, tagged **Don't Merge**, named `@NOMERGE_`, or kept for another reason. Check the Merge Tree before deploying.
+- **The merge does not read the model XML.** An object the XML refers to (a screen, a clickspot, an animation target) is merged away unless it is animated, tagged **Don't Merge**, named `@NOMERGE_`, or kept for another reason. Check the Zones & Merge Tree before deploying.
 - **Several materials in one group** stay several materials; the panel and the console warn so you can check that this is intended.
 - **More than two UV maps** in a group: only two are exported. UV maps are matched by name; if members name them differently, they are matched by position, with a warning.
 - **A merged name equal to a kept object's name** gives a warning; rename one of them.

@@ -5,14 +5,14 @@
 
 This guide is for 3D artists who build Flight Sim Studio (FSS) aircraft in Blender 5.2. It assumes you already model, unwrap, animate, texture and export in Blender. It explains what MSFS needs on top of that, the order in which we prepare a model for it, and which of our tools help at each step and why.
 
-It matches **FSS Blender Tools 0.28.1** and the FSS exporter based on Asobo exporter 8.4.1.
+It matches **FSS Blender Tools 0.29.0** and the FSS exporter based on Asobo exporter 8.4.1.
 
 - **The pipeline** (below): the steps from a new model to a deployed one, in order.
 - **The reference pages:** what each panel and button does, linked from the steps:
 
   | Page | Contents |
   | :--- | :--- |
-  | [fss-tools.md](fss-tools.md) | The **FSS Tools** sidebar tab: **Tools**, **Empty Bounds**, **Tags**, **Merge Tree**, **UV Marks**, **Auto Seam**, **Heatmap**, **Visibility Test**, **Checks** |
+  | [fss-tools.md](fss-tools.md) | The **FSS Tools** sidebar tab: **Tools**, **Empty Bounds**, **Tags**, **Zones & Merge Tree**, **UV Marks**, **Auto Seam**, **Heatmap**, **Visibility Test**, **Checks** |
   | [lod.md](lod.md) | The **LOD** panel: automatic LODs, marks, size cut-offs, quota and hints, the LOD sphere, viewport preview, and exporting with LODs |
   | [uv.md](uv.md) | The **Auto Seam** panel (proposed and current seams, workflow, reports, limits) and the **Heatmap** panel (distortion, texel density and visibility on the model, the distribution chart, the UV grid) |
   | [exporter.md](exporter.md) | The exporter: export target MSFS 2024 or MSFS 2020, one `.blend` for both simulators, materials, instancing, legacy normals |
@@ -35,9 +35,9 @@ Steps marked **in development** describe what the tool will do, and how to get t
 | Step | Tools | Tool status | MSFS Authoring Guide |
 | :--- | :--- | :--- | :--- |
 | [1. Scene, Hierarchy and Names](#1-scene-hierarchy-and-names) | Tools, Empty Bounds, Checks | available | `modeling.md` |
-| [2. Zones and Materials](#2-zones-and-materials-in-development) | zone tool | in development: by hand | `materials.md`, `texturing.md` |
+| [2. Zones and Materials](#2-zones-and-materials-in-development) | Zones & Merge Tree, zone tool | density multiplier available; the rest by hand | `materials.md`, `texturing.md` |
 | [3. Loose Pieces](#3-loose-pieces-what-disappears-together) | LOD hints, Viewport LOD | a modelling decision | `lods.md` |
-| [4. Merge Tree](#4-merge-tree) | Tags, Merge Tree | available | `modeling.md` |
+| [4. Merge Tree](#4-merge-tree) | Tags, Zones & Merge Tree | available | `modeling.md` |
 | [5. LOD](#5-lod) | LOD | available | `lods.md` |
 | [6. Seams and Unwrap](#6-seams-and-unwrap) | Auto Seam, UV Marks, Heatmap | available | `uv-mapping.md` |
 | [7. Visibility Scoring](#7-visibility-scoring) | Visibility Test | available | [visibility.md](visibility.md) |
@@ -69,7 +69,7 @@ Steps marked **in development** describe what the tool will do, and how to get t
 **Why:** a **zone** is a part of the scene that is seen together, for example the forward cockpit (main panel, glareshield, pedestal) and the rear cockpit (behind the seats, the aft ceiling), or the front and rear cabin. Zones are your choice; they depend on the scene. Each zone has its own materials and texture sets, for three reasons:
 
 - **Video memory:** a texture stays loaded as long as any part of it may be on screen. If forward and rear parts share a texture, the rear half stays in memory while the pilot looks forward, although it is never seen. Separate zones keep what is out of view from holding memory for what is in view. See "When Separate Textures Are Better" in `texturing.md` of the MSFS Authoring Guide.
-- **Texel density:** each zone will get its own density multiplier, so the packer can give the rarely seen rear zone less texture and the forward zone more (step 7).
+- **Texel density:** each zone has its own density multiplier, set in [Zones & Merge Tree](fss-tools.md#zones--merge-tree), so the packer can give the rarely seen rear zone less texture and the forward zone more (step 7).
 - **Culling:** MSFS leaves out what is out of view by each node's bounding box. An object with parts both at the windshield and at the rear has a box across the whole cockpit, and is never left out. Zones make such objects easy to find: select a zone's empty, and [Empty Bounds](fss-tools.md#empty-bounds) shows its box reaching into the other zone. They also keep merge groups apart (step 4).
 
 Within a zone there is one material, and one texture set, per **material class** (standard, emissive, decal, glass and so on). Packing (step 8) packs one texture set at a time, so it follows the zones and materials.
@@ -83,6 +83,7 @@ Materials are named `<SCENE>_<ZONE>_<CLASS>`: the scene from the root, the zone 
 **Meanwhile, by hand:**
 
 - Create the zone empties now, named `@ZONE_<NAME>` below the root, and put every part below one of them. The export drops the leading `@`: `@ZONE_FWD` becomes the node `ZONE_FWD`.
+- Press **Refresh** in [Zones & Merge Tree](fss-tools.md#zones--merge-tree) to see the zones, and set each zone's **density multiplier** there (1.0 keeps the density; for example 0.5 for a rarely seen zone). Everything below the zone inherits it.
 - Name the materials `<SCENE>_<ZONE>_<CLASS>`, one per zone and class, and set each material's MSFS type to match its class. Auto Seam already skips objects whose materials are all decal, glass, windshield, invisible or occluder, by these class names or by the MSFS type.
 - Keep the number of materials low: see `materials.md` in the MSFS Authoring Guide.
 
@@ -122,11 +123,11 @@ So the topology you model decides what disappears together. A floor plate and it
 - Merge what is static and drawn together: parts that never move on their own, that nothing refers to by name, that are seen together and share materials. Merging parts with different materials saves nodes, not draw calls.
 - Keep separate what has a life of its own: a switch, a lever or a door with its handle must move on its own, which it cannot do as part of the panel's mesh. The merge keeps animated, skinned and bone-parented objects, meshes with shape keys, lights and cameras separate by itself. See [What Stays Separate](fss-tools.md#what-stays-separate).
 - The merge cannot see the model XML: a gauge screen or a clickspot that is not animated would be merged away. Give it a [tag](fss-tools.md#tags) with **Don't Merge** (for example `SCREEN`), or name it `@NOMERGE_<name>`.
-- Keep each merge group inside one zone (step 2): a group that spans two zones becomes one mesh across both, so MSFS cannot leave one zone out of view without the other, and the mesh carries both zones' materials. The Merge Tree does not check this yet.
+- Keep each merge group inside one zone (step 2): a group that spans two zones becomes one mesh across both, so MSFS cannot leave one zone out of view without the other, and the mesh carries both zones' materials. The Zones & Merge Tree lists groups outside every zone under **Unzoned**, and warns on a zone inside a merge group.
 - Put `@MERGE_<name>` on the empty above a set of parts that may become one mesh. A group can be large, a whole panel with everything on it: what must stay separate inside it stays separate by itself or by its tag, so you rarely need many small groups.
-- Use **Refresh** in [Merge Tree](fss-tools.md#merge-tree) to see the groups, their materials, and why objects were kept separate.
+- Use **Refresh** in [Zones & Merge Tree](fss-tools.md#zones--merge-tree) to see the zones and groups, their materials, and why objects were kept separate.
 
-**Check:** the Merge Tree shows the groups you expect, each inside one zone; every referenced node is kept separate, and the multiple-materials warnings are intended.
+**Check:** the Zones & Merge Tree shows the groups you expect, each inside one zone, and no **Unzoned** row; every referenced node is kept separate, and the multiple-materials warnings are intended.
 
 **Redo when:** you add parts, or the model XML starts referring to a node that is merged away. Merging happens only at export, so it never touches UVs or textures.
 
@@ -235,7 +236,7 @@ Some work has no step of its own, because it runs through several:
 
 ## Where to Find the Tools
 
-- **FSS Tools:** in the 3D Viewport, press `N` to open the sidebar, then pick the **FSS Tools** tab. The panels are, from top to bottom: **Tools**, **Empty Bounds**, **LOD**, **Tags**, **Merge Tree**, **UV Marks**, **Auto Seam**, **Heatmap**, **Visibility Test**, **Checks**.
+- **FSS Tools:** in the 3D Viewport, press `N` to open the sidebar, then pick the **FSS Tools** tab. The panels are, from top to bottom: **Tools**, **Empty Bounds**, **LOD**, **Tags**, **Zones & Merge Tree**, **UV Marks**, **Auto Seam**, **Heatmap**, **Visibility Test**, **Checks**.
 - **Exporter:** in the same sidebar, tab **Microsoft Flight Simulator 2024 Tools**, panel **Export Target** (also shown in **File > Export > glTF 2.0**, section **Microsoft Flight Simulator (FSS)**).
 - **Material and object settings:** in the Properties editor, the MSFS panels of the Asobo add-on, plus **MSFS 2020 Object Parameters** and **MSFS 2020 Material Parameters** while the scene targets MSFS 2020.
 
@@ -270,7 +271,7 @@ If your version is newer than 0.24.1, some labels or buttons may differ from thi
 | **Mark** | Something you put on an object to tell an automatic tool what it cannot work out itself: an override or a hint. Marks live in the `.blend`; MSFS never sees them. Three kinds: **LOD marks** in the [LOD](lod.md#marks) panel (from which LOD a part is left out or shown, or **Keep**); **UV marks** in the [UV Marks](fss-tools.md#uv-marks) panel (the target density for packing, how islands may turn, **Skip Auto Seam**), inherited by the objects below; and **tags**. |
 | **Material class** | The kind of material (standard, emissive, decal, glass and so on), the last part of a material name `<SCENE>_<ZONE>_<CLASS>`. |
 | **Merge group** | An object named `@MERGE_<name>` whose subtree becomes one mesh at export. |
-| **Name prefix** | `@MERGE_`, `@NOMERGE_` (see [Merge Tree](fss-tools.md#merge-tree)) and `@ZONE_` (step 2): a prefix in an object's name that the tools act on. The export removes `@MERGE_` and `@NOMERGE_` entirely, and the leading `@` of any other name: `@ZONE_FWD` becomes `ZONE_FWD`. |
+| **Name prefix** | `@MERGE_`, `@NOMERGE_` (see [Zones & Merge Tree](fss-tools.md#zones--merge-tree)) and `@ZONE_` (step 2): a prefix in an object's name that the tools act on. The export removes `@MERGE_` and `@NOMERGE_` entirely, and the leading `@` of any other name: `@ZONE_FWD` becomes `ZONE_FWD`. |
 | **Origin** | The object's own point (orange dot in Blender). In the glTF it becomes the node position. |
 | **Part** | An object together with all objects below it in the hierarchy. |
 | **Root** | The empty `EMPTY_ROOT_<SCENE>` at the top of a scene's hierarchy: the anchor that places the scene relative to the aircraft datum. |

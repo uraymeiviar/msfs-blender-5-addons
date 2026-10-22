@@ -9,6 +9,9 @@ above them that the merge removes is replaced by an object with the same world m
 glTF: merged meshes are named without it, and node names are stripped of it as the glTF is written.
 A node named @NOMERGE_<name> inside a group is the opposite marker: it and its subtree are not merged and stay child
 nodes of the merged mesh, exported as <name>.
+Zone empties (@ZONE_<NAME>) hold the merge groups: a group's topmost marked ancestor must be a zone (UV journal
+decision 34), and each zone carries a texel density multiplier for the packer (fss_zone_density, decision 76). The
+Zones & Merge Tree panel lists both, and flags groups outside every zone and zones nested inside a group or a zone.
 
 The merge edits the objects being exported, so it only runs where those are throwaway: the MSFS 2024 multi-exporter
 (it exports duplicates and purges everything created during the export) or a background Blender run (the deploy
@@ -27,6 +30,9 @@ from . import lod_model, tags
 PREFIX = "@MERGE_"
 NO_MERGE_PREFIX = "@NOMERGE_"
 MARKERS = (PREFIX, NO_MERGE_PREFIX)
+# Zone empties keep their name at export, without the "@" (@ZONE_FWD exports as ZONE_FWD)
+ZONE_PREFIX = "@ZONE_"
+ZONE_DENSITY_KEY = "fss_zone_density"
 # Set by the MSFS 2024 multi-exporter on its duplicates; the exporter writes it as the glTF node name
 ORIGINAL_NAME_KEY = "msfs_original_name"
 # Set by the multi-exporter on its export copies of materials: the material the artist assigned
@@ -56,6 +62,20 @@ def strip_markers(name):
 
 def is_merge_root(obj) -> bool:
     return logical_name(obj).startswith(PREFIX)
+
+
+def is_zone(obj) -> bool:
+    return logical_name(obj).startswith(ZONE_PREFIX)
+
+
+def zone_density(obj):
+    """(multiplier, zone) of the nearest @ZONE_ empty at or above obj, or (1.0, None) outside every zone. The packer
+    multiplies the UV Marks density range by it: everything below a zone inherits the zone's multiplier."""
+    while obj is not None:
+        if is_zone(obj):
+            return getattr(obj, ZONE_DENSITY_KEY), obj
+        obj = obj.parent
+    return 1.0, None
 
 
 def _is_animated(obj) -> bool:
@@ -543,8 +563,14 @@ def _on_tree_active(settings, context):
 
 
 class FSS_MergeTreeItem(bpy.types.PropertyGroup):
-    # name (built in) is the merged mesh name, so the list's name filter works
+    # name (built in) is the merged mesh name (the zone name for zones), so the list's name filter works
+    kind: bpy.props.EnumProperty(items=(('GROUP', "Merge Group", ""), ('NOMERGE', "Stays Separate", ""),
+                                        ('ZONE', "Zone", ""), ('UNZONED', "Unzoned", "")))
     root: bpy.props.StringProperty()
+    # The empty of a zone row: its density field is drawn from it and edited in place, without Refresh
+    zone: bpy.props.PointerProperty(type=bpy.types.Object)
+    flag: bpy.props.StringProperty()
+    groups: bpy.props.IntProperty()
     depth: bpy.props.IntProperty()
     objects: bpy.props.IntProperty()
     material_count: bpy.props.IntProperty()
@@ -571,13 +597,16 @@ class FSS_MergeSettings(bpy.types.PropertyGroup):
 class FSS_OT_MergeRefresh(bpy.types.Operator):
     bl_idname = "fss.merge_refresh"
     bl_label = "Refresh"
-    bl_description = "List the merge groups of the visible objects, nested as they are, without changing anything"
+    bl_description = ("List the zones and merge groups of the visible objects, nested as they are, without changing "
+                      "anything")
 
     def execute(self, context):
         settings = context.scene.fss_merge
         skip_tags = set(tags.parse_tag_list(settings.skip_tags))
         view_layer = context.view_layer
-        groups = plan(context.scene, lambda obj: obj.visible_get(view_layer=view_layer), skip_tags)
+        visible = [obj for obj in context.scene.objects if obj.visible_get(view_layer=view_layer)]
+        visible_set = set(visible)
+        groups = plan(context.scene, visible_set.__contains__, skip_tags)
         by_root = {group.root: group for group in groups}
 
         def parent_group(obj):
@@ -591,10 +620,36 @@ class FSS_OT_MergeRefresh(bpy.types.Operator):
             children.setdefault(parent_group(group.root), []).append(group.root)
         settings.items.clear()
 
+        # The zone of each visible object (the nearest zone above it) and of each outermost group. A hidden zone with
+        # visible groups below is still listed, so its groups are not reported as unzoned.
+        zone_groups, zone_objects, zoned = {}, {}, {}
+        for obj in visible:
+            zone = zone_density(obj.parent)[1]
+            if zone is not None:
+                zone_objects[zone] = zone_objects.get(zone, 0) + 1
+                if obj in by_root:
+                    zone_groups[zone] = zone_groups.get(zone, 0) + 1
+        for root in children.get(None, []):
+            zoned.setdefault(zone_density(root.parent)[1], []).append(root)
+        zones = {obj for obj in visible if is_zone(obj)} | {zone for zone in zoned if zone is not None}
+
+        def zone_flag(zone):
+            """A zone never lies inside a merge group (it would be merged away) or inside another zone."""
+            inside_group = inside_zone = None
+            obj = zone.parent
+            while obj is not None:
+                if inside_group is None and is_merge_root(obj):
+                    inside_group = obj
+                elif inside_zone is None and is_zone(obj):
+                    inside_zone = obj
+                obj = obj.parent
+            return "; ".join(f"inside {logical_name(obj)}" for obj in (inside_group, inside_zone) if obj is not None)
+
         def add(root, depth):
             group = by_root[root]
             materials, kinds, uv_names, reasons = _group_summary(group)
             item = settings.items.add()
+            item.kind = 'GROUP'
             item.name = strip_markers(logical_name(root))
             item.root = root.name
             item.depth = depth
@@ -607,15 +662,40 @@ class FSS_OT_MergeRefresh(bpy.types.Operator):
             ordered = sorted(reasons.items(), key=lambda entry: -entry[1])
             item.reasons = ", ".join(f"{reason}: {count}" for reason, count in ordered)
             item.uv_names = ", ".join(uv_names)
+            # The @NOMERGE_ nodes the merge stops at, so the artist sees what stays separate under the merged tree
+            separate = [obj for obj, _reason in group.skipped if logical_name(obj).startswith(NO_MERGE_PREFIX)]
+            for obj in sorted(separate, key=lambda obj: obj.name):
+                item = settings.items.add()
+                item.kind = 'NOMERGE'
+                item.name = strip_markers(logical_name(obj))
+                item.root = obj.name
+                item.depth = depth + 1
             for child in sorted(children.get(root, []), key=lambda obj: obj.name):
                 add(child, depth + 1)
 
-        for root in sorted(children.get(None, []), key=lambda obj: obj.name):
-            add(root, 0)
+        for zone in sorted(zones, key=lambda obj: obj.name):
+            item = settings.items.add()
+            item.kind = 'ZONE'
+            item.name = logical_name(zone)[len(ZONE_PREFIX):] or logical_name(zone)
+            item.root = zone.name
+            item.zone = zone
+            item.flag = zone_flag(zone)
+            item.groups = zone_groups.get(zone, 0)
+            item.objects = zone_objects.get(zone, 0)
+            for root in sorted(zoned.get(zone, []), key=lambda obj: obj.name):
+                add(root, 1)
+        # Decision 34 of the UV journal: a merge group's topmost marked ancestor must be a zone
+        if None in zoned:
+            item = settings.items.add()
+            item.kind = 'UNZONED'
+            item.name = "Unzoned"
+            item.groups = len(zoned[None])
+            for root in sorted(zoned[None], key=lambda obj: obj.name):
+                add(root, 1)
         settings.scanned = True
         if settings.active >= len(settings.items):
             settings.active = max(len(settings.items) - 1, 0)
-        self.report({'INFO'}, f"{len(settings.items)} merge group(s)")
+        self.report({'INFO'}, f"{len(zones)} zone(s), {len(groups)} merge group(s)")
         return {'FINISHED'}
 
 
@@ -626,6 +706,19 @@ class FSS_UL_MergeTree(bpy.types.UIList):
         row = layout.row(align=True)
         for _ in range(item.depth):
             row.label(icon='BLANK1')
+        if item.kind == 'ZONE':
+            row.label(text=f"{item.name} ({item.flag})" if item.flag else item.name,
+                      icon='ERROR' if item.flag else 'OUTLINER_OB_EMPTY')
+            row.label(text=f"{item.groups} grp  {item.objects} obj")
+            if item.zone is not None:
+                row.prop(item.zone, ZONE_DENSITY_KEY, text="")
+            return
+        if item.kind == 'UNZONED':
+            row.label(text=f"{item.name}: {item.groups} group(s) outside every {ZONE_PREFIX} empty", icon='ERROR')
+            return
+        if item.kind == 'NOMERGE':
+            row.label(text=f"{item.name} (stays separate)", icon='UNLINKED')
+            return
         if item.root_reason:
             row.label(text=f"{item.name} (not merged: {item.root_reason})", icon='ERROR')
             return
@@ -711,7 +804,7 @@ class FSS_OT_MergeCreateGroup(bpy.types.Operator):
 
 class FSS_PT_Merge(bpy.types.Panel):
     bl_idname = "FSS_PT_merge"
-    bl_label = "Merge Tree"
+    bl_label = "Zones & Merge Tree"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "FSS Tools"
@@ -724,14 +817,27 @@ class FSS_PT_Merge(bpy.types.Panel):
         row.operator(FSS_OT_MergeCreateGroup.bl_idname, icon='EMPTY_AXIS')
         row.operator(FSS_OT_MergeRefresh.bl_idname, icon='FILE_REFRESH')
         if not settings.scanned:
-            layout.label(text=f"{PREFIX}name merges, {NO_MERGE_PREFIX}name stays", icon='INFO')
+            layout.label(text=f"{ZONE_PREFIX}name zones, {PREFIX}name merges, {NO_MERGE_PREFIX}name stays", icon='INFO')
             return
         if not settings.items:
-            layout.label(text=f"No visible {PREFIX} nodes", icon='INFO')
+            layout.label(text=f"No visible {ZONE_PREFIX} or {PREFIX} nodes", icon='INFO')
             return
         layout.template_list(FSS_UL_MergeTree.bl_idname, "", settings, "items", settings, "active", rows=6)
-        if 0 <= settings.active < len(settings.items):
-            item = settings.items[settings.active]
+        item = settings.items[settings.active] if 0 <= settings.active < len(settings.items) else None
+        if item is not None and item.kind != 'GROUP':
+            box = layout.box()
+            if item.kind == 'ZONE':
+                box.label(text=f"{item.root}: {item.groups} merge group(s), {item.objects} object(s)",
+                          icon='OUTLINER_OB_EMPTY')
+                if item.flag:
+                    box.label(text=f"Zone {item.flag}", icon='ERROR')
+                if item.zone is not None:
+                    box.prop(item.zone, ZONE_DENSITY_KEY)
+            elif item.kind == 'UNZONED':
+                box.label(text=f"Put these groups below a {ZONE_PREFIX} empty", icon='ERROR')
+            else:
+                box.label(text=f"{item.root} -> {item.name}: not merged, with its subtree", icon='UNLINKED')
+        elif item is not None:
             box = layout.box()
             box.label(text=f"{item.root} -> {item.name}", icon='OUTLINER_OB_EMPTY')
             if item.root_reason:
@@ -767,9 +873,14 @@ def register():
     for cls in CLASSES:
         bpy.utils.register_class(cls)
     bpy.types.Scene.fss_merge = bpy.props.PointerProperty(type=FSS_MergeSettings)
+    # On the zone empty, read through zone_density()
+    setattr(bpy.types.Object, ZONE_DENSITY_KEY, bpy.props.FloatProperty(
+        name="Density Multiplier", default=1.0, min=0.1, max=10.0, soft_min=0.1, soft_max=10.0,
+        description="Multiplies the texel density of everything below this zone when the UVs are packed"))
 
 
 def unregister():
+    delattr(bpy.types.Object, ZONE_DENSITY_KEY)
     del bpy.types.Scene.fss_merge
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)
