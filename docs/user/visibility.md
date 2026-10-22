@@ -69,7 +69,7 @@ After an analysis run, the panel displays:
 - **File Metadata:** Timestamp of the `.visibility` file, camera names, and animation state count.
 - **Surface Breakdown:** Total faces, surface area ($m^2$), and overall scored meshes.
 - **Never-Seen Objects & Islands:** Number of objects and UV islands with a score of $0.000$ (never visible from any included camera in any state).
-  - Click **Select Never Seen** to select them for review. They need no density mark: never-seen faces get the minimum density automatically. Check whether they are really never visible: switch positions and parts shown only under some conditions may not be seen in the analysed states. Nothing is deleted.
+  - Click **Select Never Seen** to select them for review. They need no density mark: never-seen faces get the minimum density automatically (x0.10, which is also the floor for faces seen only a little). Check whether they are really never visible: switch positions and parts shown only under some conditions may not be seen in the analysed states. Nothing is deleted.
 - **Undetermined Objects:** Small sub-pixel parts whose scores were inherited from parent panels.
 - **Stale Meshes Warning:** If geometry is modified, subdivided, or deleted after visibility data was generated, the panel alerts: `Mesh geometry changed since last run`.
   - Click **Select Stale** to select affected objects that need updating.

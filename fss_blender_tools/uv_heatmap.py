@@ -614,6 +614,26 @@ def tag_redraw():
                 area.tag_redraw()
 
 
+MARKS_REFRESH_DELAY = 0.3  # s after the last mark change: a slider drag sends one change per step
+
+
+def marks_changed():
+    """A density mark or the scene freedom changed: a parent's mark changes the density of everything below it.
+    Once the edit pauses, the cached objects are dropped; the next redraw recomputes the selected ones."""
+    if not _cache:
+        return
+    if bpy.app.timers.is_registered(_drop_after_marks):
+        bpy.app.timers.unregister(_drop_after_marks)
+    bpy.app.timers.register(_drop_after_marks, first_interval=MARKS_REFRESH_DELAY)
+
+
+def _drop_after_marks():
+    _cache.clear()
+    _global_stats.pop('selection', None)  # the draw callback then recomputes the selection
+    tag_redraw()
+    return None
+
+
 def clear_cache():
     """Clear all cached heatmap geometry, material references and GPU batches."""
     _cache.clear()
@@ -1500,6 +1520,8 @@ def register():
 
 def unregister():
     global _draw_view_handle, _draw_pixel_handle, _shader, _previews, _chart_key, _glyph_texture
+    if bpy.app.timers.is_registered(_drop_after_marks):
+        bpy.app.timers.unregister(_drop_after_marks)
     _glyph_texture = None
     if _previews is not None:
         bpy.utils.previews.remove(_previews)

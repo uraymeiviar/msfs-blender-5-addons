@@ -136,8 +136,9 @@ def texture_size(material):
 
 
 def visibility_factor(score):
-    """The density factor of a visibility score: never seen (0) gets the minimum of decision 74."""
-    return score if score > 0 else NEVER_SEEN_FACTOR
+    """The density factor of a visibility score, never below the minimum of decision 74 (decision 111): a face
+    seen a little never gets less texture than a face never seen."""
+    return max(score, NEVER_SEEN_FACTOR)
 
 
 def _factor_text(low, high):
@@ -306,13 +307,21 @@ def _on_load_post(*_dummy):
 
 def _keep_order(low_name, high_name, moved):
     """Update function: dragging one bound past the other moves the other along (Min never above Max)."""
-    def update(self, _context):
+    def update(self, context):
         if getattr(self, low_name) > getattr(self, high_name):
             if moved == low_name:
                 setattr(self, high_name, getattr(self, low_name))
             else:
                 setattr(self, low_name, getattr(self, high_name))
+        _marks_changed(self, context)
     return update
+
+
+def _marks_changed(_self, _context):
+    """Update function: a mark or the scene freedom changes the density of everything below it, so the heatmap's
+    Density mode recomputes its objects (imported here: uv_heatmap imports this module)."""
+    from . import uv_heatmap
+    uv_heatmap.marks_changed()
 
 
 class FSS_OT_UvSetDensity(bpy.types.Operator):
@@ -552,7 +561,7 @@ def register():
         bpy.utils.register_class(cls)
     factor = dict(min=0.01, max=10.0, soft_min=0.1, soft_max=4.0, precision=2)
     bpy.types.Object.fss_uv_density_own = bpy.props.BoolProperty(
-        name='Own Density Mark', default=False,
+        name='Own Density Mark', default=False, update=_marks_changed,
         description='This object has its own texel density factor: it multiplies the factors above it, and '
                     'everything below takes it too')
     bpy.types.Object.fss_uv_density_min = bpy.props.FloatProperty(

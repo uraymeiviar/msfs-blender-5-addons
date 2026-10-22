@@ -338,6 +338,36 @@ def test_panel_visibility():
     print("PASS: test_panel_visibility (x0.80, islands 0.10-0.90, Result 16.59 - 22.30, cached across redraws)")
 
 
+def test_visibility_floor():
+    # Decision 111: the minimum is a floor, so a face seen a little never gets less than a face never seen
+    for score, expected in ((0.0, 0.1), (0.05, 0.1), (0.1, 0.1), (0.5, 0.5), (1.0, 1.0)):
+        got = uv_marks.visibility_factor(score)
+        assert abs(got - expected) < 1e-9, (score, got, expected)
+    print("PASS: test_visibility_floor (0 and 0.05 give x0.10, 0.5 stays x0.50)")
+
+
+def test_heatmap_after_mark_change():
+    # A parent's mark changes its children's density: the heatmap drops its cached objects once the edit pauses
+    from fss_blender_tools import uv_heatmap
+    o = build_chain()
+    edits = [lambda: setattr(o['door'], uv_marks.MIN_PROP, 0.9),
+             lambda: setattr(o['door'], uv_marks.MAX_PROP, 1.2),
+             lambda: setattr(o['zone'], uv_marks.OWN_PROP, False),
+             lambda: setattr(bpy.context.scene, 'fss_uv_density_freedom_min', 0.8)]
+    for edit in edits:
+        uv_heatmap._cache['KNOB'] = object()
+        uv_heatmap._global_stats['selection'] = ('KNOB',)
+        edit()
+        assert bpy.app.timers.is_registered(uv_heatmap._drop_after_marks), "no refresh scheduled"
+        uv_heatmap._drop_after_marks()  # what the timer runs (timers do not fire inside a background script)
+        bpy.app.timers.unregister(uv_heatmap._drop_after_marks)
+        assert not uv_heatmap._cache and 'selection' not in uv_heatmap._global_stats
+    # With nothing cached, a mark change schedules nothing
+    o['door'].fss_uv_density_max = 1.3
+    assert not bpy.app.timers.is_registered(uv_heatmap._drop_after_marks)
+    print(f"PASS: test_heatmap_after_mark_change ({len(edits)} kinds of edit drop the cache)")
+
+
 def main():
     test_defaults()
     test_multiplication()
@@ -346,6 +376,8 @@ def main():
     test_migration_at_load_and_register()
     test_panel()
     test_panel_visibility()
+    test_visibility_floor()
+    test_heatmap_after_mark_change()
     print("ALL TESTS PASSED")
 
 

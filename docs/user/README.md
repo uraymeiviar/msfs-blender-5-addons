@@ -5,7 +5,7 @@
 
 This guide is for 3D artists who build Flight Sim Studio (FSS) aircraft in Blender 5.2. It assumes you already model, unwrap, animate, texture and export in Blender. It explains what MSFS needs on top of that, the order in which we prepare a model for it, and which of our tools help at each step and why.
 
-It matches **FSS Blender Tools 0.31.0** and the FSS exporter based on Asobo exporter 8.4.1.
+It matches **FSS Blender Tools 0.31.1** and the FSS exporter based on Asobo exporter 8.4.1.
 
 - **The pipeline** (below): the steps from a new model to a deployed one, in order.
 - **The reference pages:** what each panel and button does, linked from the steps:
@@ -167,7 +167,7 @@ So the topology you model decides what disappears together. A floor plate and it
 
 **What it measures:** from the cameras you include (for the cockpit the pilot and copilot eyes; for the exterior your own exterior cameras) and over the animation steps, how much of each face is actually visible, weighted by how far the head has to turn from the camera's default view. The score is a factor from 0 to 1 per face that depends neither on distance nor on size: a small knob in plain view scores as high as a large panel. Parts too small to measure (screw heads, small labels) take the value of the part they belong to.
 
-**How packing uses it:** each island gets a texel density (pixels per centimetre) within the target density × its object's density range × the island's visibility. The density range is the scene's density freedom times every density mark from the root down to the object, zone marks included, all set in [Packing](fss-tools.md#packing). An island's visibility comes from its seen faces only, so a partly hidden island keeps the density its visible part needs. Faces never seen in the analysed views and steps get a small minimum density; nothing is deleted.
+**How packing uses it:** each island gets a texel density (pixels per centimetre) within the target density × its object's density range × the island's visibility. The density range is the scene's density freedom times every density mark from the root down to the object, zone marks included, all set in [Packing](fss-tools.md#packing). An island's visibility comes from its seen faces only, so a partly hidden island keeps the density its visible part needs. No island gets less than a small minimum (x0.10), whether it is seen a little or never seen in the analysed views and steps; nothing is deleted.
 
 **Do:**
 
