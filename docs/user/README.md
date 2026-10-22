@@ -5,7 +5,7 @@
 
 This guide is for 3D artists who build Flight Sim Studio (FSS) aircraft in Blender 5.2. It assumes you already model, unwrap, animate, texture and export in Blender. It explains what MSFS needs on top of that, the order in which we prepare a model for it, and which of our tools help at each step and why.
 
-It matches **FSS Blender Tools 0.31.1** and the FSS exporter based on Asobo exporter 8.4.1.
+It matches **FSS Blender Tools 0.32.0** and the FSS exporter based on Asobo exporter 8.4.1.
 
 - **The pipeline** (below): the steps from a new model to a deployed one, in order.
 - **The reference pages:** what each panel and button does, linked from the steps:
@@ -41,7 +41,7 @@ Steps marked **in development** describe what the tool will do, and how to get t
 | [5. LOD](#5-lod) | LOD | available | `lods.md` |
 | [6. Seams and Unwrap](#6-seams-and-unwrap) | UV Tools > Seams, Utilities > Heatmap | available | `uv-mapping.md` |
 | [7. Visibility Scoring](#7-visibility-scoring) | UV Tools > Packing > Visibility Scoring | available | [visibility.md](visibility.md) |
-| [8. Packing](#8-packing-in-development) | packer | in development: Blender's Pack Islands | `uv-mapping.md` |
+| [8. Packing](#8-packing) | UV Tools > Packing | available | `uv-mapping.md` |
 | [9. Texturing](#9-texturing) | Substance Painter | outside Blender | `texturing.md`, `baking.md` |
 | [10. Export and Deploy](#10-export-and-deploy) | exporter, deploy scripts | available | `blender-export.md` |
 
@@ -182,22 +182,29 @@ So the topology you model decides what disappears together. A floor plate and it
 
 **Redo when:** cameras, animations or the geometry change; the panel lists stale meshes. New seams or a new unwrap do not count: the scores belong to faces, not islands.
 
-### 8. Packing (in development)
+### 8. Packing
 
 **Why:** each texture set (step 2) is one texture. All islands that use it must fit into it, at the texel density each part should get (step 7), with enough space between islands that they do not bleed into each other at lower mip levels.
 
 ![Seams, from Auto Seam or by hand, and the unwrap produce the UV islands; each island's visibility comes from the scores of its seen faces. The scene's density freedom times the density marks from the root down to the object (zone marks included) times the island visibility gives a density ratio range without unit; that ratio times the target density gives the island's density range in pixels per centimetre. The zone also decides the texture set: the packer packs one texture set per zone and class, each island inside its range.](images/zone-visibility-packing.svg)
 
-**What the tool will do:** pack each texture set from its materials and zones, scale each island to its density range, turn islands only as their **direction** mark allows, keep mirrored or shared parts stacked, and use each material's **margin** in pixels. It will report a texture set whose islands do not fit its **size** even at the bottom of their ranges, or leave space even at the top, and the size that would fit.
+**What the tool does:** **Pack** packs one texture set: every face with its material in the scene, selected or not. It scales each island to its density range (target density × the density marks × the island's visibility), at one common position inside the ranges for the whole set, turns islands only as their **direction** mark allows, and keeps each material's **margin** in pixels. When the islands do not fit the texture **size**, it still writes them at their density, reaching beyond the texture, and says which size they need; when they leave space even at the top of their ranges, it says which smaller size would do. **Check All** does the same for every texture set without writing UVs. See [Packing](fss-tools.md#packing).
 
-**Meanwhile, by hand:** for each texture set, select the objects that use its material, then in the UV editor:
+**Do:** in **FSS Tools** > **UV Tools** > **Packing**:
 
-1. **Average Islands Scale**, then scale the islands of marked parts by their factor (**Higher** x1.5, **Lower** x0.75, times the marks above them).
-2. **Pack Islands** with the material's margin from [Packing](fss-tools.md#packing) (set **Margin Method** to **Fraction** and enter the pixel margin divided by the texture size, for example 8 / 4096 = 0.002), and rotation off for parts marked **Upright** (brushed metal, grain, text).
+1. Set **Target density** and the density marks (step 7 explains them), and each texture set's **Size** and **Margin**.
+2. Tick **Keep UVs** on texture sets that must not be packed: fur and hair cards, decal sheets, colliders.
+3. **Check All**, then read each set's **Last run** and the **FSS Packing Report**. Change sizes or marks until each set fits at a size you accept.
+4. Select an object of a texture set and press its **Pack**. **Ctrl + Z** undoes it.
+5. If the report warns about **faces without area**, run [Find Faces Without Area](fss-tools.md#find-faces-without-area) and fix them.
 
-**Check:** the heatmap's **Density** mode shows each texture set near 1.0, except where you chose otherwise.
+**Check:**
 
-**Redo when:** zones, materials, density marks or visibility scores change. It's quick to repeat until texturing has started.
+- The set's **Last run** says **fits**, and the report shows 0 margin violations and 0 overlapping triangles.
+- The heatmap's **Density** mode shows each texture set near 1.0, except where you chose otherwise.
+- In the UV editor, no island lies outside the texture. Islands without UV area (lines, points) keep their old place; the report lists their objects.
+
+**Redo when:** zones, materials, sizes, density marks or visibility scores change. It's quick to repeat until texturing has started; after that, moving islands means baking again.
 
 ### 9. Texturing
 

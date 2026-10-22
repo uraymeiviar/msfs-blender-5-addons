@@ -108,10 +108,15 @@ def test_draw_all():
     assert 'Skip Auto Seam' not in texts, texts
     # Density marks are live fields with factor presets: no Apply, no Select Marked (decision 109)
     assert 'Apply' not in texts and 'Select Marked' not in texts and {'Lower', 'Higher'} <= set(texts), texts
+    assert 'Check All' in texts, texts  # the packer (decision 115); the Pack rows need a material
+    checks_calls = []
+    bpy.types.FSS_PT_checks.draw(SimpleNamespace(layout=_Layout(checks_calls)), bpy.context)
+    ops = [args[0] for name, args, _kwargs in checks_calls if name == 'operator']
+    assert 'fss.find_faces_without_area' in ops, ops
     steps = bpy.context.scene.fss_visibility.bl_rna.properties['states']
     assert steps.name == 'Animation Steps', steps.name
     print(f"PASS: test_draw_all ({len(drawn)} panels drawn; Skip Auto Seam in Seams only; Packing without Apply and "
-          "Select Marked; 'Animation Steps')")
+          "Select Marked, with Check All; Find Faces Without Area in Checks; 'Animation Steps')")
 
 
 def main():

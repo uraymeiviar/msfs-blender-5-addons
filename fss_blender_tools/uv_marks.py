@@ -6,14 +6,20 @@ down to the object itself (zone empties included); an unmarked object counts as 
 the target density (scene, px/cm) x that range x the island's visibility. Direction and Skip Auto Seam are inherited
 from the nearest marked ancestor. Density marks, texture sizes and margins are registered properties; the export
 hooks keep every fss_ key out of the glTF extras (merge._strip_fss_extras).
+
+The Packing section also packs: one row per texture set of the selected objects with Pack (uv_pack.pack, decision
+114) and Keep UVs (decision 116), and Check All below them (uv_pack.measure on every texture set, decision 115). The
+results stay in memory for the session (not in the file) and are cleared when a file is loaded.
 """
 
 from pathlib import Path
 
+import time
+
 import bpy
 from bpy.app.handlers import persistent
 
-from . import visibility_core
+from . import uv_pack, visibility_core  # uv_pack imports this module too (density, direction, sizes)
 from .tags import _editable
 
 # On an object: the own density mark, a factor range [min, max] (one factor when min == max)
@@ -22,6 +28,7 @@ MIN_PROP = 'fss_uv_density_min'
 MAX_PROP = 'fss_uv_density_max'
 DIRECTION_KEY = 'fss_uv_direction'
 SKIP_AUTOSEAM_KEY = 'fss_uv_skip_autoseam'
+KEEP_UVS_PROP = 'fss_uv_keep_uvs'  # on a material: its texture set is not packed (decision 116)
 # Before 0.31.0, read only to migrate: the density mark [min, max] (a custom property; the nearest marked ancestor
 # replaced, not multiplied), the zone multiplier (a registered property: its data lies in the object's system
 # properties) and the material margin as a fraction of the UV square (a custom property)
@@ -48,6 +55,10 @@ BLOCK_PIXELS = 4  # texture compression works in 4x4 blocks; a margin below this
 
 _migration = {}  # what the migration converted in the open file (by file path), shown in the Packing panel
 _vis_cache = {}  # object name -> (key, summary) of the Visibility row; dropped when the key or the geometry changes
+_results = {}  # texture set name -> the last uv_pack result (Pack or Check All) in this session
+# While Pack or Check All runs, the Packing section shows this progress instead of its rows and buttons
+_progress = None  # dict: verb ('Packing' or 'Checking'), index, count, set, stage, steps
+_cancel_requested = False
 
 
 def own_density(obj):
@@ -301,7 +312,11 @@ def _run_migration_timer():
 
 @persistent
 def _on_load_post(*_dummy):
+    global _progress, _cancel_requested
     _vis_cache.clear()
+    _results.clear()
+    _progress = None
+    _cancel_requested = False
     run_migration()
 
 
@@ -505,10 +520,33 @@ def _draw_object(layout, scene, obj):
     if source is not None and source != obj:
         _labelled(box, '').label(text=f'{value.lower()} from {source.name}')
 
+
+def texture_set_materials(context):
+    """The materials of the selected mesh objects, the active object's first (decision 114)."""
+    objects = sorted((o for o in context.selected_objects if o.type == 'MESH'), key=lambda o: o.name)
+    active = context.active_object
+    if active is not None:
+        objects = [active] + [o for o in objects if o != active]
     materials = []
-    for slot in obj.material_slots:
-        if slot.material is not None and slot.material not in materials:
-            materials.append(slot.material)
+    for obj in objects:
+        for slot in obj.material_slots:
+            if slot.material is not None and slot.material not in materials:
+                materials.append(slot.material)
+    return materials
+
+
+def last_result_text(material):
+    """The Last run row of a texture set: the last Pack or Check All result of this session, or 'kept'."""
+    if uv_pack.is_kept(material):
+        return 'kept'
+    result = _results.get(material.name)
+    if result is None or result['mode'] == 'kept':
+        return 'not packed or checked yet'
+    return uv_pack.result_text(result) + ('' if result['written'] else ' (checked)')
+
+
+def _draw_texture_sets(layout, context):
+    materials = texture_set_materials(context)
     for material in materials[:MAX_LISTED]:
         box = layout.box()
         box.label(text=f'Texture set: {material.name}', icon='MATERIAL')
@@ -519,8 +557,223 @@ def _draw_object(layout, scene, obj):
         _labelled(box, 'Margin').prop(material, 'fss_uv_margin_px', text='')
         if margin(material) < BLOCK_PIXELS:
             box.label(text=f'Under {BLOCK_PIXELS} px: compressed 4x4 blocks bleed across islands', icon='ERROR')
+        row = _labelled(box, '')
+        row.prop(material, KEEP_UVS_PROP, text='Keep UVs', toggle=True)
+        sub = row.row(align=True)
+        sub.enabled = not uv_pack.is_kept(material)
+        sub.operator(FSS_OT_UvPackTextureSet.bl_idname, text='Pack', icon='UV').material = material.name
+        _labelled(box, 'Last run').label(text=last_result_text(material))
     if len(materials) > MAX_LISTED:
         layout.label(text=f'... {len(materials) - MAX_LISTED} more')
+    layout.operator(FSS_OT_UvPackCheckAll.bl_idname, text='Check All', icon='VIEWZOOM')
+    if bpy.data.texts.get(uv_pack.REPORT_TEXT_NAME) is not None:
+        layout.label(text=f"Full report: Text Editor > '{uv_pack.REPORT_TEXT_NAME}'", icon='INFO')
+
+
+def _draw_progress(layout):
+    p = _progress
+    box = layout.box()
+    if p['verb'] == 'Checking':
+        box.progress(factor=(p['index'] - 1) / max(p['count'], 1), type='BAR',
+                     text=f"Checking {p['index']} of {p['count']}: {p['set']}")
+        box.label(text=p['stage'] or 'Starting', icon='TIME')
+        box.operator(FSS_OT_UvPackCancel.bl_idname, text='Cancel', icon='CANCEL')
+        box.label(text='Cancel and Esc stop after the texture set in work')
+    else:
+        box.progress(factor=min(p['steps'] / 10.0, 0.95), type='BAR', text=f"Packing {p['set']}")
+        box.label(text=p['stage'] or 'Starting', icon='TIME')
+        box.label(text='Blender waits until each pack is done')
+
+
+def _redraw_panels():
+    for window in bpy.context.window_manager.windows:
+        for area in window.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+
+
+def _status(text):
+    try:
+        bpy.context.workspace.status_text_set(text)
+    except AttributeError:  # no workspace (background)
+        pass
+
+
+def _on_stage(stage):
+    """uv_pack progress: the stage in the status bar, and the sidebar drawn at once (Blender blocks in each pack)."""
+    from .uv_autoseam import _redraw_sidebar_now  # uv_autoseam imports this module
+    if _progress is None:
+        return
+    _progress['stage'] = stage
+    _progress['steps'] += 1
+    count = f" {_progress['index']}/{_progress['count']}" if _progress['verb'] == 'Checking' else ''
+    _status(f"FSS {_progress['verb']}{count}: {_progress['set']} ({stage})...")
+    _redraw_sidebar_now()
+
+
+def _summary(result):
+    text = f"{result['set']}: {uv_pack.result_text(result)}"
+    if result.get('no_area_objects'):
+        text += f"; faces without area in {len(result['no_area_objects'])} object(s)"
+    return text
+
+
+class FSS_OT_UvPackTextureSet(bpy.types.Operator):
+    bl_idname = 'fss.uv_pack_texture_set'
+    bl_label = 'Pack Texture Set'
+    bl_description = ('Pack this texture set: every face with this material in the view layer, also on objects that '
+                      'are not selected, each island at its texel density. Replaces their UVs')
+    bl_options = {'REGISTER', 'UNDO'}
+
+    material: bpy.props.StringProperty(name='Material', description='Material of the texture set to pack')
+
+    @classmethod
+    def poll(cls, context):
+        return _progress is None and context.mode in {'OBJECT', 'EDIT_MESH'}
+
+    def execute(self, context):
+        global _progress
+        material = bpy.data.materials.get(self.material)
+        if material is None:
+            self.report({'ERROR'}, f"No material '{self.material}'")
+            return {'CANCELLED'}
+        if uv_pack.is_kept(material):
+            self.report({'WARNING'}, f'{material.name}: Keep UVs is set, nothing packed')
+            return {'CANCELLED'}
+        self._material = material
+        self._selected = {o.name for o in context.selected_objects}
+        if bpy.app.background:
+            return self._run(context)
+        # draw the progress first: each pack is one Blender call, Blender waits until it is done
+        _progress = {'verb': 'Packing', 'index': 1, 'count': 1, 'set': material.name, 'stage': '', 'steps': 0}
+        _status(f'FSS Packing: {material.name}...')
+        _redraw_panels()
+        self._timer = context.window_manager.event_timer_add(0.05, window=context.window)
+        context.window_manager.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        global _progress
+        if event.type != 'TIMER':
+            return {'RUNNING_MODAL'}
+        context.window_manager.event_timer_remove(self._timer)
+        try:
+            return self._run(context)
+        except Exception as ex:
+            self.report({'ERROR'}, f'Packing {self._material.name} stopped: {ex}')
+            return {'CANCELLED'}
+        finally:
+            _progress = None
+            _status(None)
+            _redraw_panels()
+
+    def _run(self, context):
+        result = uv_pack.pack(self._material, progress=None if bpy.app.background else _on_stage)
+        _results[result['set']] = result
+        uv_pack.write_report([result], 'Pack', result['time_s'], selected=self._selected)
+        extra = [name for name in result.get('objects', []) if name not in self._selected]
+        text = _summary(result) + (f'; {len(extra)} object(s) not selected included' if extra else '')
+        self.report({'WARNING'} if result.get('no_area_objects') else {'INFO'},
+                    f"{text} ({result['time_s']:.1f} s). See '{uv_pack.REPORT_TEXT_NAME}'.")
+        return {'FINISHED'}
+
+
+class FSS_OT_UvPackCheckAll(bpy.types.Operator):
+    bl_idname = 'fss.uv_pack_check_all'
+    bl_label = 'Check All'
+    bl_description = ('Measure every texture set of the view layer as Pack would, without writing UVs: which sets fit, '
+                      'leave space or overflow, and the texture size each one needs')
+    bl_options = {'REGISTER'}
+
+    _timer = None
+
+    @classmethod
+    def poll(cls, context):
+        return _progress is None and context.mode in {'OBJECT', 'EDIT_MESH'}
+
+    def execute(self, context):
+        global _progress, _cancel_requested
+        self._sets = uv_pack.texture_sets(context.view_layer)
+        self._done = []
+        self._vis_cache = {}
+        self._index = 0
+        self._announced = False
+        self._t_start = time.perf_counter()
+        if bpy.app.background:
+            for material in self._sets:
+                self._step(material)
+            return self._finish(context)
+        _cancel_requested = False
+        _progress = {'verb': 'Checking', 'index': 1, 'count': len(self._sets), 'set': '', 'stage': '', 'steps': 0}
+        self._timer = context.window_manager.event_timer_add(0.01, window=context.window)
+        context.window_manager.modal_handler_add(self)
+        _redraw_panels()
+        return {'RUNNING_MODAL'}
+
+    def _step(self, material):
+        result = uv_pack.measure(material, progress=None if bpy.app.background else _on_stage,
+                                 vis_cache=self._vis_cache)
+        _results[result['set']] = result
+        self._done.append(result)
+
+    def _finish(self, context, cancelled=False):
+        global _progress, _cancel_requested
+        if self._timer is not None:
+            context.window_manager.event_timer_remove(self._timer)
+            self._timer = None
+        _progress = None
+        _cancel_requested = False
+        _status(None)
+        _redraw_panels()
+        seconds = time.perf_counter() - self._t_start
+        uv_pack.write_report(self._done, 'Check All', seconds, cancelled=cancelled)
+        over = sum(1 for r in self._done if r['mode'] == 'overflow')
+        kept = sum(1 for r in self._done if r['mode'] == 'kept')
+        self.report({'INFO'}, f"Checked {len(self._done)} of {len(self._sets)} texture set(s) in {seconds:.1f} s"
+                              f"{', cancelled' if cancelled else ''}: {over} overflow, {kept} kept. "
+                              f"See '{uv_pack.REPORT_TEXT_NAME}'.")
+        return {'FINISHED'}
+
+    def modal(self, context, event):
+        if event.type == 'ESC' or _cancel_requested:
+            return self._finish(context, cancelled=True)
+        if event.type != 'TIMER':
+            return {'PASS_THROUGH'}
+        if self._index >= len(self._sets):
+            return self._finish(context)
+        material = self._sets[self._index]
+        if not self._announced:
+            # show which set comes next before Blender blocks on it
+            _progress.update(index=self._index + 1, set=uv_pack.set_name(material), stage='Starting', steps=0)
+            _status(f"FSS Checking {self._index + 1}/{len(self._sets)}: {uv_pack.set_name(material)}...")
+            _redraw_panels()
+            self._announced = True
+            return {'RUNNING_MODAL'}
+        try:
+            self._step(material)
+        except Exception as ex:
+            self._finish(context, cancelled=True)
+            self.report({'ERROR'}, f'Check All stopped at {uv_pack.set_name(material)}: {ex}')
+            return {'CANCELLED'}
+        self._index += 1
+        self._announced = False
+        return {'RUNNING_MODAL'}
+
+
+class FSS_OT_UvPackCancel(bpy.types.Operator):
+    bl_idname = 'fss.uv_pack_cancel'
+    bl_label = 'Cancel'
+    bl_description = 'Stop Check All after the texture set in work (as Esc)'
+    bl_options = {'INTERNAL'}
+
+    @classmethod
+    def poll(cls, context):
+        return _progress is not None and _progress.get('verb') == 'Checking'
+
+    def execute(self, context):
+        global _cancel_requested
+        _cancel_requested = True
+        return {'FINISHED'}
 
 
 class FSS_PT_UvMarks(bpy.types.Panel):
@@ -536,6 +789,10 @@ class FSS_PT_UvMarks(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         scene = context.scene
+        if _progress is not None:
+            # Pack or Check All in progress: only the progress (the active object may be the temporary mesh)
+            _draw_progress(layout)
+            return
         if _migration:
             _draw_migration(layout)
         row = _labelled(layout, 'Target density')
@@ -549,9 +806,11 @@ class FSS_PT_UvMarks(bpy.types.Panel):
             layout.label(text='No active object', icon='INFO')
         else:
             _draw_object(layout, scene, obj)
+        _draw_texture_sets(layout, context)
 
 
-CLASSES = (FSS_OT_UvSetDensity, FSS_OT_UvSetDirection, FSS_OT_UvSetSkipAutoseam, FSS_PT_UvMarks)
+CLASSES = (FSS_OT_UvSetDensity, FSS_OT_UvSetDirection, FSS_OT_UvSetSkipAutoseam, FSS_OT_UvPackTextureSet,
+           FSS_OT_UvPackCheckAll, FSS_OT_UvPackCancel, FSS_PT_UvMarks)
 HANDLERS = ((bpy.app.handlers.load_post, _on_load_post),
             (bpy.app.handlers.depsgraph_update_post, _on_depsgraph_update_post))
 
@@ -589,6 +848,10 @@ def register():
         name='UV Margin', default=DEFAULT_MARGIN, min=0, soft_max=64, subtype='PIXEL',
         description='Space around each island in pixels of this texture set (8 keeps islands apart to the second '
                     'mip level after 4x4 block compression)')
+    bpy.types.Material.fss_uv_keep_uvs = bpy.props.BoolProperty(
+        name='Keep UVs', default=False,
+        description='Leave this texture set out of Pack and Check All and keep its UVs (fur and hair cards, decal '
+                    'sheets, colliders)')
     for handlers, handler in HANDLERS:
         if handler not in handlers:
             handlers.append(handler)
@@ -606,7 +869,8 @@ def unregister():
     if bpy.app.timers.is_registered(_run_migration_timer):
         bpy.app.timers.unregister(_run_migration_timer)
     _vis_cache.clear()
-    for name in ('fss_uv_margin_px', 'fss_uv_texture_height', 'fss_uv_texture_width'):
+    _results.clear()
+    for name in (KEEP_UVS_PROP, 'fss_uv_margin_px', 'fss_uv_texture_height', 'fss_uv_texture_width'):
         delattr(bpy.types.Material, name)
     for name in ('fss_uv_density_freedom_max', 'fss_uv_density_freedom_min', 'fss_uv_target_density'):
         delattr(bpy.types.Scene, name)

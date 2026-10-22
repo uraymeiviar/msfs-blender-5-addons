@@ -8,7 +8,7 @@ All panels are in the 3D Viewport sidebar (`N`), tab **FSS Tools**, from top to 
 - **Zones & Merge Tree**
 - **Tags**
 - **LOD**: its own page, [lod.md](lod.md)
-- **UV Tools**, with the sections **Seams** (Auto Seam, its own page [uv.md](uv.md)) and **Packing** (the UV marks for packing, with **Visibility Scoring** inside)
+- **UV Tools**, with the sections **Seams** (Auto Seam, its own page [uv.md](uv.md)) and **Packing** (the UV marks, the packer per texture set, with **Visibility Scoring** inside)
 - **Utilities**, with the sections **General**, **Empty Bounds**, **Heatmap** and **Checks**
 
 Each section opens and closes on its own; Blender remembers that in the `.blend`.
@@ -92,7 +92,7 @@ Automated UV seam proposal for hard-surface meshes, with a **Distortion Limit** 
 
 ### Packing
 
-How much texture each part gets, and the settings of each texture set, for packing and for the heatmap's Density mode. The section is closed by default. Every field takes effect as you change it; there is no Apply button.
+How much texture each part gets, the settings of each texture set, and the packer. The marks are also read by the heatmap's Density mode. The section is closed by default. Every field takes effect as you change it; there is no Apply button.
 
 - **Target density** (for the scene): the texel density at factor 1.0, in pixels per centimetre. The default 20.48 is 2048 pixels per metre.
 - **Density freedom Min / Max** (for the scene, default 0.90 and 1.10): how far the packer may scale any island down or up. It applies once, at the top of the hierarchy.
@@ -109,9 +109,42 @@ How much texture each part gets, and the settings of each texture set, for packi
     - **Flip:** 0 or 180 degrees only.
     - **Quarter:** 90-degree steps only.
     - **Clear:** remove the mark (inherit from the parent, else Free).
-- **Texture set** boxes: one per material of the active object (up to 5, then the number of the others):
-  - **Size:** the width and height of the texture set, 256 to 8192 pixels (default 4096 × 4096). Choose the size; the packer (in development) will report when the islands do not fit at their density, or leave space, and which size would fit.
+- **Texture set** boxes: one per material of the selected objects, the active object's first (up to 5, then the number of the others; select fewer objects to reach those):
+  - **Size:** the width and height of the texture set, 256 to 8192 pixels (default 4096 × 4096). Choose the size; **Pack** and **Check All** report when the islands do not fit at their density, or leave space, and which size would fit.
   - **Margin:** the space around each island, in pixels of this texture set (default 8). 8 pixels keep islands apart down to the second mip level after the 4 × 4 block compression of the textures; below 4 pixels the box warns that compressed blocks bleed across islands.
+  - **Keep UVs:** leave this texture set alone: **Pack** is greyed out and **Check All** lists it as **kept**. For fur and hair cards, decal sheets and colliders, whose UVs map onto a strand or label sheet on purpose. It is stored on the material.
+  - **Pack:** packs the texture set (see [Pack](#pack) below). It replaces the UVs of every face with this material; **Ctrl + Z** undoes it.
+  - **Last run:** the result of the last **Pack** or **Check All** of this texture set in this Blender session (not saved in the file; cleared when a file is opened), with **(checked)** when it came from Check All:
+    - **fits 73 %:** the islands fit at their density and fill 73 % of the texture; **, 2048 x 2048 would do** when a smaller size would still hold them.
+    - **needs x1.40: 8192 x 8192:** the islands need 1.4 times the texture's side; the size names the smallest one that holds them.
+    - **does not fit even at 8192 (x2.51):** not even 8192 pixels per side would hold them.
+    - **kept:** Keep UVs is on.
+- **Check All:** below the texture set boxes. Measures every texture set of the scene's view layer as **Pack** would, but writes no UVs, and fills each set's **Last run**. Use it as the overview of which texture sizes give a consistent density. While it runs, the section shows a progress bar instead of its fields; **Cancel** or **Esc** stops after the texture set in work.
+
+#### Pack
+
+**Pack** takes every face that uses the texture set's material in the view layer, also on objects that are not selected or are hidden: a texture set is one texture, so all its islands share one layout. A mesh used by several objects is packed once.
+
+- **Density first:** every island gets its density from its range (the **Result** row above), at one common position inside the ranges for the whole set: the top of the ranges when the islands fit with space left, the highest density that still fits, or the bottom of the ranges when they do not fit.
+- **When the islands do not fit,** they are still written at their density: the layout then reaches beyond the texture, from the corner at the UV origin, and the result names the size it needs. Fitting it into the texture is your choice: a larger **Size** and **Pack** again, Blender's **Pack Islands** with scaling, or by hand.
+- **Direction marks:** **Upright** and **Flip** islands keep their rotation; a set with a **Quarter** island turns its islands in 90-degree steps only.
+- **Margin:** each island keeps the margin on every side, so two islands are at least twice the margin apart.
+- **Kept unchanged:** islands without UV area (a line or a point in the UVs) keep their UVs; the report lists them.
+- Works in Object Mode and Edit Mode; the selection, the mode and the active UV map stay as they were.
+- Blender waits while a texture set packs (up to about half a minute for thousands of islands); the section and the status bar show the step in work.
+
+#### Packing Report
+
+**Pack** and **Check All** write the text **FSS Packing Report** (open it in a **Text Editor**). Per texture set:
+
+- the result, the mode (fit, underflow: room even at the top of the ranges, or overflow), the position in the ranges (t, 0 to 1) and k, the layout's size against the texture's;
+- the needed size, the fill of the needed size and of the current size;
+- the smallest gap between islands, margin violations and overlapping triangles (both should be 0), and how far any island's density lies outside its range;
+- the number of islands, and those packed by their bounding box (when Blender's outline of an island fails);
+- islands kept unchanged, and islands not checked for density (a sliver in the UVs, or no 3D area);
+- **WARNING faces without area:** objects of the set with faces that have no area. Fix them with [Find Faces Without Area](#find-faces-without-area);
+- after **Pack**, the objects that were included but not selected;
+- the time.
 
 **Marks multiply down the hierarchy.** An object's density range is the scene's density freedom × every density mark from the root down to the object itself, zone empties included. A door empty marked x1.5 inside a zone marked x0.8 gives everything in the door x1.2 (with the freedom: x1.08 to x1.32); a knob inside the door marked x0.75 gets x0.81 to x0.99.
 
@@ -201,6 +234,10 @@ How to use it:
 5. Press **Rename Selected (N)**. The list is scanned again afterwards.
 
 The check does not read the MSFS project: it cannot know which names the XML uses. Before renaming, make sure the old name is not referenced, or update the reference. Linked (library) items are listed but cannot be renamed here. Bones of an armature in Edit Mode are skipped.
+
+#### Find Faces Without Area
+
+A face without area (its corners on one point or one line, at most 0.000001 cm²) has no surface to texture, but its UVs can still reach far out and push the islands of its texture set apart when packing. **Find Faces Without Area** checks every mesh object of the view layer and selects the visible ones with such faces, the first one active; it also selects those faces in their meshes, so **Tab** into Edit Mode shows them. The message counts the faces and objects (hidden objects are counted, not selected); the system console lists each object. Fix the geometry, for example with **Mesh > Clean Up > Degenerate Dissolve** or **Merge by Distance**, then run the check again. It works in Object Mode.
 
 #### Fix Broken Bone Parents
 

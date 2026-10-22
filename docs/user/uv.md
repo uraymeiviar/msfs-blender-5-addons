@@ -60,7 +60,7 @@ On 17 cockpit test parts, 1.10 gave about 15 % more islands and 26 % more extra 
 7. **Accept + Unwrap** when you are happy (or **Accept Proposed** to unwrap later yourself), or **Discard Proposed** to drop the proposal.
 8. **Unwrap** (if you did not use Accept + Unwrap): in Edit Mode, select all faces and unwrap with **UV > Unwrap**, method **Angle Based**.
 
-**Packing can wait.** You may pack now, for example to review the **Density** heatmap or to try a texture. Packing is quick to redo: pack again whenever zones, materials or density marks change. It becomes costly once texturing has started, because moving islands then means baking again and carrying the painting over. See [The Pipeline, step 8](README.md#8-packing-in-development).
+**Packing can wait.** You may pack now, for example to review the **Density** heatmap or to try a texture. Packing is quick to redo: **Pack** again (**UV Tools > Packing**) whenever zones, materials or density marks change. It becomes costly once texturing has started, because moving islands then means baking again and carrying the painting over. See [The Pipeline, step 8](README.md#8-packing).
 
 **To replace the current seams with a fresh proposal:** **Clear Current**, then **Propose Seams**, then **Accept Proposed**. The order matters: proposing first would let the old seams steer the proposal.
 
