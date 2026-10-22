@@ -5,7 +5,7 @@
 
 This guide is for 3D artists who build Flight Sim Studio (FSS) aircraft in Blender 5.2. It assumes you already model, unwrap, animate, texture and export in Blender. It explains what MSFS needs on top of that, the order in which we prepare a model for it, and which of our tools help at each step and why.
 
-It matches **FSS Blender Tools 0.30.0** and the FSS exporter based on Asobo exporter 8.4.1.
+It matches **FSS Blender Tools 0.31.0** and the FSS exporter based on Asobo exporter 8.4.1.
 
 - **The pipeline** (below): the steps from a new model to a deployed one, in order.
 - **The reference pages:** what each panel and button does, linked from the steps:
@@ -35,7 +35,7 @@ Steps marked **in development** describe what the tool will do, and how to get t
 | Step | Tools | Tool status | MSFS Authoring Guide |
 | :--- | :--- | :--- | :--- |
 | [1. Scene, Hierarchy and Names](#1-scene-hierarchy-and-names) | Tools, Empty Bounds, Checks | available | `modeling.md` |
-| [2. Zones and Materials](#2-zones-and-materials-in-development) | Zones & Merge Tree, zone tool | density multiplier available; the rest by hand | `materials.md`, `texturing.md` |
+| [2. Zones and Materials](#2-zones-and-materials-in-development) | Zones & Merge Tree, zone tool | zone density marks available; the rest by hand | `materials.md`, `texturing.md` |
 | [3. Loose Pieces](#3-loose-pieces-what-disappears-together) | LOD hints, Viewport LOD | a modelling decision | `lods.md` |
 | [4. Merge Tree](#4-merge-tree) | Tags, Zones & Merge Tree | available | `modeling.md` |
 | [5. LOD](#5-lod) | LOD | available | `lods.md` |
@@ -69,7 +69,7 @@ Steps marked **in development** describe what the tool will do, and how to get t
 **Why:** a **zone** is a part of the scene that is seen together, for example the forward cockpit (main panel, glareshield, pedestal) and the rear cockpit (behind the seats, the aft ceiling), or the front and rear cabin. Zones are your choice; they depend on the scene. Each zone has its own materials and texture sets, for three reasons:
 
 - **Video memory:** a texture stays loaded as long as any part of it may be on screen. If forward and rear parts share a texture, the rear half stays in memory while the pilot looks forward, although it is never seen. Separate zones keep what is out of view from holding memory for what is in view. See "When Separate Textures Are Better" in `texturing.md` of the MSFS Authoring Guide.
-- **Texel density:** each zone has its own density multiplier, set in [Zones & Merge Tree](fss-tools.md#zones--merge-tree), so the packer can give the rarely seen rear zone less texture and the forward zone more (step 7).
+- **Texel density:** each zone empty can carry its own density mark, set in [Zones & Merge Tree](fss-tools.md#zones--merge-tree), so the packer can give the rarely seen rear zone less texture and the forward zone more (step 7).
 - **Culling:** MSFS leaves out what is out of view by each node's bounding box. An object with parts both at the windshield and at the rear has a box across the whole cockpit, and is never left out. Zones make such objects easy to find: select a zone's empty, and [Empty Bounds](fss-tools.md#empty-bounds) shows its box reaching into the other zone. They also keep merge groups apart (step 4).
 
 Within a zone there is one material, and one texture set, per **material class** (standard, emissive, decal, glass and so on). Packing (step 8) packs one texture set at a time, so it follows the zones and materials.
@@ -78,12 +78,12 @@ Within a zone there is one material, and one texture set, per **material class**
 
 ![EMPTY_ROOT_COCKPIT contains the zones @ZONE_FWD and @ZONE_AFT. @ZONE_FWD uses the materials COCKPIT_FWD_STD and so on, and holds the merge group @MERGE_MAIN_PANEL: the panel shell and screws merge into one mesh, while the animated SWITCH_APU and the tagged MFD_SCREEN stay their own nodes. @ZONE_AFT uses COCKPIT_AFT_STD and so on.](images/scene-hierarchy.svg)
 
-Materials are named `<SCENE>_<ZONE>_<CLASS>`: the scene from the root, the zone from its empty, the class from the MSFS material type. Objects below `@ZONE_FWD` with a standard material use `COCKPIT_FWD_STD`. The texture size is taken from the zone's material (4K if none is set). Classes follow the MSFS material types: `STD`, `STD_EM`, `DECAL`, `DECAL_EM`, `DECAL_FROST`, `DECAL_BLEND`, `GLASS`, `WNDSHIELD`, `INVIS`, `OCCLUDER`, `SCREEN`, `ANISO`, `CLEARCOAT`, `PORTHOLE`, `PARALLAX`, `FRESNEL`, `PROPELLER`.
+Materials are named `<SCENE>_<ZONE>_<CLASS>`: the scene from the root, the zone from its empty, the class from the MSFS material type. Objects below `@ZONE_FWD` with a standard material use `COCKPIT_FWD_STD`. The texture size is set per material in [Packing](fss-tools.md#packing) (default 4096 × 4096). Classes follow the MSFS material types: `STD`, `STD_EM`, `DECAL`, `DECAL_EM`, `DECAL_FROST`, `DECAL_BLEND`, `GLASS`, `WNDSHIELD`, `INVIS`, `OCCLUDER`, `SCREEN`, `ANISO`, `CLEARCOAT`, `PORTHOLE`, `PARALLAX`, `FRESNEL`, `PROPELLER`.
 
 **Meanwhile, by hand:**
 
 - Create the zone empties now, named `@ZONE_<NAME>` below the root, and put every part below one of them. The export drops the leading `@`: `@ZONE_FWD` becomes the node `ZONE_FWD`.
-- Press **Refresh** in [Zones & Merge Tree](fss-tools.md#zones--merge-tree) to see the zones, and set each zone's **density multiplier** there (1.0 keeps the density; for example 0.5 for a rarely seen zone). Everything below the zone inherits it.
+- Press **Refresh** in [Zones & Merge Tree](fss-tools.md#zones--merge-tree) to see the zones, and give a zone a **density mark** there where it needs one (no mark keeps the density; for example 0.5 for a rarely seen zone). Marks multiply down the hierarchy, so everything below the zone takes it.
 - Name the materials `<SCENE>_<ZONE>_<CLASS>`, one per zone and class, and set each material's MSFS type to match its class. Auto Seam already skips objects whose materials are all decal, glass, windshield, invisible or occluder, by these class names or by the MSFS type.
 - Keep the number of materials low: see `materials.md` in the MSFS Authoring Guide.
 
@@ -167,7 +167,7 @@ So the topology you model decides what disappears together. A floor plate and it
 
 **What it measures:** from the cameras you include (for the cockpit the pilot and copilot eyes; for the exterior your own exterior cameras) and over the animation steps, how much of each face is actually visible, weighted by how far the head has to turn from the camera's default view. The score is a factor from 0 to 1 per face that depends neither on distance nor on size: a small knob in plain view scores as high as a large panel. Parts too small to measure (screw heads, small labels) take the value of the part they belong to.
 
-**How packing uses it:** each island gets a texel density (pixels per centimetre) within its object's density range from the UV marks in [Packing](fss-tools.md#packing) × zone multiplier × visibility × the target density. An island's visibility comes from its seen faces only, so a partly hidden island keeps the density its visible part needs. Faces never seen in the analysed views and steps get a small minimum density; nothing is deleted.
+**How packing uses it:** each island gets a texel density (pixels per centimetre) within the target density × its object's density range × the island's visibility. The density range is the scene's density freedom times every density mark from the root down to the object, zone marks included, all set in [Packing](fss-tools.md#packing). An island's visibility comes from its seen faces only, so a partly hidden island keeps the density its visible part needs. Faces never seen in the analysed views and steps get a small minimum density; nothing is deleted.
 
 **Do:**
 
@@ -186,14 +186,14 @@ So the topology you model decides what disappears together. A floor plate and it
 
 **Why:** each texture set (step 2) is one texture. All islands that use it must fit into it, at the texel density each part should get (step 7), with enough space between islands that they do not bleed into each other at lower mip levels.
 
-![Seams, from Auto Seam or by hand, and the unwrap produce the UV islands; each island's visibility comes from the scores of its seen faces. The density mark range from UV Marks times the zone multiplier times the island visibility gives a density ratio range without unit; that ratio times the target density gives the island's density range in pixels per centimetre. The zone also decides the texture set: the packer packs one texture set per zone and class, each island inside its range.](images/zone-visibility-packing.svg)
+![Seams, from Auto Seam or by hand, and the unwrap produce the UV islands; each island's visibility comes from the scores of its seen faces. The scene's density freedom times the density marks from the root down to the object (zone marks included) times the island visibility gives a density ratio range without unit; that ratio times the target density gives the island's density range in pixels per centimetre. The zone also decides the texture set: the packer packs one texture set per zone and class, each island inside its range.](images/zone-visibility-packing.svg)
 
-**What the tool will do:** pack each texture set from its materials and zones, scale each island to its density range, turn islands only as their **direction** mark allows, keep mirrored or shared parts stacked, and use each material's **margin**.
+**What the tool will do:** pack each texture set from its materials and zones, scale each island to its density range, turn islands only as their **direction** mark allows, keep mirrored or shared parts stacked, and use each material's **margin** in pixels. It will report a texture set whose islands do not fit its **size** even at the bottom of their ranges, or leave space even at the top, and the size that would fit.
 
 **Meanwhile, by hand:** for each texture set, select the objects that use its material, then in the UV editor:
 
-1. **Average Islands Scale**, then scale up the islands of parts marked **Higher** and down those marked **Lower**.
-2. **Pack Islands** with the material's margin from [Packing](fss-tools.md#packing), and rotation off for parts marked **Upright** (brushed metal, grain, text).
+1. **Average Islands Scale**, then scale the islands of marked parts by their factor (**Higher** x1.5, **Lower** x0.75, times the marks above them).
+2. **Pack Islands** with the material's margin from [Packing](fss-tools.md#packing) (set **Margin Method** to **Fraction** and enter the pixel margin divided by the texture size, for example 8 / 4096 = 0.002), and rotation off for parts marked **Upright** (brushed metal, grain, text).
 
 **Check:** the heatmap's **Density** mode shows each texture set near 1.0, except where you chose otherwise.
 
@@ -268,7 +268,7 @@ If your version is newer than 0.24.1, some labels or buttons may differ from thi
 | **Deploy** | Exporting a `.blend` to glTF with the aircraft repository's scripts and copying the files into the simulator package. The deploy runs Blender in the background. |
 | **LOD** | Level of detail. `_LOD00` is the full model; `_LOD01` to `_LOD06` are lighter versions MSFS shows when the model is small on screen. |
 | **Loose piece** | A connected piece of geometry inside one mesh. Pieces that only touch without sharing vertices count as separate. |
-| **Mark** | Something you put on an object to tell an automatic tool what it cannot work out itself: an override or a hint. Marks live in the `.blend`; MSFS never sees them. Three kinds: **LOD marks** in the [LOD](lod.md#marks) panel (from which LOD a part is left out or shown, or **Keep**); **UV marks** in **UV Tools** ([Packing](fss-tools.md#packing): the target density, how islands may turn; [Seams](fss-tools.md#seams): **Skip Auto Seam**), inherited by the objects below; and **tags**. |
+| **Mark** | Something you put on an object to tell an automatic tool what it cannot work out itself: an override or a hint. Marks live in the `.blend`; MSFS never sees them. Three kinds: **LOD marks** in the [LOD](lod.md#marks) panel (from which LOD a part is left out or shown, or **Keep**); **UV marks** in **UV Tools** ([Packing](fss-tools.md#packing): the density factor, multiplied down the hierarchy, and how islands may turn; [Seams](fss-tools.md#seams): **Skip Auto Seam**), which reach the objects below; and **tags**. |
 | **Material class** | The kind of material (standard, emissive, decal, glass and so on), the last part of a material name `<SCENE>_<ZONE>_<CLASS>`. |
 | **Merge group** | An object named `@MERGE_<name>` whose subtree becomes one mesh at export. |
 | **Name prefix** | `@MERGE_`, `@NOMERGE_` (see [Zones & Merge Tree](fss-tools.md#zones--merge-tree)) and `@ZONE_` (step 2): a prefix in an object's name that the tools act on. The export removes `@MERGE_` and `@NOMERGE_` entirely, and the leading `@` of any other name: `@ZONE_FWD` becomes `ZONE_FWD`. |

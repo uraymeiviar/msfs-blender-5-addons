@@ -131,9 +131,9 @@ def test_uv_scaled_by_two():
     obj_scaled = create_plane("Plane_Scaled", size=1.0, uv_scale=(2.0, 2.0), location=(10, 0, 0))
     obj_scaled.data.materials.append(mat)
 
-    # Set both objects' density range to default (0.9 to 1.1)
-    obj_ref[uv_marks.DENSITY_KEY] = [1.0, 1.0]
-    obj_scaled[uv_marks.DENSITY_KEY] = [1.0, 1.0]
+    # Final density range exactly 1.0 for both (no marks, scene density freedom 1.0 to 1.0)
+    bpy.context.scene.fss_uv_density_freedom_min = 1.0
+    bpy.context.scene.fss_uv_density_freedom_max = 1.0
 
     obj_ref.select_set(True)
     obj_scaled.select_set(True)
@@ -261,11 +261,7 @@ def test_skip_auto_seam_mark():
     assert any(name == "ChildMesh" and reason == "marked Skip Auto Seam (from ParentEmpty)" for name, reason in skipped), (
         f"Child object not skipped with inheritance reason: {skipped}"
     )
-
-    # 3. Select Marked operator
-    bpy.ops.fss.uv_select_marked()
-    assert parent_empty.select_get(), "ParentEmpty should be selected by Select Marked"
-    print("  -> PASS: direct mark, inherited mark with parent name, and Select Marked verified.")
+    print("  -> PASS: direct mark and inherited mark with parent name verified.")
 
 
 def test_gltf_export_unchanged():

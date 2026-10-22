@@ -10,8 +10,9 @@ glTF: merged meshes are named without it, and node names are stripped of it as t
 A node named @NOMERGE_<name> inside a group is the opposite marker: it and its subtree are not merged and stay child
 nodes of the merged mesh, exported as <name>.
 Zone empties (@ZONE_<NAME>) hold the merge groups: a group's topmost marked ancestor must be a zone (UV journal
-decision 34), and each zone carries a texel density multiplier for the packer (fss_zone_density, decision 76). The
-Zones & Merge Tree panel lists both, and flags groups outside every zone and zones nested inside a group or a zone.
+decision 34). A zone's texel density factor is the zone empty's own density mark (uv_marks, decision 108), which
+multiplies everything below it. The Zones & Merge Tree panel lists zones and groups, edits each zone's mark, and flags
+groups outside every zone and zones nested inside a group or a zone.
 
 The merge edits the objects being exported, so it only runs where those are throwaway: the MSFS 2024 multi-exporter
 (it exports duplicates and purges everything created during the export) or a background Blender run (the deploy
@@ -24,7 +25,7 @@ import sys
 import bpy
 import numpy as np
 
-from . import lod_model, tags
+from . import lod_model, tags, uv_marks
 
 # "@" keeps markers from clashing with real node names; every leading "@" is stripped before the glTF is written
 PREFIX = "@MERGE_"
@@ -32,7 +33,6 @@ NO_MERGE_PREFIX = "@NOMERGE_"
 MARKERS = (PREFIX, NO_MERGE_PREFIX)
 # Zone empties keep their name at export, without the "@" (@ZONE_FWD exports as ZONE_FWD)
 ZONE_PREFIX = "@ZONE_"
-ZONE_DENSITY_KEY = "fss_zone_density"
 # Set by the MSFS 2024 multi-exporter on its duplicates; the exporter writes it as the glTF node name
 ORIGINAL_NAME_KEY = "msfs_original_name"
 # Set by the multi-exporter on its export copies of materials: the material the artist assigned
@@ -68,14 +68,13 @@ def is_zone(obj) -> bool:
     return logical_name(obj).startswith(ZONE_PREFIX)
 
 
-def zone_density(obj):
-    """(multiplier, zone) of the nearest @ZONE_ empty at or above obj, or (1.0, None) outside every zone. The packer
-    multiplies the UV Marks density range by it: everything below a zone inherits the zone's multiplier."""
+def nearest_zone(obj):
+    """The nearest @ZONE_ empty at or above obj, or None outside every zone."""
     while obj is not None:
         if is_zone(obj):
-            return getattr(obj, ZONE_DENSITY_KEY), obj
+            return obj
         obj = obj.parent
-    return 1.0, None
+    return None
 
 
 def _is_animated(obj) -> bool:
@@ -463,7 +462,7 @@ def run(context, exported, selected_export, log):
 
 def _strip_fss_extras(gltf2_element):
     """FSS settings are tool data, not model data: drop them from the extras that Include Extras writes (Blender 5.2
-    writes registered properties such as fss_zone_density too). Other custom properties stay."""
+    writes registered properties such as the density marks fss_uv_density_min too). Other custom properties stay."""
     extras = getattr(gltf2_element, "extras", None)
     if isinstance(extras, dict):
         for key in [key for key in extras if key.startswith("fss_")]:
@@ -586,7 +585,7 @@ class FSS_MergeTreeItem(bpy.types.PropertyGroup):
     kind: bpy.props.EnumProperty(items=(('GROUP', "Merge Group", ""), ('NOMERGE', "Stays Separate", ""),
                                         ('ZONE', "Zone", ""), ('UNZONED', "Unzoned", "")))
     root: bpy.props.StringProperty()
-    # The empty of a zone row: its density field is drawn from it and edited in place, without Refresh
+    # The empty of a zone row: its density mark is drawn from it and edited in place, without Refresh
     zone: bpy.props.PointerProperty(type=bpy.types.Object)
     flag: bpy.props.StringProperty()
     groups: bpy.props.IntProperty()
@@ -643,13 +642,13 @@ class FSS_OT_MergeRefresh(bpy.types.Operator):
         # visible groups below is still listed, so its groups are not reported as unzoned.
         zone_groups, zone_objects, zoned = {}, {}, {}
         for obj in visible:
-            zone = zone_density(obj.parent)[1]
+            zone = nearest_zone(obj.parent)
             if zone is not None:
                 zone_objects[zone] = zone_objects.get(zone, 0) + 1
                 if obj in by_root:
                     zone_groups[zone] = zone_groups.get(zone, 0) + 1
         for root in children.get(None, []):
-            zoned.setdefault(zone_density(root.parent)[1], []).append(root)
+            zoned.setdefault(nearest_zone(root.parent), []).append(root)
         zones = {obj for obj in visible if is_zone(obj)} | {zone for zone in zoned if zone is not None}
 
         def zone_flag(zone):
@@ -718,6 +717,15 @@ class FSS_OT_MergeRefresh(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def _draw_zone_mark(row, zone, text):
+    """The zone empty's own density mark: the toggle, then Min and Max (greyed while the mark is off)."""
+    row.prop(zone, uv_marks.OWN_PROP, text=text)
+    fields = row.row(align=True)
+    fields.enabled = getattr(zone, uv_marks.OWN_PROP)
+    fields.prop(zone, uv_marks.MIN_PROP, text="")
+    fields.prop(zone, uv_marks.MAX_PROP, text="")
+
+
 class FSS_UL_MergeTree(bpy.types.UIList):
     bl_idname = "FSS_UL_merge_tree"
 
@@ -730,7 +738,7 @@ class FSS_UL_MergeTree(bpy.types.UIList):
                       icon='ERROR' if item.flag else 'OUTLINER_OB_EMPTY')
             row.label(text=f"{item.groups} grp  {item.objects} obj")
             if item.zone is not None:
-                row.prop(item.zone, ZONE_DENSITY_KEY, text="")
+                _draw_zone_mark(row, item.zone, "")
             return
         if item.kind == 'UNZONED':
             row.label(text=f"{item.name}: {item.groups} group(s) outside every {ZONE_PREFIX} empty", icon='ERROR')
@@ -852,7 +860,7 @@ class FSS_PT_Merge(bpy.types.Panel):
                 if item.flag:
                     box.label(text=f"Zone {item.flag}", icon='ERROR')
                 if item.zone is not None:
-                    box.prop(item.zone, ZONE_DENSITY_KEY)
+                    _draw_zone_mark(box.row(align=True), item.zone, "Density")
             elif item.kind == 'UNZONED':
                 box.label(text=f"Put these groups below a {ZONE_PREFIX} empty", icon='ERROR')
             else:
@@ -893,14 +901,9 @@ def register():
     for cls in CLASSES:
         bpy.utils.register_class(cls)
     bpy.types.Scene.fss_merge = bpy.props.PointerProperty(type=FSS_MergeSettings)
-    # On the zone empty, read through zone_density()
-    setattr(bpy.types.Object, ZONE_DENSITY_KEY, bpy.props.FloatProperty(
-        name="Density Multiplier", default=1.0, min=0.1, max=10.0, soft_min=0.1, soft_max=10.0,
-        description="Multiplies the texel density of everything below this zone when the UVs are packed"))
 
 
 def unregister():
-    delattr(bpy.types.Object, ZONE_DENSITY_KEY)
     del bpy.types.Scene.fss_merge
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)

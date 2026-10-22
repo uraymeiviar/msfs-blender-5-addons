@@ -15,7 +15,7 @@ Each section opens and closes on its own; Blender remembers that in the `.blend`
 
 ## Zones & Merge Tree
 
-Merge groups join many small objects into one mesh at export, while every part stays a separate, editable object in the `.blend`. Fewer meshes means fewer draw calls in the simulator. Zones hold the merge groups: the panel lists each zone with its groups, and sets the zone's texel density multiplier.
+Merge groups join many small objects into one mesh at export, while every part stays a separate, editable object in the `.blend`. Fewer meshes means fewer draw calls in the simulator. Zones hold the merge groups: the panel lists each zone with its groups, and edits the zone's density mark.
 
 ### Name Prefixes
 
@@ -49,7 +49,7 @@ Transparent materials (MSFS alpha mode Blend) never share a mesh with opaque one
 - **Merge on Export:** turns merging on or off for the scene (on by default).
 - **New Merge Group:** select objects with the same parent (or the same parent bone), press the button and type a name (for example `OVHD_PANEL`). It creates the empty `@MERGE_OVHD_PANEL` at the parent's position and moves the objects under it without moving them in the world.
 - **Refresh:** lists the zones and merge groups of the visible objects. Click a row to select that object. The list does not follow later changes in the scene; press **Refresh** again.
-  - **Zone rows** (`@ZONE_` empties, without the prefix): the number of merge groups and objects below the zone, and the zone's **density multiplier** (default 1.0, from 0.1 to 10). The packer (in development) will multiply the texel density of everything below the zone by it: 2.0 for twice the texels per metre, 0.5 for half. A change is stored on the zone empty at once, without **Refresh**.
+  - **Zone rows** (`@ZONE_` empties, without the prefix): the number of merge groups and objects below the zone, and the zone empty's own **density mark** (see [Packing](#packing)): a tick for the mark, then its **Min** and **Max** factors, greyed while the tick is off. Marks multiply down the hierarchy, so the zone's factor applies to everything below it: 2.0 for twice the texels per metre, 0.5 for half; type the same value in both fields for one factor. A change is stored on the zone empty at once, without **Refresh**, and is the same mark the Packing section shows for that empty.
   - **Merge group rows**, below their zone and nested as in the scene, with objects, materials and kept-separate counts per group. Below the list, the active group shows its materials, a transparency split, its UV map names, and why objects were kept separate.
   - **`@NOMERGE_` rows**, one level below the group they belong to: these objects stay their own nodes under the merged mesh.
   - **Unzoned** (warning): merge groups with no zone above them. Move them below a `@ZONE_` empty.
@@ -92,23 +92,30 @@ Automated UV seam proposal for hard-surface meshes, with a **Distortion Limit** 
 
 ### Packing
 
-Marks for packing and for the heatmap's Density mode. The section is closed by default.
+How much texture each part gets, and the settings of each texture set, for packing and for the heatmap's Density mode. The section is closed by default. Every field takes effect as you change it; there is no Apply button.
 
-- **Active object box:** the effective texel density range and island direction of the active object, and where each comes from: **own mark**, **from** an ancestor, or **default**. An object without its own mark takes the mark of its nearest marked parent (for example an empty that groups a door).
-- **Texel density range (x base):** how sharp the object's texture should be compared with the base density, as a range the packer may choose from. Type **Min** and **Max** and press **Apply**, or use a preset:
-  - **Lower:** 0.7 to 0.8, for parts that are hardly seen.
-  - **Higher:** 1.5 to 1.65, for prominent parts such as the glareshield.
-  - **Clear:** remove the mark (inherit from the parent, else the default 0.9 to 1.1).
-- **Island direction:** how islands may turn when packed:
-  - **Free:** any angle.
-  - **Upright:** no rotation (brushed metal, wood grain, text).
-  - **Flip:** 0 or 180 degrees only.
-  - **Quarter:** 90-degree steps only.
-  - **Clear:** remove the mark.
-- **Select Marked:** select every visible object with its own density, direction, or skip mark.
-- **Texture sets:** one row per material of the selection (up to 20) with its **Margin**, the space around each island as a fraction of the UV square (default 0.002). The line below shows what that means in pixels at 4K and 8K, and warns when the margin is under 4 px at 2K (texture compression works in 4 x 4 pixel blocks, so smaller margins bleed). A material with its own margin shows an arrow button that returns it to the default.
+- **Target density** (for the scene): the texel density at factor 1.0, in pixels per centimetre. The default 20.48 is 2048 pixels per metre.
+- **Density freedom Min / Max** (for the scene, default 0.90 and 1.10): how far the packer may scale any island down or up. It applies once, at the top of the hierarchy.
+- **Active object box:** for the active object, how its density comes together:
+  - **Parent:** the factor range of everything above it, for example `x1.35 - x1.82 from DOOR_L` (the nearest marked parent is named), or `x0.90 - x1.10 (scene freedom)` when nothing above it is marked.
+  - **Zone:** the zone the object lies in and the zone empty's own factor. It is already part of **Parent**; the row only shows where the zone stands.
+  - **Visibility:** the object's score from [Visibility Scoring](#visibility-scoring) and the range of its islands' scores. **no data: x1.00** when the `.visibility` file is missing or the mesh changed since; **never seen: x0.10** when no analysed view sees it. Shown in Object Mode.
+  - **Density:** the object's own mark. Tick **own mark** to give it a factor, then set **Min** and **Max** (the same value in both for one factor); the fields are greyed while the tick is off. An object without its own mark counts as x1.0.
+  - **Lower** (x0.75, for parts that are hardly seen), **Higher** (x1.5, for prominent parts such as the glareshield) and **Clear** (remove the own mark) act on all selected objects.
+  - **Result:** the density range in pixels per centimetre that the packer may give the object's islands: target × parent × own mark × visibility, and in brackets the range over its islands' visibility.
+  - **Direction:** how islands may turn when packed; the active object's direction is highlighted, and the box names the parent it comes from. The buttons act on all selected objects:
+    - **Free:** any angle.
+    - **Upright:** no rotation (brushed metal, wood grain, text).
+    - **Flip:** 0 or 180 degrees only.
+    - **Quarter:** 90-degree steps only.
+    - **Clear:** remove the mark (inherit from the parent, else Free).
+- **Texture set** boxes: one per material of the active object (up to 5, then the number of the others):
+  - **Size:** the width and height of the texture set, 256 to 8192 pixels (default 4096 × 4096). Choose the size; the packer (in development) will report when the islands do not fit at their density, or leave space, and which size would fit.
+  - **Margin:** the space around each island, in pixels of this texture set (default 8). 8 pixels keep islands apart down to the second mip level after the 4 × 4 block compression of the textures; below 4 pixels the box warns that compressed blocks bleed across islands.
 
-The density and direction buttons act on all selected objects. The **Min** and **Max** fields are not saved with the file.
+**Marks multiply down the hierarchy.** An object's density range is the scene's density freedom × every density mark from the root down to the object itself, zone empties included. A door empty marked x1.5 inside a zone marked x0.8 gives everything in the door x1.2 (with the freedom: x1.08 to x1.32); a knob inside the door marked x0.75 gets x0.81 to x0.99.
+
+To set a field on several objects at once, select them, make one of them active, and hold **Alt** while you drag or type in the field (Blender's own way to edit all selected objects).
 
 #### Visibility Scoring
 

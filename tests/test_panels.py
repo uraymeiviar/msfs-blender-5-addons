@@ -106,9 +106,12 @@ def test_draw_all():
     bpy.types.FSS_PT_uv_marks.draw(SimpleNamespace(layout=_Layout(packing)), bpy.context)
     texts = [kwargs.get('text') for name, _args, kwargs in packing if name == 'operator']
     assert 'Skip Auto Seam' not in texts, texts
+    # Density marks are live fields with factor presets: no Apply, no Select Marked (decision 109)
+    assert 'Apply' not in texts and 'Select Marked' not in texts and {'Lower', 'Higher'} <= set(texts), texts
     steps = bpy.context.scene.fss_visibility.bl_rna.properties['states']
     assert steps.name == 'Animation Steps', steps.name
-    print(f"PASS: test_draw_all ({len(drawn)} panels drawn; Skip Auto Seam in Seams only; 'Animation Steps')")
+    print(f"PASS: test_draw_all ({len(drawn)} panels drawn; Skip Auto Seam in Seams only; Packing without Apply and "
+          "Select Marked; 'Animation Steps')")
 
 
 def main():

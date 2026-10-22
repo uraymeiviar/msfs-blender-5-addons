@@ -1,5 +1,6 @@
-"""Zones & Merge Tree: zone rows, merge groups below them, @NOMERGE_ rows, Unzoned, nesting flags, the zone density
-multiplier (fss_zone_density), zone_density() inheritance, and that the multiplier never reaches the glTF.
+"""Zones & Merge Tree: zone rows, merge groups below them, @NOMERGE_ rows, Unzoned, nesting flags, the zone row
+editing the zone empty's own density mark (uv_marks, decision 108), nearest_zone(), and that no fss_ key reaches the
+glTF.
 
 To run:
 G:\\e-jets-e2\\tools\\blender\\blender.exe -b --factory-startup --python tests/test_zone_tree.py
@@ -33,7 +34,7 @@ sys.path.insert(0, repo_root_str)
 
 import io_scene_gltf2_msfs_fss  # noqa: E402,F401
 import fss_blender_tools  # noqa: E402
-from fss_blender_tools import merge  # noqa: E402
+from fss_blender_tools import merge, uv_marks  # noqa: E402
 
 for name in ADDONS:
     addon_utils.enable(name, default_set=True)
@@ -131,44 +132,35 @@ def test_tree_rows():
     print(f"PASS: test_tree_rows ({len(rows)} rows)")
 
 
-def test_density_property():
+def test_zone_mark():
     o = build_scene()
     zone = o['fwd']
-    prop = bpy.types.Object.bl_rna.properties[merge.ZONE_DENSITY_KEY]
-    limits = (prop.default, prop.hard_min, prop.hard_max, prop.soft_min, prop.soft_max)
-    assert all(abs(got - want) < 1e-6 for got, want in zip(limits, (1.0, 0.1, 10.0, 0.1, 10.0))), limits
-    assert prop.description
-    assert zone.fss_zone_density == 1.0
-    zone.fss_zone_density = 20.0
-    assert abs(zone.fss_zone_density - 10.0) < 1e-6, zone.fss_zone_density
-    zone.fss_zone_density = 0.01
-    assert abs(zone.fss_zone_density - 0.1) < 1e-6, zone.fss_zone_density
-    # A write through the row's zone pointer lands on the empty, without Refresh
+    assert not hasattr(bpy.types.Object, 'fss_zone_density'), "the separate zone property is gone (decision 108)"
+    assert uv_marks.own_density(zone) is None
+    # A write through the row's zone pointer lands on the empty's own mark, without Refresh
     bpy.ops.fss.merge_refresh()
     row = next(item for item in bpy.context.scene.fss_merge.items if item.kind == 'ZONE' and item.name == 'FWD')
-    row.zone.fss_zone_density = 2.5
-    assert abs(zone.fss_zone_density - 2.5) < 1e-6, zone.fss_zone_density
-    print("PASS: test_density_property")
+    setattr(row.zone, uv_marks.OWN_PROP, True)
+    setattr(row.zone, uv_marks.MAX_PROP, 2.5)
+    setattr(row.zone, uv_marks.MIN_PROP, 2.5)
+    assert uv_marks.own_density(zone) == (2.5, 2.5), uv_marks.own_density(zone)
+    # Everything below takes the zone's factor, times the scene freedom
+    (low, high), source = uv_marks.density(o['k1'])
+    assert abs(low - 0.9 * 2.5) < 1e-6 and abs(high - 1.1 * 2.5) < 1e-6 and source == zone, (low, high, source)
+    print("PASS: test_zone_mark")
 
 
-def test_zone_density():
+def test_nearest_zone():
     o = build_scene()
-    o['fwd'].fss_zone_density = 2.0
-    o['aft'].fss_zone_density = 0.5
-    o['inner'].fss_zone_density = 3.0
     cases = {
-        'fwd': (2.0, 'fwd'), 'panel': (2.0, 'fwd'), 'k1': (2.0, 'fwd'), 'screen': (2.0, 'fwd'),
-        'aft': (0.5, 'aft'), 's1': (0.5, 'aft'),
-        'inner': (3.0, 'inner'), 'b1': (3.0, 'inner'),
-        'bad': (1.0, 'bad'), 'z1': (1.0, 'bad'),
-        'root': (1.0, None), 'stray': (1.0, None), 't1': (1.0, None),
+        'fwd': 'fwd', 'panel': 'fwd', 'k1': 'fwd', 'screen': 'fwd', 'aft': 'aft', 's1': 'aft',
+        'inner': 'inner', 'b1': 'inner', 'bad': 'bad', 'z1': 'bad', 'root': None, 'stray': None, 't1': None,
     }
-    for key, (value, zone_key) in cases.items():
-        got_value, got_zone = merge.zone_density(o[key])
-        assert abs(got_value - value) < 1e-6 and got_zone == (o[zone_key] if zone_key else None), (
-            key, got_value, got_zone)
-    assert merge.zone_density(None) == (1.0, None)
-    print(f"PASS: test_zone_density ({len(cases)} objects)")
+    for key, zone_key in cases.items():
+        got = merge.nearest_zone(o[key])
+        assert got == (o[zone_key] if zone_key else None), (key, got)
+    assert merge.nearest_zone(None) is None
+    print(f"PASS: test_nearest_zone ({len(cases)} objects)")
 
 
 class _Layout:
@@ -186,7 +178,7 @@ class _Layout:
 
 def test_draw_smoke():
     o = build_scene()
-    o['fwd'].fss_zone_density = 1.5
+    setattr(o['fwd'], uv_marks.OWN_PROP, True)
     bpy.ops.fss.merge_refresh()
     settings = bpy.context.scene.fss_merge
     texts = []
@@ -196,8 +188,9 @@ def test_draw_smoke():
                                          index)
         texts.append([kwargs.get('text') for name, _args, kwargs in calls if name == 'label' and kwargs.get('text')])
         props = [(args[0], args[1]) for name, args, _kwargs in calls if name == 'prop']
-        assert props == ([(o[item.name.lower()], merge.ZONE_DENSITY_KEY)] if item.kind == 'ZONE' else []), (
-            item.name, props)
+        mark = [(item.zone, name) for name in (uv_marks.OWN_PROP, uv_marks.MIN_PROP, uv_marks.MAX_PROP)]
+        assert props == (mark if item.kind == 'ZONE' else []), (item.name, props)
+        assert item.kind != 'ZONE' or item.zone == o[item.name.lower()], item.name
     assert texts[2] == ["BAD (inside @MERGE_STRAY)", "0 grp  1 obj"], texts[2]
     assert texts[5] == ["SCREEN (stays separate)"], texts[5]
     assert texts[9] == ["Unzoned: 1 group(s) outside every @ZONE_ empty"], texts[9]
@@ -231,13 +224,18 @@ def test_gltf_leak():
     results = {}
     for extras in (True, False):
         o = build_scene()
-        o['fwd'].fss_zone_density = 2.5
+        # The registered density mark on the zone empty, texture size and margin on a material
+        setattr(o['fwd'], uv_marks.OWN_PROP, True)
+        setattr(o['fwd'], uv_marks.MAX_PROP, 2.5)
+        setattr(o['fwd'], uv_marks.MIN_PROP, 2.5)
         o['fwd']['artist_note'] = 1  # a plain custom property: shows that extras were written at all
         # FSS keys on a material and on mesh data, beside the scene's registered fss_merge and fss_viewport_lod
         mesh_obj = next(obj for obj in bpy.context.scene.objects if obj.type == 'MESH' and obj.visible_get())
         mat = bpy.data.materials.new('ZONE_LEAK_MAT')
         mat['fss_probe'] = 1
         mat['artist_mat_note'] = 1
+        mat.fss_uv_texture_width = '2048'
+        mat.fss_uv_margin_px = 12
         mesh_obj.data.materials.append(mat)
         mesh_obj.data['fss_probe'] = 1
         path = SCRATCH_DIR / f"zones_extras_{int(extras)}.gltf"
@@ -247,9 +245,9 @@ def test_gltf_leak():
         gltf = json.loads(text)
         names = {node.get('name') for node in gltf.get('nodes', [])}
         assert 'ZONE_FWD' in names, sorted(names)
-        results[extras] = (merge.ZONE_DENSITY_KEY in text, fss_extras_keys(gltf),
+        results[extras] = ('fss_uv_' in text, fss_extras_keys(gltf),
                            'artist_note' in text and 'artist_mat_note' in text)
-        print(f"  export_extras={extras}: {len(gltf.get('nodes', []))} nodes, fss_zone_density in file: "
+        print(f"  export_extras={extras}: {len(gltf.get('nodes', []))} nodes, fss_uv_ in file: "
               f"{results[extras][0]}, fss_ keys in extras: {results[extras][1]}, custom properties written: "
               f"{results[extras][2]}")
     # With Include Extras, Blender 5.2 also writes registered properties; the FSS export hooks drop every fss_ key
@@ -263,8 +261,8 @@ def test_gltf_leak():
 
 def main():
     test_tree_rows()
-    test_density_property()
-    test_zone_density()
+    test_zone_mark()
+    test_nearest_zone()
     test_draw_smoke()
     test_gltf_leak()
     print("ALL TESTS PASSED")
