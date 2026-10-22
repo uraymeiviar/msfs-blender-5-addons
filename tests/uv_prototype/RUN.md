@@ -508,3 +508,47 @@ Outputs written to `tests/_work/uv_visibility/`:
 - `<blend_name>.visibility`: Compressed NPZ archive (schema version 4) containing JSON metadata, camera configurations, animation states, per-mesh arrays `(N_views, N_instances, N_faces)`, mesh face counts, and summaries.
 - `pilot_demand.png`: 1080p offscreen render from the pilot camera colored by per-face visibility score (undetermined in cyan, never-seen in magenta, visible graded).
 - `outside_demand.png`: 1080p offscreen render from an exterior isometric view highlighting never-seen exterior fuselage/structure (magenta) and interior instruments (blue/grey).
+
+## 12. Density-first packing prototype (`pack_density_proto.py`)
+
+Blender's Pack Islands wrapped in our own steps (journal Session 97, decisions 112 and 113). Per material, every island is
+scaled to the density lo + t (hi - lo), with one t per set, and then packed with `scale=False` on a temporary mesh:
+
+- margin method ADD, with margin = gap / 2;
+- ORIGINAL_AABB region set by two anchor triangles;
+- proxy quads for islands whose hull fails, and AABB as the last fallback.
+
+The source objects' selection, modes, pins and active UV maps are not touched; only the packed UVs are written.
+
+### Commands
+
+Run from the repository root, one Blender at a time (`tasklist | grep -i blender`):
+
+```powershell
+$B = "G:\e-jets-e2\tools\blender\blender.exe"
+
+# 1. Synthetic cases (10) plus the margin_method and overflow probes
+& $B -b --factory-startup --python tests/uv_prototype/pack_density_proto.py -- --synthetic
+
+# 2. Cockpit: copy the source first (never open the original), with its visibility data beside it
+#    tests/_work/uv_packing_density/COCKPIT_pack.blend      <- G:\e-jets-e2\assets\visual\cockpit\COCKPIT.blend
+#    tests/_work/uv_packing_density/COCKPIT_pack.visibility <- tests/_work/uv_visibility/COCKPIT_addon.visibility
+& $B -b --factory-startup tests/_work/uv_packing_density/COCKPIT_pack.blend --python tests/uv_prototype/pack_density_proto.py -- --cockpit
+
+# 3. Venv (section 3): layout PNGs of the exported sets, grid packer comparison for the named sets
+tests/_work/uv_packing/venv/Scripts/python.exe tests/uv_prototype/pack_density_proto.py --grid Cockpit_STD,COLLIDER
+```
+
+### Outputs (`tests/_work/uv_packing_density/out/`)
+
+- `synthetic_results.json`: each case with pass or fail, and the margin and overflow probe measurements.
+- `cockpit_results.json`: one row per texture set, sorted by 3D area. Each row holds:
+  - islands, t, mode (underflow, fit or overflow), k, extent in px and the needed size;
+  - fill of the texture, of the k square and of the needed size;
+  - the smallest gap, margin violations and overlapping triangle pairs;
+  - density outside the range (max; max for islands of at least 1 and of at least 100 px^2; area-weighted mean);
+  - the shape method, proxy islands, attempts, packs and times;
+  - notes: zero-area islands not packed, collapsed and degenerate islands, linked users.
+- `cockpit_nonsquare.json`: Cockpit_STD and FUR1 at 4096 x 2048 (not written into the file).
+- `set_<name>.npz`, `set_<name>.png` and `set_<name>_grid_*.png`: exported layouts and their images.
+- `tests/_work/uv_packing_density/COCKPIT_packed.blend`: the cockpit copy with the packed UVs.
