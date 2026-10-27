@@ -5,7 +5,7 @@
 
 This guide is for 3D artists who build Flight Sim Studio (FSS) aircraft in Blender 5.2. It assumes you already model, unwrap, animate, texture and export in Blender. It explains what MSFS needs on top of that, the order in which we prepare a model for it, and which of our tools help at each step and why.
 
-It matches **FSS Blender Tools 0.34.0** and the FSS exporter based on Asobo exporter 8.4.1.
+It matches **FSS Blender Tools 0.35.0** and the FSS exporter based on Asobo exporter 8.4.1.
 
 - **The pipeline** (below): the steps from a new model to a deployed one, in order.
 - **The reference pages:** what each panel and button does, linked from the steps:
@@ -13,7 +13,8 @@ It matches **FSS Blender Tools 0.34.0** and the FSS exporter based on Asobo expo
   | Page | Contents |
   | :--- | :--- |
   | [fss-tools.md](fss-tools.md) | The **FSS Tools** sidebar tab: **Zones & Merge Tree**, **Tags**, **UV Tools** (**Seams**, **Packing** with **Visibility Scoring**) and **Utilities** (**General**, **Empty Bounds**, **Heatmap**, **Checks**) |
-  | [lod.md](lod.md) | The **FSS MSFS Tools** sidebar tab, with the **LOD** panel: automatic LODs, marks, size cut-offs, quota and hints, the LOD sphere, viewport preview, and exporting with LODs |
+  | [materials.md](materials.md) | The **FSS MSFS Tools** sidebar tab, first panel **Materials**: every material with its objects, zones and surface, the warnings never used and shared across zones, the transparent and emissive marks, a texture size estimate, Select Objects, and **By Zone** |
+  | [lod.md](lod.md) | The **FSS MSFS Tools** sidebar tab, second panel **LOD**: automatic LODs, marks, size cut-offs, quota and hints, the LOD sphere, viewport preview, and exporting with LODs |
   | [uv.md](uv.md) | Auto Seam in **UV Tools > Seams** (proposed and current seams, workflow, reports, limits) and the **Heatmap** in **Utilities** (distortion, texel density and visibility on the model, the distribution chart, the UV grid) |
   | [exporter.md](exporter.md) | The exporter: export target MSFS 2024 or MSFS 2020, one `.blend` for both simulators, materials, instancing, legacy normals |
 
@@ -35,7 +36,7 @@ Steps marked **in development** describe what the tool will do, and how to get t
 | Step | Tools | Tool status | MSFS Authoring Guide |
 | :--- | :--- | :--- | :--- |
 | [1. Scene, Hierarchy and Names](#1-scene-hierarchy-and-names) | Tools, Empty Bounds, Checks | available | `modeling.md` |
-| [2. Zones and Materials](#2-zones-and-materials-in-development) | Zones & Merge Tree, zone tool | zone density marks available; the rest by hand | `materials.md`, `texturing.md` |
+| [2. Zones and Materials](#2-zones-and-materials-in-development) | Zones & Merge Tree, Materials, zone tool | zone density marks and the Materials overview available; the rest by hand | `materials.md`, `texturing.md` |
 | [3. Loose Pieces](#3-loose-pieces-what-disappears-together) | LOD hints, Viewport LOD | a modelling decision | `lods.md` |
 | [4. Merge Tree](#4-merge-tree) | Tags, Zones & Merge Tree | available | `modeling.md` |
 | [5. LOD](#5-lod) | LOD | available | `lods.md` |
@@ -86,8 +87,9 @@ Name the materials as you like; a name that says the zone and the kind of surfac
 - Press **Refresh** in [Zones & Merge Tree](fss-tools.md#zones--merge-tree) to see the zones, and give a zone a **density mark** there where it needs one (no mark keeps the density; for example 0.5 for a rarely seen zone). Marks multiply down the hierarchy, so everything below the zone takes it.
 - Give each zone its own materials, one per kind of surface, and set each material's MSFS type. Auto Seam skips objects whose materials are all decal, glass, windshield, invisible or occluder (see [What Is Skipped](uv.md#what-is-skipped)).
 - Keep the number of materials low: see `materials.md` in the MSFS Authoring Guide.
+- Press **Refresh** in [Materials](materials.md) (tab **FSS MSFS Tools**) to see every material with its objects, zones and surface, which materials are transparent or emissive, and a first estimate of the texture size each needs.
 
-**Check:** no material is used in two zones; no `Material.001` copies are left.
+**Check:** after **Refresh**, [Materials](materials.md) set to **Warnings** lists nothing: no material is never used or shared across zones; no `Material.001` copies are left.
 
 **Redo when:** a zone turns out too full or nearly empty for its texture. Each change here changes a texture set, so packing follows, and repainting if the set was already textured.
 
@@ -122,7 +124,7 @@ So the topology you model decides what disappears together. A floor plate and it
 
 - Merge what is static and drawn together: parts that never move on their own, that nothing refers to by name, that are seen together and share materials. Merging parts with different materials saves nodes, not draw calls.
 - Keep separate what has a life of its own: a switch, a lever or a door with its handle must move on its own, which it cannot do as part of the panel's mesh. The merge keeps animated, skinned and bone-parented objects, meshes with shape keys, lights and cameras separate by itself. See [What Stays Separate](fss-tools.md#what-stays-separate).
-- The merge cannot see the model XML: a gauge screen or a clickspot that is not animated would be merged away. Give it a [tag](fss-tools.md#tags) with **Don't Merge** (for example `SCREEN`), or name it `@NOMERGE_<name>`.
+- The merge cannot see the model XML: a gauge screen or a clickspot that is not animated would be merged away. Give it a [tag](fss-tools.md#tags) with **Don't Merge** (for example `SCREEN`), or name it `@NOMERGE_<name>`. To tag every object of one material (colliders, screens), select them with **Select Objects** in [Materials](materials.md#keeping-a-materials-objects-out-of-merging).
 - Transparent surfaces sort by their mesh. MSFS draws glass, windshields and decals after the opaque surfaces, back to front, sorted by the centre of each mesh's bounding box, not by triangle (see `how-msfs-renders.md` in the MSFS Authoring Guide). A merge group puts all its transparent parts into one mesh, `<name>_TRANSPARENT`, with one centre:
   - two glasses that overlap on screen (gauge glass in front of a display glass) can no longer be sorted against each other and may flicker: give one of them a tag with **Don't Merge**;
   - decals spread over surfaces at different depths are drawn as one mesh after all of them: a label of the rear surface can then show on the front surface at some view angles. Merge decals of one surface, or of surfaces at the same depth; keep a decal on a surface far behind others out of the group.
@@ -252,7 +254,7 @@ Some work has no step of its own, because it runs through several:
 
 - **FSS Tools and FSS MSFS Tools:** in the 3D Viewport, press `N` to open the sidebar. FSS Blender Tools has two tabs there:
   - **FSS Tools**, the tools that work on any model. The panels are, from top to bottom: **Zones & Merge Tree**, **Tags**, **UV Tools** (sections **Seams** and **Packing**, with **Visibility Scoring** inside Packing) and **Utilities** (sections **General**, **Empty Bounds**, **Heatmap** and **Checks**).
-  - **FSS MSFS Tools**, the tools that follow MSFS rules: the **LOD** panel.
+  - **FSS MSFS Tools**, the tools that follow MSFS rules. The panels are, from top to bottom: **Materials** (with the section **By Zone**) and **LOD**.
 - **Exporter:** in the same sidebar, tab **Microsoft Flight Simulator 2024 Tools**, panel **Export Target** (also shown in **File > Export > glTF 2.0**, section **Microsoft Flight Simulator (FSS)**).
 - **Material and object settings:** in the Properties editor, the MSFS panels of the Asobo add-on, plus **MSFS 2020 Object Parameters** and **MSFS 2020 Material Parameters** while the scene targets MSFS 2020.
 

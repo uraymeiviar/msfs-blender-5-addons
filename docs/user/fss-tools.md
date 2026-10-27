@@ -10,7 +10,7 @@ All panels on this page are in the 3D Viewport sidebar (`N`), tab **FSS Tools**,
 - **UV Tools**, with the sections **Seams** (Auto Seam, its own page [uv.md](uv.md)) and **Packing** (the UV marks, the packer per texture set, with **Visibility Scoring** inside)
 - **Utilities**, with the sections **General**, **Empty Bounds**, **Heatmap** and **Checks**
 
-The **LOD** panel follows MSFS rules, so it has a tab of its own next to it, **FSS MSFS Tools**, and its own page, [lod.md](lod.md).
+The panels that follow MSFS rules have a tab of their own next to it, **FSS MSFS Tools**: **Materials** ([materials.md](materials.md)) and **LOD** ([lod.md](lod.md)).
 
 Each section opens and closes on its own; Blender remembers that in the `.blend`.
 

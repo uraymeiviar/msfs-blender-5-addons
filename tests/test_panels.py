@@ -1,6 +1,6 @@
 """The FSS sidebar layout: the tabs FSS Tools (top-level panels in pipeline order, UV Tools and Utilities with their
-sections) and FSS MSFS Tools (LOD with its subpanels, material-management decision 7), Packing in the UV editor's sidebar too,
-and every panel drawing without errors.
+sections) and FSS MSFS Tools (Materials with By Zone, then LOD with its subpanels, material-management decisions 7 and
+11), Packing in the UV editor's sidebar too, and every panel drawing without errors.
 
 To run:
 "<blender>" -b --factory-startup --python tests/test_panels.py
@@ -46,7 +46,9 @@ EXPECTED = {
     'FSS_PT_empty_bounds': ("Empty Bounds", 'FSS_PT_utilities', 1, TOOLS),
     'FSS_PT_uv_heatmap': ("Heatmap", 'FSS_PT_utilities', 2, TOOLS),
     'FSS_PT_checks': ("Checks", 'FSS_PT_utilities', 3, TOOLS),
-    'FSS_PT_lod': ("LOD", '', 0, MSFS),
+    'FSS_PT_materials': ("Materials", '', 0, MSFS),
+    'FSS_PT_materials_by_zone': ("By Zone", 'FSS_PT_materials', 0, MSFS),
+    'FSS_PT_lod': ("LOD", '', 1, MSFS),
     'FSS_PT_lod_quota_hints': ("Quota and Hints", 'FSS_PT_lod', 0, MSFS),
     'FSS_PT_lod_export': ("Export Settings", 'FSS_PT_lod', 0, MSFS),
     'FSS_PT_lod_export_advanced': ("Advanced", 'FSS_PT_lod_export', 0, MSFS),
@@ -140,11 +142,15 @@ def test_draw_all():
     bpy.types.FSS_PT_checks.draw(SimpleNamespace(layout=_Layout(checks_calls)), bpy.context)
     ops = [args[0] for name, args, _kwargs in checks_calls if name == 'operator']
     assert 'fss.find_faces_without_area' in ops and 'fss.find_faces_without_uv_area' in ops, ops
+    materials_calls = []
+    bpy.types.FSS_PT_materials.draw(SimpleNamespace(layout=_Layout(materials_calls)), bpy.context)
+    ops = [args[0] for name, args, _kwargs in materials_calls if name == 'operator']
+    assert ops == ['fss.materials_refresh'], ops  # before the first Refresh: the button and a hint only
     steps = bpy.context.scene.fss_visibility.bl_rna.properties['states']
     assert steps.name == 'Animation Steps', steps.name
     print(f"PASS: test_draw_all ({len(drawn)} panels drawn; Skip Auto Seam in Seams only; Packing without Apply and "
           "Select Marked, with Check All, the same in the UV editor; Find Faces Without Area and Find Faces Without UV "
-          "Area in Checks; 'Animation Steps')")
+          "Area in Checks; Refresh in Materials; 'Animation Steps')")
 
 
 def main():

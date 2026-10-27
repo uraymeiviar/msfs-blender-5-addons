@@ -1,8 +1,8 @@
 """Sidebar groups: UV Tools (Seams, Packing with Visibility Scoring) and Utilities (General, Empty Bounds, Heatmap,
 Checks). The groups hold nothing of their own; each section is a subpanel registered by its module, after this one.
 
-bl_order sets the order of the FSS Tools tab: Zones & Merge Tree, Tags, UV Tools, Utilities. The LOD panel (lod.py) is
-first in the FSS MSFS Tools tab, which holds the panels that follow MSFS rules.
+bl_order sets the order of the FSS Tools tab: Zones & Merge Tree, Tags, UV Tools, Utilities. The FSS MSFS Tools tab
+holds the panels that follow MSFS rules, in pipeline order: Materials (materials.py), then LOD (lod.py).
 """
 
 import bpy
