@@ -27,6 +27,19 @@ install them into their own Blender.
 - **Finish lines are measurable;** a criterion that is not met is reported as NOT MET with its numbers.
 - **Release:** after review, raise the version, commit, push, deploy (below); the maintainer commits the deployed copies in the aircraft repositories.
 
+## Maintainer Preferences
+
+What the maintainer has asked for across the work, beyond single decisions:
+
+- **Independent, optional tools:** fss_blender_tools aids the artist; no tool enforces a workflow or depends on another tool being used (UV journal decision 42).
+- **Model-agnostic rules:** prefer generic rules (every face with UVs, marks set by the artist) over MSFS material-type logic (UV decision 100).
+- **Accuracy first, convenience second:** the packer meets the texel density exactly and reports what does not fit, rather than squeezing it (UV decision 112); the artist then chooses.
+- **Square textures, power-of-two sizes,** Substance Painter is the texturing tool (UV decisions 81, 120).
+- **Workflow details wait for the artists:** where the right workflow is unclear (packing per material or per selection, which needles to report), build the functional tool first and adjust after artists' feedback.
+- **Plain explanations:** say what something means for the artist and the model before the technical detail; answer the question asked, then propose.
+- **Proposals before work, one decision at a time:** list options with a recommendation; ask when a request can be read two ways.
+- **Moderate or large work as a hand-off;** small fixes directly after approval; commit and push in this repository, deploy to all targets, never commit in the aircraft repositories.
+
 ## Upstream Policy (the exporter)
 
 - Asobo's releases are tracked in the per-simulator fork repositories (`msfs2024-blender-5.2.x-addons`, branch
@@ -137,6 +150,7 @@ This repository is the single source of truth for the add-ons and their document
 | What | Where | Audience |
 | :--- | :--- | :--- |
 | Artist guide (how to use the panels and the exporter) | [docs/user/](docs/user/) | artists; deployed with the add-ons into each portable target's `docs` folder |
+| Feature inventory (implemented, planned, wish, rejected) and, later, the specification | [docs/spec/](docs/spec/inventory.md) | developers and agents |
 | Task journals (design, decisions, progress, hand-offs) | [docs/journal/](docs/journal/), index in [docs/journal/README.md](docs/journal/README.md) | developers and agents |
 | Design of the FSS tools | [fss_blender_tools/README.md](fss_blender_tools/README.md) | developers and agents |
 | Working rules | this file | developers and agents |
