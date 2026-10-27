@@ -61,6 +61,16 @@ Based on Asobo's MSFS 2024 exporter 8.4.1 for Blender 5.2; FSS changes live in F
 | Exported glTF diff against the deployed one | wish (the test harness can compare two glTFs: `tests/harness/compare.py`) | W12 | GEN-024 |
 | Draw-call, batch and active-LOD prediction | wish | W7 | GEN-025 |
 
+### 2.1a Materials (FSS MSFS Tools)
+
+| Feature | Status | Source | Spec |
+| :--- | :--- | :--- | :--- |
+| Sidebar split into FSS Tools and FSS MSFS Tools | implemented (added 20261028) | material management journal, decision 7 | GEN-040 |
+| Materials panel: list with never used, shared across zones, transparent and emissive marks; per zone objects and area; size estimate with visibility; Keep UVs and kept sets; Select Objects; Check All; By Zone | implemented (added 20261028) | material management journal, decisions 1, 3, 8, 9, 11 to 14 | MTL-001 to MTL-009 |
+| MSFS material checks (no MSFS material, texture needed, parameters) | planned | material management journal, Session 1 objectives | MTL-020 |
+| Split helpers for sets too large for 8192 | planned | material management journal, Session 1 objectives | MTL-021 |
+| Emissive texture imbalance, measured after painting | planned | material management journal, decisions 3, 10 | MTL-022 |
+
 ### 2.2 Tags
 
 | Feature | Status | Source | Spec |

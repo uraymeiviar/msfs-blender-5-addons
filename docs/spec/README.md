@@ -2,7 +2,7 @@
 
 What the FSS add-ons do (**implemented**), will do (**planned**) and might do (**wish**): one requirement per
 statement, each with its decision and its test. Drafted on 20261028 from the [feature inventory](inventory.md),
-checked against the code of fss_blender_tools 0.33.1 and the exporter at commit 4261fff, and against the tests.
+checked against the code of fss_blender_tools 0.33.1 and the exporter at commit 4261fff (the Materials panel and the sidebar tabs against 0.35.0), and against the tests.
 
 | Document | Holds | Audience |
 | :--- | :--- | :--- |
@@ -25,6 +25,7 @@ recorded in a journal first ([../../AGENTS.md](../../AGENTS.md#working-model)), 
 | [tags.md](tags.md) | `TAG` | Tags and their switches |
 | [zones.md](zones.md) | `ZON` | Zone empties, zone rows, the zone tool |
 | [merge-tree.md](merge-tree.md) | `MRG` | Export-time merge groups |
+| [materials.md](materials.md) | `MTL` | The Materials panel: material list, warnings, kinds, zones, size estimate |
 | [lod.md](lod.md) | `LOD` | LOD marks, size culling, quota, viewport LOD, LOD sphere |
 | [uv.md](uv.md) | `UV-SEAM`, `UV-UNW`, `UV-VIS`, `UV-DEN`, `UV-PCK` | Seams, unwrap, Visibility Scoring, density, packing |
 | [project-contract.md](project-contract.md) | `PRJ` | Tools that need the MSFS project contract |

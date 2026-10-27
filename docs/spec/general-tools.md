@@ -6,6 +6,18 @@ The Utilities panel of fss_blender_tools (General, Empty Bounds, Heatmap, Checks
 wishes without an area of their own. Artist guide: [../user/fss-tools.md](../user/fss-tools.md#utilities),
 [../user/uv.md](../user/uv.md#heatmap-distortion-texel-density-and-visibility).
 
+## Sidebar
+
+### GEN-040: Two sidebar tabs
+
+- **Status:** implemented
+- **Requirement:** fss_blender_tools draws its 3D Viewport panels in two tabs: **FSS Tools** for tools that work on any
+  model (Zones & Merge Tree, Tags, UV Tools, Utilities, in that order) and **FSS MSFS Tools** for tools that follow MSFS
+  rules (Materials, LOD). The UV Editor's Packing panel is in its own FSS Tools tab. One add-on; only the UI is split.
+- **Decision:** MAT 7
+- **Test:** `tests/test_panels.py::test_layout`
+- **Code:** `panels.py`, `lod.py`, `materials.py`
+
 ## General
 
 ### GEN-001: Add Empty Parent

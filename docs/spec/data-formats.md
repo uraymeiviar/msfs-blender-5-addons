@@ -93,6 +93,19 @@ requirements that use it. Properties that are registered (`bpy.props`) are saved
 - **Decision:** UV 66 (heatmap grid saved), UV 88, UV 106; others none recorded
 - **Test:** `tests/test_panels.py::test_draw_all` (every panel draws with these properties)
 
+### DAT-007: `Scene.fss_materials`
+
+- **Status:** implemented
+- **Requirement:** Property group of the Materials panel: `rows` (per material: `name`, `objects`, `hidden`,
+  `shared_meshes`, `zone_names`, `zones` with `name`, `zone` (the zone empty's name, empty outside every zone),
+  `objects`, `area`; `area` in m², `estimate` in px, `with_visibility`, `never_used`, `shared_zones`, `transparent`,
+  `emissive`), `active_name` (the active row by material name) with `active` reading it as an index, `scanned`, `show`
+  (ALL or WARNINGS). Written only by Refresh; saved with the file like the Zones & Merge Tree rows.
+- **Used by:** MTL-001 to MTL-009
+- **Decision:** MAT 1
+- **Test:** `tests/test_materials.py::test_rows`, `tests/test_materials.py::test_gltf_leak`
+- **Code:** `fss_blender_tools/materials.py`
+
 ## Object Data
 
 ### DAT-020: `fss_tags`
