@@ -150,7 +150,7 @@ This repository is the single source of truth for the add-ons and their document
 | What | Where | Audience |
 | :--- | :--- | :--- |
 | Artist guide (how to use the panels and the exporter) | [docs/user/](docs/user/) | artists; deployed with the add-ons into each portable target's `docs` folder |
-| Feature inventory (implemented, planned, wish, rejected) and, later, the specification | [docs/spec/](docs/spec/inventory.md) | developers and agents |
+| Specification (requirements with IDs, decisions and tests; data formats) and the feature inventory (status overview, rejected proposals) | [docs/spec/](docs/spec/README.md) | developers and agents |
 | Task journals (design, decisions, progress, hand-offs) | [docs/journal/](docs/journal/), index in [docs/journal/README.md](docs/journal/README.md) | developers and agents |
 | Design of the FSS tools | [fss_blender_tools/README.md](fss_blender_tools/README.md) | developers and agents |
 | Working rules | this file | developers and agents |

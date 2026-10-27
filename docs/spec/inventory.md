@@ -1,6 +1,6 @@
 # Feature Inventory
 
-Input for the specification to be written in `docs/spec/`: every feature of the two FSS add-ons, sorted by status, each with its source. Compiled on 20261027 from the code (fss_blender_tools 0.33.1, commit 188bf24), the artist guide ([../user/](../user/)) and the journals ([../journal/](../journal/README.md)). The specification itself (requirement IDs, data formats, test traces) is not written yet.
+Input for the specification to be written in `docs/spec/`: every feature of the two FSS add-ons, sorted by status, each with its source. Compiled on 20261027 from the code (fss_blender_tools 0.33.1, commit 188bf24), the artist guide ([../user/](../user/)) and the journals ([../journal/](../journal/README.md)). The specification is now in [README.md](README.md) and its area files (drafted 20261028); the **Spec** column names the requirements of each row, and the rows marked "added 20261028" were found while drafting it. This file stays the status overview and the list of rejected proposals.
 
 | Status | Meaning |
 | :--- | :--- |
@@ -22,126 +22,130 @@ Sources: **W***n* = item *n* of the wish-list journal (`20261010.fss-blender-too
 
 Based on Asobo's MSFS 2024 exporter 8.4.1 for Blender 5.2; FSS changes live in FSS-owned modules (`instancing.py`, `migration.py`, `legacy_normals.py`, `msfs2020_target.py`, `fss_workflow_ui.py`, `io/exp/gltf_exporter_patches.py`, marked spots in `io/exp/multi_export.py`). Guide: [../user/exporter.md](../user/exporter.md); journal: `20261002.msfs2024-blender5-exporter-conversion.md`.
 
-| Feature | Status | Source |
-| :--- | :--- | :--- |
-| One `.blend` for both simulators: Export Target MSFS 2024 or MSFS 2020; MSFS 2020 exports build, for the export only, the material setup the MSFS 2020 add-on would have made | implemented | exporter conversion journal; `msfs2020_target.py` |
-| One-time conversion of materials made with the MSFS 2020 add-on (values to MSFS 2024 meaning, emissive to cd/m²), on open, append and before export | implemented | `migration.py` |
-| Restore Blender 3.6 normals for files from Blender 4.0 or older | implemented | `legacy_normals.py` |
-| Instancing: a shared mesh exported once, also when its users have only Auto Smooth with the same angle | implemented | `instancing.py` |
-| Clean-up on export: NLA tweak mode, Edit and Pose Mode | implemented | exporter guide |
-| Asobo's export workflow hidden (Multi-Export Hierarchy tab, LOD Tools panel) in favour of the FSS deploy, merge groups and LOD marks | implemented | `fss_workflow_ui.py` |
-| Export speed of the LOD deploy (E2 cockpit 973 s to 67 s) | implemented | `20261017.export-performance.md` |
-| Hooks used by fss_blender_tools: merge groups, leading `@` stripped, `fss_` keys out of glTF extras | implemented | `fss_blender_tools/merge.py` (runs inside the exporter) |
-| Ghost material ranges (`msfs_ghost_bias`, `msfs_ghost_power`) converted between simulators | wish (known issue) | exporter guide, Known Issue |
-| Five "Mesh is not valid" warnings in the E195 cockpit export | wish (not investigated) | exporter conversion journal, Session 14 |
-| Upstream Asobo releases merged per file (three-way) | implemented (process) | `AGENTS.md`, Upstream Policy |
+| Feature | Status | Source | Spec |
+| :--- | :--- | :--- | :--- |
+| One `.blend` for both simulators: Export Target MSFS 2024 or MSFS 2020; MSFS 2020 exports build, for the export only, the material setup the MSFS 2020 add-on would have made | implemented | exporter conversion journal; `msfs2020_target.py` | EXP-001, EXP-003 |
+| One-time conversion of materials made with the MSFS 2020 add-on (values to MSFS 2024 meaning, emissive to cd/m²), on open, append and before export | implemented | `migration.py` | EXP-004 |
+| Restore Blender 3.6 normals for files from Blender 4.0 or older | implemented | `legacy_normals.py` | EXP-007 |
+| Target detection on open: a `.blend` without a saved target that holds MSFS 2020 data opens as MSFS 2020; nothing is converted | implemented (added 20261028) | `msfs2020_target.py` | EXP-002 |
+| Export For per object and Prepare for MSFS 2024 (MSFS 2024 gizmos and lights next to the legacy ones) | implemented (added 20261028) | `msfs2020_target.py`, `ui/prepare_msfs2024.py` | EXP-005, EXP-006 |
+| Emissive reference for MSFS 2020 exports (scene value or add-on preference) | implemented (added 20261028) | `migration.py`, exporter guide | EXP-004 |
+| Instancing: a shared mesh exported once, also when its users have only Auto Smooth with the same angle | implemented | `instancing.py` | EXP-008 |
+| Clean-up on export: NLA tweak mode, Edit and Pose Mode | implemented | exporter guide | EXP-009 |
+| Asobo's export workflow hidden (Multi-Export Hierarchy tab, LOD Tools panel) in favour of the FSS deploy, merge groups and LOD marks | implemented | `fss_workflow_ui.py` | EXP-010 |
+| Export speed of the LOD deploy (E2 cockpit 973 s to 67 s) | implemented | `20261017.export-performance.md` | — (a measurement, not a requirement) |
+| Hooks used by fss_blender_tools: merge groups, leading `@` stripped, `fss_` keys out of glTF extras | implemented | `fss_blender_tools/merge.py` (runs inside the exporter) | EXP-013, DAT-040, DAT-042 |
+| Ghost material ranges (`msfs_ghost_bias`, `msfs_ghost_power`) converted between simulators | wish (known issue) | exporter guide, Known Issue | EXP-012 |
+| Five "Mesh is not valid" warnings in the E195 cockpit export | wish (not investigated) | exporter conversion journal, Session 14 | — (an investigation, journal only) |
+| Upstream Asobo releases merged per file (three-way) | implemented (process) | `AGENTS.md`, Upstream Policy | — (process, AGENTS.md) |
 
 ## 2. fss_blender_tools
 
 ### 2.1 General Tools (Utilities)
 
-| Feature | Status | Source |
-| :--- | :--- | :--- |
-| Add Empty Parent (Manual, Suffix, Prefix naming) | implemented | `tools.py` |
-| Origin to Bounding Box (tightest box, corners, faces, edges) | implemented | `tools.py` |
-| Empty Bounds: boxes of empties' subtrees, parent highlight, clickable hierarchy text | implemented | W29; `20261011.fss-blender-tools-empty-bounds.md` |
-| Heatmap: Distortion (shear, area, both), Density, Visibility; chart, legend, UV grid with labels | implemented | UV 57 to 63, 66, 84, 89 |
-| Scan Names: suffix, collision, case, characters, default names, taken, clash; batch rename | implemented | W2 (without the project contract); `20261011.fss-blender-tools-name-check.md`; UV 87 |
-| Fix Broken Bone Parents | implemented | W28 (first rule); tags-and-merge journal Session 6 |
-| Find Faces Without Area (3D) | implemented | UV 117 |
-| Find Faces Without UV Area (needles) | implemented | UV 118 |
-| Find Thin UV Faces: any UV triangle under 1 px wide on a 1K texture, size and width as settings, replacing Find Faces Without UV Area | wish (proposed 20261023) | UV journal Session 102, open item 1 |
-| Stupidity check: one report with severity and fixes (duplicate vertices and faces, loose geometry, hierarchy, transforms, bloat, external add-on data) | wish (two rules built: bone parents, faces without area) | W28 |
-| Texture and path check (missing images, absolute paths, `.png.xml`) | wish | W11 |
-| Material consolidation (duplicate materials) | wish | W10 |
-| Instancing candidates and "bake shared modifiers" | wish | W9 |
-| Exported glTF diff against the deployed one | wish (the test harness can compare two glTFs: `tests/harness/compare.py`) | W12 |
-| Draw-call, batch and active-LOD prediction | wish | W7 |
+| Feature | Status | Source | Spec |
+| :--- | :--- | :--- | :--- |
+| Add Empty Parent (Manual, Suffix, Prefix naming) | implemented | `tools.py` | GEN-001 |
+| Origin to Bounding Box (tightest box, corners, faces, edges) | implemented | `tools.py` | GEN-002 |
+| Empty Bounds: boxes of empties' subtrees, parent highlight, clickable hierarchy text | implemented | W29; `20261011.fss-blender-tools-empty-bounds.md` | GEN-003, GEN-004 |
+| Heatmap: Distortion (shear, area, both), Density, Visibility; chart, legend, UV grid with labels | implemented | UV 57 to 63, 66, 84, 89 | GEN-005 to GEN-007 |
+| Scan Names: suffix, collision, case, characters, default names, taken, clash; batch rename | implemented | W2 (without the project contract); `20261011.fss-blender-tools-name-check.md`; UV 87 | GEN-008, GEN-009 |
+| Fix Broken Bone Parents | implemented | W28 (first rule); tags-and-merge journal Session 6 | GEN-013 |
+| Find Faces Without Area (3D) | implemented | UV 117 | GEN-010 |
+| Find Faces Without UV Area (needles) | implemented | UV 118 | GEN-011 |
+| Find Thin UV Faces: any UV triangle under 1 px wide on a 1K texture, size and width as settings, replacing Find Faces Without UV Area | wish (proposed 20261023) | UV journal Session 102, open item 1 | GEN-012 |
+| Stupidity check: one report with severity and fixes (duplicate vertices and faces, loose geometry, hierarchy, transforms, bloat, external add-on data) | wish (two rules built: bone parents, faces without area) | W28 | GEN-020 |
+| Texture and path check (missing images, absolute paths, `.png.xml`) | wish | W11 | GEN-021 |
+| Material consolidation (duplicate materials) | wish | W10 | GEN-022 |
+| Instancing candidates and "bake shared modifiers" | wish | W9 | GEN-023 |
+| Exported glTF diff against the deployed one | wish (the test harness can compare two glTFs: `tests/harness/compare.py`) | W12 | GEN-024 |
+| Draw-call, batch and active-LOD prediction | wish | W7 | GEN-025 |
 
 ### 2.2 Tags
 
-| Feature | Status | Source |
-| :--- | :--- | :--- |
-| Free, multi-valued tags per object (`fss_tags`), independent of collections; add, remove, select, rename, delete | implemented | W5 (as generic tags); tags-and-merge journal |
-| Tag switches: Don't Merge (merge), Keep (LOD) | implemented | tags-and-merge journal; LOD journal |
-| Functional roles with meaning (clickspot, screen, light mesh, emitter, debug mesh) inferred from materials and `panel.cfg` | wish (tags were built instead, without inference) | W5 |
-| Conversion of the functional collections into tags or roles | wish | W5 |
+| Feature | Status | Source | Spec |
+| :--- | :--- | :--- | :--- |
+| Free, multi-valued tags per object (`fss_tags`), independent of collections; add, remove, select, rename, delete | implemented | W5 (as generic tags); tags-and-merge journal | TAG-001 to TAG-004, TAG-007 |
+| Tag switches: Don't Merge (merge), Keep (LOD) | implemented | tags-and-merge journal; LOD journal | TAG-005, TAG-006 |
+| Functional roles with meaning (clickspot, screen, light mesh, emitter, debug mesh) inferred from materials and `panel.cfg` | wish (tags were built instead, without inference) | W5 | TAG-010 |
+| Conversion of the functional collections into tags or roles | wish | W5 | TAG-011 |
 
 ### 2.3 Zones
 
-| Feature | Status | Source |
-| :--- | :--- | :--- |
-| `@ZONE_<NAME>` empties; exported as `ZONE_<NAME>` | implemented | UV 28, 33, 87 |
-| Zones listed in Zones & Merge Tree; warnings for merge groups outside every zone, zones inside merge groups or zones | implemented | UV 34; tags-and-merge journal Session 8 |
-| A zone's density factor = its own density mark, inherited below it | implemented | UV 108 |
-| The zone tool: materials per zone and class (`<SCENE>_<ZONE>_<CLASS>`), created from template materials and assigned automatically, so no material spans zones; texture size from the zone material | planned (not built) | UV 22 to 27, 29 to 32 |
-| Mirror across zones handling | planned | UV 27 |
+| Feature | Status | Source | Spec |
+| :--- | :--- | :--- | :--- |
+| `@ZONE_<NAME>` empties; exported as `ZONE_<NAME>` | implemented | UV 28, 33, 87 | ZON-001 |
+| Zones listed in Zones & Merge Tree; warnings for merge groups outside every zone, zones inside merge groups or zones | implemented | UV 34; tags-and-merge journal Session 8 | ZON-002, ZON-004 |
+| A zone's density factor = its own density mark, inherited below it | implemented | UV 108 | ZON-003 |
+| The zone tool: materials per zone and class (`<SCENE>_<ZONE>_<CLASS>`), created from template materials and assigned automatically, so no material spans zones; texture size from the zone material | planned, on hold (material management decision 6); naming rule withdrawn (decision 2) | UV 22 to 27, 29 to 32 | ZON-010 |
+| Mirror across zones handling | planned, on hold (material management decision 6) | UV 27 | ZON-011 |
 
 ### 2.4 Merge Tree
 
-| Feature | Status | Source |
-| :--- | :--- | :--- |
-| Export-time merge of each `@MERGE_` group's subtree into one mesh; `@NOMERGE_`, animated, skinned, bone-parented, shape-key, Don't Merge and non-mesh objects stay separate; transparent parts as `<name>_TRANSPARENT` | implemented | W8; tags-and-merge journal |
-| Only in a deploy or the MSFS 2024 multi-exporter, never in a plain File > Export | implemented | tags-and-merge journal |
-| New Merge Group, Refresh tree, Print Details | implemented | `merge.py` |
-| Decal merge per zone, decal material and Draw Order | wish (today decals, as blended surfaces, merge into their group's `<name>_TRANSPARENT` mesh, without grouping by Draw Order) | W14 |
-| Merged animation names keep a `@MERGE_` marker when the action is named after the root | known issue | tags-and-merge journal, Known Issues |
+| Feature | Status | Source | Spec |
+| :--- | :--- | :--- | :--- |
+| Export-time merge of each `@MERGE_` group's subtree into one mesh; `@NOMERGE_`, animated, skinned, bone-parented, shape-key, Don't Merge and non-mesh objects stay separate; transparent parts as `<name>_TRANSPARENT` | implemented | W8; tags-and-merge journal | MRG-001 to MRG-007 |
+| Only in a deploy or the MSFS 2024 multi-exporter, never in a plain File > Export | implemented | tags-and-merge journal | MRG-008 |
+| Merge on Export: merging on or off per scene, on by default | implemented (added 20261028) | `merge.py` | MRG-001 |
+| New Merge Group, Refresh tree, Print Details | implemented | `merge.py` | MRG-010 to MRG-012 |
+| Decal merge per zone, decal material and Draw Order | wish (today decals, as blended surfaces, merge into their group's `<name>_TRANSPARENT` mesh, without grouping by Draw Order) | W14 | MRG-020 |
+| Merged animation names keep a `@MERGE_` marker when the action is named after the root | implemented (action names are exported as authored; accepted behaviour) | tags-and-merge journal, Known Issues | DAT-044 |
 
 ### 2.5 LOD
 
-| Feature | Status | Source |
-| :--- | :--- | :--- |
-| LOD marks: Auto, Keep, Hidden from, Visible from; per-LOD export | implemented | LOD journal stage 1 |
-| Automatic size culling of whole parts and of loose pieces inside a mesh, before merging (no geometry is cut) | implemented | LOD 18; [../user/lod.md](../user/lod.md) |
-| Quota and Hints (vertex quota per LOD, near cut-off and loose-piece lists) | implemented | LOD journal Session 7 |
-| Viewport LOD: a level or Auto (as MSFS would pick); excluded objects Hidden or Bounds | implemented | LOD journal Session 8; LOD 36 |
-| LOD sphere padding (diameter) controlling MSFS's LOD switch; model type Exterior, Interior (exterior diameter derives the table), Scenery; explicit `minSize` table; Print LOD Settings / XML | implemented | LOD journal; [../user/lod.md](../user/lod.md) |
-| Children of a hidden reference empty (for example the `LIGHTPOS_*` nodes MSFS lights refer to) stay exported at the glTF root | implemented (the exporter's behaviour, accepted) | LOD 33 |
-| Automated LOD generator with decimation (flow-lod, meshoptimizer), render comparison | wish (research only) | W27; LOD journal |
-| Cockpit LOD1 from window visibility | wish | W21 |
-| Silhouette check across LODs | wish | W23 |
+| Feature | Status | Source | Spec |
+| :--- | :--- | :--- | :--- |
+| LOD marks: Auto, Keep, Hidden from, Visible from; per-LOD export | implemented | LOD journal stage 1 | LOD-001 to LOD-005 |
+| Automatic size culling of whole parts and of loose pieces inside a mesh, before merging (no geometry is cut) | implemented | LOD 18; [../user/lod.md](../user/lod.md) | LOD-006, LOD-007, LOD-009 |
+| Quota and Hints (vertex quota per LOD, near cut-off and loose-piece lists) | implemented | LOD journal Session 7 | LOD-010 to LOD-012 |
+| Viewport LOD: a level or Auto (as MSFS would pick); excluded objects Hidden or Bounds | implemented | LOD journal Session 8; LOD 36 | LOD-013, LOD-014 |
+| LOD sphere padding (diameter) controlling MSFS's LOD switch; model type Exterior, Interior (exterior diameter derives the table), Scenery; explicit `minSize` table; Print LOD Settings / XML | implemented | LOD journal; [../user/lod.md](../user/lod.md) | LOD-008, LOD-015 to LOD-018 |
+| Children of a hidden reference empty (for example the `LIGHTPOS_*` nodes MSFS lights refer to) stay exported at the glTF root | implemented (the exporter's behaviour, accepted) | LOD 33 | LOD-019 |
+| Automated LOD generator with decimation (flow-lod, meshoptimizer), render comparison | wish (research only) | W27; LOD journal | LOD-030 |
+| Cockpit LOD1 from window visibility | wish | W21 | LOD-031 |
+| Silhouette check across LODs | wish | W23 | LOD-032 |
 
 ### 2.6 UV
 
-| Feature | Status | Source |
-| :--- | :--- | :--- |
-| Auto Seam: Propose (C1, around the artist's seams, no diagonal cuts), Accept, Accept + Unwrap (Angle Based), Discard, Clear Current, Select; Distortion Limit; progress; report | implemented | UV 35 to 54, 64, 65, 88, 90 to 94 |
-| Skip Auto Seam mark; decal-only objects skipped | implemented | UV 55, 56 |
-| Unwrap: Blender's Angle Based (through Accept + Unwrap) | implemented | UV 90, 91 |
-| Visibility Scoring: artist cameras, Look Around or Fixed View, 2 to 10 animation steps, `.visibility` file, per-face sums, seen-face island values, floor 0.1 | implemented | UV 67, 72 to 74, 77 to 80, 82, 83, 86, 111 |
-| Density: scene target (px/cm), density freedom, multiplying density marks with presets, the chain shown live | implemented | UV 105, 106, 108, 109 |
-| Packing per texture set (Blender's Pack Islands with our scaling): density first, spill and needed size, one common position, square sizes 256 to 8192, margin in px, direction marks, Keep UVs, Check All, texture set list, also in the UV Editor | implemented | UV 100, 107, 110, 112 to 116, 119 to 121 |
-| Packing picked per material directly instead of through the object selection | wish (waits for artists' feedback) | UV journal Session 102, open item 2 |
-| Add to Layout: pack new islands into free space with the rest pinned | wish | UV journal Session 99 |
-| Ignore short needles in the checks | wish (waits for artists' feedback) | UV journal Session 100 |
-| Visibility Scoring of an exterior (the artist's own exterior cameras) | implemented generically (any artist camera, UV 80), never tried on an exterior model | UV 80 |
-| Stacking units (shared meshes, Mirror, Array) | implemented for shared meshes; Mirror and Array copies share UVs by construction | UV 3 |
+| Feature | Status | Source | Spec |
+| :--- | :--- | :--- | :--- |
+| Auto Seam: Propose (C1, around the artist's seams, no diagonal cuts), Accept, Accept + Unwrap (Angle Based), Discard, Clear Current, Select; Distortion Limit; progress; report | implemented | UV 35 to 54, 64, 65, 88, 90 to 94 | UV-SEAM-001 to UV-SEAM-006, UV-SEAM-009 |
+| Skip Auto Seam mark; decal-only objects skipped | implemented | UV 55, 56 | UV-SEAM-007, UV-SEAM-008 |
+| Unwrap: Blender's Angle Based (through Accept + Unwrap) | implemented | UV 90, 91 | UV-UNW-001 |
+| Visibility Scoring: artist cameras, Look Around or Fixed View, 2 to 10 animation steps, `.visibility` file, per-face sums, seen-face island values, floor 0.1 | implemented | UV 67, 72 to 74, 77 to 80, 82, 83, 86, 111 | UV-VIS-001 to UV-VIS-008 |
+| Density: scene target (px/cm), density freedom, multiplying density marks with presets, the chain shown live | implemented | UV 105, 106, 108, 109 | UV-DEN-001 to UV-DEN-005 |
+| Packing per texture set (Blender's Pack Islands with our scaling): density first, spill and needed size, one common position, square sizes 256 to 8192, margin in px, direction marks, Keep UVs, Check All, texture set list, also in the UV Editor | implemented | UV 100, 107, 110, 112 to 116, 119 to 121 | UV-PCK-001 to UV-PCK-015 |
+| Packing picked per material directly instead of through the object selection | wish (waits for artists' feedback) | UV journal Session 102, open item 2 | UV-PCK-020 |
+| Add to Layout: pack new islands into free space with the rest pinned | wish | UV journal Session 99 | UV-PCK-021 |
+| Ignore short needles in the checks | wish (waits for artists' feedback) | UV journal Session 100 | UV-PCK-022 |
+| Visibility Scoring of an exterior (the artist's own exterior cameras) | implemented for any artist camera (UV 80); the exterior camera set is a wish, never tried on an exterior model | UV 80; UV journal Session 102, open item 5 | UV-VIS-001, UV-VIS-010 |
+| Stacking units (shared meshes, Mirror, Array) | implemented for shared meshes; Mirror and Array copies share UVs by construction | UV 3 | UV-PCK-010 |
 
 ### 2.7 Project Contract and MSFS Project Tools
 
 All need the project contract (what the MSFS project expects from a glTF), to come from `project-tree` in the FSS aircraft repository (wish-list Shared Foundation; maintainer decision 2 of the wish-list: ask project-tree, transport open).
 
-| Feature | Status | Source |
-| :--- | :--- | :--- |
-| Sub-model and attachment preview | wish | W1 |
-| Name check against the project (names the XML expects) | wish (Scan Names works without it) | W2 |
-| Missing nodes and animations expected by the project | wish | W3 |
-| Clickspot and collision mesh generator (Invisible material meshes) | wish | W4 |
-| MSFS project view (tree of referenced objects, playback) | wish | W6 |
-| E1-to-E2 name mapping | wish | W13 |
-| Input normalizer and adaptor-empty collapse | wish | W17 |
+| Feature | Status | Source | Spec |
+| :--- | :--- | :--- | :--- |
+| Sub-model and attachment preview | wish | W1 | PRJ-002 |
+| Name check against the project (names the XML expects) | wish (Scan Names works without it) | W2 | PRJ-003 |
+| Missing nodes and animations expected by the project | wish | W3 | PRJ-004 |
+| Clickspot and collision mesh generator (Invisible material meshes) | wish | W4 | PRJ-005 |
+| MSFS project view (tree of referenced objects, playback) | wish | W6 | PRJ-006 |
+| E1-to-E2 name mapping | wish | W13 | PRJ-007 |
+| Input normalizer and adaptor-empty collapse | wish | W17 | PRJ-008 |
 
 ### 2.8 Other Wishes
 
-| Feature | Status | Source |
-| :--- | :--- | :--- |
-| Legend bake helper; decal text generator (glyph atlas) | wish | W15, W16 |
-| Cockpit bake operator (AO, sky light, flood circuits) | wish | W18 |
-| Dirt, grime and ice shell generator | wish | W19 |
-| Sky portal placer | wish | W20 |
-| Transparency sorting-risk check | wish | W22 |
-| Registration mesh check; exterior light audit; wing-flex joint helper | wish | W24 to W26 |
-| Tools for passive (AI traffic) aircraft | wish (deferred until a passive E-Jet is planned) | wish-list |
+| Feature | Status | Source | Spec |
+| :--- | :--- | :--- | :--- |
+| Legend bake helper; decal text generator (glyph atlas) | wish | W15, W16 | GEN-030, GEN-031 |
+| Cockpit bake operator (AO, sky light, flood circuits) | wish | W18 | GEN-032 |
+| Dirt, grime and ice shell generator | wish | W19 | GEN-033 |
+| Sky portal placer | wish | W20 | GEN-034 |
+| Transparency sorting-risk check | wish | W22 | GEN-035 |
+| Registration mesh check; exterior light audit; wing-flex joint helper | wish | W24 to W26 | GEN-036 to GEN-038 |
+| Tools for passive (AI traffic) aircraft | wish (deferred until a passive E-Jet is planned) | wish-list | GEN-039 |
 
 ## 3. Rejected
 
