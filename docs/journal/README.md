@@ -15,6 +15,7 @@ Task journals of this repository: design, decisions, progress and hand-offs, one
 | [20261017.export-performance.md](20261017.export-performance.md) | Export speed of the LOD deploy | Phase 2 done |
 | [20261019.automated-uv-unwrap.md](20261019.automated-uv-unwrap.md) | UV auto-seam, unwrap and packing; material classes and zones; visibility-based texel density | Implemented (0.33.1); entry point Session 102: current design, decisions in force, open items |
 | [20261021.artist-pipeline-guide.md](20261021.artist-pipeline-guide.md) | The artist guide's pipeline (`docs/user/`): reasoning, redo points, terms | In progress |
+| [20261028.material-management.md](20261028.material-management.md) | Materials panel: material checks, zone distribution, texture sizes and splits; zone tool on hold | Design |
 
 The first five were started in the FSS aircraft repository (`codes/wasm/doc/journal/`) and moved here; their copies
 there end with a session pointing here.

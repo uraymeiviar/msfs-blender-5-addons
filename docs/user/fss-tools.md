@@ -62,6 +62,7 @@ Transparent materials (MSFS alpha mode Blend) never share a mesh with opaque one
 
 - **Merging only happens in a deploy** (or the MSFS 2024 multi-exporter), where the exported objects are throwaway copies. A plain **File > Export > glTF 2.0** of the open file leaves the groups unmerged and warns.
 - **The merge does not read the model XML.** An object the XML refers to (a screen, a clickspot, an animation target) is merged away unless it is animated, tagged **Don't Merge**, named `@NOMERGE_`, or kept for another reason. Check the Zones & Merge Tree before deploying.
+- **Transparent parts share one mesh per group** (`<name>_TRANSPARENT`), and MSFS sorts transparent surfaces by the centre of each mesh: two glasses that overlap on screen can flicker, and a decal on a surface far behind others can show on a surface in front. Keep such glass or decals out of the group with a **Don't Merge** tag; see [step 4 of the Artist Guide](README.md#4-merge-tree).
 - **Several materials in one group** stay several materials; the panel and the console warn so you can check that this is intended.
 - **More than two UV maps** in a group: only two are exported. UV maps are matched by name; if members name them differently, they are matched by position, with a warning.
 - **A merged name equal to a kept object's name** gives a warning; rename one of them.

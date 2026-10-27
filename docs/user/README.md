@@ -72,22 +72,22 @@ Steps marked **in development** describe what the tool will do, and how to get t
 - **Texel density:** each zone empty can carry its own density mark, set in [Zones & Merge Tree](fss-tools.md#zones--merge-tree), so the packer can give the rarely seen rear zone less texture and the forward zone more (step 7).
 - **Culling:** MSFS leaves out what is out of view by each node's bounding box. An object with parts both at the windshield and at the rear has a box across the whole cockpit, and is never left out. Zones make such objects easy to find: select a zone's empty, and [Empty Bounds](fss-tools.md#empty-bounds) shows its box reaching into the other zone. They also keep merge groups apart (step 4).
 
-Within a zone there is one material, and one texture set, per **material class** (standard, emissive, decal, glass and so on). Packing (step 8) packs one texture set at a time, so it follows the zones and materials.
+Within a zone, each kind of surface (standard, emissive, decal, glass and so on) gets its own material, and so its own texture set, and no material is used in two zones. Packing (step 8) packs one texture set at a time, so it follows the zones and materials.
 
-**What the tool will do:** zones as empties named `@ZONE_<NAME>` below the root, every part below one zone:
+Zones are empties named `@ZONE_<NAME>` below the root, every part below one zone:
 
 ![EMPTY_ROOT_COCKPIT contains the zones @ZONE_FWD and @ZONE_AFT. @ZONE_FWD uses the materials COCKPIT_FWD_STD and so on, and holds the merge group @MERGE_MAIN_PANEL: the panel shell and screws merge into one mesh, while the animated SWITCH_APU and the tagged MFD_SCREEN stay their own nodes. @ZONE_AFT uses COCKPIT_AFT_STD and so on.](images/scene-hierarchy.svg)
 
-Materials are named `<SCENE>_<ZONE>_<CLASS>`: the scene from the root, the zone from its empty, the class from the MSFS material type. Objects below `@ZONE_FWD` with a standard material use `COCKPIT_FWD_STD`. The texture size is set per material in [Packing](fss-tools.md#packing) (default 4096 × 4096). Classes follow the MSFS material types: `STD`, `STD_EM`, `DECAL`, `DECAL_EM`, `DECAL_FROST`, `DECAL_BLEND`, `GLASS`, `WNDSHIELD`, `INVIS`, `OCCLUDER`, `SCREEN`, `ANISO`, `CLEARCOAT`, `PORTHOLE`, `PARALLAX`, `FRESNEL`, `PROPELLER`.
+Name the materials as you like; a name that says the zone and the kind of surface, such as `COCKPIT_FWD_STD` in the picture, makes the material list easy to read. The texture size is set per material in [Packing](fss-tools.md#packing) (default 4096 × 4096).
 
-**Meanwhile, by hand:**
+**Do:**
 
 - Create the zone empties now, named `@ZONE_<NAME>` below the root, and put every part below one of them. The export drops the leading `@`: `@ZONE_FWD` becomes the node `ZONE_FWD`.
 - Press **Refresh** in [Zones & Merge Tree](fss-tools.md#zones--merge-tree) to see the zones, and give a zone a **density mark** there where it needs one (no mark keeps the density; for example 0.5 for a rarely seen zone). Marks multiply down the hierarchy, so everything below the zone takes it.
-- Name the materials `<SCENE>_<ZONE>_<CLASS>`, one per zone and class, and set each material's MSFS type to match its class. Auto Seam already skips objects whose materials are all decal, glass, windshield, invisible or occluder, by these class names or by the MSFS type.
+- Give each zone its own materials, one per kind of surface, and set each material's MSFS type. Auto Seam skips objects whose materials are all decal, glass, windshield, invisible or occluder (see [What Is Skipped](uv.md#what-is-skipped)).
 - Keep the number of materials low: see `materials.md` in the MSFS Authoring Guide.
 
-**Check:** every material name follows the pattern; no `Material.001` copies are left.
+**Check:** no material is used in two zones; no `Material.001` copies are left.
 
 **Redo when:** a zone turns out too full or nearly empty for its texture. Each change here changes a texture set, so packing follows, and repainting if the set was already textured.
 
@@ -123,6 +123,10 @@ So the topology you model decides what disappears together. A floor plate and it
 - Merge what is static and drawn together: parts that never move on their own, that nothing refers to by name, that are seen together and share materials. Merging parts with different materials saves nodes, not draw calls.
 - Keep separate what has a life of its own: a switch, a lever or a door with its handle must move on its own, which it cannot do as part of the panel's mesh. The merge keeps animated, skinned and bone-parented objects, meshes with shape keys, lights and cameras separate by itself. See [What Stays Separate](fss-tools.md#what-stays-separate).
 - The merge cannot see the model XML: a gauge screen or a clickspot that is not animated would be merged away. Give it a [tag](fss-tools.md#tags) with **Don't Merge** (for example `SCREEN`), or name it `@NOMERGE_<name>`.
+- Transparent surfaces sort by their mesh. MSFS draws glass, windshields and decals after the opaque surfaces, back to front, sorted by the centre of each mesh's bounding box, not by triangle (see `how-msfs-renders.md` in the MSFS Authoring Guide). A merge group puts all its transparent parts into one mesh, `<name>_TRANSPARENT`, with one centre:
+  - two glasses that overlap on screen (gauge glass in front of a display glass) can no longer be sorted against each other and may flicker: give one of them a tag with **Don't Merge**;
+  - decals spread over surfaces at different depths are drawn as one mesh after all of them: a label of the rear surface can then show on the front surface at some view angles. Merge decals of one surface, or of surfaces at the same depth; keep a decal on a surface far behind others out of the group.
+  - **Draw Order** (decal, glass and windshield materials) sorts separate meshes; it cannot sort parts inside one merged mesh.
 - Keep each merge group inside one zone (step 2): a group that spans two zones becomes one mesh across both, so MSFS cannot leave one zone out of view without the other, and the mesh carries both zones' materials. The Zones & Merge Tree lists groups outside every zone under **Unzoned**, and warns on a zone inside a merge group.
 - Put `@MERGE_<name>` on the empty above a set of parts that may become one mesh. A group can be large, a whole panel with everything on it: what must stay separate inside it stays separate by itself or by its tag, so you rarely need many small groups.
 - Use **Refresh** in [Zones & Merge Tree](fss-tools.md#zones--merge-tree) to see the zones and groups, their materials, and why objects were kept separate.
@@ -212,6 +216,8 @@ So the topology you model decides what disappears together. A floor plate and it
 **Why:** texture memory is the budget that matters most for frame rate. The texture sizes, atlas rules and memory budget are in `texturing.md` of the MSFS Authoring Guide. Baked ambient occlusion and sky light go into the texture set's occlusion channel; see `baking.md`.
 
 **Do:** texture each texture set in Substance Painter from the packed UVs. Use material values (colour, metallic, roughness) instead of a texture where a flat value is enough.
+
+**Texture imbalance:** every map of a texture set covers the whole set and costs the same memory, whatever it shows. If only a few parts of a material emit light, its emissive map is mostly black, yet it takes as much memory as the albedo and ORM maps, which are full. Give the emitting parts their own material (and texture set) when they cover only a small part of the set; the rest then needs no emissive map. The same holds for any map only a few parts need.
 
 For tiling patterns (brushed metal, fabric, grip), use tri-planar projection instead of UV projection: islands are packed at different densities, and a UV-projected pattern would change size from island to island.
 
