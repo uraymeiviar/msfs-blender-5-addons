@@ -71,3 +71,26 @@ python tests/harness/compare.py ref.gltf new.gltf
 - MSFS 2020: Blender **4.5 LTS** as well. Blender 3.6 is a poor reference for material textures: Khronos 3.6
   caches texture info keyed on socket objects, and the add-on's temporary shader nodes reuse freed sockets,
   so 3.6 itself exports stale texture references (`--ref 3.6` shows these as diffs).
+
+## Unit Suites of fss_blender_tools
+
+Background-Blender scripts that build synthetic scenes, purge the add-on copy deployed in the portable Blender (`5.2/scripts/addons_core`), import this repository's `fss_blender_tools` and print `PASS:` lines and a final `ALL ... PASSED`. Run from the repository root, one Blender at a time:
+
+```powershell
+$B = "G:\e-jets-e2\tools\blender\blender.exe"
+& $B -b --factory-startup --python tests/test_uv_pack.py
+```
+
+| Suite | Covers |
+| :--- | :--- |
+| `tests/test_uv_pack.py` | the packer: density per island, fit, underflow, overflow and needed size, directions, linked duplicates, Pack and Check All, Keep UVs, faces without 3D or UV area, the texture set list, the UV editor panel, report order |
+| `tests/test_density_marks.py` | density marks multiplying down the hierarchy, scene freedom, presets, migration of older files, the Packing chain drawn, visibility floor, heatmap refresh after a mark change |
+| `tests/test_panels.py` | the sidebar layout: every panel's label, parent and order, every panel drawn |
+| `tests/test_zone_tree.py` | Zones & Merge Tree rows and flags, zone marks, nearest zone, no `fss_` key in the glTF extras |
+| `tests/test_markers.py` | leading `@` stripped at export, Scan Names markers and the Clash rule |
+| `tests/test_lod_preview.py` | LOD viewport preview (hidden and bounds), save and load handlers |
+| `tests/uv_prototype/test_visibility.py` | Visibility Scoring: synthetic cases, operator, scene unchanged, heatmap mode, glTF leak, packer interface |
+| `tests/uv_prototype/test_autoseam_operators.py` | Auto Seam operators: propose, accept, Accept + Unwrap, discard, clear, progress, buttons |
+| `tests/uv_prototype/test_uv_heatmap.py` | the heatmap: distortion, density, visibility modes, display takeover, chart, grid |
+
+Without Blender: `python -m unittest tests.test_lod_rules` (LOD rules), and `tests/uv_prototype/test_uvmetrics_shape.py` (see its header). A traceback about `ImagePreviewCollection ... left open` at start-up comes from purging the deployed copy and is harmless. Prototype scripts and real-data runs are described in [uv_prototype/RUN.md](uv_prototype/RUN.md).

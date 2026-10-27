@@ -186,5 +186,4 @@ contains a marker.
 
 ## Decisions
 
-Rationale and history: `codes/wasm/doc/journal/20261014.fss-blender-tools-tags-and-merge.md` and
-`20261010.fss-blender-tools-wishlist.md` in the FSS aircraft repository.
+Rationale and history are in this repository's journals ([../docs/journal/](../docs/journal/README.md)): tags and merge groups in `20261014.fss-blender-tools-tags-and-merge.md`, the wish-list in `20261010.fss-blender-tools-wishlist.md`, LOD in `20261010.automated-lod-generation.md`, and UV seams, heatmap, visibility, density and packing in `20261019.automated-uv-unwrap.md` (start with its Session 102, which indexes the decisions in force).

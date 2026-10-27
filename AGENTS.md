@@ -18,6 +18,15 @@ install them into their own Blender.
 | `tests` | FSS | Differential test harness ([tests/README.md](tests/README.md)) |
 | `tools` | FSS | `deploy.ps1` / `deploy.bat` |
 
+## Working Model
+
+- **The maintainer decides.** Before a significant change (a new feature, a changed behaviour, a changed file or data format), propose it with the options and a recommendation, and wait for an answer. Small fixes follow an approved direction.
+- **Decisions are numbered in the task journal** (for the UV work: `docs/journal/20261019.automated-uv-unwrap.md`, decisions 1 to 121 so far, the index of those in force in Session 102). Record only what the maintainer decided; an agent's own choices are proposals until answered.
+- **Hand-offs:** moderate or large work is written as a hand-off in the journal (read first, steps, finish line, do-not list) and executed by another agent (Antigravity, a sub-agent), which appends its own session and commits by name without pushing.
+- **Review by re-running:** the reviewer re-runs the tests and measurements and inspects images before accepting a session; a claim that was not re-checked is reported as not verified. Findings go into a review session. Earlier agents' reports were wrong often enough (circular tests, criteria passed "with an explanation") that this is the rule, not an option.
+- **Finish lines are measurable;** a criterion that is not met is reported as NOT MET with its numbers.
+- **Release:** after review, raise the version, commit, push, deploy (below); the maintainer commits the deployed copies in the aircraft repositories.
+
 ## Upstream Policy (the exporter)
 
 - Asobo's releases are tracked in the per-simulator fork repositories (`msfs2024-blender-5.2.x-addons`, branch
@@ -59,6 +68,7 @@ install them into their own Blender.
   test then silently runs the deployed copy, not the code under test. Deploy first, or use `--factory-startup` with
   a Blender that has no copy.
 - `tests/run_tests.py` diffs exports between two add-on sides; see [tests/README.md](tests/README.md).
+- **Unit suites of `fss_blender_tools`** (each a background-Blender script that purges the deployed copy and imports this repository's): listed with the command in [tests/README.md](tests/README.md#unit-suites-of-fss_blender_tools). Run every suite a change can touch before committing; one Blender at a time (`tasklist | grep -i blender`).
 
 ## Deploying
 
@@ -83,6 +93,16 @@ tools\deploy.bat -Addons fss_blender_tools
   (FSS: `codes/wasm/AGENTS.md`, journals in `codes/wasm/doc/journal/`).
 - Raise `bl_info["version"]` of `fss_blender_tools` with each functional change, so deployed copies can be told apart.
 
+## Tools and Data Outside This Repository
+
+| What | Where | Used for |
+| :--- | :--- | :--- |
+| Portable Blender 5.2 for tests | `G:\e-jets-e2\tools\blender\blender.exe` (E2) or `F:\new-fss-aircraft-ejet\tools\blender\blender.exe` (E1) | background test runs; it holds a deployed add-on copy, so tests purge it |
+| Markdown linter | `F:\new-fss-aircraft-ejet\tools\mdlint.exe <file>` | every changed `.md` passes with 0 errors before a commit |
+| MSFS Authoring Guide | `F:\new-fss-aircraft-ejet\doc\msfs-authoring\` (E1) | the MSFS rules the artist guide refers to (draw calls, LOD, materials, textures) |
+| MSFS SDK documentation | `F:\new-fss-aircraft-ejet\doc\msfs-sdk\` | SDK facts (texture sizes, LOD selection) |
+| Production test scene | `G:\e-jets-e2\assets\visual\cockpit\COCKPIT.blend` (E2 cockpit, read-only) | real-data checks on copies in `tests/_work/` (git-ignored); how to rebuild them: Session 102 of the UV journal |
+
 ## Git
 
 - Conventional commit messages (`feat(fss-blender-tools): ...`, `fix(...)`), one topic per commit.
@@ -102,6 +122,11 @@ tools\deploy.bat -Addons fss_blender_tools
   folders with garbage names in the current folder, here the repository root (seen on 20261017: 23 of them). Start
   Blender with the normal user environment, or from a scratch folder; after a test run, check that `ls` of the
   repository root shows only the known folders, and remove leftover empty ones.
+- **GPU in background Blender:** offscreen rendering works after `gpu.init()`; create GPU resources (textures, batches) before binding an offscreen, or they draw into the wrong buffer.
+- **Timers and handlers have no selection:** `bpy.context.selected_objects` is empty in a timer; read each window's view layer (`window.view_layer`).
+- **Panels must not write data while drawing** (Blender refuses it): schedule the write after the draw (see `visibility.schedule_camera_sync`) or use an operator.
+- **Registered properties reach glTF extras:** Blender 5.2's exporter writes registered (system) properties as extras when Include Extras is on. `merge._strip_fss_extras` drops every `fss_` key from nodes, meshes, materials and the scene; name new properties `fss_...`. Their values stay readable through `id.bl_system_properties_get()` after the property is unregistered, which migrations use.
+- **Pack Islands margins:** with `scale=False`, `margin_method` ADD and FRACTION put the margin around each island, so the gap between two islands is twice the margin; concave margins are not exact (AABB is). UV triangles without area (needles) inflate the concave hull and push islands far out.
 - **Batch files:** on machines with `NoDefaultCurrentDirectoryInExePath` set, run `.bat` files by full path, or with
   `cmd /c "set NoDefaultCurrentDirectoryInExePath=&& ..."`.
 
