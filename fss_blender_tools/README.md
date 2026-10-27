@@ -1,7 +1,7 @@
 # FSS Blender Tools
 
-Authoring tools for FSS aircraft in Blender 5.2, in the 3D View sidebar tab "FSS Tools" (Packing also in the UV
-Editor's). Independent of the Asobo
+Authoring tools for FSS aircraft in Blender 5.2, in the 3D View sidebar tabs "FSS Tools" and "FSS MSFS Tools"
+(LOD; Packing also in the UV Editor's "FSS Tools"). Independent of the Asobo
 add-ons; the only coupling to the exporter is the glTF user-extension hook in `merge.py`. Working rules for this
 repository are in [../AGENTS.md](../AGENTS.md).
 
@@ -9,10 +9,10 @@ repository are in [../AGENTS.md](../AGENTS.md).
 
 | Module | Panel (sidebar path) | What it does |
 | :--- | :--- | :--- |
-| `panels.py` | **UV Tools**, **Utilities** | The two group panels; every section below is a subpanel registered by its module (`bl_parent_id`), with `bl_order` setting the sidebar order: Zones & Merge Tree, Tags, LOD, UV Tools, Utilities |
+| `panels.py` | **UV Tools**, **Utilities** | The two group panels; every section below is a subpanel registered by its module (`bl_parent_id`), with `bl_order` setting the sidebar order: Zones & Merge Tree, Tags, UV Tools, Utilities in the tab FSS Tools; LOD first in the tab FSS MSFS Tools |
 | `tools.py` | **Utilities > General** | Scene helpers: **Add Empty Parent** (Manual / Suffix / Prefix naming rules), **Origin to Bounding Box** (minimum-volume OBB orientation with 8 corners, 6 face centers and 12 edge centers) |
 | `empty_bounds.py` | **Utilities > Empty Bounds** | Draws the bounds of empties' subtrees (`All` / `Selected` / `Off`, `In Front`) and a clickable hierarchy text in the viewport |
-| `lod.py`, `lod_model.py`, `lod_rules.py` | **LOD** | Auto size culling (objects and loose mesh pieces), hidden-from / visible-from / Keep marks, Quota and Hints subpanel, scene export settings, and viewport membership preview |
+| `lod.py`, `lod_model.py`, `lod_rules.py` | **LOD** (tab FSS MSFS Tools) | Auto size culling (objects and loose mesh pieces), hidden-from / visible-from / Keep marks, Quota and Hints subpanel, scene export settings, and viewport membership preview |
 | `tags.py` | **Tags** | Generic object tags (`fss_tags`, semicolon-separated), per-row `[-]`/`[+]` assignment, selection, and per-tag skip-merge and Keep toggles |
 | `merge.py` | **Zones & Merge Tree** | Export-time merge groups (`@MERGE_<name>` / `@NOMERGE_<name>`), New Merge Group, tree preview of zones (`@ZONE_<NAME>`), groups and `@NOMERGE_` nodes with Unzoned and nesting warnings, console details; the zone row edits the zone empty's own density mark (`uv_marks`); `nearest_zone()` finds an object's zone |
 | `uv_marks.py` | **UV Tools > Packing**, and **Packing** in the UV Editor's sidebar (the Skip Auto Seam mark is drawn in Seams) | Authoring marks for UV unwrapping and packing: per-object density mark, a factor range (`fss_uv_density_own`, `fss_uv_density_min`, `fss_uv_density_max`; presets Lower x0.75 and Higher x1.5) that multiplies down the hierarchy with the scene's target density (`fss_uv_target_density`, 20.48 px/cm) and density freedom (`fss_uv_density_freedom_min` / `_max`, 0.9 to 1.1): `density()` gives the final range, `parent_density()` the chain above, `own_density()` the own factor; island direction (`fss_uv_direction`: Free, Upright, Flip, Quarter) and Skip Auto Seam (`fss_uv_skip_autoseam`), inherited from the nearest marked ancestor; per material the square texture set size (`fss_uv_texture_size`, 256 to 8192, default 4096, `texture_size()`) and island margin in pixels (`fss_uv_margin_px`, default 8, `margin()`), and **Keep UVs** (`fss_uv_keep_uvs`: the set is not packed). The texture set list (`FSS_UL_TextureSets`, a UIList over `bpy.data.materials` whose `filter_items` shows the selection's materials, active object's first, so drawing writes nothing; active row in `WindowManager.fss_uv_pack_active`) shows each set's last result of the session; the active row's box below carries Size, Margin, Keep UVs, **Pack** (`fss.uv_pack_texture_set`, undoable) and Last run; **Check All** (`fss.uv_pack_check_all`, modal, one set per step, progress bar with Cancel and Esc) measures every set without writing. One draw (`_PackingSection`) serves `FSS_PT_uv_marks` (3D viewport) and `FSS_PT_uv_marks_image` (Image Editor's UI region). Marks of earlier versions (`fss_uv_density`, `fss_zone_density`, the margin fraction `fss_uv_margin`, and before 0.33.0 `fss_uv_texture_width` / `_height`, which become the larger of the two) are converted on file load and at register |

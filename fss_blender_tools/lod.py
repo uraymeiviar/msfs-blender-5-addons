@@ -764,8 +764,8 @@ class FSS_PT_Lod(bpy.types.Panel):
     bl_label = 'LOD'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'FSS Tools'
-    bl_order = 2
+    bl_category = 'FSS MSFS Tools'
+    bl_order = 0
 
     def draw(self, context):
         layout = self.layout
@@ -823,7 +823,7 @@ class FSS_PT_LodQuotaHints(bpy.types.Panel):
     bl_parent_id = 'FSS_PT_lod'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'FSS Tools'
+    bl_category = 'FSS MSFS Tools'
 
     def draw(self, context):
         layout = self.layout
@@ -924,7 +924,7 @@ class FSS_PT_LodExport(bpy.types.Panel):
     bl_parent_id = 'FSS_PT_lod'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'FSS Tools'
+    bl_category = 'FSS MSFS Tools'
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
@@ -1001,7 +1001,7 @@ class FSS_PT_LodExportAdvanced(bpy.types.Panel):
     bl_parent_id = 'FSS_PT_lod_export'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'FSS Tools'
+    bl_category = 'FSS MSFS Tools'
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):

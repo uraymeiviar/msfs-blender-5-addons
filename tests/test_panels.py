@@ -1,5 +1,6 @@
-"""The FSS Tools sidebar layout: top-level panels in pipeline order, UV Tools and Utilities with their sections, Packing
-in the UV editor's sidebar too, and every panel drawing without errors.
+"""The FSS sidebar layout: the tabs FSS Tools (top-level panels in pipeline order, UV Tools and Utilities with their
+sections) and FSS MSFS Tools (LOD with its subpanels, material-management decision 7), Packing in the UV editor's sidebar too,
+and every panel drawing without errors.
 
 To run:
 "<blender>" -b --factory-startup --python tests/test_panels.py
@@ -30,51 +31,65 @@ import fss_blender_tools  # noqa: E402
 
 fss_blender_tools.register()
 
-# idname: (label, parent idname or '', bl_order)
+# idname: (label, parent idname or '', bl_order, category)
+TOOLS = 'FSS Tools'
+MSFS = 'FSS MSFS Tools'
 EXPECTED = {
-    'FSS_PT_merge': ("Zones & Merge Tree", '', 0),
-    'FSS_PT_tags': ("Tags", '', 1),
-    'FSS_PT_lod': ("LOD", '', 2),
-    'FSS_PT_uv_tools': ("UV Tools", '', 3),
-    'FSS_PT_utilities': ("Utilities", '', 4),
-    'FSS_PT_uv_autoseam': ("Seams", 'FSS_PT_uv_tools', 0),
-    'FSS_PT_uv_marks': ("Packing", 'FSS_PT_uv_tools', 1),
-    'FSS_PT_visibility': ("Visibility Scoring", 'FSS_PT_uv_marks', 0),
-    'FSS_PT_tools': ("General", 'FSS_PT_utilities', 0),
-    'FSS_PT_empty_bounds': ("Empty Bounds", 'FSS_PT_utilities', 1),
-    'FSS_PT_uv_heatmap': ("Heatmap", 'FSS_PT_utilities', 2),
-    'FSS_PT_checks': ("Checks", 'FSS_PT_utilities', 3),
+    'FSS_PT_merge': ("Zones & Merge Tree", '', 0, TOOLS),
+    'FSS_PT_tags': ("Tags", '', 1, TOOLS),
+    'FSS_PT_uv_tools': ("UV Tools", '', 2, TOOLS),
+    'FSS_PT_utilities': ("Utilities", '', 3, TOOLS),
+    'FSS_PT_uv_autoseam': ("Seams", 'FSS_PT_uv_tools', 0, TOOLS),
+    'FSS_PT_uv_marks': ("Packing", 'FSS_PT_uv_tools', 1, TOOLS),
+    'FSS_PT_visibility': ("Visibility Scoring", 'FSS_PT_uv_marks', 0, TOOLS),
+    'FSS_PT_tools': ("General", 'FSS_PT_utilities', 0, TOOLS),
+    'FSS_PT_empty_bounds': ("Empty Bounds", 'FSS_PT_utilities', 1, TOOLS),
+    'FSS_PT_uv_heatmap': ("Heatmap", 'FSS_PT_utilities', 2, TOOLS),
+    'FSS_PT_checks': ("Checks", 'FSS_PT_utilities', 3, TOOLS),
+    'FSS_PT_lod': ("LOD", '', 0, MSFS),
+    'FSS_PT_lod_quota_hints': ("Quota and Hints", 'FSS_PT_lod', 0, MSFS),
+    'FSS_PT_lod_export': ("Export Settings", 'FSS_PT_lod', 0, MSFS),
+    'FSS_PT_lod_export_advanced': ("Advanced", 'FSS_PT_lod_export', 0, MSFS),
 }
 # The UV editor's sidebar: Packing again (UV journal decision 119), drawn by the same code
 EXPECTED_IMAGE_EDITOR = {
-    'FSS_PT_uv_marks_image': ("Packing", '', 0),
+    'FSS_PT_uv_marks_image': ("Packing", '', 0, TOOLS),
 }
 
 
 def fss_panels():
     return {cls.bl_idname: cls for cls in bpy.types.Panel.__subclasses__()
-            if getattr(cls, 'bl_category', '') == 'FSS Tools' and cls.__module__.startswith('fss_blender_tools')}
+            if getattr(cls, 'bl_category', '') in (TOOLS, MSFS) and cls.__module__.startswith('fss_blender_tools')}
 
 
 def test_layout():
     panels = fss_panels()
-    for idname, (label, parent, order) in {**EXPECTED, **EXPECTED_IMAGE_EDITOR}.items():
+    for idname, (label, parent, order, category) in {**EXPECTED, **EXPECTED_IMAGE_EDITOR}.items():
         cls = panels.get(idname)
         space = 'IMAGE_EDITOR' if idname in EXPECTED_IMAGE_EDITOR else 'VIEW_3D'
         assert cls is not None, f"{idname} not registered"
         assert cls.bl_label == label, (idname, cls.bl_label, label)
         assert getattr(cls, 'bl_parent_id', '') == parent, (idname, getattr(cls, 'bl_parent_id', ''), parent)
         assert getattr(cls, 'bl_order', 0) == order, (idname, getattr(cls, 'bl_order', 0), order)
+        assert cls.bl_category == category, (idname, cls.bl_category, category)
         assert getattr(bpy.types, idname, None) is not None, f"{idname} not in bpy.types"
         assert (cls.bl_space_type, cls.bl_region_type) == (space, 'UI'), (idname, cls.bl_space_type)
     assert bpy.types.FSS_PT_uv_marks.draw is bpy.types.FSS_PT_uv_marks_image.draw
-    # Every other FSS panel is a subpanel of one of these (the LOD subpanels)
+    # Every FSS panel is expected, and a subpanel sits in its parent's tab
+    unexpected = sorted(set(panels) - set(EXPECTED) - set(EXPECTED_IMAGE_EDITOR))
+    assert not unexpected, unexpected
     for idname, cls in panels.items():
-        if idname not in EXPECTED and idname not in EXPECTED_IMAGE_EDITOR:
-            assert getattr(cls, 'bl_parent_id', '') in panels, (idname, getattr(cls, 'bl_parent_id', ''))
-    top = sorted((order, label) for label, parent, order in EXPECTED.values() if not parent)
-    print(f"PASS: test_layout ({len(panels)} panels; top level: {', '.join(label for _o, label in top)}; UV editor: "
-          "Packing)")
+        parent = getattr(cls, 'bl_parent_id', '')
+        if parent:
+            assert panels[parent].bl_category == cls.bl_category, (idname, cls.bl_category, panels[parent].bl_category)
+    tabs = []
+    for category in (TOOLS, MSFS):
+        top = sorted((order, label) for label, parent, order, cat in EXPECTED.values()
+                     if not parent and cat == category)
+        tabs.append(f"{category}: {', '.join(label for _o, label in top)}")
+    msfs_panels = sorted(idname for idname, cls in panels.items() if cls.bl_category == MSFS)
+    print(f"PASS: test_layout ({len(panels)} panels; {'; '.join(tabs)} ({len(msfs_panels)} panels with subpanels); "
+          "UV editor: FSS Tools > Packing)")
 
 
 class _Layout:

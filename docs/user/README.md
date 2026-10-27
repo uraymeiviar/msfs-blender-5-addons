@@ -5,7 +5,7 @@
 
 This guide is for 3D artists who build Flight Sim Studio (FSS) aircraft in Blender 5.2. It assumes you already model, unwrap, animate, texture and export in Blender. It explains what MSFS needs on top of that, the order in which we prepare a model for it, and which of our tools help at each step and why.
 
-It matches **FSS Blender Tools 0.33.1** and the FSS exporter based on Asobo exporter 8.4.1.
+It matches **FSS Blender Tools 0.34.0** and the FSS exporter based on Asobo exporter 8.4.1.
 
 - **The pipeline** (below): the steps from a new model to a deployed one, in order.
 - **The reference pages:** what each panel and button does, linked from the steps:
@@ -13,7 +13,7 @@ It matches **FSS Blender Tools 0.33.1** and the FSS exporter based on Asobo expo
   | Page | Contents |
   | :--- | :--- |
   | [fss-tools.md](fss-tools.md) | The **FSS Tools** sidebar tab: **Zones & Merge Tree**, **Tags**, **UV Tools** (**Seams**, **Packing** with **Visibility Scoring**) and **Utilities** (**General**, **Empty Bounds**, **Heatmap**, **Checks**) |
-  | [lod.md](lod.md) | The **LOD** panel: automatic LODs, marks, size cut-offs, quota and hints, the LOD sphere, viewport preview, and exporting with LODs |
+  | [lod.md](lod.md) | The **FSS MSFS Tools** sidebar tab, with the **LOD** panel: automatic LODs, marks, size cut-offs, quota and hints, the LOD sphere, viewport preview, and exporting with LODs |
   | [uv.md](uv.md) | Auto Seam in **UV Tools > Seams** (proposed and current seams, workflow, reports, limits) and the **Heatmap** in **Utilities** (distortion, texel density and visibility on the model, the distribution chart, the UV grid) |
   | [exporter.md](exporter.md) | The exporter: export target MSFS 2024 or MSFS 2020, one `.blend` for both simulators, materials, instancing, legacy normals |
 
@@ -60,7 +60,7 @@ Steps marked **in development** describe what the tool will do, and how to get t
 - Run **Scan Names** and **Fix Broken Bone Parents** in [Checks](fss-tools.md#checks) (**Utilities**).
 - **Empty Bounds** shows what each empty contains; use it to check the hierarchy. See [Empty Bounds](fss-tools.md#empty-bounds).
 
-**Check:** Scan Names lists nothing you did not intend. For the origins, press **Refresh LOD Counts** in the [LOD](lod.md) panel (no LOD marks are needed for it; for an interior, first enter **Exterior Diameter** under **Export Settings**, or Refresh stops with "exterior diameter missing"): its **Export Settings** show no warning about origins outside the geometry, and **Show LOD Sphere** draws the sphere around the model, not far beyond it. See [Origins Outside the Geometry](lod.md#origins-outside-the-geometry).
+**Check:** Scan Names lists nothing you did not intend. For the origins, press **Refresh LOD Counts** in the [LOD](lod.md) panel (sidebar tab **FSS MSFS Tools**; no LOD marks are needed for it; for an interior, first enter **Exterior Diameter** under **Export Settings**, or Refresh stops with "exterior diameter missing"): its **Export Settings** show no warning about origins outside the geometry, and **Show LOD Sphere** draws the sphere around the model, not far beyond it. See [Origins Outside the Geometry](lod.md#origins-outside-the-geometry).
 
 **Redo when:** you add or rename parts. Renaming a node that the model XML, a `.cfg` or an attachment refers to also means updating that reference.
 
@@ -139,7 +139,7 @@ So the topology you model decides what disappears together. A floor plate and it
 
 **Why:** MSFS shows one whole LOD file at a time, chosen by how large the model's LOD sphere is on screen, and skips a LOD that has too many vertices for that size. The export builds the LOD files from your full model by removing parts and loose pieces by size and by marks. The rules are in `lods.md` of the MSFS Authoring Guide.
 
-**Do:**
+**Do:** in the **FSS MSFS Tools** tab > **LOD**:
 
 - **LOD sphere:** check it with **Show LOD Sphere**; set **LOD Sphere Diameter** to the size you want MSFS to measure, so the LODs switch at the distances you intend. See [The LOD Sphere](lod.md#the-lod-sphere).
 - **Marks:** **Keep** for small parts that must stay visible (annunciators, lights), **Hidden from** for parts not needed at lower detail, **Visible from** for simpler replacements. See [Marks](lod.md#marks).
@@ -250,7 +250,9 @@ Some work has no step of its own, because it runs through several:
 
 ## Where to Find the Tools
 
-- **FSS Tools:** in the 3D Viewport, press `N` to open the sidebar, then pick the **FSS Tools** tab. The panels are, from top to bottom: **Zones & Merge Tree**, **Tags**, **LOD**, **UV Tools** (sections **Seams** and **Packing**, with **Visibility Scoring** inside Packing) and **Utilities** (sections **General**, **Empty Bounds**, **Heatmap** and **Checks**).
+- **FSS Tools and FSS MSFS Tools:** in the 3D Viewport, press `N` to open the sidebar. FSS Blender Tools has two tabs there:
+  - **FSS Tools**, the tools that work on any model. The panels are, from top to bottom: **Zones & Merge Tree**, **Tags**, **UV Tools** (sections **Seams** and **Packing**, with **Visibility Scoring** inside Packing) and **Utilities** (sections **General**, **Empty Bounds**, **Heatmap** and **Checks**).
+  - **FSS MSFS Tools**, the tools that follow MSFS rules: the **LOD** panel.
 - **Exporter:** in the same sidebar, tab **Microsoft Flight Simulator 2024 Tools**, panel **Export Target** (also shown in **File > Export > glTF 2.0**, section **Microsoft Flight Simulator (FSS)**).
 - **Material and object settings:** in the Properties editor, the MSFS panels of the Asobo add-on, plus **MSFS 2020 Object Parameters** and **MSFS 2020 Material Parameters** while the scene targets MSFS 2020.
 
@@ -260,7 +262,7 @@ The portable Blender in `tools/blender` of the aircraft repository enables these
 
 | Add-on | Name in Blender | Role |
 | :--- | :--- | :--- |
-| `fss_blender_tools` | FSS Blender Tools | The **FSS Tools** sidebar tab |
+| `fss_blender_tools` | FSS Blender Tools | The **FSS Tools** and **FSS MSFS Tools** sidebar tabs |
 | `io_scene_gltf2_msfs_fss` | Microsoft Flight Simulator 2020 + 2024: glTF Extension (FSS) | glTF export for MSFS 2024 and MSFS 2020 from one `.blend`; replaces the separate MSFS 2024 and MSFS 2020 exporters |
 | `lod_tools_msfs_2024` | LOD Tools | Asobo LOD utilities; its panel is hidden by default (see [exporter.md](exporter.md#asobo-export-workflow-hidden)) |
 | `wipermask_generator_msfs_2024` | Wiper Mask Generator | Asobo windshield wiper mask generator |

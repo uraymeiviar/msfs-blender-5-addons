@@ -3,7 +3,7 @@
 [Artist Guide](README.md) / **lod.md**
 ***
 
-The **LOD** panel (sidebar `N` > **FSS Tools** > **LOD**) prepares a model for export as several LOD files. You model the full detail once; the export leaves out parts that are too small to see at each lower level of detail.
+The **LOD** panel (sidebar `N` > **FSS MSFS Tools** > **LOD**) prepares a model for export as several LOD files. You model the full detail once; the export leaves out parts that are too small to see at each lower level of detail.
 
 ## How the Automatic LODs Work
 
