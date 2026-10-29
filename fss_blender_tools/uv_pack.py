@@ -1055,13 +1055,13 @@ def _set_block(r, selected=None):
     if r['no_area_objects']:
         lines.append(f"  WARNING faces without area in {len(r['no_area_objects'])} object(s): "
                      f"{_names(r['no_area_objects'])}. They can push islands far out; fix the geometry "
-                     "(Utilities > Checks > Find Faces Without Area)")
+                     "(Checks > Find Faces Without Area)")
     if r['uv_zero_islands']:
         lines.append(f"  WARNING triangles without UV area in {r['uv_zero_islands']} island(s) of "
                      f"{len(r['uv_zero_objects'])} object(s), largest in the layout first: "
                      f"{_names(r['uv_zero_objects'])}. They push islands out "
                      "of the layout (k and the needed size grow); re-unwrap those parts, for example with Accept + "
-                     "Unwrap (Utilities > Checks > Find Faces Without UV Area selects them)")
+                     "Unwrap (Checks > Find Faces Without UV Area selects them)")
     if r['stale_visibility_meshes']:
         lines.append(f"  Visibility x1.00 for {r['stale_visibility_meshes']} mesh(es) without current visibility data")
     if selected is not None:

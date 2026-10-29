@@ -1,20 +1,23 @@
-# FSS Tools Panels
+# FSS MSFS Tools Panels
 
 [Artist Guide](README.md) / **fss-tools.md**
 ***
 
-All panels on this page are in the 3D Viewport sidebar (`N`), tab **FSS Tools**, from top to bottom in the order of the pipeline:
+FSS Blender Tools has one tab in the 3D Viewport sidebar (`N`), **FSS MSFS Tools**. Its panels, from top to bottom in the order of the pipeline:
 
 - **Zones & Merge Tree**
+- **Materials**, its own page [materials.md](materials.md)
 - **Tags**
+- **LOD**, its own page [lod.md](lod.md)
 - **UV Tools**, with the sections **Seams** (Auto Seam, its own page [uv.md](uv.md)) and **Packing** (the UV marks, the packer per texture set, with **Visibility Scoring** inside)
-- **Utilities**, with the sections **General**, **Empty Bounds**, **Heatmap** and **Checks**
+- **General**
+- **Empty Bounds**
+- **Heatmap**
+- **Checks**
 
-The panels that follow MSFS rules have a tab of their own next to it, **FSS MSFS Tools**: **Materials** ([materials.md](materials.md)) and **LOD** ([lod.md](lod.md)).
+This page describes all of them except Materials and LOD. Each panel and section opens and closes on its own; Blender remembers that in the `.blend`. **General**, **Empty Bounds**, **Heatmap** and **Checks** are closed at first.
 
-Each section opens and closes on its own; Blender remembers that in the `.blend`.
-
-The **UV Editor**'s sidebar (`N`) has an **FSS Tools** tab too, with the **Packing** section (without Visibility Scoring); it shows in the UV Editor only, not in the Image Editor's image view.
+The **UV Editor**'s sidebar (`N`) has an **FSS MSFS Tools** tab too, with the **Packing** section (without Visibility Scoring); it shows in the UV Editor only, not in the Image Editor's image view.
 
 ## Zones & Merge Tree
 
@@ -98,7 +101,7 @@ Automated UV seam proposal for hard-surface meshes, with a **Distortion Limit** 
 
 How much texture each part gets, the settings of each texture set, and the packer. The marks are also read by the heatmap's Density mode. The section is closed by default. Every field takes effect as you change it; there is no Apply button.
 
-The same section is also in the **UV Editor**'s sidebar (**N**), tab **FSS Tools** > **Packing**, so you can pack and see the result side by side. **Visibility Scoring** is only in the 3D viewport's section.
+The same section is also in the **UV Editor**'s sidebar (**N**), tab **FSS MSFS Tools** > **Packing**, so you can pack and see the result side by side. **Visibility Scoring** is only in the 3D viewport's section.
 
 - **Target density** (for the scene): the texel density at factor 1.0, in pixels per centimetre. The default 20.48 is 2048 pixels per metre.
 - **Density freedom Min / Max** (for the scene, default 0.90 and 1.10): how far the packer may scale any island down or up. It applies once, at the top of the hierarchy.
@@ -163,15 +166,11 @@ To set a field on several objects at once, select them, make one of them active,
 
 Measures, from the cameras you include and over the animation steps, how much of each face is visible, as a factor from 0 to 1 that does not depend on distance or size. Writes `<blend_name>.visibility` for the packer and the Heatmap's Visibility mode. See [visibility.md](visibility.md) for the settings and the workflow.
 
-## Utilities
-
-Tools that are not tied to one pipeline step.
-
-### General
+## General
 
 Helpers for parenting and object origins. Both work in Object Mode on the selected objects, and both can be undone.
 
-#### Add Empty Parent
+### Add Empty Parent
 
 Puts a new empty above each selected object.
 
@@ -182,7 +181,7 @@ Puts a new empty above each selected object.
   - **Suffix:** object name plus the suffix (default `_PARENT`).
   - **Prefix:** prefix (default `PARENT_`) plus the object name.
 
-#### Origin to Bounding Box
+### Origin to Bounding Box
 
 Moves the origin of each selected object to a point of its tightest bounding box, without moving the geometry or the children.
 
@@ -194,7 +193,7 @@ Moves the origin of each selected object to a point of its tightest bounding box
 
 Pitfall: the object's rotation values change. Do not use it on an object whose own transform is animated; the animation keys would no longer match.
 
-### Empty Bounds
+## Empty Bounds
 
 Draws, for each empty, a box around everything below it, and lists the parents of the active object. It only draws in the viewport: nothing is added to the scene or exported.
 
@@ -207,7 +206,7 @@ Draws, for each empty, a box around everything below it, and lists the parents o
 
 The boxes include hidden children.
 
-### Heatmap
+## Heatmap
 
 Colours the selected objects directly in the 3D viewport:
 - **Distortion:** Does each face keep its shape? (Conformal singular-value ratio)
@@ -216,11 +215,11 @@ Colours the selected objects directly in the 3D viewport:
 
 Includes a distribution chart in the panel and an optional UV grid with cell labels. See [uv.md](uv.md#heatmap-distortion-texel-density-and-visibility) for how to read it.
 
-### Checks
+## Checks
 
 Repairs for problems that break the export without an error message.
 
-#### Scan Names
+### Scan Names
 
 The object or bone name becomes the glTF node name, and the model XML, `.cfg` files and attachments find nodes by that exact name. **Scan Names** lists every object (and, with **Bones** on, every bone) whose name breaks the FSS naming rules:
 
@@ -244,11 +243,11 @@ How to use it:
 
 The check does not read the MSFS project: it cannot know which names the XML uses. Before renaming, make sure the old name is not referenced, or update the reference. Linked (library) items are listed but cannot be renamed here. Bones of an armature in Edit Mode are skipped.
 
-#### Find Faces Without Area
+### Find Faces Without Area
 
 A face without area (its corners on one point or one line, at most 0.000001 cm²) has no surface to texture, and re-unwrapping does not give it one. **Find Faces Without Area** checks every mesh object of the view layer and selects the visible ones with such faces, the first one active; it also selects those faces in their meshes, so **Tab** into Edit Mode shows them. The message counts the faces and objects (hidden objects are counted, not selected); the system console lists each object. Fix the geometry, for example with **Mesh > Clean Up > Degenerate Dissolve** or **Merge by Distance**, then run the check again. It works in Object Mode.
 
-#### Find Faces Without UV Area
+### Find Faces Without UV Area
 
 A face whose model has area but whose UVs have none, or only part of it: one of its triangles lies on one line (or one point) in the UVs, inside an island that otherwise has area. Such a needle covers no texels, but the packer cannot pack around it: the island lands far out of the layout and the texture set needs a larger texture than its islands would (on the cockpit, these triangles turned a set that needed about 1.15 times 4096 into one that does not fit even at 8192). **Find Faces Without UV Area** checks every mesh object of the view layer with a UV map, per texture set at its **Size**, and selects the visible objects with such faces, the first one active, and those faces in their meshes, so **Tab** into Edit Mode shows them. The message counts the faces, the islands and the objects (hidden objects are counted, not selected); the system console lists each object.
 
@@ -256,6 +255,6 @@ A face whose model has area but whose UVs have none, or only part of it: one of 
 - **Fix:** re-unwrap those parts, for example with **Accept + Unwrap** in [Seams](#seams) or Blender's **Unwrap**, then run the check again and pack.
 - It works in Object Mode. On the cockpit it takes about 3 seconds.
 
-#### Fix Broken Bone Parents
+### Fix Broken Bone Parents
 
 When a bone-parented object gets a new parent through the parent field (instead of `Ctrl + P`), Blender keeps the old parent bone. Blender then reports "Failed to add relation Bone Parent" on every update, and the Relations panel cannot fix it. **Fix Broken Bone Parents** finds every such object in the file and resets it to normal object parenting, without moving it. It reports how many objects it fixed.

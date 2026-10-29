@@ -913,7 +913,7 @@ class FSS_PT_UvMarks(_PackingSection, bpy.types.Panel):
     bl_label = 'Packing'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'FSS Tools'
+    bl_category = 'FSS MSFS Tools'
     bl_parent_id = 'FSS_PT_uv_tools'
     bl_order = 1
     bl_options = {'DEFAULT_CLOSED'}
@@ -925,7 +925,7 @@ class FSS_PT_UvMarksImageEditor(_PackingSection, bpy.types.Panel):
     bl_label = 'Packing'
     bl_space_type = 'IMAGE_EDITOR'
     bl_region_type = 'UI'
-    bl_category = 'FSS Tools'
+    bl_category = 'FSS MSFS Tools'
 
     @classmethod
     def poll(cls, context):

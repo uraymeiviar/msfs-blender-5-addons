@@ -1417,7 +1417,7 @@ class FSS_PT_UvAutoSeam(bpy.types.Panel):
     bl_label = 'Seams'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'FSS Tools'
+    bl_category = 'FSS MSFS Tools'
     bl_parent_id = 'FSS_PT_uv_tools'
     bl_order = 0
     bl_options = {'DEFAULT_CLOSED'}

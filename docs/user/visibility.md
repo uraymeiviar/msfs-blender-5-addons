@@ -1,6 +1,6 @@
 # Visibility Scoring
 
-**Visibility Scoring** (sidebar `N` > **FSS Tools** > **UV Tools** > **Packing** > **Visibility Scoring**) analyses how much of each mesh and UV island is visible from reference cameras (such as the pilot and copilot viewpoints) across animation states.
+**Visibility Scoring** (sidebar `N` > **FSS MSFS Tools** > **UV Tools** > **Packing** > **Visibility Scoring**) analyses how much of each mesh and UV island is visible from reference cameras (such as the pilot and copilot viewpoints) across animation states.
 
 The analysis writes its results to an external compressed file, `<blend_name>.visibility`, beside the `.blend` file. It modifies no meshes, leaves no custom properties on exported objects, and does not alter glTF exports. The results are used by the **Heatmap** (Visibility mode) for visual review and will guide the automatic UV packer to distribute texel density where it matters most.
 
@@ -79,7 +79,7 @@ After an analysis run, the panel displays:
 ## Visualizing Visibility: The Heatmap
 
 To visualize visibility directly on the 3D model:
-1. Open sidebar `N` > **FSS Tools** > **Utilities** > **Heatmap**.
+1. Open sidebar `N` > **FSS MSFS Tools** > **Heatmap**.
 2. Enable **Show Heatmap**.
 3. Set **Mode** to **Visibility**.
 

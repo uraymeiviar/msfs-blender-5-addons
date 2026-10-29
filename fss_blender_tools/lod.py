@@ -765,7 +765,7 @@ class FSS_PT_Lod(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'FSS MSFS Tools'
-    bl_order = 1
+    bl_order = 3
 
     def draw(self, context):
         layout = self.layout

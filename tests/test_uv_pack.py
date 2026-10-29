@@ -526,7 +526,7 @@ def test_uv_editor_panel():
     build_shared()
     view3d, image = bpy.types.FSS_PT_uv_marks, bpy.types.FSS_PT_uv_marks_image
     assert (image.bl_space_type, image.bl_region_type, image.bl_category, image.bl_label) == (
-        'IMAGE_EDITOR', 'UI', 'FSS Tools', 'Packing'), image
+        'IMAGE_EDITOR', 'UI', 'FSS MSFS Tools', 'Packing'), image
     assert view3d.bl_space_type == 'VIEW_3D' and view3d.draw is image.draw  # one draw function, not a copy
     # only in the UV editor, not in the image viewer
     assert image.poll(SimpleNamespace(space_data=SimpleNamespace(mode='UV')))
@@ -541,7 +541,7 @@ def test_uv_editor_panel():
     assert bpy.types.FSS_PT_visibility.bl_parent_id == 'FSS_PT_uv_marks'
     # the redraw helper tags the UV editor too
     assert set(uv_marks.SPACES) == {'VIEW_3D', 'IMAGE_EDITOR'}
-    print(f"PASS: test_uv_editor_panel (IMAGE_EDITOR UI 'FSS Tools' > Packing draws the same {len(strip[1])} calls "
+    print(f"PASS: test_uv_editor_panel (IMAGE_EDITOR UI 'FSS MSFS Tools' > Packing draws the same {len(strip[1])} calls "
           "as the 3D viewport's)")
 
 

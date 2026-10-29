@@ -1389,9 +1389,9 @@ class FSS_PT_UvHeatmap(bpy.types.Panel):
     bl_label = 'Heatmap'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'FSS Tools'
-    bl_parent_id = 'FSS_PT_utilities'
-    bl_order = 2
+    bl_category = 'FSS MSFS Tools'
+    bl_order = 7
+    bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
         layout = self.layout

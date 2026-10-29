@@ -551,12 +551,12 @@ class FSS_UL_VisibilityCameraList(bpy.types.UIList):
 # ---------------------------------------------------------------------------
 
 class FSS_PT_Visibility(bpy.types.Panel):
-    """Visibility Scoring section of UV Tools > Packing in sidebar FSS Tools."""
+    """Visibility Scoring section of UV Tools > Packing in sidebar FSS MSFS Tools."""
     bl_idname = 'FSS_PT_visibility'
     bl_label = 'Visibility Scoring'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'FSS Tools'
+    bl_category = 'FSS MSFS Tools'
     bl_parent_id = 'FSS_PT_uv_marks'
 
     def draw(self, context):

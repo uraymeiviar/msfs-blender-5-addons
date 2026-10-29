@@ -3,7 +3,7 @@
 [Artist Guide](README.md) / **materials.md**
 ***
 
-The **Materials** panel (sidebar `N` > **FSS MSFS Tools** > **Materials**, above **LOD**) lists every material of the `.blend` with the objects that use it, their zones, and how much surface each material covers. It shows what Blender's own material lists scatter over many places: which materials are never used, which are used in more than one zone, which are transparent or emissive, and roughly which texture size a material needs.
+The **Materials** panel (sidebar `N` > **FSS MSFS Tools** > **Materials**, below **Zones & Merge Tree**) lists every material of the `.blend` with the objects that use it, their zones, and how much surface each material covers. It shows what Blender's own material lists scatter over many places: which materials are never used, which are used in more than one zone, which are transparent or emissive, and roughly which texture size a material needs.
 
 The panel only reads, with one exception: the **Keep UVs** checkbox of the active material, the same setting as in [Packing](fss-tools.md#packing). It changes no other material setting, no object and no tag; **Select Objects** only changes the selection.
 

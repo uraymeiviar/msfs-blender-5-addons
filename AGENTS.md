@@ -14,7 +14,7 @@ install them into their own Blender.
 | `io_scene_gltf2_msfs_fss` | Asobo, forked by FSS | The glTF exporter for MSFS 2024 and 2020 (unified). Asobo code plus FSS changes in FSS-owned modules |
 | `_addons_common` | Asobo | Shared helpers of the Asobo add-ons |
 | `lod_tools_msfs_2024`, `wipermask_generator_msfs_2024`, `max_bridge_msfs_2024` | Asobo | Asobo tools, unchanged |
-| `fss_blender_tools` | FSS | FSS authoring tools: Zones & Merge Tree, Tags, LOD level marking, UV Tools (Seams: Auto Seam; Packing: UV marks, Pack and Check All per texture set, Visibility Scoring), and Utilities (General: Add Empty Parent, Origin to Bounding Box; Empty Bounds; Heatmap; Checks: Name Check, Fix Broken Bone Parents, Find Faces Without Area, Find Faces Without UV Area); Packing also in the UV editor's sidebar |
+| `fss_blender_tools` | FSS | FSS authoring tools, all in the sidebar tab FSS MSFS Tools: Zones & Merge Tree, Materials, Tags, LOD level marking, UV Tools (Seams: Auto Seam; Packing: UV marks, Pack and Check All per texture set, Visibility Scoring), General (Add Empty Parent, Origin to Bounding Box), Empty Bounds, Heatmap, Checks (Name Check, Fix Broken Bone Parents, Find Faces Without Area, Find Faces Without UV Area); Packing also in the UV editor's sidebar |
 | `tests` | FSS | Differential test harness ([tests/README.md](tests/README.md)) |
 | `tools` | FSS | `deploy.ps1` / `deploy.bat` |
 

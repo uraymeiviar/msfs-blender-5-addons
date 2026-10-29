@@ -5,17 +5,17 @@
 
 This guide is for 3D artists who build Flight Sim Studio (FSS) aircraft in Blender 5.2. It assumes you already model, unwrap, animate, texture and export in Blender. It explains what MSFS needs on top of that, the order in which we prepare a model for it, and which of our tools help at each step and why.
 
-It matches **FSS Blender Tools 0.35.0** and the FSS exporter based on Asobo exporter 8.4.1.
+It matches **FSS Blender Tools 0.36.0** and the FSS exporter based on Asobo exporter 8.4.1.
 
 - **The pipeline** (below): the steps from a new model to a deployed one, in order.
 - **The reference pages:** what each panel and button does, linked from the steps:
 
   | Page | Contents |
   | :--- | :--- |
-  | [fss-tools.md](fss-tools.md) | The **FSS Tools** sidebar tab: **Zones & Merge Tree**, **Tags**, **UV Tools** (**Seams**, **Packing** with **Visibility Scoring**) and **Utilities** (**General**, **Empty Bounds**, **Heatmap**, **Checks**) |
-  | [materials.md](materials.md) | The **FSS MSFS Tools** sidebar tab, first panel **Materials**: every material with its objects, zones and surface, the warnings never used and shared across zones, the transparent and emissive marks, a texture size estimate, Select Objects, and **By Zone** |
-  | [lod.md](lod.md) | The **FSS MSFS Tools** sidebar tab, second panel **LOD**: automatic LODs, marks, size cut-offs, quota and hints, the LOD sphere, viewport preview, and exporting with LODs |
-  | [uv.md](uv.md) | Auto Seam in **UV Tools > Seams** (proposed and current seams, workflow, reports, limits) and the **Heatmap** in **Utilities** (distortion, texel density and visibility on the model, the distribution chart, the UV grid) |
+  | [fss-tools.md](fss-tools.md) | The **FSS MSFS Tools** sidebar tab and its panels **Zones & Merge Tree**, **Tags**, **UV Tools** (**Seams**, **Packing** with **Visibility Scoring**), **General**, **Empty Bounds**, **Heatmap** and **Checks** |
+  | [materials.md](materials.md) | The **Materials** panel (**FSS MSFS Tools** sidebar tab): every material with its objects, zones and surface, the warnings never used and shared across zones, the transparent and emissive marks, a texture size estimate, Select Objects, and **By Zone** |
+  | [lod.md](lod.md) | The **LOD** panel (**FSS MSFS Tools** sidebar tab): automatic LODs, marks, size cut-offs, quota and hints, the LOD sphere, viewport preview, and exporting with LODs |
+  | [uv.md](uv.md) | Auto Seam in **UV Tools > Seams** (proposed and current seams, workflow, reports, limits) and the **Heatmap** panel (distortion, texel density and visibility on the model, the distribution chart, the UV grid) |
   | [exporter.md](exporter.md) | The exporter: export target MSFS 2024 or MSFS 2020, one `.blend` for both simulators, materials, instancing, legacy normals |
 
 - **The MSFS rules behind the steps** (draw calls, LOD limits, materials, texture budgets, with their SDK sources) are in the aircraft repository's **MSFS Authoring Guide**, `doc/msfs-authoring/`. This guide links its steps to those rules by topic.
@@ -40,7 +40,7 @@ Steps marked **in development** describe what the tool will do, and how to get t
 | [3. Loose Pieces](#3-loose-pieces-what-disappears-together) | LOD hints, Viewport LOD | a modelling decision | `lods.md` |
 | [4. Merge Tree](#4-merge-tree) | Tags, Zones & Merge Tree | available | `modeling.md` |
 | [5. LOD](#5-lod) | LOD | available | `lods.md` |
-| [6. Seams and Unwrap](#6-seams-and-unwrap) | UV Tools > Seams, Utilities > Heatmap | available | `uv-mapping.md` |
+| [6. Seams and Unwrap](#6-seams-and-unwrap) | UV Tools > Seams, Heatmap | available | `uv-mapping.md` |
 | [7. Visibility Scoring](#7-visibility-scoring) | UV Tools > Packing > Visibility Scoring | available | [visibility.md](visibility.md) |
 | [8. Packing](#8-packing) | UV Tools > Packing | available | `uv-mapping.md` |
 | [9. Texturing](#9-texturing) | Substance Painter | outside Blender | `texturing.md`, `baking.md` |
@@ -57,8 +57,8 @@ Steps marked **in development** describe what the tool will do, and how to get t
   - **Its position relative to the aircraft datum** (the world origin) places the scene in the aircraft. Everything below it moves with it: a longer variant's cockpit is the same cockpit with its root moved forward.
   - **Place it at the centre of the LOD sphere**, inside the scene, never on the datum. MSFS measures how large the model is on screen from that centre, so a camera there always sees `_LOD00`. MSFS works out the centre itself, from the geometry and every origin; the root does not set it, but a root far outside the geometry would move and enlarge the sphere (the root is exported, and its origin counts like every other). Compare it with **Show LOD Sphere** (step 5).
   - To move the root without moving what is below it, turn on **Options > Transform > Affect Only: Parents** in the 3D Viewport header, move it, and turn the option off again.
-- Use **Add Empty Parent** to group parts without moving them, and **Origin to Bounding Box** to bring origins back into their geometry (not on objects whose own transform is animated). See [General](fss-tools.md#general) in **Utilities**.
-- Run **Scan Names** and **Fix Broken Bone Parents** in [Checks](fss-tools.md#checks) (**Utilities**).
+- Use **Add Empty Parent** to group parts without moving them, and **Origin to Bounding Box** to bring origins back into their geometry (not on objects whose own transform is animated). See [General](fss-tools.md#general).
+- Run **Scan Names** and **Fix Broken Bone Parents** in [Checks](fss-tools.md#checks).
 - **Empty Bounds** shows what each empty contains; use it to check the hierarchy. See [Empty Bounds](fss-tools.md#empty-bounds).
 
 **Check:** Scan Names lists nothing you did not intend. For the origins, press **Refresh LOD Counts** in the [LOD](lod.md) panel (sidebar tab **FSS MSFS Tools**; no LOD marks are needed for it; for an interior, first enter **Exterior Diameter** under **Export Settings**, or Refresh stops with "exterior diameter missing"): its **Export Settings** show no warning about origins outside the geometry, and **Show LOD Sphere** draws the sphere around the model, not far beyond it. See [Origins Outside the Geometry](lod.md#origins-outside-the-geometry).
@@ -177,7 +177,7 @@ So the topology you model decides what disappears together. A floor plate and it
 
 **Do:**
 
-- In **FSS Tools** > **UV Tools** > **Packing** > **Visibility Scoring**, tick **Include** for your cameras and set each to **Look Around** (the head can turn) or **Fixed View** (only what the camera's own frame shows).
+- In **FSS MSFS Tools** > **UV Tools** > **Packing** > **Visibility Scoring**, tick **Include** for your cameras and set each to **Look Around** (the head can turn) or **Fixed View** (only what the camera's own frame shows).
 - Set **Animation Steps** (default 5: 0, 25, 50, 75 and 100 % of each animation).
 - Save the `.blend`, then **Update Visibility**. The results go to `<blend name>.visibility` beside the `.blend`. See [visibility.md](visibility.md).
 
@@ -196,11 +196,11 @@ So the topology you model decides what disappears together. A floor plate and it
 
 **What the tool does:** **Pack** packs one texture set: every face with its material in the scene, selected or not. It scales each island to its density range (target density × the density marks × the island's visibility), at one common position inside the ranges for the whole set, turns islands only as their **direction** mark allows, and keeps each material's **margin** in pixels. When the islands do not fit the texture **size**, it still writes them at their density, reaching beyond the texture, and says which size they need; when they leave space even at the top of their ranges, it says which smaller size would do. **Check All** does the same for every texture set without writing UVs. See [Packing](fss-tools.md#packing).
 
-**Do:** in **FSS Tools** > **UV Tools** > **Packing** (the same section is in the UV Editor's sidebar, tab **FSS Tools**):
+**Do:** in **FSS MSFS Tools** > **UV Tools** > **Packing** (the same section is in the UV Editor's sidebar, tab **FSS MSFS Tools**):
 
 1. Set **Target density** and the density marks (step 7 explains them). Select the objects; the list shows their texture sets. Click a row and set that set's **Size** (square: 256 to 8192 pixels per side) and **Margin**.
 2. Tick **Keep UVs** on texture sets that must not be packed: fur and hair cards, decal sheets, colliders.
-3. Before packing, run [Find Faces Without UV Area](fss-tools.md#find-faces-without-uv-area) (**Utilities** > **Checks**) and re-unwrap the parts it selects (for example **Accept + Unwrap**): their islands would land far out of the layout and make the set need a larger texture.
+3. Before packing, run [Find Faces Without UV Area](fss-tools.md#find-faces-without-uv-area) (**Checks** panel) and re-unwrap the parts it selects (for example **Accept + Unwrap**): their islands would land far out of the layout and make the set need a larger texture.
 4. **Check All**, then read each set's **Last run** and the **FSS Packing Report**. If a set's report warns about **triangles without UV area**, re-unwrap the objects it names and check again. Change sizes or marks until each set fits at a size you accept.
 5. Click the set's row and press **Pack**. **Ctrl + Z** undoes it.
 6. If the report warns about **faces without area**, run [Find Faces Without Area](fss-tools.md#find-faces-without-area) and fix them.
@@ -252,9 +252,7 @@ Some work has no step of its own, because it runs through several:
 
 ## Where to Find the Tools
 
-- **FSS Tools and FSS MSFS Tools:** in the 3D Viewport, press `N` to open the sidebar. FSS Blender Tools has two tabs there:
-  - **FSS Tools**, the tools that work on any model. The panels are, from top to bottom: **Zones & Merge Tree**, **Tags**, **UV Tools** (sections **Seams** and **Packing**, with **Visibility Scoring** inside Packing) and **Utilities** (sections **General**, **Empty Bounds**, **Heatmap** and **Checks**).
-  - **FSS MSFS Tools**, the tools that follow MSFS rules. The panels are, from top to bottom: **Materials** (with the section **By Zone**) and **LOD**.
+- **FSS MSFS Tools:** in the 3D Viewport, press `N` to open the sidebar. FSS Blender Tools has one tab there, **FSS MSFS Tools**. The panels are, from top to bottom: **Zones & Merge Tree**, **Materials** (with the section **By Zone**), **Tags**, **LOD**, **UV Tools** (sections **Seams** and **Packing**, with **Visibility Scoring** inside Packing), **General**, **Empty Bounds**, **Heatmap** and **Checks**. The UV Editor's sidebar has an **FSS MSFS Tools** tab too, with **Packing**.
 - **Exporter:** in the same sidebar, tab **Microsoft Flight Simulator 2024 Tools**, panel **Export Target** (also shown in **File > Export > glTF 2.0**, section **Microsoft Flight Simulator (FSS)**).
 - **Material and object settings:** in the Properties editor, the MSFS panels of the Asobo add-on, plus **MSFS 2020 Object Parameters** and **MSFS 2020 Material Parameters** while the scene targets MSFS 2020.
 
@@ -264,7 +262,7 @@ The portable Blender in `tools/blender` of the aircraft repository enables these
 
 | Add-on | Name in Blender | Role |
 | :--- | :--- | :--- |
-| `fss_blender_tools` | FSS Blender Tools | The **FSS Tools** and **FSS MSFS Tools** sidebar tabs |
+| `fss_blender_tools` | FSS Blender Tools | The **FSS MSFS Tools** sidebar tab (in the 3D Viewport and the UV Editor) |
 | `io_scene_gltf2_msfs_fss` | Microsoft Flight Simulator 2020 + 2024: glTF Extension (FSS) | glTF export for MSFS 2024 and MSFS 2020 from one `.blend`; replaces the separate MSFS 2024 and MSFS 2020 exporters |
 | `lod_tools_msfs_2024` | LOD Tools | Asobo LOD utilities; its panel is hidden by default (see [exporter.md](exporter.md#asobo-export-workflow-hidden)) |
 | `wipermask_generator_msfs_2024` | Wiper Mask Generator | Asobo windshield wiper mask generator |

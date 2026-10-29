@@ -6,10 +6,10 @@ Independent of the Asobo add-ons and of _addons_common, so upstream merges into 
 bl_info = {
     "name": "FSS Blender Tools",
     "author": "Flight Sim Studio",
-    "description": "Authoring checks and helpers for MSFS aircraft (zones and merge tree, tags, materials, lod, uv tools: seams, packing per texture set with its marks, visibility scoring; utilities: general tools, empty bounds, heatmap, checks)",
+    "description": "Authoring checks and helpers for MSFS aircraft (zones and merge tree, materials, tags, lod, uv tools: seams, packing per texture set with its marks, visibility scoring; general tools, empty bounds, heatmap, checks)",
     "blender": (5, 2, 0),
-    "version": (0, 35, 0),
-    "location": "3D View > Sidebar > FSS Tools, FSS MSFS Tools (Materials, LOD); UV Editor > Sidebar > FSS Tools (Packing)",
+    "version": (0, 36, 0),
+    "location": "3D View > Sidebar > FSS MSFS Tools; UV Editor > Sidebar > FSS MSFS Tools (Packing)",
     "category": "Object",
 }
 
@@ -36,7 +36,7 @@ else:
     from . import (checks, empty_bounds, lod_rules, lod_model, lod, materials, merge, name_check, panels, tags, tools,
                    uv_autoseam, uv_heatmap, uv_marks, uv_pack, visibility, visibility_core)
 
-# panels first: it registers the UV Tools and Utilities groups that the other modules' panels sit in
+# panels first: it registers the UV Tools group that the Seams and Packing panels sit in
 MODULES = (panels, tools, empty_bounds, lod, tags, merge, uv_marks, materials, uv_autoseam, uv_heatmap, visibility, name_check,
            checks)
 

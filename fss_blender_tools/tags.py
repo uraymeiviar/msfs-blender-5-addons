@@ -254,8 +254,8 @@ class FSS_PT_Tags(bpy.types.Panel):
     bl_label = "Tags"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "FSS Tools"
-    bl_order = 1
+    bl_category = "FSS MSFS Tools"
+    bl_order = 2
 
     def draw(self, context):
         layout = self.layout

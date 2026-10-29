@@ -1,6 +1,7 @@
-"""The FSS sidebar layout: the tabs FSS Tools (top-level panels in pipeline order, UV Tools and Utilities with their
-sections) and FSS MSFS Tools (Materials with By Zone, then LOD with its subpanels, material-management decisions 7 and
-11), Packing in the UV editor's sidebar too, and every panel drawing without errors.
+"""The FSS sidebar layout: every panel in the tab FSS MSFS Tools (material-management decision 15), top-level in
+pipeline order (Zones & Merge Tree, Materials with By Zone, Tags, LOD with its subpanels, UV Tools with Seams and
+Packing, General, Empty Bounds, Heatmap, Checks), Packing in the UV editor's FSS MSFS Tools tab too, no other tab, and
+every panel drawing without errors.
 
 To run:
 "<blender>" -b --factory-startup --python tests/test_panels.py
@@ -32,36 +33,38 @@ import fss_blender_tools  # noqa: E402
 fss_blender_tools.register()
 
 # idname: (label, parent idname or '', bl_order, category)
-TOOLS = 'FSS Tools'
 MSFS = 'FSS MSFS Tools'
 EXPECTED = {
-    'FSS_PT_merge': ("Zones & Merge Tree", '', 0, TOOLS),
-    'FSS_PT_tags': ("Tags", '', 1, TOOLS),
-    'FSS_PT_uv_tools': ("UV Tools", '', 2, TOOLS),
-    'FSS_PT_utilities': ("Utilities", '', 3, TOOLS),
-    'FSS_PT_uv_autoseam': ("Seams", 'FSS_PT_uv_tools', 0, TOOLS),
-    'FSS_PT_uv_marks': ("Packing", 'FSS_PT_uv_tools', 1, TOOLS),
-    'FSS_PT_visibility': ("Visibility Scoring", 'FSS_PT_uv_marks', 0, TOOLS),
-    'FSS_PT_tools': ("General", 'FSS_PT_utilities', 0, TOOLS),
-    'FSS_PT_empty_bounds': ("Empty Bounds", 'FSS_PT_utilities', 1, TOOLS),
-    'FSS_PT_uv_heatmap': ("Heatmap", 'FSS_PT_utilities', 2, TOOLS),
-    'FSS_PT_checks': ("Checks", 'FSS_PT_utilities', 3, TOOLS),
-    'FSS_PT_materials': ("Materials", '', 0, MSFS),
+    'FSS_PT_merge': ("Zones & Merge Tree", '', 0, MSFS),
+    'FSS_PT_materials': ("Materials", '', 1, MSFS),
     'FSS_PT_materials_by_zone': ("By Zone", 'FSS_PT_materials', 0, MSFS),
-    'FSS_PT_lod': ("LOD", '', 1, MSFS),
+    'FSS_PT_tags': ("Tags", '', 2, MSFS),
+    'FSS_PT_lod': ("LOD", '', 3, MSFS),
     'FSS_PT_lod_quota_hints': ("Quota and Hints", 'FSS_PT_lod', 0, MSFS),
     'FSS_PT_lod_export': ("Export Settings", 'FSS_PT_lod', 0, MSFS),
     'FSS_PT_lod_export_advanced': ("Advanced", 'FSS_PT_lod_export', 0, MSFS),
+    'FSS_PT_uv_tools': ("UV Tools", '', 4, MSFS),
+    'FSS_PT_uv_autoseam': ("Seams", 'FSS_PT_uv_tools', 0, MSFS),
+    'FSS_PT_uv_marks': ("Packing", 'FSS_PT_uv_tools', 1, MSFS),
+    'FSS_PT_visibility': ("Visibility Scoring", 'FSS_PT_uv_marks', 0, MSFS),
+    'FSS_PT_tools': ("General", '', 5, MSFS),
+    'FSS_PT_empty_bounds': ("Empty Bounds", '', 6, MSFS),
+    'FSS_PT_uv_heatmap': ("Heatmap", '', 7, MSFS),
+    'FSS_PT_checks': ("Checks", '', 8, MSFS),
 }
+# The former Utilities sections, top-level now: closed by default, as they effectively were inside the closed group
+DEFAULT_CLOSED = ('FSS_PT_tools', 'FSS_PT_empty_bounds', 'FSS_PT_uv_heatmap', 'FSS_PT_checks')
 # The UV editor's sidebar: Packing again (UV journal decision 119), drawn by the same code
 EXPECTED_IMAGE_EDITOR = {
-    'FSS_PT_uv_marks_image': ("Packing", '', 0, TOOLS),
+    'FSS_PT_uv_marks_image': ("Packing", '', 0, MSFS),
 }
 
 
 def fss_panels():
+    """Every registered panel class of the add-on, whatever its tab, so a panel left in another tab is found. Classes of
+    the purged deployed copy stay in __subclasses__ but are not registered."""
     return {cls.bl_idname: cls for cls in bpy.types.Panel.__subclasses__()
-            if getattr(cls, 'bl_category', '') in (TOOLS, MSFS) and cls.__module__.startswith('fss_blender_tools')}
+            if cls.__module__.startswith('fss_blender_tools') and cls.is_registered}
 
 
 def test_layout():
@@ -77,6 +80,16 @@ def test_layout():
         assert getattr(bpy.types, idname, None) is not None, f"{idname} not in bpy.types"
         assert (cls.bl_space_type, cls.bl_region_type) == (space, 'UI'), (idname, cls.bl_space_type)
     assert bpy.types.FSS_PT_uv_marks.draw is bpy.types.FSS_PT_uv_marks_image.draw
+    for idname in DEFAULT_CLOSED:
+        assert 'DEFAULT_CLOSED' in getattr(panels[idname], 'bl_options', set()), idname
+    # The group panel Utilities is gone (decision 15)
+    assert not [cls for cls in panels.values() if cls.bl_label == 'Utilities']
+    # One tab: no panel of the add-on elsewhere, and top-level orders 0..8 without gaps or doubles
+    other_tabs = sorted((idname, cls.bl_category) for idname, cls in panels.items() if cls.bl_category != MSFS)
+    assert not other_tabs, other_tabs
+    orders = sorted(getattr(cls, 'bl_order', 0) for idname, cls in panels.items()
+                    if cls.bl_space_type == 'VIEW_3D' and not getattr(cls, 'bl_parent_id', ''))
+    assert orders == list(range(9)), orders
     # Every FSS panel is expected, and a subpanel sits in its parent's tab
     unexpected = sorted(set(panels) - set(EXPECTED) - set(EXPECTED_IMAGE_EDITOR))
     assert not unexpected, unexpected
@@ -84,14 +97,10 @@ def test_layout():
         parent = getattr(cls, 'bl_parent_id', '')
         if parent:
             assert panels[parent].bl_category == cls.bl_category, (idname, cls.bl_category, panels[parent].bl_category)
-    tabs = []
-    for category in (TOOLS, MSFS):
-        top = sorted((order, label) for label, parent, order, cat in EXPECTED.values()
-                     if not parent and cat == category)
-        tabs.append(f"{category}: {', '.join(label for _o, label in top)}")
-    msfs_panels = sorted(idname for idname, cls in panels.items() if cls.bl_category == MSFS)
-    print(f"PASS: test_layout ({len(panels)} panels; {'; '.join(tabs)} ({len(msfs_panels)} panels with subpanels); "
-          "UV editor: FSS Tools > Packing)")
+    top = sorted((getattr(cls, 'bl_order', 0), cls.bl_label) for cls in panels.values()
+                 if cls.bl_space_type == 'VIEW_3D' and not getattr(cls, 'bl_parent_id', ''))
+    print(f"PASS: test_layout ({len(panels)} panels, all in {MSFS}: {', '.join(label for _o, label in top)}; "
+          f"General, Empty Bounds, Heatmap, Checks closed by default; no Utilities; UV editor: {MSFS} > Packing)")
 
 
 class _Layout:

@@ -508,9 +508,9 @@ class FSS_PT_Tools(bpy.types.Panel):
     bl_label = "General"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "FSS Tools"
-    bl_parent_id = "FSS_PT_utilities"
-    bl_order = 0
+    bl_category = "FSS MSFS Tools"
+    bl_order = 5
+    bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
         layout = self.layout

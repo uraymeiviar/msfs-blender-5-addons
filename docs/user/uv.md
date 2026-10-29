@@ -5,7 +5,7 @@
 
 This page covers two sections of the sidebar: **Auto Seam** in **UV Tools > Seams**, which proposes UV seams, and the [Heatmap](#heatmap-distortion-texel-density-and-visibility), which shows how well the UVs fit and how visible each face is.
 
-The **Seams** section (sidebar `N` > **FSS Tools** > **UV Tools** > **Seams**) proposes seams for hard-surface meshes, so you mark by hand only the seams that matter to you. It works alongside your own seams: it never removes or changes them, unless you click **Clear Current**.
+The **Seams** section (sidebar `N` > **FSS MSFS Tools** > **UV Tools** > **Seams**) proposes seams for hard-surface meshes, so you mark by hand only the seams that matter to you. It works alongside your own seams: it never removes or changes them, unless you click **Clear Current**.
 
 ## How It Works
 
@@ -119,7 +119,7 @@ Repeated problems on one mesh are grouped into one line, with the count, the lar
 
 ## Heatmap: Distortion, Texel Density, and Visibility
 
-The **Heatmap** section (sidebar `N` > **FSS Tools** > **Utilities** > **Heatmap**) displays a live per-face overlay directly on the 3D surface in the viewport. It helps review UV distortion, verify texel density distribution before packing or texturing, and inspect pilot camera visibility scores.
+The **Heatmap** panel (sidebar `N` > **FSS MSFS Tools** > **Heatmap**) displays a live per-face overlay directly on the 3D surface in the viewport. It helps review UV distortion, verify texel density distribution before packing or texturing, and inspect pilot camera visibility scores.
 
 ### Turning It On
 
