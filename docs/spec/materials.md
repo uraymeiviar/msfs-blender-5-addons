@@ -10,7 +10,7 @@ Tools. Artist guide: [../user/materials.md](../user/materials.md). Decisions: ma
 ### MTL-001: Materials panel and Refresh
 
 - **Status:** implemented
-- **Requirement:** The panel Materials is first in the 3D Viewport sidebar tab FSS MSFS Tools (GEN-040). Refresh (Object
+- **Requirement:** The panel Materials is second in the 3D Viewport sidebar tab FSS MSFS Tools, after Zones & Merge Tree (GEN-040). Refresh (Object
   Mode) fills `Scene.fss_materials` (DAT-007) from the view layer and changes nothing else; the panel only reads those
   rows and does not follow changes until the next Refresh, which it says. Before the first Refresh it asks for one.
 - **Data:** DAT-007

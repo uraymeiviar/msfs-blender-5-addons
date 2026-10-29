@@ -21,7 +21,7 @@ recorded in a journal first ([../../AGENTS.md](../../AGENTS.md#working-model)), 
 | :--- | :--- | :--- |
 | [data-formats.md](data-formats.md) | `DAT` | Properties and marks, name markers, the `.visibility` file, text blocks, what reaches the glTF |
 | [exporter.md](exporter.md) | `EXP` | The exporter `io_scene_gltf2_msfs_fss` |
-| [general-tools.md](general-tools.md) | `GEN` | Utilities: General, Empty Bounds, Heatmap, Checks; other wishes |
+| [general-tools.md](general-tools.md) | `GEN` | The sidebar tab; General, Empty Bounds, Heatmap, Checks; other wishes |
 | [tags.md](tags.md) | `TAG` | Tags and their switches |
 | [zones.md](zones.md) | `ZON` | Zone empties, zone rows, the zone tool |
 | [merge-tree.md](merge-tree.md) | `MRG` | Export-time merge groups |

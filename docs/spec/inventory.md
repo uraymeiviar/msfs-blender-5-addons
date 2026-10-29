@@ -41,7 +41,7 @@ Based on Asobo's MSFS 2024 exporter 8.4.1 for Blender 5.2; FSS changes live in F
 
 ## 2. fss_blender_tools
 
-### 2.1 General Tools (Utilities)
+### 2.1 General Tools (General, Empty Bounds, Heatmap, Checks)
 
 | Feature | Status | Source | Spec |
 | :--- | :--- | :--- | :--- |
@@ -65,7 +65,7 @@ Based on Asobo's MSFS 2024 exporter 8.4.1 for Blender 5.2; FSS changes live in F
 
 | Feature | Status | Source | Spec |
 | :--- | :--- | :--- | :--- |
-| Sidebar split into FSS Tools and FSS MSFS Tools | implemented (added 20261028) | material management journal, decision 7 | GEN-040 |
+| Every panel in one sidebar tab, FSS MSFS Tools; no Utilities group | implemented (added 20261029) | material management journal, decisions 7, 15 | GEN-040 |
 | Materials panel: list with never used, shared across zones, transparent and emissive marks; per zone objects and area; size estimate with visibility; Keep UVs and kept sets; Select Objects; Check All; By Zone | implemented (added 20261028) | material management journal, decisions 1, 3, 8, 9, 11 to 14 | MTL-001 to MTL-009 |
 | MSFS material checks (no MSFS material, texture needed, parameters) | planned | material management journal, Session 1 objectives | MTL-020 |
 | Split helpers for sets too large for 8192 | planned | material management journal, Session 1 objectives | MTL-021 |

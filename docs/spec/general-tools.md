@@ -2,19 +2,20 @@
 
 [Specification](README.md) / **general-tools.md**
 
-The Utilities panel of fss_blender_tools (General, Empty Bounds, Heatmap, Checks), the check wishes, and other
-wishes without an area of their own. Artist guide: [../user/fss-tools.md](../user/fss-tools.md#utilities),
+The sidebar tab of fss_blender_tools, the panels General, Empty Bounds, Heatmap and Checks, the check wishes, and
+other wishes without an area of their own. Artist guide: [../user/fss-tools.md](../user/fss-tools.md),
 [../user/uv.md](../user/uv.md#heatmap-distortion-texel-density-and-visibility).
 
 ## Sidebar
 
-### GEN-040: Two sidebar tabs
+### GEN-040: One sidebar tab
 
 - **Status:** implemented
-- **Requirement:** fss_blender_tools draws its 3D Viewport panels in two tabs: **FSS Tools** for tools that work on any
-  model (Zones & Merge Tree, Tags, UV Tools, Utilities, in that order) and **FSS MSFS Tools** for tools that follow MSFS
-  rules (Materials, LOD). The UV Editor's Packing panel is in its own FSS Tools tab. One add-on; only the UI is split.
-- **Decision:** MAT 7
+- **Requirement:** fss_blender_tools draws every 3D Viewport panel in the sidebar tab **FSS MSFS Tools**, at the top
+  level, in this order: Zones & Merge Tree, Materials, Tags, LOD, UV Tools (Seams, Packing with Visibility Scoring),
+  General, Empty Bounds, Heatmap, Checks; the last four are closed by default. The UV Editor's Packing panel is in a
+  tab FSS MSFS Tools of the UV Editor.
+- **Decision:** MAT 7 (label), MAT 15 (assignment, replaces MAT 7's split)
 - **Test:** `tests/test_panels.py::test_layout`
 - **Code:** `panels.py`, `lod.py`, `materials.py`
 

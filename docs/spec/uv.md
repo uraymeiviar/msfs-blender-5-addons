@@ -465,9 +465,9 @@ its own and can be repeated, none requires another to have run (UV 7, 42). Artis
 ### UV-PCK-014: Packing in the UV Editor
 
 - **Status:** implemented
-- **Requirement:** The UV Editor's sidebar has an FSS Tools tab with the same Packing section, without Visibility
+- **Requirement:** The UV Editor's sidebar has an FSS MSFS Tools tab with the same Packing section, without Visibility
   Scoring; it shows in the UV Editor only, not in the Image Editor's image view.
-- **Decision:** UV 99, 119 (replace 104)
+- **Decision:** UV 99, 119 (replace 104); MAT 15 (tab)
 - **Test:** `tests/test_uv_pack.py::test_uv_editor_panel`, `tests/test_panels.py::test_layout`
 - **Code:** `uv_marks.py`
 - **Notes:** never checked in an interactive Blender (UV journal Session 102, open item 3).
