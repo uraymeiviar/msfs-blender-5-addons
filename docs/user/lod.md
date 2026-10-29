@@ -3,7 +3,13 @@
 [Artist Guide](README.md) / **lod.md**
 ***
 
-The **LOD** panel (sidebar `N` > **FSS MSFS Tools** > **LOD**) prepares a model for export as several LOD files. You model the full detail once; the export leaves out parts that are too small to see at each lower level of detail.
+Three panels in the sidebar (`N` > **FSS MSFS Tools**) prepare a model for export as several LOD files. You model the full detail once; the export leaves out parts that are too small to see at each lower level of detail.
+
+| Panel | What it is for |
+| :--- | :--- |
+| **Object LOD** | The marks of the selected objects: let the size rule decide (**Auto**), never leave out (**Keep**), or choose the LODs in which an object is visible (**Hidden from**, **Visible from**). See [Object LOD](#object-lod). |
+| **Viewport LOD** | A preview in the viewport of what each LOD file keeps. See [Viewport LOD](#viewport-lod). |
+| **LOD Settings** | **Refresh LOD Counts** and the object count per LOD, with the sections **Quota and Hints** (will MSFS show each LOD, and which objects cost the most vertices) and **Export Settings** (model type, LOD sphere, cut-offs). See [LOD Settings](#lod-settings). |
 
 ## How the Automatic LODs Work
 
@@ -23,21 +29,41 @@ Terms:
 - **Cut-off:** for each LOD, the size below which Auto parts and loose pieces are left out.
 - **LOD sphere:** the sphere MSFS uses to measure how large the model is on screen (see [The LOD Sphere](#the-lod-sphere)).
 
-## Marks
+## Object LOD
 
-The buttons at the top of the panel set a mark on the **selected** objects. The buttons that are pressed show the mark of the **active** object.
+The **Object LOD** panel sets a mark on the **selected** objects. Its first lines say what you are acting on:
 
-| Button | Meaning |
+- **Selected: 3 objects (active: KNOB_HDG)**, or **Select objects to mark them** when nothing is selected (the buttons are greyed out then).
+- **Active object: Hidden from LOD3**: the mark of the active object (**Auto**, **Keep**, **Hidden from LODn** or **Visible from LODn**).
+- **Selected objects: mixed marks**, when the selected objects do not all carry the same mark. **Hidden from LOD3** and **Hidden from LOD4** count as different marks. A mark you set replaces the marks of all selected objects.
+
+Below them, one row with the four marks **Auto**, **Keep**, **Hidden from** and **Visible from**. The pressed button is the active object's mark.
+
+- **Auto** and **Keep** apply at once to the selected objects.
+- **Hidden from** and **Visible from** do not change anything yet: they open the row **Visible in** below, and a number there applies the mark.
+
+### The Visible In Row
+
+The row **Visible in** has the buttons **0** to **6**, for `LOD00` to `LOD06`. The lit buttons show the LODs in which the active object is visible. You click the LOD where the visible range ends or starts:
+
+- **Under Hidden from:** click the **last** LOD in which the objects should still be visible. Clicking **2** makes them visible in LOD 0 to 2 and leaves them out from LOD 3 on; the panel then reads **Active object: Hidden from LOD3**. **6** is greyed out: an object visible in every LOD needs no Hidden from mark.
+- **Under Visible from:** click the **first** LOD in which the objects should be visible. Clicking **2** leaves them out of LOD 0 and 1 and makes them visible from LOD 2 on. **0** is greyed out: visible from LOD 0 is every LOD.
+
+The button you click is always lit afterwards. While you have pressed **Hidden from** or **Visible from** on an object that does not carry that mark yet, nothing is lit until you click a number. **Auto** and **Keep** show no **Visible in** row.
+
+### What the Marks Mean
+
+| Mark | Meaning |
 | :--- | :--- |
-| **Auto** | The default. The size rule decides from which LOD the part is left out. Pressing it removes any other mark. |
+| **Auto** | The default. The size rule decides from which LOD the part is left out. Setting it removes any other mark. |
 | **Keep** | Never left out by size, in any LOD. |
-| **Hidden from** 1 to 6 | In `_LOD00` up to the LOD before n; left out from LOD n on. |
-| **Visible from** 1 to 6 | Left out up to the LOD before n; present from LOD n on. Meant for simpler replacement meshes. |
+| **Hidden from** LOD 1 to 6 | Visible from `_LOD00` up to the LOD before n; left out from LOD n on. |
+| **Visible from** LOD 1 to 6 | Left out up to the LOD before n; visible from LOD n on. Meant for simpler replacement meshes. |
 
 Rules:
 
 - An object has one mark at a time; setting one clears the others.
-- **A child is never present where its parent is absent.** A parent's hidden-from and visible-from limit all objects below it. The buttons clamp the marks of the selection and of the children to the parent's limits and report how many were clamped.
+- **A child is never present where its parent is absent.** A parent's hidden-from and visible-from limit all objects below it. Setting a mark clamps the marks of the selection and of the children to the parent's limits, and Blender's status bar reports how many were clamped.
 - **Explicit marks win over size.** A marked object is never culled by size.
 - **Keep protects the way up:** an Auto parent stays as long as a Keep child is present below it. Its other small Auto children can still disappear.
 - **Hidden ancestors win over Keep:** a Keep object under a parent marked hidden from n is still left out from n on. **Refresh LOD Counts** warns with "Keep under hidden ancestor".
@@ -48,76 +74,102 @@ Rules:
 When to use them:
 
 - **Keep:** small parts that must stay visible from far away, for example annunciators, beacon lights, emissive LEDs.
-- **Hidden from:** a large part that costs many vertices but is not needed at lower detail (for example seat covers from LOD 1), or a part that sits just above a cut-off (see [Near cut-off](#hints)).
+- **Hidden from:** a large part that costs many vertices but is not needed at lower detail (for example seat covers from LOD 1), or a part that sits just above a cut-off (see [Near cut-off](#per-lod-vertex-contributors)).
 - **Visible from:** a simplified replacement that should take over from a LOD; mark the detailed original **Hidden from** the same LOD.
 
 ## Viewport LOD
 
-The **Viewport LOD** row shows in the viewport what an export would put in each file.
+The **Viewport LOD** panel shows in the viewport what an export would put in each file. Its row of buttons:
 
+- **Off:** no preview. Every object shows again, with its own display setting; objects you had set to Wire or Bounds yourself keep that setting.
 - **0** to **6:** shows what that LOD file keeps; objects absent from it are hidden or shown as boxes, as **Excluded** says (below). The bottom-left corner of the viewport says "Filtered by LODn".
 - **Auto:** picks the LOD from the current view, as MSFS would: it measures how large the LOD sphere is on screen (from the view's field of view and distance) and switches the filter when the LOD changes. The viewport shows "Auto LODn (ratio)", the panel "Auto: LODnn (screen ratio ...)". After a **Refresh LOD Counts** it also accounts for the vertex counts, as MSFS does (MSFS 2024 only).
-- **Off:** shows every object again, with its own display setting. Objects you had set to Wire or Bounds yourself keep that setting.
-- **Excluded: Hidden / Bounds:** how the preview shows objects absent from the previewed LOD. **Hidden** (default) gives a clean view of what the LOD keeps; **Bounds** shows them as box outlines, to see where the excluded parts are. While **Hidden** is in use, the panel reminds you to set Viewport LOD to **Off** before exporting by hand from Blender, because exporting only visible objects would leave the hidden ones out.
+
+**0 is not the same as Off.** LOD 0 shows what `_LOD00` keeps, and `_LOD00` leaves out the objects marked **Visible from** (the simpler replacements). In a file without Visible from marks the two look the same.
+
+While a preview is on (a number or **Auto**), the panel shows two more things:
+
+- **Excluded: Hidden / Bounds:** how the preview shows objects absent from the previewed LOD. **Hidden** (default) gives a clean view of what the LOD keeps; **Bounds** shows them as box outlines, to see where the excluded parts are. With **Off** nothing is excluded, so the row is not shown.
+- While **Hidden** is in use, the reminder "Excluded objects hidden: set Viewport LOD Off before exporting by hand": exporting only visible objects from Blender would leave the hidden ones out.
 
 Notes:
 
-- Loose pieces that the export drops are not shown in the viewport, only counted in the panel.
+- Loose pieces that the export drops are not shown in the viewport, only counted in **LOD Settings**.
 - **Saving and opening:** saving undoes the preview first and puts it back afterwards; opening a file switches it **Off** (older files saved with hidden objects are cleaned too). A saved file therefore always contains every object as you made it, and the deploy scripts export the full model.
 - Choosing a LOD after the last written one shows "LODnn: not written (first empty LODmm)".
 - The preview only looks at **visible** objects, as the export does. Hidden objects are not part of the model.
-## Refresh LOD Counts
 
-Press **Refresh LOD Counts** after editing geometry, marks or settings. It measures the model, counts vertices and fills the hints. It does not export anything. The results are cached until the next Refresh; after a change the panel asks for a new Refresh.
+## LOD Settings
 
-Under the button, the panel then lists per LOD:
+The **LOD Settings** panel holds **Refresh LOD Counts**, the object count of each LOD, and the sections [Quota and Hints](#quota-and-hints) and [Export Settings](#export-settings).
 
-- `LOD00: 3099 obj`: objects in that file;
-- `-1234 pcs`: loose pieces the export drops;
-- `hides < 1.2 cm`: the cut-off of that LOD;
-- `LODnn: not written, no objects`: the first empty LOD. The export stops there; later LODs are not written, even if **Visible from** marks would put objects in them.
+### Refresh LOD Counts
+
+Press **Refresh LOD Counts** after editing geometry, marks or settings. It measures the model, counts vertices and fills the hints. It does not export anything, and it does not run by itself when you open a file (on a cockpit it takes a few seconds). The results stay as they were at the last Refresh, as the line "Cached source counts — Refresh after editing" reminds you; changing a setting in **Export Settings** clears them until the next Refresh.
+
+### Object Count per LOD
+
+After a Refresh, the panel shows one row per written LOD, for example:
+
+`LOD02 | 326 obj (11 %) | -40,851 pcs | hides < 18.8 cm`
+
+- **LODnn** and a **bar**: the bar is full for `LOD00` and shows how many of `LOD00`'s objects the LOD still has; the text gives the object count and, from LOD 1 on, that share in brackets. A bar that hardly shrinks from one LOD to the next means the size rule removes little there.
+- **-40,851 pcs:** loose pieces the export drops from that LOD (empty when none).
+- **hides < 18.8 cm:** the cut-off of that LOD.
+- **LODnn: not written, no objects:** the first empty LOD. The export stops there; later LODs are not written, even if **Visible from** marks would put objects in them.
 
 ## Quota and Hints
 
-This sub-panel shows whether MSFS will actually use each LOD, and what to change when it will not.
+This section of **LOD Settings** shows whether MSFS will actually use each LOD, and which objects to work on when it will not. Before the first Refresh it says "Click Refresh LOD Counts to compute estimates".
 
 ### Vertex Quota
 
-MSFS shows a LOD file only when the model is large enough on screen for its vertex count. A LOD with too many vertices is skipped, and MSFS uses the next one (or falls back to the last LOD). The quota is the most vertices a LOD may have and still be shown from its own minimum screen size (MSFS 2024, High graphics setting).
+What it means for you: MSFS shows a LOD file only when the model is large enough on screen for its vertex count; the section's first sentence says so. A LOD with too many vertices for its place in the table is shown only from a larger screen size than the table asks for. If it would need more than the whole screen, MSFS in practice never shows it and uses another LOD instead.
 
-Each line reads, for example:
+The table has one row per written LOD:
 
-`_LOD02  ~160,000 / 137,500  116%  MSFS from 73.6%`
+| Column | Meaning |
+| :--- | :--- |
+| **LOD** | `00` to `06`. |
+| **Vertices** | Estimated vertices of that file, counted as the glTF stores them (split where UVs, normals or materials differ; shared instances once). |
+| **Quota** | The most vertices the LOD may have and still be shown from its own table size (MSFS 2024, High graphics setting). |
+| **Used** | A bar: the vertices as a share of the quota. Up to 100 % the LOD fits; above 100 % the bar is full and red. |
+| **MSFS shows it from** | The screen size from which MSFS will show this LOD: the larger of its table value and what its vertex count needs. |
 
-- `~160,000`: estimated vertices of that file, counted as the glTF stores them (split where UVs, normals or materials differ; shared instances once).
-- `137,500`: the quota; `116%` how much of it is used. Over 100 % the line turns red.
-- `MSFS from 66.0%`: the screen size from which MSFS will show this LOD (the larger of its table value and what its vertex count needs). The last LOD is marked as fallback.
-- A grey line below tells how many loose pieces the export drops.
+The **MSFS shows it from** column reads:
 
-For MSFS 2020 (preview target, see [Advanced](#advanced)) only the vertex count is shown; MSFS 2020 has no vertex rule.
+- `55 % of screen (table 55 %)`: the LOD fits its quota and is shown from its table value.
+- `96 % of screen (table 2.7 %)`: too many vertices; MSFS shows the LOD only when the model fills 96 % of the screen instead of 2.7 %.
+- `never (needs 240 %; table 100 %)`: the LOD would need more than the whole screen, so MSFS never shows it.
+- `, fallback` after the last LOD: the LOD MSFS falls back to.
 
-### Hints
+Below the table, a box **Dropped at export (loose pieces below the cut-off)** lists per LOD how many loose pieces the export removes and their vertices, for example `LOD01: 12,832 pcs, ~248,613 vtx`. It is not shown when nothing is dropped.
 
-Pick a LOD with the number buttons under **Hints for LOD**. Each hint has a select button. The loose-piece and near-cut-off lists exist from LOD 1 on.
+For MSFS 2020 (preview target, see [Advanced](#advanced)) the section says "MSFS 2020 has no vertex rule" and the table shows only the **LOD** and **Vertices** columns.
 
-- **Largest contributors:** the objects and merge groups with the most vertices in that LOD. Candidates for **Hidden from**, or for splitting.
-- **Loose pieces below the cut-off (dropped at export):** meshes that hold small loose pieces the export removes from that LOD.
-- **Near cut-off (candidates to hide):** Auto parts just above the cut-off that cost many vertices. Marking them **Hidden from** this LOD saves those vertices.
+### Per LOD Vertex Contributors
 
-The usual loop: **Refresh LOD Counts**, pick a red LOD, select a hint, split the mesh or set a mark, **Refresh LOD Counts** again, until the LODs fit. Then deploy.
+Pick a LOD with the number buttons under **Per LOD Vertex Contributors**. Each entry has a select button (**Shift + click** adds to the selection).
+
+- The first box starts with the LOD's vertex count, for example `LOD00: ~1,257,938 vtx`, then lists the five objects and merge groups with the most vertices in that LOD. Each has a bar for its share of the LOD's vertices, with its vertex count and that share, for example `~80,316 (6.4 %)`. Candidates for **Hidden from**, or for splitting.
+- From LOD 1 on, two more boxes:
+  - **Loose pieces below ... m (dropped at export):** meshes that hold small loose pieces the export removes from that LOD.
+  - **Near cut-off (... m, candidates to hide):** Auto parts just above the cut-off that cost many vertices. Marking them **Hidden from** this LOD saves those vertices.
+
+The usual loop: **Refresh LOD Counts**, find a LOD with a red **Used** bar, select a contributor, split the mesh or set a mark, **Refresh LOD Counts** again, until the LODs fit. Then deploy.
 
 Splitting tip: a joined mesh with many small parts (screws, decals, cables) keeps all of them until its loose pieces are below the cut-off. Separate the small parts into their own objects, or keep them as separate loose pieces, and the size rule removes them.
 
-Pitfall: while **Viewport LOD** is set to a number (or **Auto**), the hints show that LOD and the number buttons have no effect. Set **Viewport LOD** to **Off** to pick the hint LOD freely.
+Pitfall: while **Viewport LOD** is set to a number (or **Auto**), the contributors show that LOD and the number buttons have no effect. Set **Viewport LOD** to **Off** to pick the LOD freely.
 
 ## Export Settings
 
-The **Export Settings** sub-panel (closed by default) holds the per-scene LOD settings. They are saved in the `.blend`.
+The **Export Settings** section of **LOD Settings** (closed by default) holds the per-scene LOD settings. They are saved in the `.blend`.
 
 ### Model Type
 
 - **Exterior part:** the default. Uses the SDK aircraft table 100, 75, 55, 35, 8, 5, 1 % (the screen size from which `_LOD00` to `_LOD06` are shown).
-- **Interior:** for a cockpit or cabin. The interior's LODs only matter when it is seen through the windows from outside, so its table is derived from the exterior's: LOD00 stays at 100 %, the others are the exterior values times interior diameter / exterior diameter. Enter **Exterior Diameter (m)** (the diameter of the exterior model's LOD sphere); without it the panel shows "exterior diameter missing" and the export stops. An interior writes at most `_LOD00` to `_LOD05`; its `_LOD06` is always empty.
+- **Interior:** for a cockpit or cabin. The interior's LODs only matter when it is seen through the windows from outside, so its table is derived from the exterior's: LOD00 stays at 100 %, the others are the exterior values times interior diameter / exterior diameter. Enter **Exterior Diameter (m)** (the diameter of the exterior model's LOD sphere). While it is 0 (and you have not typed an explicit table, see [Advanced](#advanced)), the field is drawn red with the message "Exterior diameter missing: enter the exterior model's LOD sphere diameter", and **Refresh LOD Counts** and the export stop with "exterior diameter missing". An interior writes at most `_LOD00` to `_LOD05`; its `_LOD06` is always empty.
 - **Scenery:** in this version the same rules and table as **Exterior part**.
 
 ### Model Diameter
@@ -176,9 +228,9 @@ The **Show LOD Sphere** toggle (in **Export Settings**, after a Refresh) draws, 
 
 The panel lists the same six points with a select button. One stray vertex or origin shows up here at once. The toggle is not saved with the file, and it needs the viewport overlays on.
 
-### LOD Sphere Diameter (Padding)
+### Pad LOD Sphere To
 
-**LOD Sphere Diameter** sets the diameter MSFS should use. 0 (the default) uses the measured sphere.
+**Pad LOD Sphere To** (in **Export Settings**) is the diameter you want MSFS to use for the LOD sphere. It is a setting, not a measurement: 0 (the default) means no padding, and MSFS uses the measured sphere. The line under the field shows that measured diameter, for example "Without padding: 15.94 m (0 = no padding)"; before the first Refresh it reads "0 = no padding; press Refresh LOD Counts to measure the model".
 
 - A value larger than the geometry's own sphere **pads** the sphere at export: the export adds eight tiny invisible triangles (material invisible, no collision) at the corners of a box around the geometry centre. They exist only in the exported files, never in your `.blend`.
 - MSFS then sees the model that many times larger: every LOD holds to a proportionally larger distance, and each LOD's vertex count gets more room.
@@ -225,6 +277,6 @@ It ends with the vertex count of the file, the screen range the LOD is meant for
 - **Far origins:** the most common cause of LODs switching at strange distances. Check the warning in **Export Settings** and **Show LOD Sphere**.
 - **Exporting by hand with the preview on:** with **Excluded: Hidden**, objects absent from the previewed LOD are hidden, and an export of visible objects only leaves them out. Set **Viewport LOD** to **Off** first. The deploy scripts are not affected.
 - **Important small parts disappear:** give them **Keep** (or a tag with **Keep**).
-- **A LOD stays red although many parts are hidden:** the vertices sit in a few large meshes. Hide those meshes from that LOD, or split them; the tools do not reduce polygons.
-- **Interior export stops with "exterior diameter missing":** enter **Exterior Diameter (m)**.
+- **A LOD's Used bar stays red although many parts are hidden:** the vertices sit in a few large meshes. Hide those meshes from that LOD, or split them; the tools do not reduce polygons.
+- **Interior export stops with "exterior diameter missing":** enter **Exterior Diameter (m)** (the field drawn red in **Export Settings**).
 - **No LOD after an empty one:** the export stops at the first empty LOD, even if **Visible from** marks would fill later ones.

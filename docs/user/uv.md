@@ -3,9 +3,9 @@
 [Artist Guide](README.md) / **uv.md**
 ***
 
-This page covers two sections of the sidebar: **Auto Seam** in **UV Tools > Seams**, which proposes UV seams, and the [Heatmap](#heatmap-distortion-texel-density-and-visibility), which shows how well the UVs fit and how visible each face is.
+This page covers two panels of the sidebar: **UV Auto Seam** (tab **FSS MSFS Tools**), which proposes UV seams, and the [Heatmap](#heatmap-distortion-texel-density-and-visibility) (tab **FSS Tools**), which shows how well the UVs fit and how visible each face is.
 
-The **Seams** section (sidebar `N` > **FSS MSFS Tools** > **UV Tools** > **Seams**) proposes seams for hard-surface meshes, so you mark by hand only the seams that matter to you. It works alongside your own seams: it never removes or changes them, unless you click **Clear Current**.
+The **UV Auto Seam** panel (sidebar `N` > **FSS MSFS Tools** > **UV Auto Seam**, closed at first) proposes seams for hard-surface meshes, so you mark by hand only the seams that matter to you. It works alongside your own seams: it never removes or changes them, unless you click **Clear Current**.
 
 ## How It Works
 
@@ -60,7 +60,7 @@ On 17 cockpit test parts, 1.10 gave about 15 % more islands and 26 % more extra 
 7. **Accept + Unwrap** when you are happy (or **Accept Proposed** to unwrap later yourself), or **Discard Proposed** to drop the proposal.
 8. **Unwrap** (if you did not use Accept + Unwrap): in Edit Mode, select all faces and unwrap with **UV > Unwrap**, method **Angle Based**.
 
-**Packing can wait.** You may pack now, for example to review the **Density** heatmap or to try a texture. Packing is quick to redo: **Pack** again (**UV Tools > Packing**) whenever zones, materials or density marks change. It becomes costly once texturing has started, because moving islands then means baking again and carrying the painting over. See [The Pipeline, step 8](README.md#8-packing).
+**Packing can wait.** You may pack now, for example to review the **Density** heatmap or to try a texture. Packing is quick to redo: **Pack** again (**UV Auto Packing**) whenever zones, materials or density marks change. It becomes costly once texturing has started, because moving islands then means baking again and carrying the painting over. See [The Pipeline, step 8](README.md#8-packing).
 
 **To replace the current seams with a fresh proposal:** **Clear Current**, then **Propose Seams**, then **Accept Proposed**. The order matters: proposing first would let the old seams steer the proposal.
 
@@ -75,7 +75,7 @@ The confirmation dialog and report list objects skipped by the tool, along with 
 | **no faces** | Meshes with zero polygons. |
 | **no free UV map slot** | Blender supports up to 8 UV maps. The tool needs one temporary slot for calculation. |
 | **only decal, glass, invisible or occluder materials** | Objects textured solely with decals, screen glass, windshields, collision boxes, or shadow occluders. Decals and projections rely on custom planar mapping, so automatic unwrapping is skipped. |
-| **marked Skip Auto Seam** | The object or one of its ancestors is marked **Skip Auto Seam** in the Seams section (for example fur, hair cards, wire bundles, cables, or decal soups without decal materials). |
+| **marked Skip Auto Seam** | The object or one of its ancestors is marked **Skip Auto Seam** in the UV Auto Seam panel (for example fur, hair cards, wire bundles, cables, or decal soups without decal materials). |
 
 An object with mixed materials (for example a cockpit shell with standard paint and decal details) is processed normally.
 
@@ -114,12 +114,12 @@ Repeated problems on one mesh are grouped into one line, with the count, the lar
 - **Run time is very uneven:** on 275 cockpit meshes, 8 meshes took 84 % of the 58 minutes. Selecting those large meshes separately lets you work on the rest quickly.
 - **Modifiers:** seams are placed on the base mesh before **Mirror** and **Array** modifiers. The generated sides inherit the same seam positions.
 - **Object scale:** Blender's Angle-Based unwrap operates in object space. If an object has non-uniform scale (`1.0, 1.0, 2.0`), unwrap will stretch unless you apply scale (`Ctrl + A > Scale`).
-- **UV marks:** the density and direction marks (**UV Tools > Packing**) are for the packing step and the Heatmap; the **Skip Auto Seam** mark (**UV Tools > Seams**) tells Auto Seam to skip marked objects.
+- **UV marks:** the density and direction marks (**UV Auto Packing**) are for the packing step and the Heatmap; the **Skip Auto Seam** mark (**UV Auto Seam**) tells Auto Seam to skip marked objects.
 - **Undo:** a full run on multiple objects reverts in a single undo step (`Ctrl + Z`).
 
 ## Heatmap: Distortion, Texel Density, and Visibility
 
-The **Heatmap** panel (sidebar `N` > **FSS MSFS Tools** > **Heatmap**) displays a live per-face overlay directly on the 3D surface in the viewport. It helps review UV distortion, verify texel density distribution before packing or texturing, and inspect pilot camera visibility scores.
+The **Heatmap** panel (sidebar `N` > **FSS Tools** > **Heatmap**) displays a live per-face overlay directly on the 3D surface in the viewport. It helps review UV distortion, verify texel density distribution before packing or texturing, and inspect pilot camera visibility scores.
 
 ### Turning It On
 
@@ -162,13 +162,13 @@ The overlay uses diverging colour schemes:
    - The colours run from 1.0 (white) to 2.0 and more (full colour).
 2. **Density (Texel Density):**
    - Measures the triangle's UV area / 3D area relative to its texture set: the area-weighted median over every object in the scene that uses the same material (one atlas per material). The colours therefore do not change with what is selected.
-   - Evaluated against the object's density range: the scene's density freedom times the density marks from the root down to the object (set in **UV Tools > Packing**; without marks 0.9 to 1.1):
+   - Evaluated against the object's density range: the scene's density freedom times the density marks from the root down to the object (set in **UV Auto Packing**; without marks 0.9 to 1.1):
      - Inside the authored range: displays as neutral 1.0.
      - Above the range: turns blue on a log scale up to 2.0x.
      - Below the range: turns red on a log scale down to 0.5x.
    - If an object is marked **Higher** (x1.5, such as the glareshield), its range is 1.35 to 1.65, and it remains neutral when its density lies there.
 3. **Visibility:**
-   - Evaluates solid angle visibility scores from `<blend_name>.visibility` (generated by **Visibility Scoring** in **UV Tools > Packing**).
+   - Evaluates solid angle visibility scores from `<blend_name>.visibility` (generated by **Visibility Scoring** in **UV Auto Packing**).
    - Works directly on 3D geometry and does not require an active UV map.
    - Blue highlights geometry seen clearly by the pilot or copilot; red and magenta indicate occluded geometry beneath panels or behind structures.
 

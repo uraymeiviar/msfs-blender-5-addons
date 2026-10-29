@@ -1,23 +1,31 @@
-# FSS MSFS Tools Panels
+# FSS MSFS Tools and FSS Tools Panels
 
 [Artist Guide](README.md) / **fss-tools.md**
 ***
 
-FSS Blender Tools has one tab in the 3D Viewport sidebar (`N`), **FSS MSFS Tools**. Its panels, from top to bottom in the order of the pipeline:
+FSS Blender Tools has two tabs in the 3D Viewport sidebar (`N`).
+
+**FSS MSFS Tools**, its panels from top to bottom in the order of the pipeline:
 
 - **Zones & Merge Tree**
 - **Materials**, its own page [materials.md](materials.md)
 - **Tags**
-- **LOD**, its own page [lod.md](lod.md)
-- **UV Tools**, with the sections **Seams** (Auto Seam, its own page [uv.md](uv.md)) and **Packing** (the UV marks, the packer per texture set, with **Visibility Scoring** inside)
+- **Object LOD**, **Viewport LOD** and **LOD Settings**, their own page [lod.md](lod.md)
+- **UV Auto Seam**, closed at first: proposes UV seams (the full guide is on its own page, [uv.md](uv.md))
+- **UV Auto Packing**, closed at first: the UV marks and the packer per texture set, with the section **Visibility Scoring** inside
+
+**FSS Tools**, its panels from top to bottom, all closed at first:
+
 - **General**
 - **Empty Bounds**
 - **Heatmap**
 - **Checks**
 
-This page describes all of them except Materials and LOD. Each panel and section opens and closes on its own; Blender remembers that in the `.blend`. **General**, **Empty Bounds**, **Heatmap** and **Checks** are closed at first.
+This page describes all of them except Materials and the three LOD panels. Each panel and section opens and closes on its own; Blender remembers that in the `.blend`.
 
-The **UV Editor**'s sidebar (`N`) has an **FSS MSFS Tools** tab too, with the **Packing** section (without Visibility Scoring); it shows in the UV Editor only, not in the Image Editor's image view.
+The **UV Editor**'s sidebar (`N`) has an **FSS MSFS Tools** tab too, with the **UV Auto Packing** panel (without Visibility Scoring); it shows in the UV Editor only, not in the Image Editor's image view.
+
+**When you open a `.blend`,** **Zones & Merge Tree**, **Materials** and **Scan Names** (in **Checks**) fill their lists by themselves, so they show the file's own data without a click on **Refresh**. Materials does this only when the file opens in Object Mode. After that, the lists do not follow your changes: press **Refresh** (or **Scan Names**) again. **Refresh LOD Counts** and **Check All** take longer and stay manual.
 
 ## Zones & Merge Tree
 
@@ -54,8 +62,8 @@ Transparent materials (MSFS alpha mode Blend) never share a mesh with opaque one
 
 - **Merge on Export:** turns merging on or off for the scene (on by default).
 - **New Merge Group:** select objects with the same parent (or the same parent bone), press the button and type a name (for example `OVHD_PANEL`). It creates the empty `@MERGE_OVHD_PANEL` at the parent's position and moves the objects under it without moving them in the world.
-- **Refresh:** lists the zones and merge groups of the visible objects. Click a row to select that object. The list does not follow later changes in the scene; press **Refresh** again.
-  - **Zone rows** (`@ZONE_` empties, without the prefix): the number of merge groups and objects below the zone, and the zone empty's own **density mark** (see [Packing](#packing)): a tick for the mark, then its **Min** and **Max** factors, greyed while the tick is off. Marks multiply down the hierarchy, so the zone's factor applies to everything below it: 2.0 for twice the texels per metre, 0.5 for half; type the same value in both fields for one factor. A change is stored on the zone empty at once, without **Refresh**, and is the same mark the Packing section shows for that empty.
+- **Refresh:** lists the zones and merge groups of the visible objects. The list fills by itself when you open a `.blend`. Click a row to select that object. The list does not follow later changes in the scene; press **Refresh** again.
+  - **Zone rows** (`@ZONE_` empties, without the prefix): the number of merge groups and objects below the zone, and the zone empty's own **density mark** (see [UV Auto Packing](#uv-auto-packing)): a tick for the mark, then its **Min** and **Max** factors, greyed while the tick is off. Marks multiply down the hierarchy, so the zone's factor applies to everything below it: 2.0 for twice the texels per metre, 0.5 for half; type the same value in both fields for one factor. A change is stored on the zone empty at once, without **Refresh**, and is the same mark the **UV Auto Packing** panel shows for that empty.
   - **Merge group rows**, below their zone and nested as in the scene, with objects, materials and kept-separate counts per group. Below the list, the active group shows its materials, a transparency split, its UV map names, and why objects were kept separate.
   - **`@NOMERGE_` rows**, one level below the group they belong to: these objects stay their own nodes under the merged mesh.
   - **Unzoned** (warning): merge groups with no zone above them. Move them below a `@ZONE_` empty.
@@ -81,27 +89,25 @@ A tag is a free label you put on objects, for example `SCREEN` or `KEEP_LOD`. An
   - **-** and **+** (only with a selection): remove the tag from, or add it to, the selected objects. They are greyed out when there is nothing to do and highlighted red when several objects are selected.
   - **Select icon or tag name:** select the visible objects with this tag (**Shift + click** adds to the selection). Hidden objects are counted but not selected.
   - **Don't Merge** (merge icon): objects with this tag, and everything below them, stay out of merge groups (see [Zones & Merge Tree](#zones--merge-tree)).
-  - **Keep:** objects with this tag are never hidden by the automatic LOD size rule, like the **Keep** mark (see [lod.md](lod.md#marks)).
+  - **Keep:** objects with this tag are never hidden by the automatic LOD size rule, like the **Keep** mark (see [Object LOD](lod.md#object-lod)).
   - **Rename** (pencil): renames the tag on every object in the file, and in the Don't Merge and Keep settings.
   - **Delete** (bin): asks for confirmation, then removes the tag from every object in the file. The objects stay.
 
 Tip: to tag a whole collection, right-click it in the Outliner, **Select Objects**, then press **+** on the tag row.
 
-## UV Tools
+## UV Auto Seam
 
-Seams, then packing: the steps 6 to 8 of the [Artist Guide](README.md#the-pipeline).
-
-### Seams
+In the tab **FSS MSFS Tools**, closed at first. Seams come first in the UV work, packing after: the steps 6 to 8 of the [Artist Guide](README.md#the-pipeline).
 
 Automated UV seam proposal for hard-surface meshes, with a **Distortion Limit** slider between less distortion and fewer islands, and **Accept + Unwrap** (Angle Based). See [uv.md](uv.md) for the complete guide, workflow, readable reports, and limits.
 
 - **Skip Auto Seam / Clear:** marks the selected objects to be skipped by **Propose Seams** (for example fur, hair cards, wire bundles, cables, or decal soups). Children inherit the mark unless cleared or marked themselves. The box shows whether the active object is processed or skipped, and where that comes from (**own mark**, **from** an ancestor, or **default**).
 
-### Packing
+## UV Auto Packing
 
-How much texture each part gets, the settings of each texture set, and the packer. The marks are also read by the heatmap's Density mode. The section is closed by default. Every field takes effect as you change it; there is no Apply button.
+In the tab **FSS MSFS Tools**, closed at first. How much texture each part gets, the settings of each texture set, and the packer. The marks are also read by the heatmap's Density mode. Every field takes effect as you change it; there is no Apply button.
 
-The same section is also in the **UV Editor**'s sidebar (**N**), tab **FSS MSFS Tools** > **Packing**, so you can pack and see the result side by side. **Visibility Scoring** is only in the 3D viewport's section.
+The same panel is also in the **UV Editor**'s sidebar (**N**), tab **FSS MSFS Tools** > **UV Auto Packing**, so you can pack and see the result side by side. **Visibility Scoring** is only in the 3D viewport's panel.
 
 - **Target density** (for the scene): the texel density at factor 1.0, in pixels per centimetre. The default 20.48 is 2048 pixels per metre.
 - **Density freedom Min / Max** (for the scene, default 0.90 and 1.10): how far the packer may scale any island down or up. It applies once, at the top of the hierarchy.
@@ -118,7 +124,7 @@ The same section is also in the **UV Editor**'s sidebar (**N**), tab **FSS MSFS 
     - **Flip:** 0 or 180 degrees only.
     - **Quarter:** 90-degree steps only.
     - **Clear:** remove the mark (inherit from the parent, else Free).
-- **Texture set list:** every material of the selected objects, the active object's first. Each row shows the material and its last result (see **Last run**; empty before the first run). The list shows 5 rows and scrolls; drag its lower edge to show more, or type in its filter field to find a material by name. A lock marks a set with **Keep UVs**, a warning sign a set whose last run found faces without area or triangles without UV area. With nothing selected, the section says so.
+- **Texture set list:** every material of the selected objects, the active object's first. Each row shows the material and its last result (see **Last run**; empty before the first run). The list shows 5 rows and scrolls; drag its lower edge to show more, or type in its filter field to find a material by name. A lock marks a set with **Keep UVs**, a warning sign a set whose last run found faces without area or triangles without UV area. With nothing selected, the panel says so.
 - **Texture set box**, below the list: the row you clicked (before you click one, the first row):
   - **Size:** the texture set's size, square, 256 to 8192 pixels per side (default 4096 × 4096). Choose the size; **Pack** and **Check All** report when the islands do not fit at their density, or leave space, and which size would fit. Files from versions before 0.33.0 had a width and a height: the larger of the two becomes the size when the file opens.
   - **Margin:** the space around each island, in pixels of this texture set (default 8). 8 pixels keep islands apart down to the second mip level after the 4 × 4 block compression of the textures; below 4 pixels the box warns that compressed blocks bleed across islands.
@@ -130,9 +136,9 @@ The same section is also in the **UV Editor**'s sidebar (**N**), tab **FSS MSFS 
     - **does not fit even at 8192 (x2.51):** not even 8192 pixels per side would hold them.
     - **kept:** Keep UVs is on.
   - Below **Last run**, a warning when the last run found islands with triangles without UV area, or objects with faces without area (see the [Packing Report](#packing-report)).
-- **Check All:** below the texture set box. Measures every texture set of the scene's view layer as **Pack** would, but writes no UVs, and fills each set's **Last run**. Use it as the overview of which texture sizes give a consistent density. While it runs, the section shows a progress bar instead of its fields; **Cancel** or **Esc** stops after the texture set in work.
+- **Check All:** below the texture set box. Measures every texture set of the scene's view layer as **Pack** would, but writes no UVs, and fills each set's **Last run**. Use it as the overview of which texture sizes give a consistent density. While it runs, the panel shows a progress bar instead of its fields; **Cancel** or **Esc** stops after the texture set in work.
 
-#### Pack
+### Pack
 
 **Pack** takes every face that uses the texture set's material in the view layer, also on objects that are not selected or are hidden: a texture set is one texture, so all its islands share one layout. A mesh used by several objects is packed once.
 
@@ -142,9 +148,9 @@ The same section is also in the **UV Editor**'s sidebar (**N**), tab **FSS MSFS 
 - **Margin:** each island keeps the margin on every side, so two islands are at least twice the margin apart.
 - **Kept unchanged:** islands without UV area (a line or a point in the UVs) keep their UVs; the report lists them.
 - Works in Object Mode and Edit Mode; the selection, the mode and the active UV map stay as they were.
-- Blender waits while a texture set packs (up to about half a minute for thousands of islands); the section and the status bar show the step in work.
+- Blender waits while a texture set packs (up to about half a minute for thousands of islands); the panel and the status bar show the step in work.
 
-#### Packing Report
+### Packing Report
 
 **Pack** and **Check All** write the text **FSS Packing Report** (open it in a **Text Editor**). Per texture set:
 
@@ -162,13 +168,13 @@ The same section is also in the **UV Editor**'s sidebar (**N**), tab **FSS MSFS 
 
 To set a field on several objects at once, select them, make one of them active, and hold **Alt** while you drag or type in the field (Blender's own way to edit all selected objects).
 
-#### Visibility Scoring
+### Visibility Scoring
 
-Measures, from the cameras you include and over the animation steps, how much of each face is visible, as a factor from 0 to 1 that does not depend on distance or size. Writes `<blend_name>.visibility` for the packer and the Heatmap's Visibility mode. See [visibility.md](visibility.md) for the settings and the workflow.
+A section inside **UV Auto Packing**. Measures, from the cameras you include and over the animation steps, how much of each face is visible, as a factor from 0 to 1 that does not depend on distance or size. Writes `<blend_name>.visibility` for the packer and the Heatmap's Visibility mode. See [visibility.md](visibility.md) for the settings and the workflow.
 
 ## General
 
-Helpers for parenting and object origins. Both work in Object Mode on the selected objects, and both can be undone.
+In the tab **FSS Tools**. Helpers for parenting and object origins. Both work in Object Mode on the selected objects, and both can be undone.
 
 ### Add Empty Parent
 
@@ -195,7 +201,7 @@ Pitfall: the object's rotation values change. Do not use it on an object whose o
 
 ## Empty Bounds
 
-Draws, for each empty, a box around everything below it, and lists the parents of the active object. It only draws in the viewport: nothing is added to the scene or exported.
+In the tab **FSS Tools**. Draws, for each empty, a box around everything below it, and lists the parents of the active object. It only draws in the viewport: nothing is added to the scene or exported.
 
 - **All / Selected / Off:**
   - **All:** boxes of every empty. While a non-empty object is selected, only the selection's parents: the direct parent solid (with a cross at its origin), the empties further up dashed.
@@ -208,7 +214,8 @@ The boxes include hidden children.
 
 ## Heatmap
 
-Colours the selected objects directly in the 3D viewport:
+In the tab **FSS Tools**. Colours the selected objects directly in the 3D viewport:
+
 - **Distortion:** Does each face keep its shape? (Conformal singular-value ratio)
 - **Density:** Does each face get the right amount of texture relative to the texture set median and object marks?
 - **Visibility:** How well is each face seen from the reference cameras (from `<blend_name>.visibility`)?
@@ -217,7 +224,7 @@ Includes a distribution chart in the panel and an optional UV grid with cell lab
 
 ## Checks
 
-Repairs for problems that break the export without an error message.
+In the tab **FSS Tools**. Repairs for problems that break the export without an error message.
 
 ### Scan Names
 
@@ -235,7 +242,7 @@ The object or bone name becomes the glTF node name, and the model XML, `.cfg` fi
 
 How to use it:
 
-1. Press **Scan Names**.
+1. Press **Scan Names**. When you open a `.blend`, the list is filled by itself; press the button again after you add or rename objects.
 2. Use the rule buttons to show only some rules.
 3. Click a row to select that object (or bone); **Frame** zooms the viewport to it.
 4. Edit a proposal in its field if you want another name. Untick rows you do not want renamed; **Tick All** and **Untick All** act on the rows shown.
@@ -252,7 +259,7 @@ A face without area (its corners on one point or one line, at most 0.000001 cm²
 A face whose model has area but whose UVs have none, or only part of it: one of its triangles lies on one line (or one point) in the UVs, inside an island that otherwise has area. Such a needle covers no texels, but the packer cannot pack around it: the island lands far out of the layout and the texture set needs a larger texture than its islands would (on the cockpit, these triangles turned a set that needed about 1.15 times 4096 into one that does not fit even at 8192). **Find Faces Without UV Area** checks every mesh object of the view layer with a UV map, per texture set at its **Size**, and selects the visible objects with such faces, the first one active, and those faces in their meshes, so **Tab** into Edit Mode shows them. The message counts the faces, the islands and the objects (hidden objects are counted, not selected); the system console lists each object.
 
 - **Threshold:** a triangle counts when its UV area is at most 0.000001 pixel² of its texture set, or when it is a line (its UV area at most 0.00001 × its longest UV edge squared, the rule the packer uses for islands that are lines). Triangles without area on the model are left to **Find Faces Without Area**; islands with no UV area at all are not counted (the packer leaves them unchanged and lists them in its report).
-- **Fix:** re-unwrap those parts, for example with **Accept + Unwrap** in [Seams](#seams) or Blender's **Unwrap**, then run the check again and pack.
+- **Fix:** re-unwrap those parts, for example with **Accept + Unwrap** in [UV Auto Seam](#uv-auto-seam) or Blender's **Unwrap**, then run the check again and pack.
 - It works in Object Mode. On the cockpit it takes about 3 seconds.
 
 ### Fix Broken Bone Parents

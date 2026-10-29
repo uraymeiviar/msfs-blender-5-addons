@@ -84,10 +84,10 @@ $B = "G:\e-jets-e2\tools\blender\blender.exe"
 | Suite | Covers |
 | :--- | :--- |
 | `tests/test_uv_pack.py` | the packer: density per island, fit, underflow, overflow and needed size, directions, linked duplicates, Pack and Check All, Keep UVs, faces without 3D or UV area, the texture set list, the UV editor panel, report order |
-| `tests/test_density_marks.py` | density marks multiplying down the hierarchy, scene freedom, presets, migration of older files, the Packing chain drawn, visibility floor, heatmap refresh after a mark change |
-| `tests/test_panels.py` | the sidebar layout: every panel's label, parent, order and tab, every panel drawn |
+| `tests/test_density_marks.py` | density marks multiplying down the hierarchy, scene freedom, presets, migration of older files, the UV Auto Packing chain drawn, visibility floor, heatmap refresh after a mark change |
+| `tests/test_panels.py` | the sidebar layout (both tabs and the UV editor): every panel's label, parent, order and tab, the FSS Tools panels closed by default, every panel drawn; Object LOD (selection line, mixed marks, the pending Hidden from / Visible from choice, the Visible in row, drawing writes nothing); Viewport LOD (the Excluded row only with a preview); LOD Settings (count bars, the quota table, contributor bars, one exterior diameter message, the Pad LOD Sphere To line) |
 | `tests/test_zone_tree.py` | Zones & Merge Tree rows and flags, zone marks, nearest zone, no `fss_` key in the glTF extras |
-| `tests/test_materials.py` | the Materials panel: Refresh rows (never used, shared across zones, hidden users, shared meshes, area per zone, the estimate with and without a `.visibility` file), kind marks with and without the exporter, the select operators, panels drawn without writing, Keep UVs in the active material box (kept instead of the estimate, without Refresh), no `fss_` key in the glTF extras |
+| `tests/test_materials.py` | the Materials panel: Refresh rows (never used, shared across zones, hidden users, shared meshes, area per zone, the estimate with and without a `.visibility` file), kind marks with and without the exporter, the select operators, panels drawn without writing, Keep UVs in the active material box (kept instead of the estimate, without Refresh), no `fss_` key in the glTF extras, refresh on opening a file (Zones & Merge Tree, Materials and Scan Names; nothing scheduled in background) |
 | `tests/test_markers.py` | leading `@` stripped at export, Scan Names markers and the Clash rule |
 | `tests/test_lod_preview.py` | LOD viewport preview (hidden and bounds), save and load handlers |
 | `tests/uv_prototype/test_visibility.py` | Visibility Scoring: synthetic cases, operator, scene unchanged, heatmap mode, glTF leak, packer interface |

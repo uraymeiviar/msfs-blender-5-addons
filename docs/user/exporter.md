@@ -100,7 +100,7 @@ In the FSS workflow the deploy scripts, merge groups and LOD marks replace Asobo
 
 - The **Multi-Export glTF 2.0** panel shows only its settings, with the note "Export settings used by FSS deploys (fs24; fs20 uses fixed parameters)". The Hierarchy tab (LOD groups, export folders, Generate XML, Enable Auto LOD), the Export button and the Logs are hidden.
 - Settings the deploy always overrides (MSFS extension, lights, apply modifiers, animation mode and sampling, texture library and texture folder) are hidden, so a stale value cannot mislead you. The remaining settings of the active settings preset are saved in the `.blend` and used by MSFS 2024 deploys.
-- The **LOD Tools** panel is hidden. Use the FSS [LOD](lod.md) panel instead.
+- The **LOD Tools** panel is hidden. Use the FSS LOD panels (**Object LOD**, **Viewport LOD**, **LOD Settings**, see [lod.md](lod.md)) instead.
 
 To see everything as Asobo ships it, turn on **Show Asobo export workflow** in **Edit > Preferences > Add-ons**, in the settings of the FSS exporter.
 
