@@ -5,9 +5,10 @@
 Seams, unwrap, Visibility Scoring, density and packing. They are separate phases and separate tools: each runs on
 its own and can be repeated, none requires another to have run (UV 7, 42). Artist guide:
 [../user/uv.md](../user/uv.md), [../user/visibility.md](../user/visibility.md),
-[../user/fss-tools.md](../user/fss-tools.md#uv-tools). Current design: UV journal Session 102.
+[../user/fss-tools.md](../user/fss-tools.md#uv-auto-seam) (UV Auto Seam,
+[UV Auto Packing](../user/fss-tools.md#uv-auto-packing)). Current design: UV journal Session 102.
 
-## Seams (Auto Seam)
+## Seams (UV Auto Seam)
 
 ### UV-SEAM-001: Propose Seams
 
@@ -36,7 +37,7 @@ its own and can be repeated, none requires another to have run (UV 7, 42). Artis
 - **Requirement:** Accept Proposed makes the proposed seams current seams; Discard Proposed removes them; Clear Current
   (with confirmation) removes the current seams and keeps the proposed ones; Select Proposed and Select Current select
   those edges of the active mesh in Edit Mode. Accept, Discard and Clear act on whole objects, also from Edit Mode;
-  each is one undo step. The panel shows the active object's counts ("Proposed: n | Current: m").
+  each is one undo step. The panel UV Auto Seam shows the active object's counts ("Proposed: n | Current: m").
 - **Data:** DAT-029
 - **Decision:** UV 64, 65
 - **Test:** `tests/uv_prototype/test_autoseam_operators.py::test_keep_as_artist_seams`,
@@ -73,7 +74,7 @@ its own and can be repeated, none requires another to have run (UV 7, 42). Artis
   meshes needing attention first, then clean meshes; repeated problems on one mesh grouped into one line with count,
   largest island and worst value (islands too stretched, faces too distorted to flatten, zero-area face groups, charts
   too distorted, islands with overlapping triangles, ignored sliver overlaps, shared meshes with differing scales).
-  The panel shows the totals.
+  The panel UV Auto Seam shows the totals.
 - **Data:** DAT-037
 - **Decision:** UV 51, 54
 - **Test:** `tests/uv_prototype/test_autoseam_operators.py::test_report_attention_counts`,
@@ -98,12 +99,13 @@ its own and can be repeated, none requires another to have run (UV 7, 42). Artis
 - **Status:** implemented
 - **Requirement:** Skip Auto Seam and Clear set and clear the mark (DAT-028) on the selected objects; children inherit
   it unless cleared or marked themselves. Marked objects are skipped by Propose Seams and listed as skipped. The panel
-  shows whether the active object is processed or skipped and where that comes from (own mark, from an ancestor,
-  default).
+  UV Auto Seam shows whether the active object is processed or skipped and where that comes from (own mark, from an
+  ancestor, default); UV Auto Packing has no Skip Auto Seam button.
 - **Data:** DAT-028
 - **Decision:** UV 56
 - **Test:** `tests/uv_prototype/test_autoseam_operators.py::test_gathering_and_skipped`,
-  `tests/uv_prototype/test_uv_heatmap.py::test_skip_auto_seam_mark`
+  `tests/uv_prototype/test_uv_heatmap.py::test_skip_auto_seam_mark`, `tests/test_panels.py::test_draw_all` (the button
+  in UV Auto Seam only)
 - **Code:** `uv_marks.py`, `uv_autoseam.py`
 
 ### UV-SEAM-008: Skip by material class
@@ -211,10 +213,10 @@ its own and can be repeated, none requires another to have run (UV 7, 42). Artis
 ### UV-VIS-006: Visibility report and panel
 
 - **Status:** implemented
-- **Requirement:** After a run the panel shows the file's time, cameras and step count, the surface totals, the
-  never-seen objects and islands (Select Never Seen), the undetermined objects, and stale meshes (Select Stale); the
-  full report goes to the text block FSS Visibility Report (DAT-037). Never-seen faces are not candidates for
-  deletion; nothing is deleted.
+- **Requirement:** After a run the subpanel Visibility Scoring (inside UV Auto Packing, in the 3D Viewport only) shows
+  the file's time, cameras and step count, the surface totals, the never-seen objects and islands (Select Never Seen),
+  the undetermined objects, and stale meshes (Select Stale); the full report goes to the text block FSS Visibility
+  Report (DAT-037). Never-seen faces are not candidates for deletion; nothing is deleted.
 - **Data:** DAT-036, DAT-037
 - **Decision:** UV 74 (replaces 20), UV 83
 - **Test:** `tests/uv_prototype/test_visibility.py::test_operator_on_saved_scene`
@@ -294,11 +296,12 @@ its own and can be repeated, none requires another to have run (UV 7, 42). Artis
 ### UV-DEN-005: The density chain in the panel
 
 - **Status:** implemented
-- **Requirement:** The Packing section shows for the active object, live: Parent (the factor range of everything above
-  it and the nearest marked parent, or the scene freedom), Zone (the zone and its factor, already part of Parent),
-  Visibility (object score and island range; "no data: x1.00", "never seen: x0.10"; Object Mode), its own Density mark
-  (tick, Min, Max, greyed while off), and Result (the px/cm range: target × parent × own mark × visibility, with the
-  range over its islands). The Heatmap's Density mode follows a mark change shortly after dragging stops.
+- **Requirement:** The panel UV Auto Packing shows for the active object, live: Parent (the factor range of everything
+  above it and the nearest marked parent, or the scene freedom), Zone (the zone and its factor, already part of
+  Parent), Visibility (object score and island range; "no data: x1.00", "never seen: x0.10"; Object Mode), its own
+  Density mark (tick, Min, Max, greyed while off), and Result (the px/cm range: target × parent × own mark ×
+  visibility, with the range over its islands). The Heatmap's Density mode follows a mark change shortly after
+  dragging stops.
 - **Data:** DAT-023, DAT-036
 - **Decision:** UV 109 (amended by 121)
 - **Test:** `tests/test_density_marks.py::test_panel`, `tests/test_density_marks.py::test_panel_visibility`,
@@ -322,11 +325,11 @@ its own and can be repeated, none requires another to have run (UV 7, 42). Artis
 ### UV-PCK-002: Texture set list
 
 - **Status:** implemented
-- **Requirement:** The Packing section lists every material of the selected objects, the active object's first, in a
-  scrollable list (5 rows, resizable, filterable by name), each row with its last result (UV-PCK-015), a lock for Keep
-  UVs, and a warning sign when its last run found faces without area or triangles without UV area. Below it the
+- **Requirement:** The panel UV Auto Packing lists every material of the selected objects, the active object's first,
+  in a scrollable list (5 rows, resizable, filterable by name), each row with its last result (UV-PCK-015), a lock for
+  Keep UVs, and a warning sign when its last run found faces without area or triangles without UV area. Below it the
   clicked row's box (before a click, the first row): Size, Margin, Keep UVs, Pack, Last run. With nothing selected the
-  section says so.
+  panel says so.
 - **Data:** DAT-031
 - **Decision:** UV 114, 121
 - **Test:** `tests/test_uv_pack.py::test_texture_set_list`, `tests/test_uv_pack.py::test_panel_rows`
@@ -338,7 +341,7 @@ its own and can be repeated, none requires another to have run (UV 7, 42). Artis
 - **Status:** implemented
 - **Requirement:** Pack replaces the UVs of every face of the texture set (UV-PCK-001) by the packed layout, in Object
   or Edit Mode; the selection, the mode and the active UV map stay as they were; Ctrl + Z undoes it. It is unavailable
-  for a Keep UVs set. Blender waits while a set packs; the section and the status bar show the step.
+  for a Keep UVs set. Blender waits while a set packs; the panel and the status bar show the step.
 - **Decision:** UV 109, 114
 - **Test:** `tests/test_uv_pack.py::test_pack_operator_and_undo`, `tests/test_uv_pack.py::test_edit_mode`
 - **Code:** `uv_pack.py`
@@ -396,7 +399,7 @@ its own and can be repeated, none requires another to have run (UV 7, 42). Artis
 - **Status:** implemented
 - **Requirement:** Check All measures every texture set of the view layer as Pack would, writes no UVs, and fills each
   set's Last run (marked "(checked)"); Keep UVs sets are listed as kept. While it runs a progress bar replaces the
-  section's fields; Cancel or Esc stops after the set in work.
+  panel's fields; Cancel or Esc stops after the set in work.
 - **Decision:** UV 115
 - **Test:** `tests/test_uv_pack.py::test_check_all_and_keep`
 - **Code:** `uv_pack.py`, `uv_marks.py`
@@ -465,13 +468,14 @@ its own and can be repeated, none requires another to have run (UV 7, 42). Artis
 ### UV-PCK-014: Packing in the UV Editor
 
 - **Status:** implemented
-- **Requirement:** The UV Editor's sidebar has an FSS MSFS Tools tab with the same Packing section, without Visibility
-  Scoring; it shows in the UV Editor only, not in the Image Editor's image view.
-- **Decision:** UV 99, 119 (replace 104); MAT 15 (tab)
-- **Test:** `tests/test_uv_pack.py::test_uv_editor_panel`, `tests/test_panels.py::test_layout`
-- **Code:** `uv_marks.py`
+- **Requirement:** The UV Editor's sidebar has a tab FSS MSFS Tools with the panel **UV Auto Packing**, drawn by the
+  same code as the 3D Viewport's panel of that name, without Visibility Scoring; it shows in the UV Editor only, not
+  in the Image Editor's image view.
+- **Decision:** UV 99, 119 (replace 104); MAT 15, 16 (tab), MAT 26 (label)
+- **Test:** `tests/test_uv_pack.py::test_uv_editor_panel`, `tests/test_panels.py::test_layout`,
+  `tests/test_panels.py::test_draw_all` (the same draw calls as the 3D Viewport's panel)
+- **Code:** `uv_marks.py` (`FSS_PT_UvMarksImageEditor`)
 - **Notes:** never checked in an interactive Blender (UV journal Session 102, open item 3).
-
 ### UV-PCK-015: Last run
 
 - **Status:** implemented

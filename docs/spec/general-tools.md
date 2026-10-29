@@ -2,22 +2,48 @@
 
 [Specification](README.md) / **general-tools.md**
 
-The sidebar tab of fss_blender_tools, the panels General, Empty Bounds, Heatmap and Checks, the check wishes, and
-other wishes without an area of their own. Artist guide: [../user/fss-tools.md](../user/fss-tools.md),
+The sidebar tabs of fss_blender_tools, the refresh on opening a file, the panels General, Empty Bounds, Heatmap and
+Checks, the check wishes, and other wishes without an area of their own. Artist guide:
+[../user/fss-tools.md](../user/fss-tools.md),
 [../user/uv.md](../user/uv.md#heatmap-distortion-texel-density-and-visibility).
 
 ## Sidebar
 
-### GEN-040: One sidebar tab
+### GEN-040: Two sidebar tabs
 
 - **Status:** implemented
-- **Requirement:** fss_blender_tools draws every 3D Viewport panel in the sidebar tab **FSS MSFS Tools**, at the top
-  level, in this order: Zones & Merge Tree, Materials, Tags, LOD, UV Tools (Seams, Packing with Visibility Scoring),
-  General, Empty Bounds, Heatmap, Checks; the last four are closed by default. The UV Editor's Packing panel is in a
-  tab FSS MSFS Tools of the UV Editor.
-- **Decision:** MAT 7 (label), MAT 15 (assignment, replaces MAT 7's split)
+- **Requirement:** fss_blender_tools draws its 3D Viewport panels in two sidebar tabs and in no other tab; no panel
+  only groups other panels.
+  - **FSS MSFS Tools**, top-level panels in this order: Zones & Merge Tree, Materials (subpanel By Zone), Tags,
+    Object LOD, Viewport LOD, LOD Settings (subpanels Quota and Hints, Export Settings with Advanced), UV Auto Seam,
+    UV Auto Packing (subpanel Visibility Scoring). UV Auto Seam and UV Auto Packing are closed by default.
+  - **FSS Tools**, top-level panels in this order, each closed by default: General, Empty Bounds, Heatmap, Checks.
+  - The UV Editor's panel **UV Auto Packing** is in a tab FSS MSFS Tools of the UV Editor (UV-PCK-014).
+- **Decision:** MAT 7 (label FSS MSFS Tools), MAT 16 (the two tabs; replaces MAT 15's assignment), MAT 22 (the three
+  LOD panels), MAT 26 (the panels UV Auto Seam and UV Auto Packing)
 - **Test:** `tests/test_panels.py::test_layout`
-- **Code:** `panels.py`, `lod.py`, `materials.py`
+- **Code:** `panels.py` (documents the layout, registers no panel), `merge.py`, `materials.py`, `tags.py`, `lod.py`,
+  `uv_autoseam.py`, `uv_marks.py`, `visibility.py`, `tools.py`, `empty_bounds.py`, `uv_heatmap.py`, `checks.py`
+- **Notes:** NOT TESTED: that UV Auto Seam and UV Auto Packing are closed by default (the test checks the closed
+  default of the four FSS Tools panels only). Never seen in an interactive Blender (material management journal
+  Sessions 19, 23).
+
+### GEN-041: Refresh on opening a file
+
+- **Status:** implemented
+- **Requirement:** When a `.blend` is opened, Zones & Merge Tree (MRG-010), Materials (MTL-001) and Scan Names
+  (GEN-008) refresh by themselves, in this order, shortly after the file has opened, each only when its operator can
+  run (Materials needs Object Mode); the refreshes add no undo step and do not mark the file as modified. A
+  background Blender (deploys, tests) schedules nothing. Refresh LOD Counts (LOD-010) and Check All (UV-PCK-008) stay
+  manual.
+- **Data:** DAT-002, DAT-006, DAT-007
+- **Decision:** MAT 21
+- **Test:** `tests/test_materials.py::test_refresh_on_open`; manual: material management journal Session 21
+  (windowed run on the E2 cockpit copy: three panels filled, file not modified)
+- **Code:** `autorefresh.py` (a persistent `load_post` handler starts a timer that runs `fss.merge_refresh`,
+  `fss.materials_refresh` and `fss.name_check_scan` in the first window)
+- **Notes:** about 1 s on the E2 cockpit copy (3,628 objects; Session 21). NOT TESTED automatically: the timer in a
+  windowed Blender (the test runs the refreshes directly and checks that a background Blender schedules no timer).
 
 ## General
 

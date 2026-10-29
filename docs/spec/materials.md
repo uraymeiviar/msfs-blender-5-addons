@@ -10,15 +10,18 @@ Tools. Artist guide: [../user/materials.md](../user/materials.md). Decisions: ma
 ### MTL-001: Materials panel and Refresh
 
 - **Status:** implemented
-- **Requirement:** The panel Materials is second in the 3D Viewport sidebar tab FSS MSFS Tools, after Zones & Merge Tree (GEN-040). Refresh (Object
-  Mode) fills `Scene.fss_materials` (DAT-007) from the view layer and changes nothing else; the panel only reads those
-  rows and does not follow changes until the next Refresh, which it says. Before the first Refresh it asks for one.
+- **Requirement:** The panel Materials is second in the 3D Viewport sidebar tab FSS MSFS Tools, after Zones & Merge
+  Tree (GEN-040). Refresh (Object Mode) fills `Scene.fss_materials` (DAT-007) from the view layer and changes nothing
+  else; the panel only reads those rows and does not follow changes until the next Refresh, which it says. Before
+  the first Refresh it asks for one. Opening a file runs Refresh by itself when Object Mode allows it (GEN-041).
 - **Data:** DAT-007
-- **Decision:** MAT 1, 7, 11
-- **Test:** `tests/test_materials.py::test_rows`, `tests/test_materials.py::test_draw`, `tests/test_panels.py::test_layout`
-- **Code:** `fss_blender_tools/materials.py` (`scan`, `FSS_OT_MaterialsRefresh`, `FSS_PT_Materials`)
-- **Notes:** Refresh on the E2 cockpit copy (3,628 objects): 0.4 to 0.7 s (material management journal Sessions 7, 10).
-
+- **Decision:** MAT 1, 7, 11; MAT 16 (position); MAT 21 (refresh on opening)
+- **Test:** `tests/test_materials.py::test_rows`, `tests/test_materials.py::test_draw`,
+  `tests/test_panels.py::test_layout`, `tests/test_materials.py::test_refresh_on_open`
+- **Code:** `fss_blender_tools/materials.py` (`scan`, `FSS_OT_MaterialsRefresh`, `FSS_PT_Materials`),
+  `autorefresh.py`
+- **Notes:** Refresh on the E2 cockpit copy (3,628 objects): 0.4 to 0.7 s (material management journal Sessions 7,
+  10).
 ### MTL-002: Material list
 
 - **Status:** implemented
@@ -78,8 +81,8 @@ Tools. Artist guide: [../user/materials.md](../user/materials.md). Decisions: ma
 ### MTL-006: Keep UVs in the panel
 
 - **Status:** implemented
-- **Requirement:** The box shows the Keep UVs checkbox of the material (the same property as in Packing, UV-PCK-011). It
-  is the panel's only control that changes data.
+- **Requirement:** The box shows the Keep UVs checkbox of the material (the same property as in UV Auto Packing,
+  UV-PCK-011). It is the panel's only control that changes data.
 - **Data:** DAT-024
 - **Decision:** MAT 14
 - **Test:** `tests/test_materials.py::test_keep_uvs`
@@ -119,12 +122,40 @@ Tools. Artist guide: [../user/materials.md](../user/materials.md). Decisions: ma
 ### MTL-020: MSFS material checks
 
 - **Status:** planned
-- **Requirement:** The panel reports materials without an MSFS material, MSFS materials that make no sense without a
-  texture (informational before texturing), and MSFS material parameters that make no sense or can lead to an error.
-  The rules come from the SDK documentation and are reviewed with the maintainer rule by rule before they are built.
-- **Decision:** objectives 2, 5, 6 (material management journal Session 1); MAT 7 (in FSS MSFS Tools)
-- **Test:** no test
+- **Requirement:** The panel reports, for each used material (a face of a mesh object of the view layer uses it),
+  the rules R1 to R20 of the material management journal, Session 17, with the conditions, severities and sentences
+  drafted there:
 
+  | Rule | Reports | Severity |
+  | :--- | :--- | :--- |
+  | R1 | no MSFS material type | warning |
+  | R2 | decal without a base colour texture | info; warning once the material has another texture |
+  | R3 | porthole without its albedo or emissive texture | info; warning once another texture is assigned |
+  | R4 | wiper lines without a wiper mask | warning |
+  | R5 | iridescence without a thickness texture | warning |
+  | R6 | transparent alpha mode with nothing transparent | info without a texture; warning with a texture without alpha |
+  | R7 | glass or windshield with base alpha 1 and no Base Color texture | info |
+  | R8 | alpha value without effect | info |
+  | R9 | emissive texture with a black Emissive Color or an Emissive Scale of 0 | info until a sim test |
+  | R10 | Draw Order on a type that ignores it | info |
+  | R11 | decal with every channel switched off | warning |
+  | R12 | clearcoat texture ignored by Use Uniform Roughness | info |
+  | R13 | detail texture reused in another slot | warning |
+  | R14 | material type not used by MSFS 2024 | warning |
+  | R15 | texture in a slot the sim does not read | info |
+  | R16 | texture left in a slot the material's type does not have | info |
+  | R17 | material name starting with `$` | warning |
+  | R18 | texture size the sim does not accept | warning |
+  | R19 | two different images with the same file name | warning |
+  | R20 | image file missing | warning |
+
+- **Decision:** objectives 2, 5, 6 (material management journal Session 1); MAT 7 (in FSS MSFS Tools); MAT 17 (the
+  17 rules marked CERTAIN as drafted), MAT 18 (R7 as info), MAT 19 (R9 as info until a test in MSFS 2024 shows that
+  such a part does not glow; then a warning), MAT 20 (R16 as info)
+- **Test:** no test
+- **Notes:** on hold while the UI is reworked (material management journal Session 21). R9 skips animated emissive
+  values and the invisible, occluder, porthole and parallax types (Session 17). R1's export result (white, fully
+  metallic) is from code reading; one background export confirms it when the checks are built (MAT 17).
 ### MTL-021: Split helpers for oversized sets
 
 - **Status:** planned

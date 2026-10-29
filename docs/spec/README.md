@@ -2,7 +2,9 @@
 
 What the FSS add-ons do (**implemented**), will do (**planned**) and might do (**wish**): one requirement per
 statement, each with its decision and its test. Drafted on 20261028 from the [feature inventory](inventory.md),
-checked against the code of fss_blender_tools 0.33.1 and the exporter at commit 4261fff (the Materials panel and the sidebar tabs against 0.35.0), and against the tests.
+checked against the code of fss_blender_tools 0.33.1 and the exporter at commit 4261fff (the Materials panel against
+0.35.0; the sidebar tabs, the refresh on opening a file, the LOD panels and the UV panels against 0.36.9), and against
+the tests.
 
 | Document | Holds | Audience |
 | :--- | :--- | :--- |
@@ -21,7 +23,7 @@ recorded in a journal first ([../../AGENTS.md](../../AGENTS.md#working-model)), 
 | :--- | :--- | :--- |
 | [data-formats.md](data-formats.md) | `DAT` | Properties and marks, name markers, the `.visibility` file, text blocks, what reaches the glTF |
 | [exporter.md](exporter.md) | `EXP` | The exporter `io_scene_gltf2_msfs_fss` |
-| [general-tools.md](general-tools.md) | `GEN` | The sidebar tab; General, Empty Bounds, Heatmap, Checks; other wishes |
+| [general-tools.md](general-tools.md) | `GEN` | The sidebar tabs, refresh on opening a file; General, Empty Bounds, Heatmap, Checks; other wishes |
 | [tags.md](tags.md) | `TAG` | Tags and their switches |
 | [zones.md](zones.md) | `ZON` | Zone empties, zone rows, the zone tool |
 | [merge-tree.md](merge-tree.md) | `MRG` | Export-time merge groups |
@@ -109,7 +111,7 @@ document in this repository produces the export folder and the `lod-fs24.log` / 
 `verify_lod_exports.py` reads, so they count as tests that cannot be re-run as they stand; requirements tracing to
 them say so.
 
-## Known Gaps (20261028)
+## Known Gaps (20261028, updated 20261029)
 
 Gaps found while the specification was drafted; each shows at its requirement as "no test" or in its Notes.
 
@@ -120,8 +122,10 @@ Gaps found while the specification was drafted; each shows at its requirement as
 | Tags have no test | TAG-001 to TAG-007 |
 | Exporter features without a test: target detection, migration and emissive reference, Prepare for MSFS 2024, legacy normals, instancing, export clean-up, the hidden Asobo workflow; Export For and the unchanged materials after an MSFS 2020 export only indirectly | EXP-002 to EXP-010 |
 | General tools without a test: Add Empty Parent, Origin to Bounding Box, Empty Bounds, batch rename, Fix Broken Bone Parents; Scan Names tested for markers only | GEN-001 to GEN-004, GEN-008, GEN-009, GEN-013 |
-| LOD features without a test: loose pieces, Smallest Part Kept, Refresh LOD Counts, hints, the LOD sphere and its padding, Print LOD Settings, hidden reference empties; the quota panel (its calculation is tested) | LOD-007, LOD-009 to LOD-012, LOD-015 to LOD-019 |
+| LOD features without a test: loose pieces, Smallest Part Kept, the loose-piece and near-cut-off hints, the box of dropped pieces, the LOD sphere and its padding (only the field's label and the line under it are tested), Print LOD Settings, hidden reference empties | LOD-007, LOD-009, LOD-011, LOD-012, LOD-015 to LOD-019 |
 | Auto Seam's core rules (no diagonal cuts, chart acceptance) are only measured with prototype scripts, not in a unit suite | UV-SEAM-001 |
 | How Visibility Scoring combines instances was not checked against the code | UV-VIS-005 |
 | Never seen in an interactive Blender (UV journal Session 102, open item 3) | UV-DEN-005, UV-PCK-002, UV-PCK-008, UV-PCK-011, UV-PCK-014 |
+| The panels of 0.36.1 to 0.36.9 never seen in an interactive Blender (material management journal Sessions 19 to 29): the two tabs, Object LOD, the bars and the quota table of LOD Settings | GEN-040, LOD-001, LOD-010, LOD-011 |
+| The refresh on opening a file is tested without its timer; the windowed run was checked once | GEN-041 |
 | Registered properties of the exporter (`msfs_fss_*`) and the mesh property `msfs_fss_legacy_auto_smooth` are not stripped from glTF extras; whether they reach a glTF with Include Extras is not checked | DAT-041 |

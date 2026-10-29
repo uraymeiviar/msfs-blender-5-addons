@@ -1,6 +1,6 @@
 # Feature Inventory
 
-Input for the specification to be written in `docs/spec/`: every feature of the two FSS add-ons, sorted by status, each with its source. Compiled on 20261027 from the code (fss_blender_tools 0.33.1, commit 188bf24), the artist guide ([../user/](../user/)) and the journals ([../journal/](../journal/README.md)). The specification is now in [README.md](README.md) and its area files (drafted 20261028); the **Spec** column names the requirements of each row, and the rows marked "added 20261028" were found while drafting it. This file stays the status overview and the list of rejected proposals.
+Input for the specification to be written in `docs/spec/`: every feature of the two FSS add-ons, sorted by status, each with its source. Compiled on 20261027 from the code (fss_blender_tools 0.33.1, commit 188bf24), the artist guide ([../user/](../user/)) and the journals ([../journal/](../journal/README.md)). The specification is now in [README.md](README.md) and its area files (drafted 20261028); the **Spec** column names the requirements of each row, and the rows marked "added 20261028" were found while drafting it. The rows marked "added 20261029" and the panel names follow fss_blender_tools 0.36.9. This file stays the status overview and the list of rejected proposals.
 
 | Status | Meaning |
 | :--- | :--- |
@@ -41,7 +41,7 @@ Based on Asobo's MSFS 2024 exporter 8.4.1 for Blender 5.2; FSS changes live in F
 
 ## 2. fss_blender_tools
 
-### 2.1 General Tools (General, Empty Bounds, Heatmap, Checks)
+### 2.1 General Tools (General, Empty Bounds, Heatmap, Checks; tab FSS Tools)
 
 | Feature | Status | Source | Spec |
 | :--- | :--- | :--- | :--- |
@@ -65,9 +65,10 @@ Based on Asobo's MSFS 2024 exporter 8.4.1 for Blender 5.2; FSS changes live in F
 
 | Feature | Status | Source | Spec |
 | :--- | :--- | :--- | :--- |
-| Every panel in one sidebar tab, FSS MSFS Tools; no Utilities group | implemented (added 20261029) | material management journal, decisions 7, 15 | GEN-040 |
+| Two sidebar tabs: FSS MSFS Tools (Zones & Merge Tree, Materials, Tags, Object LOD, Viewport LOD, LOD Settings, UV Auto Seam, UV Auto Packing; UV Auto Packing also in the UV Editor) and FSS Tools (General, Empty Bounds, Heatmap, Checks); no group panels | implemented (added 20261029) | material management journal, decisions 7, 15 (Utilities group dissolved), 16 (replaces 15's one tab), 22, 26 (UV Tools group dissolved) | GEN-040 |
+| Refresh on opening a file: Zones & Merge Tree, Materials and Scan Names refresh by themselves (not in a background Blender); LOD Counts and Check All stay manual | implemented (added 20261029) | material management journal, decision 21 | GEN-041 |
 | Materials panel: list with never used, shared across zones, transparent and emissive marks; per zone objects and area; size estimate with visibility; Keep UVs and kept sets; Select Objects; Check All; By Zone | implemented (added 20261028) | material management journal, decisions 1, 3, 8, 9, 11 to 14 | MTL-001 to MTL-009 |
-| MSFS material checks (no MSFS material, texture needed, parameters) | planned | material management journal, Session 1 objectives | MTL-020 |
+| MSFS material checks (no MSFS material, texture needed, parameters): the 20 rules R1 to R20 | planned (rules decided, not built; on hold while the UI is reworked) | material management journal, Session 1 objectives; Session 17 (rules); decisions 17 to 20 | MTL-020 |
 | Split helpers for sets too large for 8192 | planned | material management journal, Session 1 objectives | MTL-021 |
 | Emissive texture imbalance, measured after painting | planned | material management journal, decisions 3, 10 | MTL-022 |
 
@@ -105,11 +106,11 @@ Based on Asobo's MSFS 2024 exporter 8.4.1 for Blender 5.2; FSS changes live in F
 
 | Feature | Status | Source | Spec |
 | :--- | :--- | :--- | :--- |
-| LOD marks: Auto, Keep, Hidden from, Visible from; per-LOD export | implemented | LOD journal stage 1 | LOD-001 to LOD-005 |
+| LOD marks: Auto, Keep, Hidden from, Visible from, set in the Object LOD panel (selection line, mixed marks, the Visible in row); per-LOD export | implemented | LOD journal stage 1; material management journal, decisions 22, 23 | LOD-001 to LOD-005, DAT-008 |
 | Automatic size culling of whole parts and of loose pieces inside a mesh, before merging (no geometry is cut) | implemented | LOD 18; [../user/lod.md](../user/lod.md) | LOD-006, LOD-007, LOD-009 |
-| Quota and Hints (vertex quota per LOD, near cut-off and loose-piece lists) | implemented | LOD journal Session 7 | LOD-010 to LOD-012 |
-| Viewport LOD: a level or Auto (as MSFS would pick); excluded objects Hidden or Bounds | implemented | LOD journal Session 8; LOD 36 | LOD-013, LOD-014 |
-| LOD sphere padding (diameter) controlling MSFS's LOD switch; model type Exterior, Interior (exterior diameter derives the table), Scenery; explicit `minSize` table; Print LOD Settings / XML | implemented | LOD journal; [../user/lod.md](../user/lod.md) | LOD-008, LOD-015 to LOD-018 |
+| LOD Settings: Refresh LOD Counts with a bar per LOD against LOD00's object count; Quota and Hints as a table (Vertices, Quota, Used bar, MSFS shows it from); Per LOD Vertex Contributors with share bars, near cut-off and loose-piece lists | implemented | LOD journal Session 7; material management journal, decisions 22, 25 | LOD-010 to LOD-012 |
+| Viewport LOD panel: a level or Auto (as MSFS would pick); excluded objects Hidden or Bounds, the choice shown only while a preview is on | implemented | LOD journal Session 8; LOD 36; material management journal, decision 22, Session 25 | LOD-013, LOD-014 |
+| LOD sphere padding (Pad LOD Sphere To, with the diameter without padding) controlling MSFS's LOD switch; model type Exterior, Interior (exterior diameter derives the table; a missing one drawn red), Scenery; explicit `minSize` table; Print LOD Settings / XML | implemented | LOD journal; material management journal, decision 24, Session 26; [../user/lod.md](../user/lod.md) | LOD-008, LOD-015 to LOD-018 |
 | Children of a hidden reference empty (for example the `LIGHTPOS_*` nodes MSFS lights refer to) stay exported at the glTF root | implemented (the exporter's behaviour, accepted) | LOD 33 | LOD-019 |
 | Automated LOD generator with decimation (flow-lod, meshoptimizer), render comparison | wish (research only) | W27; LOD journal | LOD-030 |
 | Cockpit LOD1 from window visibility | wish | W21 | LOD-031 |
@@ -119,12 +120,12 @@ Based on Asobo's MSFS 2024 exporter 8.4.1 for Blender 5.2; FSS changes live in F
 
 | Feature | Status | Source | Spec |
 | :--- | :--- | :--- | :--- |
-| Auto Seam: Propose (C1, around the artist's seams, no diagonal cuts), Accept, Accept + Unwrap (Angle Based), Discard, Clear Current, Select; Distortion Limit; progress; report | implemented | UV 35 to 54, 64, 65, 88, 90 to 94 | UV-SEAM-001 to UV-SEAM-006, UV-SEAM-009 |
+| Auto Seam (panel UV Auto Seam): Propose (C1, around the artist's seams, no diagonal cuts), Accept, Accept + Unwrap (Angle Based), Discard, Clear Current, Select; Distortion Limit; progress; report | implemented | UV 35 to 54, 64, 65, 88, 90 to 94; material management journal, decision 26 (panel) | UV-SEAM-001 to UV-SEAM-006, UV-SEAM-009 |
 | Skip Auto Seam mark; decal-only objects skipped | implemented | UV 55, 56 | UV-SEAM-007, UV-SEAM-008 |
 | Unwrap: Blender's Angle Based (through Accept + Unwrap) | implemented | UV 90, 91 | UV-UNW-001 |
 | Visibility Scoring: artist cameras, Look Around or Fixed View, 2 to 10 animation steps, `.visibility` file, per-face sums, seen-face island values, floor 0.1 | implemented | UV 67, 72 to 74, 77 to 80, 82, 83, 86, 111 | UV-VIS-001 to UV-VIS-008 |
 | Density: scene target (px/cm), density freedom, multiplying density marks with presets, the chain shown live | implemented | UV 105, 106, 108, 109 | UV-DEN-001 to UV-DEN-005 |
-| Packing per texture set (Blender's Pack Islands with our scaling): density first, spill and needed size, one common position, square sizes 256 to 8192, margin in px, direction marks, Keep UVs, Check All, texture set list, also in the UV Editor | implemented | UV 100, 107, 110, 112 to 116, 119 to 121 | UV-PCK-001 to UV-PCK-015 |
+| Packing per texture set (panel UV Auto Packing; Blender's Pack Islands with our scaling): density first, spill and needed size, one common position, square sizes 256 to 8192, margin in px, direction marks, Keep UVs, Check All, texture set list, also in the UV Editor | implemented | UV 100, 107, 110, 112 to 116, 119 to 121; material management journal, decision 26 (panel) | UV-PCK-001 to UV-PCK-015 |
 | Packing picked per material directly instead of through the object selection | wish (waits for artists' feedback) | UV journal Session 102, open item 2 | UV-PCK-020 |
 | Add to Layout: pack new islands into free space with the rest pinned | wish | UV journal Session 99 | UV-PCK-021 |
 | Ignore short needles in the checks | wish (waits for artists' feedback) | UV journal Session 100 | UV-PCK-022 |

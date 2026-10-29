@@ -36,8 +36,8 @@ groups of that part. Artist guide: [../user/README.md](../user/README.md#2-zones
 - **Status:** implemented
 - **Requirement:** A zone's density factor is the zone empty's own density mark (DAT-023); like every mark it
   multiplies everything below it (UV-DEN-003). The zone row edits the mark (tick, Min, Max, greyed while off); a
-  change is stored on the empty at once, without Refresh, and is the same mark the Packing section shows for that
-  empty.
+  change is stored on the empty at once, without Refresh, and is the same mark the panel UV Auto Packing shows for
+  that empty.
 - **Data:** DAT-023
 - **Decision:** UV 108 (replaces UV 76, 98, 101 and TM S8.4, S8.6)
 - **Test:** `tests/test_zone_tree.py::test_zone_mark`, `tests/test_density_marks.py::test_multiplication`

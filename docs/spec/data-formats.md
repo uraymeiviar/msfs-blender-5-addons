@@ -27,7 +27,7 @@ requirements that use it. Properties that are registered (`bpy.props`) are saved
 - **Requirement:** Property group with `enabled` (Merge on Export, bool, default on) and `skip_tags` (Don't Merge
   tags, `;`-separated string). `items`, `active` and `scanned` hold the last Refresh of the Zones & Merge Tree
   panel and are rebuilt by Refresh.
-- **Used by:** MRG-001, MRG-010, TAG-005, ZON-002
+- **Used by:** MRG-001, MRG-010, TAG-005, ZON-002, GEN-041
 - **Decision:** TM S1.6; TM S8.2
 - **Test:** `tests/test_zone_tree.py::test_tree_rows`
 - **Code:** `merge.py` (`FSS_MergeSettings`)
@@ -37,14 +37,15 @@ requirements that use it. Properties that are registered (`bpy.props`) are saved
 - **Status:** implemented
 - **Requirement:** Property group of the LOD export settings, saved per scene: `model_type` (EXTERIOR, INTERIOR,
   SCENERY; default EXTERIOR), `min_sizes_fs24` and `min_sizes_fs20` (seven ratios each), `explicit_fs24` and
-  `explicit_fs20` (the table was edited by hand), `exterior_diameter` (m), `reference_size` (LOD Sphere Diameter,
-  0 = measured), `screen_height` (px, default 1440), `pixel_threshold` (px, default 4), `msfs_vertex_factor`
-  (default 1.15, 0.5 to 2.0), `keep_tags` (`;`-separated string), `preview_target` (fs24 or fs20). Measured
-  values of the last Refresh LOD Counts (diameters, boxes, counts, cut-offs, quotas, hints) are fields that are
-  not saved.
+  `explicit_fs20` (the table was edited by hand), `exterior_diameter` (m), `reference_size` (label Pad LOD Sphere To,
+  0 = no padding, the measured sphere), `screen_height` (px, default 1440), `pixel_threshold` (px, default 4),
+  `msfs_vertex_factor` (default 1.15, 0.5 to 2.0), `keep_tags` (`;`-separated string), `preview_target` (fs24 or
+  fs20). Measured values of the last Refresh LOD Counts (diameters, boxes, counts, cut-offs, quotas, hints) are fields
+  that are not saved.
 - **Used by:** LOD-001 to LOD-019, TAG-006
-- **Decision:** LOD 5, 8, 10, 22, 31
-- **Test:** `tests/test_lod_rules.py::test_interior_settings`
+- **Decision:** LOD 5, 8, 10, 22, 31; MAT 24 (the label of `reference_size`)
+- **Test:** `tests/test_lod_rules.py::test_interior_settings`, `tests/test_panels.py::test_exterior_diameter_message`
+  (the label)
 - **Code:** `lod.py` (`FSS_LodSettings`)
 
 ### DAT-004: LOD viewport settings
@@ -101,10 +102,24 @@ requirements that use it. Properties that are registered (`bpy.props`) are saved
   `objects`, `area`; `area` in m², `estimate` in px, `with_visibility`, `never_used`, `shared_zones`, `transparent`,
   `emissive`), `active_name` (the active row by material name) with `active` reading it as an index, `scanned`, `show`
   (ALL or WARNINGS). Written only by Refresh; saved with the file like the Zones & Merge Tree rows.
-- **Used by:** MTL-001 to MTL-009
+- **Used by:** MTL-001 to MTL-009, GEN-041
 - **Decision:** MAT 1
 - **Test:** `tests/test_materials.py::test_rows`, `tests/test_materials.py::test_gltf_leak`
 - **Code:** `fss_blender_tools/materials.py`
+
+## Window Manager (fss_blender_tools)
+
+### DAT-008: `WindowManager.fss_lod_pending`
+
+- **Status:** implemented
+- **Requirement:** Enum on the window manager, NONE (default), HIDE or SHOW: the Hidden from or Visible from that the
+  Object LOD panel has chosen before a number is pressed. Not saved (`SKIP_SAVE`). Set only by the operator
+  `fss.lod_pending`, set back to NONE by `fss.set_object_lod`; drawing the panel never writes it. It changes no object
+  and adds no undo step.
+- **Used by:** LOD-001
+- **Decision:** MAT 22
+- **Test:** `tests/test_panels.py::test_object_lod`
+- **Code:** `lod.py` (`register`, `FSS_OT_LodPending`, `FSS_OT_SetObjectLod`)
 
 ## Object Data
 
