@@ -488,6 +488,25 @@ def test_gltf_leak():
     print(f"PASS: test_gltf_leak ({len(gltf.get('nodes', []))} nodes, no fss_ key in the extras)")
 
 
+def test_refresh_on_open():
+    """Decision 21: on opening a file, Zones & Merge Tree, Materials and Scan Names refresh; never in background."""
+    from fss_blender_tools import autorefresh
+    build_scene()
+    scene = bpy.context.scene
+    scene.fss_materials.rows.clear()
+    scene.fss_materials.scanned = False
+    scene.fss_merge.scanned = False
+    scene.fss_name_check.scanned = False
+    ran = autorefresh.refresh_all()
+    assert ran == list(autorefresh.REFRESHES), ran
+    assert scene.fss_materials.scanned and len(scene.fss_materials.rows) > 0
+    assert scene.fss_merge.scanned and scene.fss_name_check.scanned
+    assert autorefresh._on_load_post in bpy.app.handlers.load_post
+    autorefresh._on_load_post()  # background: schedules nothing
+    assert not bpy.app.timers.is_registered(autorefresh._refresh_timer)
+    print(f"PASS: test_refresh_on_open ({', '.join(ran)}; no timer in background)")
+
+
 def main():
     test_rows()
     test_visibility()
@@ -496,6 +515,7 @@ def main():
     test_draw()
     test_keep_uvs()
     test_gltf_leak()
+    test_refresh_on_open()
     test_kinds(with_exporter=False)
     print("ALL TESTS PASSED")
 

@@ -457,7 +457,7 @@ class FSS_OT_UvSetSkipAutoseam(bpy.types.Operator):
 
 
 def draw_skip_autoseam(layout, context):
-    """The Skip Auto Seam mark, drawn in the Seams section (UV Tools > Seams)."""
+    """The Skip Auto Seam mark, drawn in the UV Auto Seam panel."""
     obj = context.active_object
     box = layout.box()
     if obj is not None:
@@ -910,19 +910,18 @@ class _PackingSection:
 
 class FSS_PT_UvMarks(_PackingSection, bpy.types.Panel):
     bl_idname = 'FSS_PT_uv_marks'
-    bl_label = 'Packing'
+    bl_label = 'UV Auto Packing'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'FSS MSFS Tools'
-    bl_parent_id = 'FSS_PT_uv_tools'
-    bl_order = 1
+    bl_order = 7
     bl_options = {'DEFAULT_CLOSED'}
 
 
 class FSS_PT_UvMarksImageEditor(_PackingSection, bpy.types.Panel):
-    """Packing in the UV editor's sidebar (the Image Editor's UI region), without the UV Tools group around it."""
+    """UV Auto Packing in the UV editor's sidebar (the Image Editor's UI region)."""
     bl_idname = 'FSS_PT_uv_marks_image'
-    bl_label = 'Packing'
+    bl_label = 'UV Auto Packing'
     bl_space_type = 'IMAGE_EDITOR'
     bl_region_type = 'UI'
     bl_category = 'FSS MSFS Tools'

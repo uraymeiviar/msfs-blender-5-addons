@@ -1,4 +1,4 @@
-"""FSS Blender Tools: Visibility Scoring panel (UV Tools > Packing), settings and operators.
+"""FSS Blender Tools: Visibility Scoring panel (inside UV Auto Packing), settings and operators.
 
 Enables artists to select cameras, configure animation states, run visibility analysis,
 and view inspection reports (Decisions 80, 81, 83, 86).
@@ -547,11 +547,11 @@ class FSS_UL_VisibilityCameraList(bpy.types.UIList):
 
 
 # ---------------------------------------------------------------------------
-# Visibility Scoring Panel (Decision 83), a section of UV Tools > Packing
+# Visibility Scoring Panel (Decision 83), a section of UV Auto Packing
 # ---------------------------------------------------------------------------
 
 class FSS_PT_Visibility(bpy.types.Panel):
-    """Visibility Scoring section of UV Tools > Packing in sidebar FSS MSFS Tools."""
+    """Visibility Scoring section of UV Auto Packing in sidebar FSS MSFS Tools."""
     bl_idname = 'FSS_PT_visibility'
     bl_label = 'Visibility Scoring'
     bl_space_type = 'VIEW_3D'

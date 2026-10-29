@@ -6,10 +6,10 @@ Independent of the Asobo add-ons and of _addons_common, so upstream merges into 
 bl_info = {
     "name": "FSS Blender Tools",
     "author": "Flight Sim Studio",
-    "description": "Authoring checks and helpers for MSFS aircraft (zones and merge tree, materials, tags, lod, uv tools: seams, packing per texture set with its marks, visibility scoring; general tools, empty bounds, heatmap, checks)",
+    "description": "Authoring checks and helpers for MSFS aircraft (zones and merge tree, materials, tags, lod, uv tools: seams, packing per texture set with its marks, visibility scoring; in a second tab: general tools, empty bounds, heatmap, checks)",
     "blender": (5, 2, 0),
-    "version": (0, 36, 0),
-    "location": "3D View > Sidebar > FSS MSFS Tools; UV Editor > Sidebar > FSS MSFS Tools (Packing)",
+    "version": (0, 36, 9),
+    "location": "3D View > Sidebar > FSS MSFS Tools, FSS Tools (General, Empty Bounds, Heatmap, Checks); UV Editor > Sidebar > FSS MSFS Tools (Packing)",
     "category": "Object",
 }
 
@@ -32,13 +32,14 @@ if "name_check" in locals():
     visibility = importlib.reload(visibility)
     name_check = importlib.reload(name_check)
     checks = importlib.reload(checks)
+    autorefresh = importlib.reload(autorefresh)
 else:
-    from . import (checks, empty_bounds, lod_rules, lod_model, lod, materials, merge, name_check, panels, tags, tools,
+    from . import (autorefresh, checks, empty_bounds, lod_rules, lod_model, lod, materials, merge, name_check, panels, tags, tools,
                    uv_autoseam, uv_heatmap, uv_marks, uv_pack, visibility, visibility_core)
 
-# panels first: it registers the UV Tools group that the Seams and Packing panels sit in
+# panels first: it documents the sidebar layout (it registers no panel since UV Tools was dissolved)
 MODULES = (panels, tools, empty_bounds, lod, tags, merge, uv_marks, materials, uv_autoseam, uv_heatmap, visibility, name_check,
-           checks)
+           checks, autorefresh)
 
 # The glTF exporter looks this name up on every enabled add-on: merge groups are merged in its pre-export hook
 glTF2ExportUserExtension = merge.glTF2ExportUserExtension

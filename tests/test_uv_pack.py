@@ -526,7 +526,7 @@ def test_uv_editor_panel():
     build_shared()
     view3d, image = bpy.types.FSS_PT_uv_marks, bpy.types.FSS_PT_uv_marks_image
     assert (image.bl_space_type, image.bl_region_type, image.bl_category, image.bl_label) == (
-        'IMAGE_EDITOR', 'UI', 'FSS MSFS Tools', 'Packing'), image
+        'IMAGE_EDITOR', 'UI', 'FSS MSFS Tools', 'UV Auto Packing'), image
     assert view3d.bl_space_type == 'VIEW_3D' and view3d.draw is image.draw  # one draw function, not a copy
     # only in the UV editor, not in the image viewer
     assert image.poll(SimpleNamespace(space_data=SimpleNamespace(mode='UV')))

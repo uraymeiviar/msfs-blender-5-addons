@@ -1414,12 +1414,11 @@ class FSS_OT_UvSelectArtistSeams(bpy.types.Operator):
 
 class FSS_PT_UvAutoSeam(bpy.types.Panel):
     bl_idname = 'FSS_PT_uv_autoseam'
-    bl_label = 'Seams'
+    bl_label = 'UV Auto Seam'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'FSS MSFS Tools'
-    bl_parent_id = 'FSS_PT_uv_tools'
-    bl_order = 0
+    bl_order = 6
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):

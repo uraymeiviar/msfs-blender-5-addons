@@ -448,6 +448,25 @@ def format_length(metres):
     return f'{metres * 100:.1f} cm' if metres < 1 else f'{metres:.2f} m'
 
 
+def format_percent(value):
+    """A percentage short enough for a table column: '364 %', '20 %', '8.8 %', '0.5 %'."""
+    return f'{value:.0f} %' if value >= 10 else f'{value:.2g} %'
+
+
+def table_row(layout, shares):
+    """The cells of one table row, widths as shares of the row (summing to 1); split keeps them lined up across
+    rows."""
+    cells = []
+    rest = 1.0
+    split = layout
+    for share in shares[:-1]:
+        split = split.split(factor=share / rest, align=True)
+        cells.append(split.column(align=True))
+        rest -= share
+    cells.append(split.column(align=True))
+    return cells
+
+
 def _get_lowest_cutoff(settings):
     inputs, _reason = cutoff_context(settings)
     return cutoff_for_level(settings, inputs, last_lod(settings)) if inputs else 0.0
@@ -494,7 +513,7 @@ class FSS_LodSettings(bpy.types.PropertyGroup):
     explicit_fs24: bpy.props.BoolProperty(default=False)
     explicit_fs20: bpy.props.BoolProperty(default=False)
     exterior_diameter: bpy.props.FloatProperty(name='Exterior Diameter (m)', min=0, update=_settings_changed)
-    reference_size: bpy.props.FloatProperty(name='LOD Sphere Diameter', min=0, subtype='DISTANCE', unit='LENGTH',
+    reference_size: bpy.props.FloatProperty(name='Pad LOD Sphere To', min=0, subtype='DISTANCE', unit='LENGTH',
         update=_reference_changed,
         description='0 uses the measured LOD sphere. A larger value pads the sphere MSFS uses for LOD selection to '
                     'this diameter around the geometry centre at export (invisible corner points): MSFS sees the '
@@ -665,9 +684,48 @@ class FSS_OT_SetObjectLod(bpy.types.Operator):
     def execute(self, context):
         mode = 'AUTO' if self.level == 0 and self.mode == 'HIDE' else self.mode
         changed, clamped = apply_marks(context.selected_objects, mode, max(1, self.level))
+        # Applying any mark ends a pending Hidden from / Visible from choice of the Object LOD panel
+        context.window_manager.fss_lod_pending = 'NONE'
         apply_viewport_lod(context)
         self.report({'INFO'}, f'Set {mode} on {changed} object(s); {clamped} clamped by parent')
         return {'FINISHED'}
+
+
+class FSS_OT_LodPending(bpy.types.Operator):
+    bl_idname = 'fss.lod_pending'
+    bl_label = 'Choose LOD Mark'
+    bl_description = 'Choose this mark, then an LOD number to apply it to the selected objects'
+    mode: bpy.props.EnumProperty(default='HIDE', items=[('HIDE', 'Hidden from', ''), ('SHOW', 'Visible from', '')])
+
+    @classmethod
+    def poll(cls, context):
+        return bool(context.selected_objects)
+
+    def execute(self, context):
+        # UI state only: the marks change when a number is pressed (fss.set_object_lod)
+        context.window_manager.fss_lod_pending = self.mode
+        return {'FINISHED'}
+
+
+_MARK_LABELS = {'AUTO': 'Auto', 'KEEP': 'Keep', 'HIDE': 'Hidden from', 'SHOW': 'Visible from'}
+
+
+def object_mark(obj):
+    """The object's mark as (mode, level): ('AUTO', 0), ('KEEP', 0), ('HIDE', n) or ('SHOW', n)."""
+    if obj.get(lod_model.KEEP_KEY):
+        return 'KEEP', 0
+    hide = lod_model.mark(obj, LOD_KEY)
+    if hide:
+        return 'HIDE', hide
+    show = lod_model.mark(obj, lod_model.SHOW_KEY)
+    if show:
+        return 'SHOW', show
+    return 'AUTO', 0
+
+
+def mark_text(mark):
+    mode, level = mark
+    return f'{_MARK_LABELS[mode]} LOD{level}' if level else _MARK_LABELS[mode]
 
 
 class FSS_OT_SetViewportLod(bpy.types.Operator):
@@ -761,7 +819,7 @@ class FSS_OT_LodEditTable(bpy.types.Operator):
 
 class FSS_PT_Lod(bpy.types.Panel):
     bl_idname = 'FSS_PT_lod'
-    bl_label = 'LOD'
+    bl_label = 'Object LOD'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'FSS MSFS Tools'
@@ -770,19 +828,50 @@ class FSS_PT_Lod(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         active = context.active_object
+        selected = context.selected_objects
+        if selected:
+            count = f'{len(selected)} object' + ('' if len(selected) == 1 else 's')
+            layout.label(text=f'Selected: {count} (active: {active.name})' if active else f'Selected: {count}')
+        else:
+            layout.label(text='Select objects to mark them', icon='INFO')
+        active_mark = object_mark(active) if active is not None else None
+        if active_mark is not None:
+            layout.label(text=f'Active object: {mark_text(active_mark)}')
+        if len({object_mark(obj) for obj in selected}) > 1:
+            layout.label(text='Selected objects: mixed marks', icon='INFO')
+        # The pressed mark follows a pending Hidden from / Visible from choice, else the active object's mark
+        pending = context.window_manager.fss_lod_pending
+        shown = pending if pending != 'NONE' else active_mark[0] if active_mark is not None else None
         row = layout.row(align=True)
-        for mode, label in [('AUTO', 'Auto'), ('KEEP', 'Keep')]:
-            marked = (active is not None and (bool(active.get(lod_model.KEEP_KEY)) if mode == 'KEEP' else
-                      not any(active.get(key) for key in (LOD_KEY, lod_model.SHOW_KEY, lod_model.KEEP_KEY))))
-            row.operator('fss.set_object_lod', text=label, depress=marked).mode = mode
-        for mode, label, key in [('HIDE', 'Hidden from', LOD_KEY), ('SHOW', 'Visible from', lod_model.SHOW_KEY)]:
-            layout.label(text=label)
+        for mode in ('AUTO', 'KEEP'):
+            row.operator('fss.set_object_lod', text=_MARK_LABELS[mode], depress=shown == mode).mode = mode
+        for mode in ('HIDE', 'SHOW'):
+            row.operator('fss.lod_pending', text=_MARK_LABELS[mode], depress=shown == mode).mode = mode
+        if shown in ('HIDE', 'SHOW'):
+            # Decision 23: the row lights the LODs where the object is visible; the clicked LOD is the last visible
+            # one (Hidden from n + 1) or the first (Visible from n), so it is always lit
+            layout.label(text='Visible in:')
             row = layout.row(align=True)
-            for level in range(1, 7):
-                op = row.operator('fss.set_object_lod', text=str(level),
-                                  depress=active is not None and lod_model.mark(active, key) == level)
-                op.mode, op.level = mode, level
-        layout.label(text='Viewport LOD')
+            for lod in range(7):
+                level = lod + 1 if shown == 'HIDE' else lod
+                visible = active_mark is not None and active_mark[0] == shown and (
+                    lod < active_mark[1] if shown == 'HIDE' else lod >= active_mark[1])
+                cell = row.row(align=True)
+                cell.enabled = 1 <= level <= 6
+                op = cell.operator('fss.set_object_lod', text=str(lod), depress=visible)
+                op.mode, op.level = shown, max(1, min(6, level))
+
+
+class FSS_PT_LodViewport(bpy.types.Panel):
+    bl_idname = 'FSS_PT_lod_viewport'
+    bl_label = 'Viewport LOD'
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'FSS MSFS Tools'
+    bl_order = 4
+
+    def draw(self, context):
+        layout = self.layout
         row = layout.row(align=True)
         is_auto = getattr(context.scene, 'fss_viewport_lod_auto', False)
         row.operator('fss.set_viewport_lod', text='Off',
@@ -791,10 +880,11 @@ class FSS_PT_Lod(bpy.types.Panel):
         for level in range(7):
             row.operator('fss.set_viewport_lod', text=str(level),
                          depress=context.scene.fss_viewport_lod == level).level = level
-        row = layout.row(align=True)
-        row.label(text='Excluded')
-        row.prop(context.scene, 'fss_lod_preview_display', expand=True)
         previewing = is_auto or context.scene.fss_viewport_lod >= 0
+        if previewing:  # Off excludes nothing, so the choice of how excluded objects show only appears with a preview
+            row = layout.row(align=True)
+            row.label(text='Excluded')
+            row.prop(context.scene, 'fss_lod_preview_display', expand=True)
         if previewing and context.scene.fss_lod_preview_display == 'HIDDEN':
             layout.label(text='Excluded objects hidden: set Viewport LOD Off before exporting by hand', icon='INFO')
         if is_auto and not context.scene.fss_lod_settings.preview_error:
@@ -802,17 +892,36 @@ class FSS_PT_Lod(bpy.types.Panel):
             layout.label(text=f'Auto: LOD{lvl:02} (screen ratio {_auto_state["last_ratio"]:.1%})', icon='VIEWZOOM')
         if context.scene.fss_lod_settings.preview_error:
             layout.label(text=context.scene.fss_lod_settings.preview_error, icon='ERROR')
+
+
+class FSS_PT_LodSettings(bpy.types.Panel):
+    bl_idname = 'FSS_PT_lod_settings'
+    bl_label = 'LOD Settings'
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'FSS MSFS Tools'
+    bl_order = 5
+
+    def draw(self, context):
+        layout = self.layout
         layout.operator('fss.lod_refresh', icon='FILE_REFRESH')
         settings = context.scene.fss_lod_settings
         if settings.scanned:
             layout.label(text='Cached source counts — Refresh after editing')
+            # A bar per written LOD, full at LOD00's object count (decision 25 A)
+            first = settings.counts[0]
+            col = layout.column(align=True)
             for level in range(settings.write_count):
-                text = f'LOD{level:02}: {settings.counts[level]} obj'
-                if settings.dropped_pieces[level]:
-                    text += f', -{settings.dropped_pieces[level]} pcs'
-                if level:
-                    text += f'; hides < {format_length(settings.cutoffs[level])}'
-                layout.label(text=text)
+                count = settings.counts[level]
+                lod_cell, bar_cell, pieces_cell, cutoff_cell = table_row(col.row(), (0.14, 0.40, 0.16, 0.30))
+                lod_cell.label(text=f'LOD{level:02}')
+                text = f'{count:,} obj'
+                if level and first:
+                    text += f' ({format_percent(100.0 * count / first)})'
+                bar_cell.progress(factor=count / first if first else 0.0, text=text)
+                pieces = settings.dropped_pieces[level]
+                pieces_cell.label(text=f'-{pieces:,} pcs' if pieces else '')
+                cutoff_cell.label(text=f'hides < {format_length(settings.cutoffs[level])}' if level else '')
             if settings.write_count < 7:
                 layout.label(text=f'LOD{settings.write_count:02}: not written, no objects', icon='INFO')
 
@@ -820,7 +929,7 @@ class FSS_PT_Lod(bpy.types.Panel):
 class FSS_PT_LodQuotaHints(bpy.types.Panel):
     bl_idname = 'FSS_PT_lod_quota_hints'
     bl_label = 'Quota and Hints'
-    bl_parent_id = 'FSS_PT_lod'
+    bl_parent_id = 'FSS_PT_lod_settings'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'FSS MSFS Tools'
@@ -831,35 +940,51 @@ class FSS_PT_LodQuotaHints(bpy.types.Panel):
         if not settings.scanned:
             layout.label(text='Click Refresh LOD Counts to compute estimates', icon='INFO')
             return
-        layout.label(text='Vertex estimates (per material/UV/normal corner, High quota):')
-        layout.label(text='MSFS from: where MSFS shows the LOD (minSize or vertex curve, whichever is larger)')
+        fs20 = settings.preview_target == 'fs20'
+        header = layout.column(align=True)
+        if fs20:
+            header.label(text='MSFS 2020 has no vertex rule:')
+            header.label(text='the vertex estimate per LOD only.')
+        else:
+            # One sentence, on two lines so that the sidebar does not cut it (decision 25 B)
+            header.label(text='A LOD is shown only when the model is large enough')
+            header.label(text='on screen for its vertex count.')
         effective = lod_rules.effective_min_sizes(settings.resolved_table, list(settings.vertex_estimates),
                                                   settings.msfs_vertex_factor, settings.write_count)
+        factors = (0.3, 0.7) if fs20 else (0.09, 0.17, 0.17, 0.17, 0.40)
+        headers = ('LOD', 'Vertices', 'Quota', 'Used', 'MSFS shows it from')
         col = layout.column(align=True)
+        for cell, text in zip(table_row(col.row(), factors), headers):
+            cell.label(text=text)
         for level in range(settings.write_count):
-            verts = settings.vertex_estimates[level]
-            quota = settings.quotas[level]
-            pct = settings.quota_percents[level]
-            over = settings.over_quota[level]
-            row = col.row(align=True)
-            if settings.preview_target == 'fs20':
-                row.label(text=f'_LOD{level:02}  ~{verts:,} vtx (FS20: no vertex curve)')
+            cells = table_row(col.row(), factors)
+            cells[0].label(text=f'{level:02}')
+            cells[1].label(text=f'{settings.vertex_estimates[level]:,}')
+            if fs20:
                 continue
-            fallback = '  (fallback: last LOD)' if level == settings.write_count - 1 else ''
-            text = f'_LOD{level:02}  ~{verts:,} / {quota:,}  {pct:.0f}%  MSFS from {effective[level]:.1%}{fallback}'
-            if over:
-                row.alert = True
-                row.label(text=text, icon='ERROR')
+            pct = settings.quota_percents[level]
+            cells[2].label(text=f'{settings.quotas[level]:,}')
+            cells[3].alert = pct > 100.0
+            cells[3].progress(factor=min(pct / 100.0, 1.0), text=format_percent(pct))
+            needed = effective[level] * 100.0
+            table = format_percent(settings.resolved_table[level] * 100.0)
+            if needed > 100.0:
+                text = f'never (needs {format_percent(needed)}; table {table})'
             else:
-                row.label(text=text, icon='CHECKMARK')
-            if settings.dropped_pieces[level]:
-                sub = col.row(align=True)
-                sub.enabled = False
-                sub.label(text=f'    -{settings.dropped_pieces[level]:,} loose pieces '
-                               f'(~{settings.dropped_vertices[level]:,} vtx) dropped at export')
+                text = f'{format_percent(needed)} of screen (table {table})'
+            if level == settings.write_count - 1:
+                text += ', fallback'
+            cells[4].label(text=text)
+        dropped = [level for level in range(settings.write_count) if settings.dropped_pieces[level]]
+        if dropped:
+            box = layout.box().column(align=True)
+            box.label(text='Dropped at export (loose pieces below the cut-off):', icon='MOD_EXPLODE')
+            for level in dropped:
+                box.label(text=f'LOD{level:02}: {settings.dropped_pieces[level]:,} pcs, '
+                               f'~{settings.dropped_vertices[level]:,} vtx')
 
         layout.separator()
-        layout.label(text='Hints for LOD:')
+        layout.label(text='Per LOD Vertex Contributors')
         sel_row = layout.row(align=True)
         active_lod = (context.scene.fss_viewport_lod
                       if 0 <= context.scene.fss_viewport_lod < settings.write_count
@@ -874,11 +999,16 @@ class FSS_PT_LodQuotaHints(bpy.types.Panel):
         near = [h for h in lod_hints if h.kind == 'NEAR_CUTOFF'][:5]
 
         box = layout.box()
-        box.label(text=f'Largest contributors in _LOD{active_lod:02}:', icon='MESH_DATA')
+        total = settings.vertex_estimates[active_lod]
+        box.label(text=f'LOD{active_lod:02}: ~{total:,} vtx', icon='MESH_DATA')
         if contributors:
+            # A bar per contributor for its share of the LOD's vertices (decision 25 C)
             for h in contributors:
                 r = box.row(align=True)
-                r.label(text=f'{h.object_name}: ~{h.vertices:,} vtx')
+                name_cell, bar_cell = table_row(r, (0.5, 0.5))
+                name_cell.label(text=h.object_name)
+                share = 100.0 * h.vertices / total if total else 0.0
+                bar_cell.progress(factor=min(share / 100.0, 1.0), text=f'~{h.vertices:,} ({format_percent(share)})')
                 r.operator('fss.lod_select_hint', text='', icon='RESTRICT_SELECT_OFF').object_name = h.object_name
         else:
             box.label(text='None')
@@ -921,7 +1051,7 @@ class FSS_OT_LodInspectLevel(bpy.types.Operator):
 class FSS_PT_LodExport(bpy.types.Panel):
     bl_idname = 'FSS_PT_lod_export'
     bl_label = 'Export Settings'
-    bl_parent_id = 'FSS_PT_lod'
+    bl_parent_id = 'FSS_PT_lod_settings'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'FSS MSFS Tools'
@@ -957,6 +1087,11 @@ class FSS_PT_LodExport(bpy.types.Panel):
         else:
             layout.label(text='Model diameter: not measured yet, press Refresh LOD Counts', icon='INFO')
         layout.prop(settings, 'reference_size')
+        # The field is an input (0 = no padding); the line under it gives the diameter MSFS uses without padding
+        if settings.measured_diameter > 0:
+            layout.label(text=f'Without padding: {format_length(settings.measured_diameter)} (0 = no padding)')
+        else:
+            layout.label(text='0 = no padding; press Refresh LOD Counts to measure the model')
         if settings.reference_size > 0 and settings.measured_diameter > 0:
             if settings.reference_size <= settings.mesh_diameter:
                 layout.label(text=f'Not larger than the geometry sphere ({format_length(settings.mesh_diameter)}): '
@@ -969,17 +1104,23 @@ class FSS_PT_LodExport(bpy.types.Panel):
             else:
                 layout.label(text=f'Export pads the LOD sphere: MSFS sees the model '
                                   f'{settings.lod_diameter / settings.mesh_diameter:.2f}x larger', icon='INFO')
+        missing = False
         if settings.model_type == 'INTERIOR':
-            layout.prop(settings, 'exterior_diameter')
             target = settings.preview_target
             explicit = getattr(settings, 'explicit_' + target) or (target == 'fs20' and settings.explicit_fs24)
-            if not explicit and settings.exterior_diameter <= 0:
-                layout.label(text='exterior diameter missing', icon='ERROR')
+            missing = not explicit and settings.exterior_diameter <= 0
+            row = layout.row()
+            row.alert = missing  # the field to fill is drawn red, with one message below it
+            row.prop(settings, 'exterior_diameter')
+            if missing:
+                layout.label(text="Exterior diameter missing: enter the exterior model's LOD sphere diameter",
+                             icon='ERROR')
 
         inputs, reason = cutoff_context(settings)
         last = last_lod(settings)
         if not inputs:
-            layout.label(text=reason, icon='INFO')
+            if not (missing and reason == 'exterior diameter missing'):
+                layout.label(text=reason, icon='INFO')
         else:
             layout.prop(settings, 'lowest_cutoff', text=f'LOD{last:02} hides parts smaller than')
             box = layout.box()
@@ -1056,8 +1197,9 @@ def _on_load_post(*_dummy):
 
 
 CLASSES = (FSS_LodHintItem, FSS_LodSettings, FSS_OT_LodRefresh, FSS_OT_LodSelectHint, FSS_OT_LodInspectLevel,
-           FSS_OT_SetObjectLod, FSS_OT_SetViewportLod, FSS_OT_LodPrintSettings,
-           FSS_OT_LodEditTable, FSS_PT_Lod, FSS_PT_LodQuotaHints, FSS_PT_LodExport, FSS_PT_LodExportAdvanced)
+           FSS_OT_SetObjectLod, FSS_OT_LodPending, FSS_OT_SetViewportLod, FSS_OT_LodPrintSettings,
+           FSS_OT_LodEditTable, FSS_PT_Lod, FSS_PT_LodViewport, FSS_PT_LodSettings, FSS_PT_LodQuotaHints,
+           FSS_PT_LodExport, FSS_PT_LodExportAdvanced)
 
 
 def register():
@@ -1065,6 +1207,10 @@ def register():
     for cls in CLASSES:
         bpy.utils.register_class(cls)
     bpy.types.Scene.fss_lod_settings = bpy.props.PointerProperty(type=FSS_LodSettings)
+    # The Object LOD panel's chosen Hidden from / Visible from before a number is pressed (UI only, not saved)
+    bpy.types.WindowManager.fss_lod_pending = bpy.props.EnumProperty(
+        name='Pending LOD Mark', default='NONE', options={'SKIP_SAVE'},
+        items=[('NONE', 'None', ''), ('HIDE', 'Hidden from', ''), ('SHOW', 'Visible from', '')])
     bpy.types.Scene.fss_viewport_lod = bpy.props.IntProperty(default=-1, min=-1, max=6)
     bpy.types.Scene.fss_viewport_lod_auto = bpy.props.BoolProperty(default=False, options={'SKIP_SAVE'})
     bpy.types.Scene.fss_lod_preview_display = bpy.props.EnumProperty(
@@ -1106,5 +1252,6 @@ def unregister():
                  'fss_lod_export_level',
                  'fss_lod_show_sphere'):
         delattr(bpy.types.Scene, name)
+    del bpy.types.WindowManager.fss_lod_pending
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)

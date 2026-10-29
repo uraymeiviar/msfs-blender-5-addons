@@ -1,35 +1,18 @@
-"""Sidebar group UV Tools (Seams, Packing with Visibility Scoring). The group holds nothing of its own; each section is
-a subpanel registered by its module, after this one.
+"""Sidebar layout of fss_blender_tools; this module registers no panel of its own.
 
-Every panel of the add-on is in the 3D Viewport sidebar tab FSS MSFS Tools (material-management decision 15), where
-bl_order sets the order: Zones & Merge Tree (merge.py), Materials (materials.py), Tags (tags.py), LOD (lod.py),
-UV Tools (this module), General (tools.py), Empty Bounds (empty_bounds.py), Heatmap (uv_heatmap.py), Checks
-(checks.py). The UV Editor's Packing panel is in a tab FSS MSFS Tools too.
+The add-on has two 3D Viewport sidebar tabs (material-management decisions 16 and 26), where bl_order sets the order of
+the top-level panels. FSS MSFS Tools: Zones & Merge Tree (merge.py), Materials (materials.py), Tags (tags.py), Object
+LOD, Viewport LOD and LOD Settings (lod.py), UV Auto Seam (uv_autoseam.py), UV Auto Packing with Visibility Scoring
+inside it (uv_marks.py, visibility.py). FSS Tools: General (tools.py), Empty Bounds (empty_bounds.py), Heatmap
+(uv_heatmap.py), Checks (checks.py). The UV Editor's UV Auto Packing panel is in a tab FSS MSFS Tools.
 """
 
-import bpy
-
-
-class FSS_PT_UvTools(bpy.types.Panel):
-    bl_idname = 'FSS_PT_uv_tools'
-    bl_label = 'UV Tools'
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = 'FSS MSFS Tools'
-    bl_order = 4
-
-    def draw(self, context):
-        pass
-
-
-CLASSES = (FSS_PT_UvTools,)
+CLASSES = ()
 
 
 def register():
-    for cls in CLASSES:
-        bpy.utils.register_class(cls)
+    pass
 
 
 def unregister():
-    for cls in reversed(CLASSES):
-        bpy.utils.unregister_class(cls)
+    pass
