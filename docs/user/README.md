@@ -14,7 +14,7 @@ It matches **FSS Blender Tools 0.36.9** and the FSS exporter based on Asobo expo
   | :--- | :--- |
   | [fss-tools.md](fss-tools.md) | The two sidebar tabs: in **FSS MSFS Tools** the panels **Zones & Merge Tree**, **Tags**, **UV Auto Seam** and **UV Auto Packing** (with **Visibility Scoring**); in **FSS Tools** the panels **General**, **Empty Bounds**, **Heatmap** and **Checks** |
   | [materials.md](materials.md) | The **Materials** panel (**FSS MSFS Tools** sidebar tab): every material with its objects, zones and surface, the warnings never used and shared across zones, the transparent and emissive marks, a texture size estimate, Select Objects, and **By Zone** |
-  | [lod.md](lod.md) | The panels **Object LOD**, **Viewport LOD** and **LOD Settings** (**FSS MSFS Tools** sidebar tab): automatic LODs, marks, viewport preview, object counts, the vertex quota table and contributors, size cut-offs, the LOD sphere, and exporting with LODs |
+  | [lod.md](lod.md) | The panels **Object LOD**, **Viewport LOD** and **LOD Settings** (**FSS MSFS Tools** sidebar tab): automatic LODs, marks, viewport preview, the table of what MSFS does at your view, contributors, the settings per LOD, the LOD sphere, and exporting with LODs |
   | [uv.md](uv.md) | The **UV Auto Seam** panel (**FSS MSFS Tools** sidebar tab: proposed and current seams, workflow, reports, limits) and the **Heatmap** panel (**FSS Tools** sidebar tab: distortion, texel density and visibility on the model, the distribution chart, the UV grid) |
   | [exporter.md](exporter.md) | The exporter: export target MSFS 2024 or MSFS 2020, one `.blend` for both simulators, materials, instancing, legacy normals |
 
@@ -37,7 +37,7 @@ Steps marked **in development** describe what the tool will do, and how to get t
 | :--- | :--- | :--- | :--- |
 | [1. Scene, Hierarchy and Names](#1-scene-hierarchy-and-names) | General, Empty Bounds, Checks | available | `modeling.md` |
 | [2. Zones and Materials](#2-zones-and-materials-in-development) | Zones & Merge Tree, Materials, zone tool | zone density marks and the Materials overview available; the rest by hand | `materials.md`, `texturing.md` |
-| [3. Loose Pieces](#3-loose-pieces-what-disappears-together) | Quota and Hints, Viewport LOD | a modelling decision | `lods.md` |
+| [3. Loose Pieces](#3-loose-pieces-what-disappears-together) | Hints, Viewport LOD | a modelling decision | `lods.md` |
 | [4. Merge Tree](#4-merge-tree) | Tags, Zones & Merge Tree | available | `modeling.md` |
 | [5. LOD](#5-lod) | Object LOD, Viewport LOD, LOD Settings | available | `lods.md` |
 | [6. Seams and Unwrap](#6-seams-and-unwrap) | UV Auto Seam, Heatmap | available | `uv-mapping.md` |
@@ -61,7 +61,7 @@ Steps marked **in development** describe what the tool will do, and how to get t
 - Run **Scan Names** and **Fix Broken Bone Parents** in [Checks](fss-tools.md#checks) (tab **FSS Tools**).
 - **Empty Bounds** (tab **FSS Tools**) shows what each empty contains; use it to check the hierarchy. See [Empty Bounds](fss-tools.md#empty-bounds).
 
-**Check:** Scan Names lists nothing you did not intend. For the origins, press **Refresh LOD Counts** in the [LOD Settings](lod.md#lod-settings) panel (sidebar tab **FSS MSFS Tools**; no LOD marks are needed for it; for an interior, first enter **Exterior Diameter** under **Export Settings**, or Refresh stops with "exterior diameter missing"): its **Export Settings** show no warning about origins outside the geometry, and **Show LOD Sphere** draws the sphere around the model, not far beyond it. See [Origins Outside the Geometry](lod.md#origins-outside-the-geometry).
+**Check:** Scan Names lists nothing you did not intend. For the origins, press **Refresh LOD Counts** in the [LOD Settings](lod.md#lod-settings) panel (sidebar tab **FSS MSFS Tools**; no LOD marks are needed for it): its **Export Settings** show no warning about origins outside the geometry, and **Show LOD Sphere** draws the sphere around the model, not far beyond it. See [Origins Outside the Geometry](lod.md#origins-outside-the-geometry).
 
 **Redo when:** you add or rename parts. Renaming a node that the model XML, a `.cfg` or an attachment refers to also means updating that reference.
 
@@ -110,7 +110,7 @@ So the topology you model decides what disappears together. A floor plate and it
 
 - **Connect** what must disappear together: join the head and body of the screw with a few edges or faces, so they become one loose piece.
 - **Separate** what should be able to disappear on its own: split it into its own loose piece, or its own object, so the size rule can remove it while the rest stays.
-- This is a modelling decision about what belongs together; no tool decides it for you. The **Quota and Hints** section of **LOD Settings** (step 5) shows which loose pieces would be dropped at each LOD.
+- This is a modelling decision about what belongs together; no tool decides it for you. The **Hints** section of **LOD Settings** (step 5) shows which loose pieces would be dropped at each LOD.
 
 **Check:** with the viewport LOD preview (step 5), small assemblies disappear as a whole, not piece by piece.
 
@@ -143,12 +143,12 @@ So the topology you model decides what disappears together. A floor plate and it
 
 **Do:** in the **FSS MSFS Tools** tab, panels **Object LOD**, **Viewport LOD** and **LOD Settings**:
 
-- **LOD sphere** (**LOD Settings > Export Settings**): check it with **Show LOD Sphere**; if the LODs should switch at larger distances, set **Pad LOD Sphere To** to the diameter you want MSFS to use (0 = no padding). See [The LOD Sphere](lod.md#the-lod-sphere).
+- **LOD sphere** (**LOD Settings > Export Settings**): check it with **Show LOD Sphere**; if the model cannot lose more vertices and the LODs still drop too early, raise **Pad LOD Sphere Multiplier** (1.00 = no padding; it costs frame rate). See [The LOD Sphere](lod.md#the-lod-sphere).
 - **Marks** (**Object LOD**): **Keep** for small parts that must stay visible (annunciators, lights), **Hidden from** for parts not needed at lower detail, **Visible from** for simpler replacements; for the last two, click in the **Visible in** row the LOD where the parts stop or start showing. See [Object LOD](lod.md#object-lod).
-- **Refresh LOD Counts** (**LOD Settings**), then work through **Quota and Hints** until every LOD fits. See [Quota and Hints](lod.md#quota-and-hints).
+- **Refresh LOD Counts** (**LOD Settings**), then frame the model as MSFS would see it and read [the table at this view](lod.md#the-table-at-this-view): **ToReduce** says how many vertices to remove from a LOD to get it there. [Hints](lod.md#hints) says which objects cost the most. **Hides Under** in **Export Settings** sets what each LOD leaves out. See [Settings per LOD](lod.md#settings-per-lod).
 - **Viewport LOD** previews what each LOD keeps; **Auto** follows the view distance. See [Viewport LOD](lod.md#viewport-lod).
 
-**Check:** after **Refresh LOD Counts**, no **Used** bar in **Quota and Hints** is red, and no LOD reads **never** in **MSFS shows it from**; the preview looks right at each level. Set the preview to **Off** before exporting by hand.
+**Check:** after **Refresh LOD Counts**, the table shows the LOD you want at the views that matter (the pilot's seat, the cockpit door, outside); the preview looks right at each level. Set the preview to **Off** before exporting by hand.
 
 **Redo when:** geometry, marks or the LOD sphere change: press **Refresh LOD Counts**. LODs are built at export from the full model, so this never touches UVs or textures.
 
@@ -253,7 +253,7 @@ Some work has no step of its own, because it runs through several:
 ## Where to Find the Tools
 
 - **FSS MSFS Tools and FSS Tools:** in the 3D Viewport, press `N` to open the sidebar. FSS Blender Tools has two tabs there:
-  - **FSS MSFS Tools**, the panels from top to bottom: **Zones & Merge Tree**, **Materials** (with the section **By Zone**), **Tags**, **Object LOD**, **Viewport LOD**, **LOD Settings** (with the sections **Quota and Hints** and **Export Settings**), **UV Auto Seam** and **UV Auto Packing** (with the section **Visibility Scoring**). UV Auto Seam and UV Auto Packing are closed at first.
+  - **FSS MSFS Tools**, the panels from top to bottom: **Zones & Merge Tree**, **Materials** (with the section **By Zone**), **Tags**, **Object LOD**, **Viewport LOD**, **LOD Settings** (with the sections **Hints** and **Export Settings**), **UV Auto Seam** and **UV Auto Packing** (with the section **Visibility Scoring**). UV Auto Seam and UV Auto Packing are closed at first.
   - **FSS Tools**, the panels from top to bottom: **General**, **Empty Bounds**, **Heatmap** and **Checks**, all closed at first.
   - The UV Editor's sidebar has an **FSS MSFS Tools** tab too, with **UV Auto Packing**.
   - When you open a `.blend`, **Zones & Merge Tree**, **Materials** (in Object Mode) and **Scan Names** fill their lists by themselves; press **Refresh** after later changes.

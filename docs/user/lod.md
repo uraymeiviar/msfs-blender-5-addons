@@ -9,7 +9,7 @@ Three panels in the sidebar (`N` > **FSS MSFS Tools**) prepare a model for expor
 | :--- | :--- |
 | **Object LOD** | The marks of the selected objects: let the size rule decide (**Auto**), never leave out (**Keep**), or choose the LODs in which an object is visible (**Hidden from**, **Visible from**). See [Object LOD](#object-lod). |
 | **Viewport LOD** | A preview in the viewport of what each LOD file keeps. See [Viewport LOD](#viewport-lod). |
-| **LOD Settings** | **Refresh LOD Counts** and the object count per LOD, with the sections **Quota and Hints** (will MSFS show each LOD, and which objects cost the most vertices) and **Export Settings** (model type, LOD sphere, cut-offs). See [LOD Settings](#lod-settings). |
+| **LOD Settings** | **Refresh LOD Counts** and the table of what MSFS does at your current view, with the sections **Hints** (which objects cost the most vertices) and **Export Settings** (the LOD sphere and the settings per LOD). See [LOD Settings](#lod-settings). |
 
 ## How the Automatic LODs Work
 
@@ -20,13 +20,13 @@ Three panels in the sidebar (`N` > **FSS MSFS Tools**) prepare a model for expor
   - inside a mesh, **loose pieces** smaller than that cut-off.
 - Merge groups are merged after this, per LOD: `_LOD00` merges a panel with its screws, `_LOD04` merges the panel without them.
 - No geometry is cut or reduced. Every boundary that disappears is one you modelled. **Model parts as separate objects** (or at least as separate loose pieces) and the LODs follow from their size.
-- Vertex counts never decide which parts are left out; only marks and sizes do. Vertex counts are reported so you can see whether MSFS will actually show each LOD (see [Quota and Hints](#quota-and-hints)).
+- Vertex counts never decide which parts are left out; only marks and sizes do. Vertex counts are reported so you can see which LOD MSFS will show (see [The Table at This View](#the-table-at-this-view)).
 
 Terms:
 
 - **Part:** an object with everything below it. Its **size** is the largest side of the world bounding box around the whole part.
 - **Loose piece:** a connected piece of geometry inside one mesh. Pieces that only touch without sharing vertices count as separate.
-- **Cut-off:** for each LOD, the size below which Auto parts and loose pieces are left out.
+- **Cut-off:** for each LOD, the size below which Auto parts and loose pieces are left out. You see and set it as **Hides Under**.
 - **LOD sphere:** the sphere MSFS uses to measure how large the model is on screen (see [The LOD Sphere](#the-lod-sphere)).
 
 ## Object LOD
@@ -83,7 +83,7 @@ The **Viewport LOD** panel shows in the viewport what an export would put in eac
 
 - **Off:** no preview. Every object shows again, with its own display setting; objects you had set to Wire or Bounds yourself keep that setting.
 - **0** to **6:** shows what that LOD file keeps; objects absent from it are hidden or shown as boxes, as **Excluded** says (below). The bottom-left corner of the viewport says "Filtered by LODn".
-- **Auto:** picks the LOD from the current view, as MSFS would: it measures how large the LOD sphere is on screen (from the view's field of view and distance) and switches the filter when the LOD changes. The viewport shows "Auto LODn (ratio)", the panel "Auto: LODnn (screen ratio ...)". After a **Refresh LOD Counts** it also accounts for the vertex counts, as MSFS does (MSFS 2024 only).
+- **Auto:** picks the LOD from the current view, as MSFS would: it measures how large the LOD sphere is on screen (from the view's field of view and distance) and switches the filter when the LOD changes. The viewport shows "Auto LODn (ratio)". After a **Refresh LOD Counts** it also accounts for the vertex counts, as MSFS does, at the **MSFS Quality** chosen in **LOD Settings**.
 
 **0 is not the same as Off.** LOD 0 shows what `_LOD00` keeps, and `_LOD00` leaves out the objects marked **Visible from** (the simpler replacements). In a file without Visible from marks the two look the same.
 
@@ -101,51 +101,47 @@ Notes:
 
 ## LOD Settings
 
-The **LOD Settings** panel holds **Refresh LOD Counts**, the object count of each LOD, and the sections [Quota and Hints](#quota-and-hints) and [Export Settings](#export-settings).
+The **LOD Settings** panel holds **Refresh LOD Counts**, [the table at this view](#the-table-at-this-view), and the sections [Hints](#hints) and [Export Settings](#export-settings).
 
 ### Refresh LOD Counts
 
-Press **Refresh LOD Counts** after editing geometry, marks or settings. It measures the model, counts vertices and fills the hints. It does not export anything, and it does not run by itself when you open a file (on a cockpit it takes a few seconds). The results stay as they were at the last Refresh, as the line "Cached source counts — Refresh after editing" reminds you; changing a setting in **Export Settings** clears them until the next Refresh.
+**Refresh LOD Counts** measures the model and counts objects and vertices per LOD. It exports nothing. It runs by itself when you open a file (a few seconds on a cockpit, shortly after the file appears). Press it after editing geometry or marks: the results stay as they were at the last Refresh, as the line "Cached counts: Refresh after editing" reminds you. Changing **Hides Under** or the padding clears them until the next Refresh; **MSFS Quality** and **minSize %** apply at once.
 
-### Object Count per LOD
+### The Table at This View
 
-After a Refresh, the panel shows one row per written LOD, for example:
+What it means for you: MSFS has a vertex limit that depends on how large the model is on screen. Close up the limit is high; further away it is low. MSFS shows the most detailed LOD that fits the limit, so **a model with fewer vertices gets a better LOD at the same view**. The table tells you which LOD MSFS shows at your current Blender view, and how many vertices to remove to get a better one.
 
-`LOD02 | 326 obj (11 %) | -40,851 pcs | hides < 18.8 cm`
+The table follows the Blender view: zoom or move and the numbers change. It does so whatever **Viewport LOD** is set to, also on **Off**.
 
-- **LODnn** and a **bar**: the bar is full for `LOD00` and shows how many of `LOD00`'s objects the LOD still has; the text gives the object count and, from LOD 1 on, that share in brackets. A bar that hardly shrinks from one LOD to the next means the size rule removes little there.
-- **-40,851 pcs:** loose pieces the export drops from that LOD (empty when none).
-- **hides < 18.8 cm:** the cut-off of that LOD.
-- **LODnn: not written, no objects:** the first empty LOD. The export stops there; later LODs are not written, even if **Visible from** marks would put objects in them.
-
-## Quota and Hints
-
-This section of **LOD Settings** shows whether MSFS will actually use each LOD, and which objects to work on when it will not. Before the first Refresh it says "Click Refresh LOD Counts to compute estimates".
-
-### Vertex Quota
-
-What it means for you: MSFS shows a LOD file only when the model is large enough on screen for its vertex count; the section's first sentence says so. A LOD with too many vertices for its place in the table is shown only from a larger screen size than the table asks for. If it would need more than the whole screen, MSFS in practice never shows it and uses another LOD instead.
+- **MSFS Quality:** the simulator's graphics setting to predict, **High** by default. The higher the setting, the higher the limit at the same view. Only High has been checked against the simulator.
+- **This view: LOD04 (screen ratio 158 %):** the LOD MSFS shows here, and how large the model is on screen. Above 100 %, the LOD sphere is larger than the screen height. This is the same measure as **Viewport LOD > Auto**.
 
 The table has one row per written LOD:
 
 | Column | Meaning |
 | :--- | :--- |
-| **LOD** | `00` to `06`. |
-| **Vertices** | Estimated vertices of that file, counted as the glTF stores them (split where UVs, normals or materials differ; shared instances once). |
-| **Quota** | The most vertices the LOD may have and still be shown from its own table size (MSFS 2024, High graphics setting). |
-| **Used** | A bar: the vertices as a share of the quota. Up to 100 % the LOD fits; above 100 % the bar is full and red. |
-| **MSFS shows it from** | The screen size from which MSFS will show this LOD: the larger of its table value and what its vertex count needs. |
+| **LOD** | The LOD and its cut-off: `00 -`, `01 <1.1cm`. The highlighted button is the LOD MSFS shows at this view; clicking it does nothing. |
+| **Vert/Obj** | Estimated vertices and objects of that file, `1.11M/3.48K`. Vertices are counted as the glTF stores them (split where UVs, normals or materials differ; shared instances once), after small loose pieces are dropped. |
+| **Used** | A bar: the vertices as a share of the limit at this view. At 100 % or less, the vertex count lets the LOD show here. |
+| **ToReduce** | The vertices to remove from that LOD so MSFS shows it here. Only on LODs more detailed than the one shown; `-` on the others. |
+| **Reduced** | A bar: how much of the previous LOD's vertices this step removed, so you can compare the steps. The text gives the step itself, vertices and objects. |
 
-The **MSFS shows it from** column reads:
+An example at one view, where the limit is 542K:
 
-- `55 % of screen (table 55 %)`: the LOD fits its quota and is shown from its table value.
-- `96 % of screen (table 2.7 %)`: too many vertices; MSFS shows the LOD only when the model fills 96 % of the screen instead of 2.7 %.
-- `never (needs 240 %; table 100 %)`: the LOD would need more than the whole screen, so MSFS never shows it.
-- `, fallback` after the last LOD: the LOD MSFS falls back to.
+| LOD | Vert/Obj | ToReduce | What it means |
+| :--- | :--- | :--- | :--- |
+| 03 | 561K | 19K | Too heavy, by 19K. Remove 19K vertices from LOD03 and MSFS shows LOD03 here instead of LOD04. |
+| 04 (highlighted) | 482K | - | Fits, so this is the LOD MSFS shows. |
 
-Below the table, a box **Dropped at export (loose pieces below the cut-off)** lists per LOD how many loose pieces the export removes and their vertices, for example `LOD01: 12,832 pcs, ~248,613 vtx`. It is not shown when nothing is dropped.
+Other messages:
 
-For MSFS 2020 (preview target, see [Advanced](#advanced)) the section says "MSFS 2020 has no vertex rule" and the table shows only the **LOD** and **Vertices** columns.
+- **Over the limit, shown as the last LOD:** even the last LOD is above the limit; MSFS still shows it, because it has nothing lower.
+- **LODnn: not written, no objects:** the first empty LOD. The export stops there; later LODs are not written, even if **Visible from** marks would put objects in them.
+- A LOD with `-` in **ToReduce** and less than 100 % in **Used** that is still not shown is held back by its **minSize %** (see [Settings per LOD](#settings-per-lod)).
+
+## Hints
+
+This section of **LOD Settings** shows which objects to work on when a LOD is too heavy. Before the first Refresh it says "Click Refresh LOD Counts to compute estimates".
 
 ### Per LOD Vertex Contributors
 
@@ -156,7 +152,7 @@ Pick a LOD with the number buttons under **Per LOD Vertex Contributors**. Each e
   - **Loose pieces below ... m (dropped at export):** meshes that hold small loose pieces the export removes from that LOD.
   - **Near cut-off (... m, candidates to hide):** Auto parts just above the cut-off that cost many vertices. Marking them **Hidden from** this LOD saves those vertices.
 
-The usual loop: **Refresh LOD Counts**, find a LOD with a red **Used** bar, select a contributor, split the mesh or set a mark, **Refresh LOD Counts** again, until the LODs fit. Then deploy.
+The usual loop: frame the model as MSFS would see it, read **ToReduce** on the LOD you want at that view, select a contributor of that LOD, split the mesh or set a mark, **Refresh LOD Counts** again. Then deploy.
 
 Splitting tip: a joined mesh with many small parts (screws, decals, cables) keeps all of them until its loose pieces are below the cut-off. Separate the small parts into their own objects, or keep them as separate loose pieces, and the size rule removes them.
 
@@ -164,38 +160,34 @@ Pitfall: while **Viewport LOD** is set to a number (or **Auto**), the contributo
 
 ## Export Settings
 
-The **Export Settings** section of **LOD Settings** (closed by default) holds the per-scene LOD settings. They are saved in the `.blend`.
-
-### Model Type
-
-- **Exterior part:** the default. Uses the SDK aircraft table 100, 75, 55, 35, 8, 5, 1 % (the screen size from which `_LOD00` to `_LOD06` are shown).
-- **Interior:** for a cockpit or cabin. The interior's LODs only matter when it is seen through the windows from outside, so its table is derived from the exterior's: LOD00 stays at 100 %, the others are the exterior values times interior diameter / exterior diameter. Enter **Exterior Diameter (m)** (the diameter of the exterior model's LOD sphere). While it is 0 (and you have not typed an explicit table, see [Advanced](#advanced)), the field is drawn red with the message "Exterior diameter missing: enter the exterior model's LOD sphere diameter", and **Refresh LOD Counts** and the export stop with "exterior diameter missing". An interior writes at most `_LOD00` to `_LOD05`; its `_LOD06` is always empty.
-- **Scenery:** in this version the same rules and table as **Exterior part**.
+The **Export Settings** section of **LOD Settings** (closed by default) holds the per-scene LOD settings. They are saved in the `.blend`. They work the same for a cockpit, a cabin, an exterior part and scenery.
 
 ### Model Diameter
 
-After a Refresh, the panel shows **Model diameter: ... (measured at Refresh)**: the diameter of the LOD sphere. All cut-offs are proportional to it.
+After a Refresh, the panel shows **Model diameter: ... (measured at Refresh)**: the diameter of the LOD sphere without padding, always measured from the model itself. Before the first Refresh it asks for one.
 
-### Smallest Part Kept
+### Settings per LOD
 
-The field **LOD06 hides parts smaller than** (for an interior **LOD05 hides parts smaller than**) sets how aggressive the size rule is. Its tooltip calls it **Smallest Part Kept**. All other LODs follow in proportion; the box **Hidden parts, smaller than** lists the cut-off of every LOD and, after a Refresh, how many objects and pieces each LOD hides.
+One table, with one row per LOD:
 
-Example with the defaults on a 3 m model:
+| Column | Meaning |
+| :--- | :--- |
+| **Hides Under** | Auto parts and loose pieces smaller than this are left out of that LOD. This decides what is in the file. |
+| **minSize %** | The LOD never shows below this screen size. It goes into the model XML. |
+| **Shows From** | The screen size from which MSFS shows the LOD: the larger of **minSize %** and what its vertex count needs, at the chosen **MSFS Quality**. `fallback` on the last written LOD, which MSFS shows when nothing else fits; `-` on a LOD that is not written. |
 
-| LOD | Shown up to | Hides parts smaller than |
-| :--- | :--- | :--- |
-| `_LOD01` | 100 % | 0.8 cm |
-| `_LOD02` | 75 % | 1.1 cm |
-| `_LOD03` | 55 % | 1.5 cm |
-| `_LOD04` | 35 % | 2.4 cm |
-| `_LOD05` | 8 % | 10.4 cm |
-| `_LOD06` | 5 % | 16.7 cm |
+**Hides Under** is yours to set. The first Refresh fills in a starting value for each LOD from the model's diameter (what would be smaller than 4 pixels on a 1440 pixel screen, using the SDK's aircraft table 100, 75, 55, 35, 8, 5, 1 %). After that your values stay, also when the diameter changes. Set a value to 0 to get the starting value back at the next Refresh.
 
-A larger value hides more and makes the lower LODs lighter; a smaller value keeps more. The field appears once a Refresh has measured the model. Behind the scenes it is the **Pixel Threshold** (default 4 px at a 1440 px screen height, see [Advanced](#advanced)): a part is left out when it would be smaller than that many pixels at the largest size its LOD is shown.
+- **The LOD is too heavy:** raise its value, so more small parts go. For example, setting `LOD06` to 1.46 m makes the far view of a cockpit light.
+- **Something visible disappears too early:** lower the value, or give that object [Keep](#what-the-marks-mean).
+
+**minSize %** starts at 7, 6, 5, 4, 3, 2, 1, the values the SDK recommends to leave the choice to MSFS's vertex rule. A low value does nothing beyond that. A high value holds the LOD back: with `150` on `LOD00`, MSFS uses a lower LOD below 150 % even when the vertices of `LOD00` would fit. The values must not increase from one LOD to the next; otherwise Refresh and the export stop with "minSize values must be in descending order".
+
+MSFS 2020 uses the same table and is predicted with the same vertex rule; this has not been checked in the simulator. Its second-to-last LOD is forced to at least 1 % at export.
 
 ### Print LOD Settings / XML
 
-Asks for the **Model Base Name** and prints the `<LODS>` block for the model XML to the system console (**Window > Toggle System Console**), with one entry per written LOD and its `minSize` (from the table of the **Preview Target**), plus the object counts and warnings per LOD. It changes nothing; give the block to whoever maintains the model XML.
+Asks for the **Model Base Name** and prints the `<LODS>` block for the model XML to the system console (**Window > Toggle System Console**), with one entry per written LOD and its `minSize`, plus the object counts, the cut-offs and warnings per LOD. It changes nothing; give the block to whoever maintains the model XML.
 
 ## The LOD Sphere
 
@@ -203,12 +195,9 @@ MSFS measures a model's screen size with one sphere per model, the same for ever
 
 ### Origins Outside the Geometry
 
-One origin far outside the model moves the sphere's centre and makes it larger, for every LOD:
+One origin far outside the model moves the sphere's centre and makes it larger, for every LOD. MSFS then thinks the model is larger than it is, and measures its distance from the wrong place. LODs switch at the wrong distances, and the screen size can be largest somewhere outside the model.
 
-- MSFS then thinks the model is larger than it is, and measures its distance from the wrong place. LODs switch at the wrong distances, and the screen size can be largest somewhere outside the model.
-- All cut-offs grow with the diameter, so too many parts disappear.
-
-After a Refresh, the **Export Settings** show a warning when origins lie more than 5 cm outside the geometry box, for example "16 origins outside the geometry: LOD sphere 4.42 m -> 26.70 m", with the five farthest objects and a select button for each.
+After a Refresh, the **Export Settings** show a warning when origins lie more than 5 cm outside the geometry box, for example "16 origins outside the geometry: LOD sphere 4.42 m -> 26.70 m", with the five farthest objects and a select button for each. With padding, the warning only lists origins more than 5 cm outside the padding box, for example "1 origins outside the padding: LOD sphere 7.66 m -> 15.39 m"; origins inside it no longer matter, and when there are none the warning is gone.
 
 How to fix it:
 
@@ -224,38 +213,33 @@ The **Show LOD Sphere** toggle (in **Export Settings**, after a Refresh) draws, 
 
 - the sphere's box and three circles (orange), and an orange cross at the centre labelled with the radius, "(padded)" when padding is active;
 - the box of the geometry alone (green), when it is smaller than the sphere's box;
-- for each of the six sides of the box, the point that sets it, labelled with the side, the object and its kind: red for an origin, yellow for a vertex.
+- for each of the six sides of the box, the point that sets it, labelled with the side, the object and its kind: red for an origin, yellow for a vertex. One stray vertex or origin shows up here at once.
 
-The panel lists the same six points with a select button. One stray vertex or origin shows up here at once. The toggle is not saved with the file, and it needs the viewport overlays on.
+The toggle is not saved with the file, and it needs the viewport overlays on.
 
-### Pad LOD Sphere To
+### Pad LOD Sphere Multiplier
 
-**Pad LOD Sphere To** (in **Export Settings**) is the diameter you want MSFS to use for the LOD sphere. It is a setting, not a measurement: 0 (the default) means no padding, and MSFS uses the measured sphere. The line under the field shows that measured diameter, for example "Without padding: 15.94 m (0 = no padding)"; before the first Refresh it reads "0 = no padding; press Refresh LOD Counts to measure the model".
+**Pad LOD Sphere Multiplier** (in **Export Settings**) makes MSFS see the model larger than it is, from **1.00** (no padding, the default) to **10.00** times the geometry's sphere.
 
-- A value larger than the geometry's own sphere **pads** the sphere at export: the export adds eight tiny invisible triangles (material invisible, no collision) at the corners of a box around the geometry centre. They exist only in the exported files, never in your `.blend`.
-- MSFS then sees the model that many times larger: every LOD holds to a proportionally larger distance, and each LOD's vertex count gets more room.
-- The tables, the cut-offs and the viewport preview use the same diameter. The cut-offs therefore grow too.
-- The cost: the detailed LODs are also drawn farther away in outside views, which costs frame rate.
+What it means for you: at the same camera position, the limit is higher, so MSFS shows a more detailed LOD. **This is a trick, and it costs frame rate:** MSFS draws more vertices at the same view, and the detailed LODs stay on further out in outside views.
 
-Use it when the LODs switch too early, for example when heavy LODs are skipped because the model is small on screen. Leave it at 0 otherwise.
+- The export adds eight tiny invisible triangles (material invisible, no collision) at the corners of a box around the geometry centre. They exist only in the exported files, never in your `.blend`.
+- The table at this view, **Shows From** and the viewport preview use the padded sphere. **Hides Under** values you already have stay as they are.
+- A file saved with the older **Pad LOD Sphere To** diameter gets the matching multiplier at its first Refresh.
 
-Messages under the field:
+Use it when the LODs drop too early and the model cannot lose more vertices. Leave it at 1.00 otherwise.
 
-- **Press Refresh LOD Counts to apply:** a changed value needs a Refresh.
-- **Export pads the LOD sphere: MSFS sees the model N.NNx larger:** padding is active.
-- **Not larger than the geometry sphere (...): no padding:** the value is too small to do anything.
-- **Origins outside the padding: MSFS uses ...:** origins lie outside the padding box and enlarge the sphere further. Fix them as described above; origins inside the padding box no longer matter.
+Lines under the field:
+
+- **MSFS sees: 3.83 m (no padding)**, or **MSFS sees: 7.66 m (geometry 3.83 m)** with padding.
+- **Press Refresh LOD Counts to apply:** a changed multiplier needs a Refresh.
+- **Above 5x has not been tested in the simulator:** a reminder, nothing stops it.
 
 ## Advanced
 
-The **Advanced** sub-panel (inside **Export Settings**, closed by default) holds the numbers behind the cut-offs. Most artists never need it.
+The **Advanced** sub-panel (inside **Export Settings**, closed by default) holds one number, which most artists never need:
 
-- **Preview Target:** **MSFS 2024** or **MSFS 2020 (unverified)**: which table the panel, the hints and the viewport preview use.
-- **Screen Height (px):** default 1440.
-- **Pixel Threshold:** default 4 px. **Smallest Part Kept** edits this value.
-- **MSFS Vertex Factor:** default 1.15. MSFS counts vertices differently from the file; the vertex estimate is multiplied by this factor to predict from which screen size MSFS shows each LOD. Vertex counts never change which parts are left out.
-- **FS24 minSize** and **FS20 minSize (unverified):** the screen sizes from which `LOD00` to `LOD06` are shown, as ratios (1 = 100 %). They must not increase from one LOD to the next. Editing the FS24 table also changes the FS20 table, until you edit the FS20 table yourself. MSFS 2020 forces its second-to-last LOD to at least 1 %. The MSFS 2020 values have not been checked in the simulator.
-- For an **Interior** with the derived table, the tables are not editable fields; **Edit Explicit minSize Table** lets you type your own. An explicit interior table needs no exterior diameter.
+- **MSFS Vertex Factor:** default 1.15. MSFS counts vertices differently from the file; the vertex estimate is multiplied by this factor to predict which LOD MSFS shows. Vertex counts never change which parts are left out.
 
 ## Exporting with LODs
 
@@ -269,14 +253,13 @@ The deploy prints one line per LOD to the console, for example:
 
 `[FSS LOD] _LOD03: 3099 objects in, 210 culled by mark, 1245 culled by size, 812 culled by size (pieces), 41 merged meshes; 211,143 vertices ...`
 
-It ends with the vertex count of the file, the screen range the LOD is meant for, the screen size from which MSFS will show it, and a **WARNING High vertex limit** when MSFS will skip it over part of that range.
+It ends with the exact vertex count of the file, the screen range from its `minSize` values, and the screen size from which MSFS will show it (`effective minSize`).
 
 ## Pitfalls
 
-- **Forgot to Refresh:** cut-offs, counts, hints and the LOD sphere are from the last **Refresh LOD Counts**. The export always measures again, so it is correct, but the panel may be out of date.
+- **Forgot to Refresh:** counts, hints and the LOD sphere are from the last **Refresh LOD Counts**. The export always measures again, so it is correct, but the panel may be out of date.
 - **Far origins:** the most common cause of LODs switching at strange distances. Check the warning in **Export Settings** and **Show LOD Sphere**.
 - **Exporting by hand with the preview on:** with **Excluded: Hidden**, objects absent from the previewed LOD are hidden, and an export of visible objects only leaves them out. Set **Viewport LOD** to **Off** first. The deploy scripts are not affected.
 - **Important small parts disappear:** give them **Keep** (or a tag with **Keep**).
-- **A LOD's Used bar stays red although many parts are hidden:** the vertices sit in a few large meshes. Hide those meshes from that LOD, or split them; the tools do not reduce polygons.
-- **Interior export stops with "exterior diameter missing":** enter **Exterior Diameter (m)** (the field drawn red in **Export Settings**).
+- **A LOD's ToReduce stays high although many parts are hidden:** the vertices sit in a few large meshes. Hide those meshes from that LOD, or split them; the tools do not reduce polygons.
 - **No LOD after an empty one:** the export stops at the first empty LOD, even if **Visible from** marks would fill later ones.

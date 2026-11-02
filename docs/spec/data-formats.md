@@ -35,18 +35,18 @@ requirements that use it. Properties that are registered (`bpy.props`) are saved
 ### DAT-003: `Scene.fss_lod_settings`
 
 - **Status:** implemented
-- **Requirement:** Property group of the LOD export settings, saved per scene: `model_type` (EXTERIOR, INTERIOR,
-  SCENERY; default EXTERIOR), `min_sizes_fs24` and `min_sizes_fs20` (seven ratios each), `explicit_fs24` and
-  `explicit_fs20` (the table was edited by hand), `exterior_diameter` (m), `reference_size` (label Pad LOD Sphere To,
-  0 = no padding, the measured sphere), `screen_height` (px, default 1440), `pixel_threshold` (px, default 4),
-  `msfs_vertex_factor` (default 1.15, 0.5 to 2.0), `keep_tags` (`;`-separated string), `preview_target` (fs24 or
-  fs20). Measured values of the last Refresh LOD Counts (diameters, boxes, counts, cut-offs, quotas, hints) are fields
-  that are not saved.
+- **Requirement:** Property group of the LOD export settings, saved per scene: `min_sizes` (seven percentages, default
+  7 to 1), `hide_sizes` (seven lengths in metres, 0 = the default, Refresh writes it in), `pad_factor` (label Pad LOD
+  Sphere Multiplier, 1 to 10, default 1 = no padding), `reference_size` (the target diameter of older versions, no
+  field, 0 after a Refresh converts it), `screen_height` (px, default 1440), `pixel_threshold` (px, default 4),
+  `msfs_quality` (ULTRA, HIGH, MEDIUM, LOW; default HIGH), `msfs_vertex_factor` (default 1.15, 0.5 to 2.0), `keep_tags`
+  (`;`-separated string). Measured values of the last Refresh LOD Counts (diameters, boxes, counts, cut-offs, hints) are
+  not meant to be kept: a Refresh runs when a file opens. Properties of older versions (`model_type`,
+  `min_sizes_fs24`, `min_sizes_fs20`, `explicit_fs24`, `explicit_fs20`, `exterior_diameter`, `preview_target`) are no
+  longer read.
 - **Used by:** LOD-001 to LOD-019, TAG-006
-- **Decision:** LOD 5, 8, 10, 22, 31; MAT 24 (the label of `reference_size`)
-- **Test:** `tests/test_lod_rules.py::test_interior_settings`, `tests/test_panels.py::test_exterior_diameter_message`
-  (the label)
-- **Code:** `lod.py` (`FSS_LodSettings`)
+- **Decision:** LOD 5, 8, 22, 37, 38, 39, 43, 45, 46
+- **Test:** `tests/test_lod_rules.py::test_one_table_for_every_model`, `tests/test_panels.py::test_export_settings_one_table`
 
 ### DAT-004: LOD viewport settings
 

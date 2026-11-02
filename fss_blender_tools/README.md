@@ -9,11 +9,11 @@ repository are in [../AGENTS.md](../AGENTS.md).
 
 | Module | Panel (sidebar path) | What it does |
 | :--- | :--- | :--- |
-| `panels.py` | (none) | Registers no panel; its docstring documents the layout (material-management decisions 16, 22 and 26). Each module registers its own panels; `bl_order` sets the order of the top-level panels in each tab: Zones & Merge Tree, Materials, Tags, Object LOD, Viewport LOD, LOD Settings, UV Auto Seam, UV Auto Packing in the tab FSS MSFS Tools (UV Auto Seam and UV Auto Packing closed by default); General, Empty Bounds, Heatmap, Checks in the tab FSS Tools (all closed by default). Subpanels: By Zone (Materials), Quota and Hints and Export Settings with Advanced (LOD Settings), Visibility Scoring (UV Auto Packing) |
-| `autorefresh.py` | (none) | Refresh on opening a file (decision 21): a persistent `load_post` handler starts a timer that runs `fss.merge_refresh`, `fss.materials_refresh` and `fss.name_check_scan` in the first window's context, each only when its poll passes (Materials needs Object Mode), without undo steps; nothing in a background Blender. Refresh LOD Counts and Check All stay manual |
+| `panels.py` | (none) | Registers no panel; its docstring documents the layout (material-management decisions 16, 22 and 26). Each module registers its own panels; `bl_order` sets the order of the top-level panels in each tab: Zones & Merge Tree, Materials, Tags, Object LOD, Viewport LOD, LOD Settings, UV Auto Seam, UV Auto Packing in the tab FSS MSFS Tools (UV Auto Seam and UV Auto Packing closed by default); General, Empty Bounds, Heatmap, Checks in the tab FSS Tools (all closed by default). Subpanels: By Zone (Materials), Hints and Export Settings with Advanced (LOD Settings), Visibility Scoring (UV Auto Packing) |
+| `autorefresh.py` | (none) | Refresh on opening a file (decision 21): a persistent `load_post` handler starts a timer that runs `fss.merge_refresh`, `fss.materials_refresh`, `fss.name_check_scan` and `fss.lod_refresh` in the first window's context, each only when its poll passes (Materials needs Object Mode), without undo steps; nothing in a background Blender. Check All stays manual |
 | `tools.py` | **General** (tab FSS Tools) | Scene helpers: **Add Empty Parent** (Manual / Suffix / Prefix naming rules), **Origin to Bounding Box** (minimum-volume OBB orientation with 8 corners, 6 face centers and 12 edge centers) |
 | `empty_bounds.py` | **Empty Bounds** (tab FSS Tools) | Draws the bounds of empties' subtrees (`All` / `Selected` / `Off`, `In Front`) and a clickable hierarchy text in the viewport |
-| `lod.py`, `lod_model.py`, `lod_rules.py` | **Object LOD**, **Viewport LOD**, **LOD Settings** (with **Quota and Hints** and **Export Settings**) | Auto size culling (objects and loose mesh pieces); Object LOD: Auto / Keep / Hidden from / Visible from marks of the selection with the **Visible in** row (the pending choice in `WindowManager.fss_lod_pending`, not saved, set by `fss.lod_pending`); Viewport LOD: the membership preview; LOD Settings: Refresh LOD Counts with a count bar per LOD, the quota table and the per-LOD vertex contributors, and the scene export settings |
+| `lod.py`, `lod_model.py`, `lod_rules.py` | **Object LOD**, **Viewport LOD**, **LOD Settings** (with **Hints** and **Export Settings**) | Auto size culling (objects and loose mesh pieces); Object LOD: Auto / Keep / Hidden from / Visible from marks of the selection with the **Visible in** row (the pending choice in `WindowManager.fss_lod_pending`, not saved, set by `fss.lod_pending`); Viewport LOD: the membership preview; LOD Settings: Refresh LOD Counts, the table of what MSFS does at the current view, the per-LOD vertex contributors, and the scene export settings |
 | `tags.py` | **Tags** | Generic object tags (`fss_tags`, semicolon-separated), per-row `[-]`/`[+]` assignment, selection, and per-tag skip-merge and Keep toggles |
 | `merge.py` | **Zones & Merge Tree** | Export-time merge groups (`@MERGE_<name>` / `@NOMERGE_<name>`), New Merge Group, tree preview of zones (`@ZONE_<NAME>`), groups and `@NOMERGE_` nodes with Unzoned and nesting warnings, console details; the zone row edits the zone empty's own density mark (`uv_marks`); `nearest_zone()` finds an object's zone |
 | `materials.py` | **Materials** with **By Zone** | Read-only overview of every material (phase 1 of the material-management journal): Refresh fills `Scene.fss_materials` from the view layer (objects with faces using each material, hidden users, shared meshes, zones by `merge.nearest_zone`, world 3D area per zone, an area-based texture size estimate at the top of the density range, with visibility); the active material's Keep UVs checkbox (`Material.fss_uv_keep_uvs`, as in Packing; the only control that changes data), a kept material shows kept instead of the estimate; warnings never used and shared across zones; kind marks transparent (`msfs_alpha_mode` Blend) and emissive (`msfs_emissive_texture`), read with `getattr`; Select Objects (all zones or one); Check All of Packing; By Zone lists each zone's materials with their share of its surface |
@@ -70,49 +70,43 @@ A parent's visibility interval limits its descendants. Keep protects its Auto an
 other small children can still disappear. An explicit hidden ancestor wins, with a **Keep under hidden ancestor**
 warning. Animated, skinned and Don't Merge objects follow the same visibility rules.
 
-Part size is the largest dimension of the evaluated subtree's world bounding box in metres. The automatic
-reference diameter is the diagonal of the world bounding box enclosing the LOD00 source set; a scene can supply
-an explicit reference diameter instead. For LOD k above zero, Auto parts disappear below
-`reference diameter * pixel threshold / (minSize[k-1] * screen height)`. On throwaway export meshes (for LOD01–06),
+Part size is the largest dimension of the evaluated subtree's world bounding box in metres. For LOD k above zero, Auto
+parts disappear below the LOD's **Hides Under** (`hide_sizes`). A value of 0 takes
+`LOD sphere diameter * pixel threshold / (SDK table[k-1] * screen height)`, with the SDK aircraft table 100, 75, 55,
+35, 8, 5, 1 percent, and Refresh writes it in. On throwaway export meshes (for LOD01–06),
 disconnected mesh pieces (evaluated connected components) whose own largest world bounding-box dimension is below
 that same cut-off are also dropped before `@MERGE_` groups run; `Keep` on an object or tag protects all of its
 pieces, and skinned or shape-keyed meshes keep all of their pieces.
-**Only the XML minSize table affects size culling. Vertex counts never affect membership.**
+**Neither the XML minSize nor the vertex count affects membership.**
 
-**Export Settings** present this in physical sizes: the model diameter measured by **Refresh LOD Counts** (or a
-larger diameter set with **Pad LOD Sphere To**, `reference_size`, 0 = no padding, with the line "Without padding: N m"
-under it), one field **LODnn hides parts smaller than** for the
-lowest-detail LOD (LOD06, interiors LOD05), and the resulting size below which each LOD hides parts, with the
-objects and pieces hidden after a Refresh. All cut-offs scale together, so the field stores the pixel threshold
-(the inverse of the formula above) and the export is unchanged. The minSize tables, screen height and pixel
-threshold are under **Advanced**.
+**Export Settings** draw one table per LOD: Hides Under, minSize % and Shows From (the effective minSize at the chosen
+MSFS Quality), plus the model diameter measured by **Refresh LOD Counts**, Show LOD Sphere and **Pad LOD Sphere
+Multiplier** (`pad_factor`, 1 to 10, of the geometry's sphere). Every model has the same rules; there is no model type.
 
-The default exterior table is 100, 75, 55, 35, 8, 5, 1 percent. Settings store ratios (1 means 100 percent).
-An interior's derived table needs a positive exterior diameter saved in the scene. Missing it stops export with
-**exterior diameter missing**; Export Settings then draws the Exterior Diameter field red with one message. Editing an explicit interior table removes that requirement. Interior LOD06 has
-no objects and is not written. The first empty LOD ends the list; later visible-from objects produce a warning,
-not more files. FS20 has its own table, initially following FS24, with its second-to-last entry at least 1 percent;
-FS20 values remain unverified in the simulator.
+The minSize table defaults to 7, 6, 5, 4, 3, 2, 1 percent (`lod_rules.MSFS_MIN_SIZES`, the SDK's convention): the vertex
+rule decides when a LOD shows, and a high value only holds a LOD back. Both simulators get the same table; MSFS 2020's
+second-to-last entry is at least 1 percent, and its vertex rule is assumed the same, unverified. The first empty LOD ends
+the list; later visible-from objects produce a warning, not more files.
 
 The **Viewport LOD** panel's buttons 0–6 preview the same object membership as export (whole objects only, absent objects hidden or displayed as bounds,
 `fss_lod_preview_display`; dropped loose pieces are counted in the panel and removed at export); **Auto** computes the model's
 bounding-sphere screen ratio from the active 3D viewport (vertical FOV and camera distance, matching
-`lod_tools_msfs_2024`), picks the LOD from the `minSize` table, and applies the filter only when the active LOD
+`lod_tools_msfs_2024`), picks the LOD from the effective `minSize`, and applies the filter only when the active LOD
 changes. **Off** unhides and restores original display types; the Excluded row (Hidden / Bounds) shows only while a
 preview is on. The preview is restored before saving and on file load, so saved files
 never carry it and all export paths see visible objects. **Refresh LOD Counts** caches object
 counts, cut-offs, estimated glTF vertex counts (accounting for UV/normal corner splits, piece dropping, and shared
-instances), High quotas, and per-LOD hints. **LOD Settings** draws a bar per written LOD (its object count against LOD00's);
-the **Quota and Hints** subpanel draws the table LOD / Vertices / Quota / Used (bar, red above 100 %) / MSFS shows it
-from (the effective minSize, "never" above 100 % of the screen), the dropped loose pieces, and **Per LOD Vertex
-Contributors** (a share bar per contributor, then the loose pieces below and the parts near the cut-off, each with a
-**Select** button); refresh after editing geometry or marks. **Print LOD Settings / XML** prints only the XML
-entries for written LODs, for maintainer review without modifying any model XML.
+instances), and per-LOD hints; it also runs when a file opens (`autorefresh.py`). **LOD Settings** draws what MSFS does at
+the Blender view, with or without a preview (`update_view_ratio` keeps the screen ratio from a timer): MSFS Quality, the LOD
+shown, and the table LOD / Vert/Obj / Used / ToReduce / Reduced. The limit at a ratio is `lod_rules.vertex_quota_at`.
+The **Hints** subpanel draws **Per LOD Vertex Contributors** (a share bar per contributor, then the loose pieces below and
+the parts near the cut-off, each with a **Select** button). **Print LOD Settings / XML** prints only the XML entries for
+written LODs, for maintainer review without modifying any model XML.
 
 The export driver calls `lod_model.build_plan` once, then `begin_export` for each nonempty LOD up to LOD06. The shared
 pre-export hook culls before merging, even when Merge on Export is disabled. The driver starts each export from
 an intact source scene and calls `report_file` on the written glTF. Console counts sum distinct POSITION accessor
-counts (stored geometry, instances counted once). Quotas and effective-minSize warnings use the High SDK curve;
+counts (stored geometry, instances counted once). Limits and the effective minSize use the SDK curve (High as measured; the other qualities by the SDK's table);
 MSFS's actual counting of seam splits and instances remains unverified. No polygon reduction is performed.
 
 ## Auto Seam

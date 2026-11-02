@@ -15,7 +15,7 @@ Checks, the check wishes, and other wishes without an area of their own. Artist 
 - **Requirement:** fss_blender_tools draws its 3D Viewport panels in two sidebar tabs and in no other tab; no panel
   only groups other panels.
   - **FSS MSFS Tools**, top-level panels in this order: Zones & Merge Tree, Materials (subpanel By Zone), Tags,
-    Object LOD, Viewport LOD, LOD Settings (subpanels Quota and Hints, Export Settings with Advanced), UV Auto Seam,
+    Object LOD, Viewport LOD, LOD Settings (subpanels Hints, Export Settings with Advanced), UV Auto Seam,
     UV Auto Packing (subpanel Visibility Scoring). UV Auto Seam and UV Auto Packing are closed by default.
   - **FSS Tools**, top-level panels in this order, each closed by default: General, Empty Bounds, Heatmap, Checks.
   - The UV Editor's panel **UV Auto Packing** is in a tab FSS MSFS Tools of the UV Editor (UV-PCK-014).
@@ -31,17 +31,17 @@ Checks, the check wishes, and other wishes without an area of their own. Artist 
 ### GEN-041: Refresh on opening a file
 
 - **Status:** implemented
-- **Requirement:** When a `.blend` is opened, Zones & Merge Tree (MRG-010), Materials (MTL-001) and Scan Names
-  (GEN-008) refresh by themselves, in this order, shortly after the file has opened, each only when its operator can
-  run (Materials needs Object Mode); the refreshes add no undo step and do not mark the file as modified. A
-  background Blender (deploys, tests) schedules nothing. Refresh LOD Counts (LOD-010) and Check All (UV-PCK-008) stay
-  manual.
+- **Requirement:** When a `.blend` is opened, Zones & Merge Tree (MRG-010), Materials (MTL-001), Scan Names (GEN-008)
+  and Refresh LOD Counts (LOD-010) refresh by themselves, in this order, shortly after the file has opened, each only
+  when its operator can run (Materials needs Object Mode); the refreshes add no undo step and do not mark the file as
+  modified. A background Blender (deploys, tests) schedules nothing. Check All (UV-PCK-008) stays manual.
 - **Data:** DAT-002, DAT-006, DAT-007
-- **Decision:** MAT 21
+- **Decision:** MAT 21; LOD 45 (adds Refresh LOD Counts)
 - **Test:** `tests/test_materials.py::test_refresh_on_open`; manual: material management journal Session 21
-  (windowed run on the E2 cockpit copy: three panels filled, file not modified)
+  (windowed run on the E2 cockpit copy: three panels filled, file not modified); LOD journal Session 26 (the same with
+  LOD counts: filled in about 7 s, file not modified)
 - **Code:** `autorefresh.py` (a persistent `load_post` handler starts a timer that runs `fss.merge_refresh`,
-  `fss.materials_refresh` and `fss.name_check_scan` in the first window)
+  `fss.materials_refresh`, `fss.name_check_scan` and `fss.lod_refresh` in the first window)
 - **Notes:** about 1 s on the E2 cockpit copy (3,628 objects; Session 21). NOT TESTED automatically: the timer in a
   windowed Blender (the test runs the refreshes directly and checks that a background Blender schedules no timer).
 

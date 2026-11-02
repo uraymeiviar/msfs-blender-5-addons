@@ -122,10 +122,10 @@ Gaps found while the specification was drafted; each shows at its requirement as
 | Tags have no test | TAG-001 to TAG-007 |
 | Exporter features without a test: target detection, migration and emissive reference, Prepare for MSFS 2024, legacy normals, instancing, export clean-up, the hidden Asobo workflow; Export For and the unchanged materials after an MSFS 2020 export only indirectly | EXP-002 to EXP-010 |
 | General tools without a test: Add Empty Parent, Origin to Bounding Box, Empty Bounds, batch rename, Fix Broken Bone Parents; Scan Names tested for markers only | GEN-001 to GEN-004, GEN-008, GEN-009, GEN-013 |
-| LOD features without a test: loose pieces, Smallest Part Kept, the loose-piece and near-cut-off hints, the box of dropped pieces, the LOD sphere and its padding (only the field's label and the line under it are tested), Print LOD Settings, hidden reference empties | LOD-007, LOD-009, LOD-011, LOD-012, LOD-015 to LOD-019 |
+| LOD features without a test: loose pieces, the loose-piece and near-cut-off hints, the padding object in an export, Show LOD Sphere, Print LOD Settings, hidden reference empties | LOD-007, LOD-012, LOD-016 to LOD-019, DAT-039 |
 | Auto Seam's core rules (no diagonal cuts, chart acceptance) are only measured with prototype scripts, not in a unit suite | UV-SEAM-001 |
 | How Visibility Scoring combines instances was not checked against the code | UV-VIS-005 |
 | Never seen in an interactive Blender (UV journal Session 102, open item 3) | UV-DEN-005, UV-PCK-002, UV-PCK-008, UV-PCK-011, UV-PCK-014 |
-| The panels of 0.36.1 to 0.36.9 never seen in an interactive Blender (material management journal Sessions 19 to 29): the two tabs, Object LOD, the bars and the quota table of LOD Settings | GEN-040, LOD-001, LOD-010, LOD-011 |
+| The panels of 0.36.1 to 0.36.9 never seen in an interactive Blender (material management journal Sessions 19 to 29): the two tabs, Object LOD. The LOD Settings panels of 0.42 were seen by the maintainer in screenshots, not by an agent | GEN-040, LOD-001, LOD-010, LOD-011 |
 | The refresh on opening a file is tested without its timer; the windowed run was checked once | GEN-041 |
 | Registered properties of the exporter (`msfs_fss_*`) and the mesh property `msfs_fss_legacy_auto_smooth` are not stripped from glTF extras; whether they reach a glTF with Include Extras is not checked | DAT-041 |
