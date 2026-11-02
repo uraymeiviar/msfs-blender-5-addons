@@ -8,6 +8,7 @@ To run:
 "<blender>" -b --factory-startup --python tests/test_panels.py
 """
 
+import math
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -44,7 +45,7 @@ EXPECTED = {
     'FSS_PT_lod': ("Object LOD", '', 3, MSFS),
     'FSS_PT_lod_viewport': ("Viewport LOD", '', 4, MSFS),
     'FSS_PT_lod_settings': ("LOD Settings", '', 5, MSFS),
-    'FSS_PT_lod_quota_hints': ("Quota and Hints", 'FSS_PT_lod_settings', 0, MSFS),
+    'FSS_PT_lod_quota_hints': ("Hints", 'FSS_PT_lod_settings', 0, MSFS),
     'FSS_PT_lod_export': ("Export Settings", 'FSS_PT_lod_settings', 0, MSFS),
     'FSS_PT_lod_export_advanced': ("Advanced", 'FSS_PT_lod_export', 0, MSFS),
     'FSS_PT_uv_autoseam': ("UV Auto Seam", '', 6, MSFS),
@@ -296,22 +297,35 @@ def test_object_lod():
 
 
 
-def test_exterior_diameter_message():
-    """Export Settings of an interior without exterior diameter: one message, not two."""
+def test_export_settings_one_table():
+    """Export Settings: no Model Type, no Exterior Diameter, and the same table fields for every model."""
     settings = bpy.context.scene.fss_lod_settings
-    model_type, exterior = settings.model_type, settings.exterior_diameter
-    settings.model_type = 'INTERIOR'
-    settings.exterior_diameter = 0.0
+    assert 'model_type' not in settings.bl_rna.properties and 'exterior_diameter' not in settings.bl_rna.properties
+    assert not hasattr(bpy.types, 'FSS_OT_LodEditTable') and 'lod_edit_table' not in dir(bpy.ops.fss)
     calls = []
     bpy.types.FSS_PT_lod_export.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
     texts = [kwargs.get('text') or '' for name, _args, kwargs in calls if name == 'label']
-    found = [text for text in texts if 'exterior diameter missing' in text.lower()]
-    assert len(found) == 1, texts
-    # Pad LOD Sphere To: the line under it names the diameter without padding (or asks for a Refresh)
-    assert any(text.startswith('0 = no padding') or text.startswith('Without padding:') for text in texts), texts
-    assert settings.bl_rna.properties['reference_size'].name == 'Pad LOD Sphere To'
-    settings.model_type, settings.exterior_diameter = model_type, exterior
-    print(f"PASS: test_exterior_diameter_message ('{found[0]}')")
+    props = [args[1] for name, args, _kwargs in calls if name == 'prop']
+    assert not any('exterior' in text.lower() for text in texts), texts
+    assert not {'model_type', 'exterior_diameter'}.intersection(props), props
+    # Pad LOD Sphere: a multiplier, 1 to 10; the line under it says what MSFS sees (or asks for a Refresh)
+    assert any(text.startswith('MSFS sees:') or text.startswith('Press Refresh') for text in texts), texts
+    prop = settings.bl_rna.properties['pad_factor']
+    assert prop.name == 'Pad LOD Sphere Multiplier' and prop.hard_min == 1.0 and prop.hard_max == 10.0, prop
+    calls = []
+    bpy.types.FSS_PT_lod_export_advanced.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+    props = [args[1] for name, args, _kwargs in calls if name == 'prop']
+    assert props == ['msfs_vertex_factor'], props
+    assert not {'min_sizes_fs24', 'min_sizes_fs20', 'preview_target', 'quotas', 'lowest_cutoff'} & \
+        set(settings.bl_rna.properties.keys())
+    # No sphere box list, even with the sphere shown; the toggle stays
+    bpy.context.scene.fss_lod_show_sphere = True
+    calls = []
+    bpy.types.FSS_PT_lod_export.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+    bpy.context.scene.fss_lod_show_sphere = False
+    assert not any('box faces' in (kwargs.get('text') or '') for _name, _args, kwargs in calls), calls
+    assert 'fss_lod_show_sphere' in [args[1] for name, args, _kwargs in calls if name == 'prop'], calls
+    print("PASS: test_export_settings_one_table (no Model Type, Exterior Diameter or Preview Target; one table)")
 
 
 def test_viewport_lod_excluded():
@@ -335,11 +349,164 @@ def test_viewport_lod_excluded():
     print("PASS: test_viewport_lod_excluded (hidden while Off; shown for LOD0, LOD3 and Auto)")
 
 
+def test_viewport_lod_view_quota():
+    """LOD Settings, whatever the viewport preview: per written LOD its vertices, the quota at the view's screen size
+    and a Used bar, no table values; the quota moves with the camera; the LOD MSFS shows is marked; drawing writes
+    nothing."""
+    from mathutils import Matrix, Vector
+    from fss_blender_tools import lod, lod_rules
+    scene = bpy.context.scene
+    settings = scene.fss_lod_settings
+    objs = [_cube('VIEWQ_BIG', 2.0, (0, 0, 0)), _cube('VIEWQ_MID', 0.5, (1.5, 0, 0))]
+    scene.fss_viewport_lod_auto = False
+    scene.fss_viewport_lod = -1
+    assert bpy.ops.fss.lod_refresh() == {'FINISHED'}
+    count = settings.write_count
+    assert count >= 2, count
+    saved_ratio = lod._auto_state['last_ratio']
+    reduced = []
+
+    def draw(ratio=None):
+        if ratio is not None:
+            lod._auto_state['last_ratio'] = ratio
+        before = _lod_snapshot()
+        calls = []
+        bpy.types.FSS_PT_lod_settings.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+        assert _lod_snapshot() == before
+        reduced[:] = [(kwargs['factor'], kwargs['text']) for name, _args, kwargs in calls
+                      if name == 'progress' and not kwargs['text'].endswith(' %')]
+        return ([kwargs.get('text') or '' for name, _args, kwargs in calls if name == 'label'],
+                [(kwargs['factor'], kwargs['text'], kwargs['_alert']) for name, _args, kwargs in calls
+                 if name == 'progress' and kwargs['text'].endswith(' %')],
+                [kwargs['text'].split()[0] for name, args, kwargs in calls
+                 if name == 'operator' and args[0] == 'fss.lod_view_shown' and kwargs.get('depress')])
+
+    # The same table for Off, a fixed LOD and Auto; the mark is what MSFS shows at this view, not the preview
+    near = lod_rules.vertex_quota_at(1.33, settings.msfs_vertex_factor)
+    effective = lod_rules.effective_min_sizes(settings.resolved_table, list(settings.vertex_estimates),
+                                              settings.msfs_vertex_factor, count)
+    expected = f'{lod_rules.lod_from_screen_ratio(1.33, effective, count):02}'
+    results = []
+    for level, auto in ((-1, False), (1, False), (1, True)):
+        scene.fss_viewport_lod_auto = False
+        scene.fss_viewport_lod = level
+        scene.fss_viewport_lod_auto = auto
+        labels, bars, marked = draw(1.33)
+        assert all(text in labels for text in ('LOD', 'Vert/Obj', 'Used', 'ToReduce', 'Reduced')), (level, auto, labels)
+        assert 'Quota' not in ' '.join(labels), labels
+        assert f'This view: LOD{expected} (screen ratio 133.0%)' in labels, labels
+        assert len(bars) == count, (labels, bars)
+        assert marked == [expected], (marked, expected)
+        results.append(bars)
+    assert results[0] == results[1] == results[2], results
+    scene.fss_viewport_lod_auto = False
+    scene.fss_viewport_lod = -1
+    for level, (factor, text, red) in enumerate(results[0]):
+        pct = 100.0 * settings.vertex_estimates[level] / near
+        assert abs(factor - min(pct / 100, 1)) < 1e-6 and text.endswith(' %') and red == (pct > 100), (level, bars)
+
+    # Moved away: the quota falls; no row names a table value
+    far = lod_rules.vertex_quota_at(0.05, settings.msfs_vertex_factor)
+    labels, bars, _marked = draw(0.05)
+    assert far < near and bars[0][1] == lod.format_percent(100.0 * settings.vertex_estimates[0] / far), (far, bars)
+    assert not any(text.startswith('table ') for text in labels) and len(bars) == count, (labels, bars)
+
+    # Reduce: what a more detailed LOD must lose; a dash on the LOD shown and below it
+    saved = list(settings.vertex_estimates)
+    settings.vertex_estimates[0] = near + 18648
+    settings.vertex_estimates[1] = near - 60100
+    labels, _bars, marked = draw(1.33)
+    assert marked == ['01'], marked
+    assert '18.65K' in labels, labels
+    # A dash on the LOD shown and below it
+    assert labels.count('-') == count - 1, labels
+    # Vert./Obj and Reduced, per step and not cumulative; the cut-off beside the LOD number
+    assert lod.format_count(1113993) == '1.11M' and lod.format_count(3481) == '3.48K', lod.format_count(3481)
+    assert lod.format_count(532) == '532' and lod.format_count(999_999) == '1.00M'
+    assert lod.format_step(3481, 2192) == '-1.29K' and lod.format_step(5, 5) == '0' and lod.format_step(5, 7) == '+2'
+    verts, objects = settings.vertex_estimates, settings.counts
+    assert f'{lod.format_count(verts[2])}/{lod.format_count(objects[2])}' in labels, labels
+    # Reduced: the share of the previous LOD's vertices this step removed, the step as its text; LOD00 empty, a dash
+    assert len(reduced) == count and reduced[0] == (0.0, '-'), reduced
+    assert reduced[2][1] == f'{lod.format_step(verts[1], verts[2])}/{lod.format_step(objects[1], objects[2])}', reduced
+    assert abs(reduced[2][0] - max(0, verts[1] - verts[2]) / verts[1]) < 1e-6, reduced
+    assert f'02 <{lod.format_length(settings.cutoffs[2]).replace(" ", "")}' in labels, labels
+    settings.vertex_estimates = saved
+
+    # Viewport LOD holds only the viewport's settings
+    calls = []
+    bpy.types.FSS_PT_lod_viewport.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+    texts = [kwargs.get('text') or '' for name, _args, kwargs in calls if name == 'label']
+    assert 'Vert/Obj' not in texts and not any(name == 'progress' for name, _args, _kwargs in calls), texts
+    assert 'msfs_quality' not in [args[1] for name, args, _kwargs in calls if name == 'prop'], calls
+
+    # MSFS Quality: High by default; another setting moves the limit and what shows, and the counts stand
+    assert settings.msfs_quality == 'HIGH'
+    settings.vertex_estimates[0] = 300000
+    settings.vertex_estimates[1] = 1000
+    _labels, _bars, marked = draw(1.0)
+    assert marked == ['01'], marked
+    settings.msfs_quality = 'ULTRA'
+    assert settings.scanned
+    quota = lod_rules.vertex_quota_at(1.0, settings.msfs_vertex_factor, lod_rules.QUALITY_FACTORS['ULTRA'])
+    labels, bars, marked = draw(1.0)
+    assert marked == ['00'] and bars[0][1] == lod.format_percent(100.0 * 300000 / quota), (marked, bars)
+    settings.msfs_quality = 'HIGH'
+    settings.vertex_estimates = saved
+
+    # The last LOD over the quota is still shown: the panel says so
+    saved = settings.vertex_estimates[count - 1]
+    settings.vertex_estimates[count - 1] = 5_000_000
+    labels, _bars, marked = draw(0.0001)
+    assert 'Over the limit, shown as the last LOD' in labels and marked == [f'{count - 1:02}'], (labels, marked)
+    settings.vertex_estimates[count - 1] = saved
+
+    # The camera drives it without Auto: the ratio comes from the view and the sphere of the last Refresh
+    def view(distance):
+        window = Matrix.Identity(4)
+        window[1][1] = 2.0
+        return SimpleNamespace(scene=scene, window_manager=None, region_data=SimpleNamespace(
+            view_matrix=Matrix.Translation((0, 0, -distance)), window_matrix=window, is_perspective=True))
+    center = (Vector(settings.sphere_box[:3]) + Vector(settings.sphere_box[3:])) / 2
+    ratios = []
+    for distance in (3.0, 30.0):
+        assert lod.update_view_ratio(view(distance))
+        camera = Vector((0, 0, distance)) * scene.unit_settings.scale_length
+        wanted = lod_rules.screen_ratio(settings.lod_diameter, (camera - center).length, 2 * math.atan(1 / 2.0))
+        assert abs(lod._auto_state['last_ratio'] - wanted) < 1e-5, (lod._auto_state['last_ratio'], wanted)
+        ratios.append(lod._auto_state['last_ratio'])
+    assert ratios[0] > ratios[1], ratios
+    assert not lod.update_view_ratio(view(30.0))  # the view did not move
+    _labels, bars, _marked = draw()
+    quota = lod_rules.vertex_quota_at(ratios[1], settings.msfs_vertex_factor)
+    assert bars[0][1] == lod.format_percent(100.0 * settings.vertex_estimates[0] / quota), bars
+    scene.fss_viewport_lod = 1
+    scene.fss_viewport_lod_auto = True
+    assert not lod.update_view_ratio(view(9.0)), 'Auto keeps the ratio itself'
+    scene.fss_viewport_lod_auto = False
+    scene.fss_viewport_lod = -1
+
+    settings.scanned = False
+    labels, bars, _marked = draw(0.05)
+    assert 'Click Refresh LOD Counts for the quota at this view' in labels and not bars, (labels, bars)
+    settings.scanned = True
+
+    lod._auto_state['last_ratio'] = saved_ratio
+    lod._auto_state['ratio_view_matrix'] = None
+    settings.hide_sizes = (0.0,) * 7
+    for obj in objs:
+        me = obj.data
+        bpy.data.objects.remove(obj)
+        bpy.data.meshes.remove(me)
+    print(f"PASS: test_viewport_lod_view_quota ({count} LODs; Off, a fixed LOD and Auto alike; quota {near:,} at 133 %, "
+          f"{far:,} at 5 %; the camera moves it)")
+
+
 def _lod_snapshot():
     """What the LOD Settings panels read, to check that drawing writes nothing."""
     settings = bpy.context.scene.fss_lod_settings
-    keys = ('scanned', 'write_count', 'counts', 'cutoffs', 'resolved_table', 'vertex_estimates', 'quotas',
-            'quota_percents', 'over_quota', 'dropped_pieces', 'dropped_vertices', 'inspect_lod', 'preview_target')
+    keys = ('scanned', 'write_count', 'counts', 'cutoffs', 'resolved_table', 'vertex_estimates', 'min_sizes',
+            'inspect_lod')
     values = {key: getattr(settings, key) for key in keys}
     values = {key: tuple(value) if hasattr(value, '__len__') and not isinstance(value, str) else value
               for key, value in values.items()}
@@ -373,41 +540,101 @@ def _cube(name, size, location):
 
 
 def test_lod_settings_bars():
-    """LOD Settings and Quota and Hints (decision 25): a bar per written LOD full at LOD00's object count; the quota
-    table (LOD, Vertices, Quota, Used bar red above 100 %, MSFS shows it from, "never" above 100 % of the screen);
-    contributor bars as shares of the LOD's vertices; MSFS 2020 with LOD and Vertices only; drawing writes nothing."""
-    from fss_blender_tools import lod_rules
+    """LOD Settings without source counts; Hides Under per LOD in Export Settings; Hints without a quota table or
+    Dropped box, with contributor bars as shares of the LOD's vertices; drawing writes nothing."""
+    from fss_blender_tools import lod, lod_model, lod_rules
     scene = bpy.context.scene
     settings = scene.fss_lod_settings
+    settings.hide_sizes = (0.0,) * 7
     objs = [_cube('BARS_BIG', 2.0, (0, 0, 0)), _cube('BARS_MID', 0.5, (1.5, 0, 0))]
     objs += [_cube(f'BARS_TINY_{i}', 0.001, (-1 + 0.2 * i, 1, 0)) for i in range(10)]
     scene.fss_viewport_lod_auto = False
     scene.fss_viewport_lod = -1
-    settings.preview_target = 'fs24'
     assert bpy.ops.fss.lod_refresh() == {'FINISHED'}
     assert settings.scanned and settings.write_count >= 2, (settings.scanned, settings.write_count)
     counts = list(settings.counts)[:settings.write_count]
 
-    # A: one bar per written LOD, factor count / LOD00 count; the share in brackets from LOD01 on
+    # A: no source counts in LOD Settings; the table comes from test_viewport_lod_view_quota
     labels, bars = _draw_lod_panel('FSS_PT_lod_settings')
-    assert len(bars) == settings.write_count, bars
-    for level, (factor, text, red) in enumerate(bars):
-        assert abs(factor - counts[level] / counts[0]) < 1e-6, (level, factor, counts)
-        assert text.startswith(f'{counts[level]:,} obj') and ('(' in text) == (level > 0) and not red, text
-        assert f'LOD{level:02}' in labels, labels
+    assert not any(text.endswith(' obj') or ' obj (' in text for _factor, text, _red in bars), bars
+    assert 'Vert/Obj' in labels and 'Cached counts: Refresh after editing' in labels, labels
+    assert not any(text.startswith('LOD0') and 'hides' in text for text in labels), labels
     assert counts[1] < counts[0], counts  # the tiny cubes are below LOD01's cut-off
-    assert any(text.startswith('hides < ') for text in labels), labels
 
-    # B: the header sentence and the table columns; Used bars = min(percent / 100, 1)
+    # B: Hides Under per LOD in Export Settings; the first Refresh writes the defaults in, and the XML table is low
+    labels, bars = _draw_lod_panel('FSS_PT_lod_export')
+    start = labels.index('LOD')
+    assert labels[start:start + 4] == ['LOD', 'Hides Under', 'minSize %', 'Shows From'], labels
+    assert not bars, bars
+    for level in range(1, 7):
+        assert abs(settings.hide_sizes[level] - settings.cutoffs[level]) < 1e-5, (level, settings.hide_sizes[:])
+    assert settings.hide_sizes[0] == 0.0
+    assert all(abs(a - b) < 1e-6 for a, b in zip(settings.resolved_table, lod_rules.MSFS_MIN_SIZES)), \
+        list(settings.resolved_table)
+    calls = []
+    bpy.types.FSS_PT_lod_export.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+    props = [args[1] for name, args, _kwargs in calls if name == 'prop']
+    assert props.count('hide_sizes') == 6 and props.count('min_sizes') == 7, calls
+
+    # Padding: the multiplier scales the geometry's sphere; 1 pads nothing; a saved diameter converts once at Refresh
+    mesh = settings.mesh_diameter
+    plan = lod_model.build_plan(bpy.context)
+    labels, _bars = _draw_lod_panel('FSS_PT_lod_export')
+    assert any('origins outside the geometry' in text for text in labels), labels
+    far_names = [name for name, _outside in plan['far_nodes']]
+    assert far_names, plan['far_nodes']
+    assert plan['padding'] is None and settings.pad_factor == 1.0, plan['padding']
+    def pad_diameter():
+        half = lod_model.build_plan(bpy.context)['padding'][1]
+        return 2.0 * sum(value * value for value in half) ** .5
+
+    settings.pad_factor = 2.0
+    assert abs(pad_diameter() - 2.0 * mesh) < 1e-3, (pad_diameter(), mesh)
+    assert bpy.ops.fss.lod_refresh() == {'FINISHED'}
+    # this scene has a far origin: at 2x it stays outside the padding and the panel says so
+    assert settings.lod_diameter > 2.0 * mesh + .01, settings.lod_diameter
+    labels, _bars = _draw_lod_panel('FSS_PT_lod_export')
+    assert any('origins outside the padding' in text for text in labels), labels
+    assert not any('origins outside the geometry' in text for text in labels), labels
+    assert lod_model.build_plan(bpy.context)['far_nodes'], 'the far origin is still outside at 2x'
+    # the padding changed, not yet refreshed: the list was measured with the old padding and is not shown
+    settings.pad_factor = 3.0
+    labels, _bars = _draw_lod_panel('FSS_PT_lod_export')
+    assert not any('origins outside' in text for text in labels), labels
+    assert 'Press Refresh LOD Counts to apply' in labels, labels
+    # at 10x the padding encloses it: MSFS sees exactly ten times the geometry's sphere
+    settings.pad_factor = 10.0
+    assert bpy.ops.fss.lod_refresh() == {'FINISHED'}
+    assert abs(settings.lod_diameter - 10.0 * mesh) < 1e-3, (settings.lod_diameter, mesh)
+    labels, _bars = _draw_lod_panel('FSS_PT_lod_export')
+    assert any(text.startswith('MSFS sees:') and 'geometry' in text for text in labels), labels
+    # ... and no warning is left: the origin no longer matters
+    assert not lod_model.build_plan(bpy.context)['far_nodes'], 'the padding encloses the far origin at 10x'
+    assert not any('origins outside' in text for text in labels), labels
+    assert 'Above 5x has not been tested in the simulator' in labels, labels
+    settings.pad_factor = 1.0
+    settings.reference_size = 2.5 * mesh
+    assert abs(pad_diameter() - 2.5 * mesh) < 1e-3, pad_diameter()
+    assert bpy.ops.fss.lod_refresh() == {'FINISHED'}
+    assert settings.reference_size == 0.0 and abs(settings.pad_factor - 2.5) < 1e-3, settings.pad_factor
+    assert settings.scanned
+    settings.pad_factor = 1.0
+    assert bpy.ops.fss.lod_refresh() == {'FINISHED'}
+
+    # A typed minSize holds a LOD back: Shows From, the plan's XML table and the view follow at once, counts stay valid
+    settings.vertex_estimates[0] = 1000
+    settings.min_sizes[0] = 150.0
+    assert settings.scanned
+    labels, _bars = _draw_lod_panel('FSS_PT_lod_export')
+    assert '150 %' in labels, labels
+    assert abs(lod_model.build_plan(bpy.context)['table'][0] - 1.5) < 1e-6
+    lod.apply_viewport_lod(bpy.context)
+    settings.min_sizes = tuple(value * 100.0 for value in lod_rules.MSFS_MIN_SIZES)
+    assert bpy.ops.fss.lod_refresh() == {'FINISHED'}
+    # Hints has no quota table and no Dropped box
     labels, bars = _draw_lod_panel('FSS_PT_lod_quota_hints')
-    assert labels[:2] == ['A LOD is shown only when the model is large enough', 'on screen for its vertex count.'], \
-        labels
-    assert labels[2:7] == ['LOD', 'Vertices', 'Quota', 'Used', 'MSFS shows it from'], labels
-    used = [bar for bar in bars if not bar[1].startswith('~')]
-    assert len(used) == settings.write_count, used
-    for level, (factor, text, red) in enumerate(used):
-        pct = settings.quota_percents[level]
-        assert abs(factor - min(pct / 100, 1)) < 1e-6 and text.endswith(' %') and red == (pct > 100), (level, used)
+    assert not {'Quota', 'Quota Here', 'Used', 'Shows From'} & set(labels), labels
+    assert not any(text.startswith('Dropped at export') for text in labels), labels
     assert 'Per LOD Vertex Contributors' in labels and 'Hints for LOD:' not in labels, labels
     assert not any(text.startswith('Largest contributors') for text in labels), labels
 
@@ -419,33 +646,33 @@ def test_lod_settings_bars():
     for h, (factor, text, _red) in zip(contributors, shares):
         assert abs(factor - h.vertices / total) < 1e-6 and text.startswith(f'~{h.vertices:,} ('), (factor, text)
 
-    # Above 100 % of the screen: "never (needs N %; table T %)", the Used bar full and red
+    # A heavy LOD: the size it needs, which a near camera can reach; the last LOD is the fallback
+    vertex_factor = settings.msfs_vertex_factor
     settings.vertex_estimates[0] = 5_000_000
-    settings.quota_percents[0] = 2000.0
     effective = lod_rules.effective_min_sizes(settings.resolved_table, list(settings.vertex_estimates),
-                                              settings.msfs_vertex_factor, settings.write_count)
+                                              vertex_factor, settings.write_count)
     assert effective[0] > 1.0, effective
-    labels, bars = _draw_lod_panel('FSS_PT_lod_quota_hints')
-    never = [text for text in labels if text.startswith('never (needs ')]
-    assert never == [f'never (needs {effective[0] * 100:.0f} %; table {settings.resolved_table[0] * 100:.0f} %)'], \
-        (never, effective)
-    assert bars[0] == (1.0, '2000 %', True), bars[0]
-    assert any(text.endswith(', fallback') for text in labels), labels
+    labels, bars = _draw_lod_panel('FSS_PT_lod_export')
+    needs = f'{effective[0] * 100:.0f} %'
+    assert needs in labels and 'fallback' in labels and not any(t.startswith('never') for t in labels), labels
 
-    # MSFS 2020: LOD and Vertices only, no quota bars
-    settings.preview_target = 'fs20'
+    # A typed Hides Under: the counts wait for a Refresh, which then uses it and keeps it
+    written = settings.write_count
+    settings.hide_sizes[1] = 1.0
+    assert not settings.scanned
+    labels, bars = _draw_lod_panel('FSS_PT_lod_export')
+    assert labels.count('-') == 8 and 'Press Refresh LOD Counts for Shows From' in labels, labels
     assert bpy.ops.fss.lod_refresh() == {'FINISHED'}
-    labels, bars = _draw_lod_panel('FSS_PT_lod_quota_hints')
-    assert 'LOD' in labels and 'Vertices' in labels, labels
-    assert not {'Quota', 'Used', 'MSFS shows it from'} & set(labels), labels
-    assert not [bar for bar in bars if not bar[1].startswith('~')], bars
-    assert not any(text.startswith('never') or 'of screen' in text for text in labels), labels
-    settings.preview_target = 'fs24'
+    assert abs(settings.cutoffs[1] - 1.0) < 1e-6 and abs(settings.hide_sizes[1] - 1.0) < 1e-6, list(settings.cutoffs)
+    assert settings.counts[1] < counts[1], (list(settings.counts), counts)
+    assert written >= 2
+    settings.hide_sizes = (0.0,) * 7
+
     for obj in objs:
         bpy.data.objects.remove(obj)
-    print(f"PASS: test_lod_settings_bars (objects {counts}, bars count / LOD00; quota table with Used bars, "
-          f"'{never[0]}' and a red full bar above 100 %; {len(shares)} contributor bars as shares; MSFS 2020 with "
-          "LOD and Vertices only; drawing writes nothing)")
+    print(f"PASS: test_lod_settings_bars (objects {counts}, bars count / LOD00; Hides Under per LOD, written at the first "
+          f"Refresh and kept, Shows From '{needs}'; {len(shares)} contributor bars as shares; drawing writes "
+          f"nothing)")
 
 
 def main():
@@ -453,7 +680,8 @@ def main():
     test_draw_all()
     test_object_lod()
     test_viewport_lod_excluded()
-    test_exterior_diameter_message()
+    test_viewport_lod_view_quota()
+    test_export_settings_one_table()
     test_lod_settings_bars()
     print("ALL TESTS PASSED")
 

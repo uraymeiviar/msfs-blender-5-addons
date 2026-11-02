@@ -77,18 +77,33 @@ class LodRulesTest(unittest.TestCase):
         self.assertEqual(result.present, {'explicit'})
         self.assertEqual(result.by_size, {'auto_parent', 'explicit_child'})
 
-    def test_interior_settings(self):
-        with self.assertRaisesRegex(ValueError, 'exterior diameter missing'):
-            lod.min_sizes('INTERIOR', False, lod.DEFAULT_MIN_SIZES, 3.5, 0, 'fs24')
-        table = lod.min_sizes('INTERIOR', False, lod.DEFAULT_MIN_SIZES, 3.5, 40, 'fs24')
-        self.assertAlmostEqual(table[1], .065625)
-        explicit = lod.min_sizes('INTERIOR', True, table, 3.5, 0, 'fs24')
-        self.assertEqual(explicit, table)
-        result = self.decide([lod.Part('keep', None, 1, keep=True)], 6, model_type='INTERIOR')
-        self.assertFalse(result.present)
+    def test_one_table_for_every_model(self):
+        self.assertEqual(lod.min_sizes(lod.DEFAULT_MIN_SIZES, 'fs24'), lod.DEFAULT_MIN_SIZES)
+        with self.assertRaisesRegex(ValueError, 'descending'):
+            lod.min_sizes((1, .5, .6, .3, .1, .05, .01), 'fs24')
+        with self.assertRaisesRegex(ValueError, 'seven'):
+            lod.min_sizes((1, .5), 'fs24')
+        # LOD06 is written: a kept object stays in it
+        result = self.decide([lod.Part('keep', None, 1, keep=True)], 6)
+        self.assertEqual(result.present, {'keep'})
+        # The cut-off follows from the model's own diameter and the table, here 3.83 m at 4 px of 1440
+        cutoffs = [lod.decide([], level, 3.83, lod.DEFAULT_MIN_SIZES).cutoff for level in range(1, 7)]
+        for cutoff, expected in zip(cutoffs, (.01064, .01419, .01934, .03040, .13299, .21278)):
+            self.assertAlmostEqual(cutoff, expected, places=4)
+
+    def test_hides_under_wins(self):
+        parts = [lod.Part('small', None, .5), lod.Part('large', None, 2.0)]
+        # The default from the diameter and the table, unless the artist's value is given
+        self.assertEqual(lod.decide(parts, 6, 3.83, lod.DEFAULT_MIN_SIZES).present, {'small', 'large'})
+        result = lod.decide(parts, 6, 3.83, lod.DEFAULT_MIN_SIZES, cutoff=1.46)
+        self.assertEqual(result.cutoff, 1.46)
+        self.assertEqual(result.present, {'large'})
+        # Low on purpose: the vertex count decides, a light LOD is not held back
+        self.assertEqual(lod.min_sizes(lod.MSFS_MIN_SIZES, 'fs24'), lod.MSFS_MIN_SIZES)
+        self.assertEqual(lod.effective_min_sizes(lod.MSFS_MIN_SIZES, [150000], 1.0, 1), [.6])
 
     def test_fs20_penultimate_floor(self):
-        table = lod.min_sizes('INTERIOR', False, lod.DEFAULT_MIN_SIZES, 3.5, 40, 'fs20')
+        table = lod.min_sizes((1, .7, .5, .3, .1, .005, .001), 'fs20')
         self.assertEqual(table[5], .01)
 
     def test_stored_vertices_shared_accessors(self):
@@ -101,6 +116,27 @@ class LodRulesTest(unittest.TestCase):
         for count in (1000, 2500, 30000, 150000, 250000, 500000, 1000000):
             ratio = lod.lowest_screen_size_from_vcount(count)
             self.assertEqual(lod.max_vertex_count(ratio), count)
+
+    def test_quota_at_view_agrees_with_selection(self):
+        # A LOD at the quota is shown at that size; a clearly heavier one needs a larger size
+        for ratio in (.005, .05, .34, .76, 1.0, 1.33, 2.26, 10.0):
+            quota = lod.vertex_quota_at(ratio, 1.15)
+            self.assertEqual(quota, int(lod.max_vertex_count(ratio) / 1.15))
+            self.assertLessEqual(lod.effective_min_sizes([0.0], [quota], 1.15, 1)[0], ratio + 1e-5)
+            if ratio >= .01:
+                self.assertGreater(lod.effective_min_sizes([0.0], [int(quota * 1.01)], 1.15, 1)[0], ratio)
+        # By hand at 133 %: ((1.33 - .01) / .99) ** 2 * 247500 + 2500 = 442500, over 1.15
+        self.assertEqual(lod.vertex_quota_at(1.33, 1.15), 384782)
+
+    def test_quality_columns_match_sdk_table(self):
+        # 250,000 vertices in the SDK's table: Ultra 70.7 %, High 100 %, Medium 141.4 %, Low 200 %
+        for name, size in (('ULTRA', .707), ('HIGH', 1.0), ('MEDIUM', 1.414), ('LOW', 2.0)):
+            quality = lod.QUALITY_FACTORS[name]
+            self.assertAlmostEqual(lod.effective_min_sizes([0.0], [250000], 1.0, 1, quality)[0], size, places=3)
+            self.assertAlmostEqual(lod.vertex_quota_at(quality, 1.0, quality), 250000, delta=1)
+        # 30,000 vertices: 8.5 / 12 / 17 / 24 %
+        self.assertAlmostEqual(lod.effective_min_sizes([0.0], [30000], 1.0, 1, lod.QUALITY_FACTORS['LOW'])[0], .24, places=2)
+        self.assertAlmostEqual(lod.effective_min_sizes([0.0], [30000], 1.0, 1, lod.QUALITY_FACTORS['ULTRA'])[0], .085, places=3)
 
     def test_first_empty_ends_export_list(self):
         parts = [lod.Part('early', None, 1, hide_from=2),

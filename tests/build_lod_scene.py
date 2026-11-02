@@ -88,20 +88,16 @@ expected = {'present': [sorted(d.present) for d in plan['decisions']],
             'count': len(plan['parts']), 'cutoffs': [d.cutoff for d in plan['decisions']]}
 (out / 'expected.json').write_text(json.dumps(expected, indent=2))
 
-# Settings and UI operators: verify the saved diameter and explicit-table distinction.
-scene.fss_lod_settings.model_type = 'INTERIOR'
-assert scene.fss_lod_settings.preview_error == 'exterior diameter missing'
-scene.fss_lod_settings.min_sizes_fs24 = (1, .7, .5, .3, .1, .05, .01)
-assert scene.fss_lod_settings.explicit_fs24
-assert 'not written' in scene.fss_lod_settings.preview_error
-assert lod_model.build_plan(bpy.context)['decisions'][6].present == set()
+# Settings: the same table rules for every model; editing it changes the plan.
+scene.fss_lod_settings.min_sizes = (150, 6, 5, 4, 3, 2, 1)
+assert abs(lod_model.build_plan(bpy.context, 'fs20')['table'][0] - 1.5) < 1e-6
+assert abs(lod_model.build_plan(bpy.context)['table'][0] - 1.5) < 1e-6
 lod_model.restore_filter(bpy.context)
 bpy.ops.wm.save_as_mainfile(filepath=str(out / 'interior.blend'))
 scene.fss_viewport_lod = -1
 lod_model.restore_filter(bpy.context)
 bpy.ops.object.select_all(action='SELECT')
 bpy.ops.object.delete(use_global=False)
-scene.fss_lod_settings.model_type = 'EXTERIOR'
 cube('Early', 1)['fss_lod'] = 2
 cube('Late', 1, 2)['fss_lod_show_from'] = 4
 bpy.ops.wm.save_as_mainfile(filepath=str(out / 'gap.blend'))

@@ -31,6 +31,8 @@ _auto_state = {
     'region_3d': None,
     'last_view_matrix': None,
     'last_window_matrix': None,
+    'ratio_view_matrix': None,
+    'ratio_window_matrix': None,
 }
 
 
@@ -161,6 +163,10 @@ def _apply_plan_level(context, plan, level):
                     uv_heatmap._display_active.discard(obj.name)
             obj[LOD_HIDDEN_KEY] = orig
             obj.display_type = 'BOUNDS'
+    _tag_view3d_redraw(context)
+
+
+def _tag_view3d_redraw(context):
     wm = getattr(context, 'window_manager', None)
     if wm is not None:
         for window in wm.windows:
@@ -172,7 +178,7 @@ def _apply_plan_level(context, plan, level):
 def _ensure_auto_plan(context):
     scene = context.scene
     if _auto_state['plan'] is None or _auto_state['scene_name'] != scene.name:
-        plan = lod_model.build_plan(context, scene.fss_lod_settings.preview_target)
+        plan = lod_model.build_plan(context)
         bounds = plan['bounds']
         center = (Vector(tuple(0.5 * (lo + hi) for lo, hi in zip(*bounds)))
                   if bounds is not None else Vector((0.0, 0.0, 0.0)))
@@ -189,7 +195,7 @@ def simulated_min_sizes(settings, plan):
     if not settings.scanned or plan['target'] != 'fs24':
         return plan['table']
     return lod_rules.effective_min_sizes(plan['table'], list(settings.vertex_estimates), settings.msfs_vertex_factor,
-                                         plan['write_count'])
+                                         plan['write_count'], lod_rules.QUALITY_FACTORS[settings.msfs_quality])
 
 
 def update_auto_viewport_lod(context=None, region_3d=None, force=False):
@@ -225,11 +231,48 @@ def update_auto_viewport_lod(context=None, region_3d=None, force=False):
                                             plan['write_count'])
     _auto_state['last_ratio'] = ratio
     if not force and _auto_state['applied_level'] == level and scene.fss_viewport_lod == level:
+        _tag_view3d_redraw(ctx)  # the same LOD, but the panel's screen ratio and quota moved with the view
         return False
     scene.fss_viewport_lod = level
     _auto_state['applied_level'] = level
     _apply_plan_level(ctx, plan, level)
     return True
+
+
+def update_view_ratio(context=None):
+    """Keep the screen ratio current with the Blender view while Auto is off, for the table in Viewport LOD. Reads the
+    LOD sphere of the last Refresh, so it plans nothing and hides nothing; Auto keeps the ratio itself."""
+    ctx = context or bpy.context
+    scene = getattr(ctx, 'scene', None)
+    if scene is None or getattr(scene, 'fss_viewport_lod_auto', False):
+        return False
+    settings = scene.fss_lod_settings
+    if not settings.scanned or settings.lod_diameter <= 0:
+        return False
+    r3d = _find_region_3d(ctx)
+    if r3d is None:
+        return False
+    if (_auto_state['ratio_view_matrix'] is not None and r3d.view_matrix == _auto_state['ratio_view_matrix']
+            and r3d.window_matrix == _auto_state['ratio_window_matrix']):
+        return False
+    fov_y, cam_pos = viewport_fov_and_location(r3d)
+    if fov_y is None or cam_pos is None:
+        return False
+    _auto_state['ratio_view_matrix'] = r3d.view_matrix.copy()
+    _auto_state['ratio_window_matrix'] = r3d.window_matrix.copy()
+    center = (Vector(settings.sphere_box[:3]) + Vector(settings.sphere_box[3:])) / 2
+    distance = (cam_pos * scene.unit_settings.scale_length - center).length
+    _auto_state['last_ratio'] = lod_rules.screen_ratio(settings.lod_diameter, distance, fov_y)
+    _tag_view3d_redraw(ctx)
+    return True
+
+
+def _view_ratio_timer():
+    try:
+        update_view_ratio()
+    except Exception:
+        pass
+    return _AUTO_INTERVAL
 
 
 def _auto_viewport_timer():
@@ -275,7 +318,7 @@ def apply_viewport_lod(context):
         scene.fss_lod_settings.preview_error = ''
         return
     try:
-        plan = lod_model.build_plan(context, scene.fss_lod_settings.preview_target)
+        plan = lod_model.build_plan(context)
     except ValueError as error:
         scene.fss_lod_settings.preview_error = str(error)
         return
@@ -398,50 +441,6 @@ def _settings_changed(settings, context):
         apply_viewport_lod(context)
 
 
-def _fs24_table_changed(settings, context):
-    settings.explicit_fs24 = True
-    if not settings.explicit_fs20:
-        settings['min_sizes_fs20'] = tuple(settings.min_sizes_fs24)
-    _settings_changed(settings, context)
-
-
-def _fs20_table_changed(settings, context):
-    settings.explicit_fs20 = True
-    _settings_changed(settings, context)
-
-
-def last_lod(settings):
-    """The lowest-detail LOD the export can write: interiors stop at LOD05 (decision 16)."""
-    return 5 if settings.model_type == 'INTERIOR' else 6
-
-
-def cutoff_context(settings):
-    """(diameter, minSize table) behind the size cut-offs, or (None, reason) when they cannot be computed yet.
-
-    Uses the same inputs as lod_model.build_plan: the LOD sphere diameter MSFS will use (padded or measured) from
-    the last Refresh, and the minSize table of the preview target.
-    """
-    measured = settings.measured_diameter
-    diameter = settings.lod_diameter or max(settings.reference_size, measured)
-    if diameter <= 0 or (settings.model_type == 'INTERIOR' and measured <= 0):
-        return None, 'Press Refresh LOD Counts to measure the model'
-    target = settings.preview_target
-    explicit = getattr(settings, 'explicit_' + target) or (target == 'fs20' and settings.explicit_fs24)
-    try:
-        table = lod_rules.min_sizes(settings.model_type, explicit, getattr(settings, 'min_sizes_' + target),
-                                    diameter, settings.exterior_diameter, target)
-    except ValueError as error:
-        return None, str(error)
-    return (diameter, table), ''
-
-
-def cutoff_for_level(settings, inputs, level):
-    """Parts smaller than this (metres) are hidden from LOD level; same formula as lod_rules.decide."""
-    diameter, table = inputs
-    upper = table[level - 1]
-    return diameter * settings.pixel_threshold / (upper * settings.screen_height) if upper > 0 else math.inf
-
-
 def format_length(metres):
     if not math.isfinite(metres):
         return 'everything'
@@ -451,6 +450,19 @@ def format_length(metres):
 def format_percent(value):
     """A percentage short enough for a table column: '364 %', '20 %', '8.8 %', '0.5 %'."""
     return f'{value:.0f} %' if value >= 10 else f'{value:.2g} %'
+
+
+def format_count(value):
+    """A count short enough for a narrow table: '532', '3.48K', '1.11M'."""
+    if value >= 999_995:
+        return f'{value / 1_000_000:.2f}M'
+    return f'{value / 1000:.2f}K' if value >= 1000 else str(value)
+
+
+def format_step(previous, current):
+    """What one LOD step took away: '-1.29K', '0', and '+' if the step added (shared meshes no longer counted once)."""
+    removed = previous - current
+    return f'-{format_count(removed)}' if removed > 0 else f'+{format_count(-removed)}' if removed < 0 else '0'
 
 
 def table_row(layout, shares):
@@ -467,20 +479,90 @@ def table_row(layout, shares):
     return cells
 
 
-def _get_lowest_cutoff(settings):
-    inputs, _reason = cutoff_context(settings)
-    return cutoff_for_level(settings, inputs, last_lod(settings)) if inputs else 0.0
-
-
-def _set_lowest_cutoff(settings, value):
-    inputs, _reason = cutoff_context(settings)
-    if not inputs or value <= 0:
+def _draw_view_quota(layout, scene, ratio):
+    """What MSFS does at the Blender view, whatever the viewport preview shows: the LOD it shows, highlighted, and for
+    each more detailed LOD the vertices to remove so that it shows here instead."""
+    settings = scene.fss_lod_settings
+    layout.prop(settings, 'msfs_quality')
+    if not settings.scanned:
+        layout.label(text='Click Refresh LOD Counts for the quota at this view', icon='INFO')
         return
-    diameter, table = inputs
-    # Inverse of the cut-off formula; written directly so dragging does not re-plan the scene on every step
-    settings['pixel_threshold'] = value * table[last_lod(settings) - 1] * settings.screen_height / diameter
-    settings.scanned = False
+    quality = lod_rules.QUALITY_FACTORS[settings.msfs_quality]
+    quota = lod_rules.vertex_quota_at(ratio, settings.msfs_vertex_factor, quality)
+    effective = lod_rules.effective_min_sizes([value / 100.0 for value in settings.min_sizes],
+                                              list(settings.vertex_estimates), settings.msfs_vertex_factor,
+                                              settings.write_count, quality)
+    shown = lod_rules.lod_from_screen_ratio(ratio, effective, settings.write_count)
+    last = settings.write_count - 1
+    layout.label(text=f'This view: LOD{shown:02} (screen ratio {ratio:.1%})', icon='VIEWZOOM')
+    factors = (0.18, 0.23, 0.13, 0.18, 0.28)
+    col = layout.column(align=True)
+    for cell, text in zip(table_row(col.row(), factors), ('LOD', 'Vert/Obj', 'Used', 'ToReduce', 'Reduced')):
+        cell.label(text=text)
+    for level in range(settings.write_count):
+        cells = table_row(col.row(), factors)
+        vertices = settings.vertex_estimates[level]
+        objects = settings.counts[level]
+        name = f'{level:02} <' + format_length(settings.cutoffs[level]).replace(' ', '') if level else '00 -'
+        if level == shown:
+            cells[0].operator('fss.lod_view_shown', text=name, depress=True)
+        else:
+            cells[0].label(text=name)
+        cells[1].label(text=f'{format_count(vertices)}/{format_count(objects)}')
+        pct = 100.0 * vertices / quota
+        cells[2].alert = pct > 100.0
+        cells[2].progress(factor=min(pct / 100.0, 1.0), text=format_percent(pct))
+        cells[3].label(text=format_count(vertices - quota) if level < shown and vertices > quota else '-')
+        # The bar: the share of the previous LOD's vertices this step removed, fair across LODs; the text: the step
+        previous = settings.vertex_estimates[level - 1] if level else 0
+        cells[4].progress(factor=max(0, previous - vertices) / previous if previous else 0.0, text='-' if not level else
+                          f'{format_step(settings.vertex_estimates[level - 1], vertices)}/'
+                          f'{format_step(settings.counts[level - 1], objects)}')
+    if shown == last and settings.vertex_estimates[last] > quota:
+        layout.label(text='Over the limit, shown as the last LOD', icon='INFO')
+
+
+def _draw_hides_table(layout, settings):
+    """The settings per LOD, one table: Hides Under decides what is in the LOD, minSize holds it back from smaller
+    screen sizes, and Shows From is the size MSFS needs for it after the last Refresh."""
+    layout.label(text='Hides Under: parts smaller than this are left out')
+    layout.label(text='minSize: the LOD never shows below this screen size')
+    scanned = settings.scanned
+    effective = (lod_rules.effective_min_sizes([value / 100.0 for value in settings.min_sizes],
+                                               list(settings.vertex_estimates), settings.msfs_vertex_factor,
+                                               settings.write_count,
+                                               lod_rules.QUALITY_FACTORS[settings.msfs_quality]) if scanned else [])
+    shares = (0.12, 0.32, 0.28, 0.28)
+    col = layout.column(align=True)
+    for cell, text in zip(table_row(col.row(), shares), ('LOD', 'Hides Under', 'minSize %', 'Shows From')):
+        cell.label(text=text)
+    for level in range(7):
+        cells = table_row(col.row(), shares)
+        cells[0].label(text=f'{level:02}')
+        if level:
+            cells[1].prop(settings, 'hide_sizes', index=level, text='')
+        else:
+            cells[1].label(text='-')
+        cells[2].prop(settings, 'min_sizes', index=level, text='')
+        if not scanned or level >= settings.write_count:
+            cells[3].label(text='-')
+        else:
+            cells[3].label(text='fallback' if level == settings.write_count - 1
+                           else format_percent(effective[level] * 100.0))
+    if not scanned:
+        layout.label(text='Press Refresh LOD Counts for Shows From', icon='INFO')
+
+
+def _min_sizes_changed(settings, context):
+    # What is in each LOD stands: only when it shows changes, so the counts stay valid and Auto looks again
     invalidate_auto_plan()
+    _tag_view3d_redraw(context)
+
+
+def _quality_changed(settings, context):
+    # The counts stand: only what MSFS would show changes, so Auto looks again and the panels redraw
+    _auto_state['last_view_matrix'] = None
+    _tag_view3d_redraw(context)
 
 
 class FSS_LodHintItem(bpy.types.PropertyGroup):
@@ -504,20 +586,18 @@ class FSS_LodHintItem(bpy.types.PropertyGroup):
 
 
 class FSS_LodSettings(bpy.types.PropertyGroup):
-    model_type: bpy.props.EnumProperty(name='Model Type', default='EXTERIOR', update=_settings_changed,
-        items=[('EXTERIOR', 'Exterior part', ''), ('INTERIOR', 'Interior', ''), ('SCENERY', 'Scenery', '')])
-    min_sizes_fs24: bpy.props.FloatVectorProperty(name='FS24 minSize', size=7, min=0,
-        default=lod_rules.DEFAULT_MIN_SIZES, update=_fs24_table_changed)
-    min_sizes_fs20: bpy.props.FloatVectorProperty(name='FS20 minSize (unverified)', size=7, min=0,
-        default=lod_rules.DEFAULT_MIN_SIZES, update=_fs20_table_changed)
-    explicit_fs24: bpy.props.BoolProperty(default=False)
-    explicit_fs20: bpy.props.BoolProperty(default=False)
-    exterior_diameter: bpy.props.FloatProperty(name='Exterior Diameter (m)', min=0, update=_settings_changed)
-    reference_size: bpy.props.FloatProperty(name='Pad LOD Sphere To', min=0, subtype='DISTANCE', unit='LENGTH',
+    # Screen percent per LOD, written to the XML; low on purpose (see lod_rules.MSFS_MIN_SIZES)
+    min_sizes: bpy.props.FloatVectorProperty(name='minSize', size=7, min=0, precision=1,
+        default=tuple(value * 100.0 for value in lod_rules.MSFS_MIN_SIZES), update=_min_sizes_changed,
+        description='The LOD never shows below this screen size. Low values leave it to the vertex count; a high '
+                    'value holds the LOD back. Must not increase from one LOD to the next')
+    pad_factor: bpy.props.FloatProperty(name='Pad LOD Sphere Multiplier', default=1.0, min=1.0, max=10.0, precision=2,
         update=_reference_changed,
-        description='0 uses the measured LOD sphere. A larger value pads the sphere MSFS uses for LOD selection to '
-                    'this diameter around the geometry centre at export (invisible corner points): MSFS sees the '
-                    'model larger, so every LOD holds to a larger distance. Tables, cut-offs and viewport LOD use it')
+        description='1 uses the measured LOD sphere. A larger value multiplies the geometry\'s sphere at export '
+                    '(invisible corner points): MSFS sees the model larger, so every LOD holds to that many times the '
+                    'distance, and heavier LODs are drawn further out')
+    # The target diameter of older versions: export still honours it until a Refresh converts it to pad_factor
+    reference_size: bpy.props.FloatProperty(min=0, update=_reference_changed)
     lod_diameter: bpy.props.FloatProperty(name='LOD Sphere', min=0, subtype='DISTANCE', unit='LENGTH',
         description='Diameter of the sphere MSFS will use after export (padded or measured), from the last Refresh')
     measured_diameter: bpy.props.FloatProperty(name='Measured Diameter', min=0, subtype='DISTANCE', unit='LENGTH',
@@ -528,19 +608,20 @@ class FSS_LodSettings(bpy.types.PropertyGroup):
     # Boxes in metres (min xyz, max xyz) from the last Refresh LOD Counts, drawn by Show LOD Sphere
     sphere_box: bpy.props.FloatVectorProperty(size=6, options={'SKIP_SAVE'})
     mesh_box: bpy.props.FloatVectorProperty(size=6, options={'SKIP_SAVE'})
-    lowest_cutoff: bpy.props.FloatProperty(name='Smallest Part Kept', min=0, subtype='DISTANCE', unit='LENGTH',
-        get=_get_lowest_cutoff, set=_set_lowest_cutoff, precision=1, step=10,
-        description='Parts smaller than this are hidden from the lowest-detail LOD; every other LOD hides '
-                    'proportionally smaller parts')
+    # Metres per LOD; 0 takes the default from the diameter and the SDK's table, and the first Refresh writes it in
+    hide_sizes: bpy.props.FloatVectorProperty(name='Hides Under', size=7, min=0, unit='LENGTH', precision=3, step=10,
+        description='Parts of this LOD smaller than this are left out', update=_settings_changed)
     screen_height: bpy.props.IntProperty(name='Screen Height (px)', default=1440, min=1, update=_settings_changed)
     pixel_threshold: bpy.props.FloatProperty(name='Pixel Threshold', default=4, min=0, update=_settings_changed)
+    msfs_quality: bpy.props.EnumProperty(name='MSFS Quality', default='HIGH', update=_quality_changed,
+        description='The graphics setting to predict: a higher one lets each LOD show from a smaller screen size. '
+                    'Only High has been checked against the simulator',
+        items=[('ULTRA', 'Ultra', ''), ('HIGH', 'High', ''), ('MEDIUM', 'Medium', ''), ('LOW', 'Low', '')])
     msfs_vertex_factor: bpy.props.FloatProperty(name='MSFS Vertex Factor', default=1.15, min=0.5, max=2.0,
         description='MSFS counts vertices differently from the export: measured 0.98 to 1.22 times the file count '
                     '(E2 cockpit). Applied to the vertex estimate (about 5 % above the file) to predict from which '
                     'screen size MSFS shows each LOD')
     keep_tags: bpy.props.StringProperty(name='Keep Tags', update=_settings_changed)
-    preview_target: bpy.props.EnumProperty(name='Preview Target', default='fs24', update=_settings_changed,
-        items=[('fs24', 'MSFS 2024', ''), ('fs20', 'MSFS 2020 (unverified)', '')])
     preview_error: bpy.props.StringProperty(options={'SKIP_SAVE'})
     scanned: bpy.props.BoolProperty(options={'SKIP_SAVE'})
     counts: bpy.props.IntVectorProperty(size=7, options={'SKIP_SAVE'})
@@ -548,11 +629,6 @@ class FSS_LodSettings(bpy.types.PropertyGroup):
     resolved_table: bpy.props.FloatVectorProperty(size=7, options={'SKIP_SAVE'})
     write_count: bpy.props.IntProperty(options={'SKIP_SAVE'})
     vertex_estimates: bpy.props.IntVectorProperty(size=7, options={'SKIP_SAVE'})
-    quotas: bpy.props.IntVectorProperty(size=7, options={'SKIP_SAVE'})
-    quota_percents: bpy.props.FloatVectorProperty(size=7, options={'SKIP_SAVE'})
-    over_quota: bpy.props.BoolVectorProperty(size=7, options={'SKIP_SAVE'})
-    dropped_pieces: bpy.props.IntVectorProperty(size=7, options={'SKIP_SAVE'})
-    dropped_vertices: bpy.props.IntVectorProperty(size=7, options={'SKIP_SAVE'})
     hints: bpy.props.CollectionProperty(type=FSS_LodHintItem, options={'SKIP_SAVE'})
     inspect_lod: bpy.props.IntProperty(name='Inspect LOD', default=0, min=0, max=6, options={'SKIP_SAVE'})
 
@@ -567,7 +643,11 @@ class FSS_OT_LodRefresh(bpy.types.Operator):
         try:
             stats = lod_model.estimate_scene_stats(context)
             plan = stats['plan']
-            settings.counts = [len(d.present) for d in plan['decisions']]
+            if settings.reference_size > 0:  # a diameter saved by an older version becomes the multiplier, once
+                factor = settings.reference_size / plan['mesh_diameter'] if plan['mesh_diameter'] > 0 else 1.0
+                settings.reference_size = 0.0
+                settings.pad_factor = max(1.0, min(10.0, factor))
+            settings.counts =[len(d.present) for d in plan['decisions']]
             settings.cutoffs = [d.cutoff for d in plan['decisions']]
             settings.resolved_table = plan['table']
             settings.write_count = plan['write_count']
@@ -578,11 +658,6 @@ class FSS_OT_LodRefresh(bpy.types.Operator):
                 settings.sphere_box = (*plan['bounds'][0], *plan['bounds'][1])
                 settings.mesh_box = (*plan['mesh_bounds'][0], *plan['mesh_bounds'][1])
             settings.vertex_estimates = [s['vertices'] for s in stats['lods']]
-            settings.quotas = [s['quota'] for s in stats['lods']]
-            settings.quota_percents = [s['percent'] for s in stats['lods']]
-            settings.over_quota = [s['over'] for s in stats['lods']]
-            settings.dropped_pieces = [s['dropped_pieces'] for s in stats['lods']]
-            settings.dropped_vertices = [s['dropped_vertices'] for s in stats['lods']]
             settings.hints.clear()
             for obj_name, outside in plan['far_nodes']:
                 item = settings.hints.add()
@@ -624,7 +699,13 @@ class FSS_OT_LodRefresh(bpy.types.Operator):
                     item.vertices = verts
             if settings.inspect_lod >= settings.write_count:
                 settings.inspect_lod = max(0, settings.write_count - 1)
+            if any(settings.hide_sizes[d] <= 0 and math.isfinite(plan['decisions'][d].cutoff) for d in range(1, 7)):
+                settings.hide_sizes = [settings.hide_sizes[d] if d == 0 or settings.hide_sizes[d] > 0
+                                       or not math.isfinite(plan['decisions'][d].cutoff)
+                                       else plan['decisions'][d].cutoff for d in range(7)]
             settings.scanned = True
+            _auto_state['ratio_view_matrix'] = None  # the sphere may have changed: measure the view again
+            update_view_ratio(context)
             for warning in plan['decisions'][0].warnings:
                 self.report({'WARNING'}, warning)
         except ValueError as error:
@@ -752,6 +833,16 @@ class FSS_OT_SetViewportLod(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class FSS_OT_LodViewShown(bpy.types.Operator):
+    bl_idname = 'fss.lod_view_shown'
+    bl_label = 'LOD Shown Here'
+    bl_description = 'The LOD MSFS shows at this view'
+    bl_options = {'INTERNAL'}
+
+    def execute(self, context):
+        return {'FINISHED'}
+
+
 class FSS_OT_LodPrintSettings(bpy.types.Operator):
     bl_idname = 'fss.lod_print_settings'
     bl_label = 'Print LOD Settings / XML'
@@ -763,7 +854,7 @@ class FSS_OT_LodPrintSettings(bpy.types.Operator):
     def execute(self, context):
         import xml.sax.saxutils
         try:
-            plan = lod_model.build_plan(context, context.scene.fss_lod_settings.preview_target)
+            plan = lod_model.build_plan(context)
             print('<LODS>')
             for level, value in enumerate(plan['table'][:plan['write_count']]):
                 filename = xml.sax.saxutils.quoteattr(f'{self.base_name}_LOD{level:02}.gltf')
@@ -779,41 +870,6 @@ class FSS_OT_LodPrintSettings(bpy.types.Operator):
             return {'CANCELLED'}
         finally:
             apply_viewport_lod(context)
-        return {'FINISHED'}
-
-
-class FSS_OT_LodEditTable(bpy.types.Operator):
-    bl_idname = 'fss.lod_edit_table'
-    bl_label = 'Edit Explicit minSize Table'
-    bl_options = {'REGISTER', 'UNDO'}
-    target: bpy.props.EnumProperty(items=[('fs24', 'FS24', ''), ('fs20', 'FS20 (unverified)', '')])
-    values: bpy.props.FloatVectorProperty(size=7, min=0, default=lod_rules.DEFAULT_MIN_SIZES)
-
-    def invoke(self, context, event):
-        settings = context.scene.fss_lod_settings
-        self.values = getattr(settings, 'min_sizes_' + self.target)
-        try:
-            self.values = lod_model.build_plan(context, self.target)['table']
-        except ValueError:
-            # The user can explicitly author a table without a known exterior diameter.
-            pass
-        finally:
-            apply_viewport_lod(context)
-        return context.window_manager.invoke_props_dialog(self, width=350)
-
-    def draw(self, context):
-        self.layout.label(text='Explicit screen ratios: 1 = 100%')
-        self.layout.label(text='No exterior diameter is needed for this table')
-        for level in range(7):
-            self.layout.prop(self, 'values', index=level, text=f'LOD{level:02}')
-
-    def execute(self, context):
-        try:
-            lod_rules.min_sizes('INTERIOR', True, self.values, 0, 0, self.target)
-        except ValueError as error:
-            self.report({'ERROR'}, str(error))
-            return {'CANCELLED'}
-        setattr(context.scene.fss_lod_settings, 'min_sizes_' + self.target, self.values)
         return {'FINISHED'}
 
 
@@ -887,9 +943,6 @@ class FSS_PT_LodViewport(bpy.types.Panel):
             row.prop(context.scene, 'fss_lod_preview_display', expand=True)
         if previewing and context.scene.fss_lod_preview_display == 'HIDDEN':
             layout.label(text='Excluded objects hidden: set Viewport LOD Off before exporting by hand', icon='INFO')
-        if is_auto and not context.scene.fss_lod_settings.preview_error:
-            lvl = max(0, context.scene.fss_viewport_lod)
-            layout.label(text=f'Auto: LOD{lvl:02} (screen ratio {_auto_state["last_ratio"]:.1%})', icon='VIEWZOOM')
         if context.scene.fss_lod_settings.preview_error:
             layout.label(text=context.scene.fss_lod_settings.preview_error, icon='ERROR')
 
@@ -907,28 +960,15 @@ class FSS_PT_LodSettings(bpy.types.Panel):
         layout.operator('fss.lod_refresh', icon='FILE_REFRESH')
         settings = context.scene.fss_lod_settings
         if settings.scanned:
-            layout.label(text='Cached source counts — Refresh after editing')
-            # A bar per written LOD, full at LOD00's object count (decision 25 A)
-            first = settings.counts[0]
-            col = layout.column(align=True)
-            for level in range(settings.write_count):
-                count = settings.counts[level]
-                lod_cell, bar_cell, pieces_cell, cutoff_cell = table_row(col.row(), (0.14, 0.40, 0.16, 0.30))
-                lod_cell.label(text=f'LOD{level:02}')
-                text = f'{count:,} obj'
-                if level and first:
-                    text += f' ({format_percent(100.0 * count / first)})'
-                bar_cell.progress(factor=count / first if first else 0.0, text=text)
-                pieces = settings.dropped_pieces[level]
-                pieces_cell.label(text=f'-{pieces:,} pcs' if pieces else '')
-                cutoff_cell.label(text=f'hides < {format_length(settings.cutoffs[level])}' if level else '')
-            if settings.write_count < 7:
-                layout.label(text=f'LOD{settings.write_count:02}: not written, no objects', icon='INFO')
+            layout.label(text='Cached counts: Refresh after editing')
+        _draw_view_quota(layout, context.scene, _auto_state['last_ratio'])
+        if settings.scanned and settings.write_count < 7:
+            layout.label(text=f'LOD{settings.write_count:02}: not written, no objects', icon='INFO')
 
 
 class FSS_PT_LodQuotaHints(bpy.types.Panel):
     bl_idname = 'FSS_PT_lod_quota_hints'
-    bl_label = 'Quota and Hints'
+    bl_label = 'Hints'
     bl_parent_id = 'FSS_PT_lod_settings'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
@@ -940,50 +980,6 @@ class FSS_PT_LodQuotaHints(bpy.types.Panel):
         if not settings.scanned:
             layout.label(text='Click Refresh LOD Counts to compute estimates', icon='INFO')
             return
-        fs20 = settings.preview_target == 'fs20'
-        header = layout.column(align=True)
-        if fs20:
-            header.label(text='MSFS 2020 has no vertex rule:')
-            header.label(text='the vertex estimate per LOD only.')
-        else:
-            # One sentence, on two lines so that the sidebar does not cut it (decision 25 B)
-            header.label(text='A LOD is shown only when the model is large enough')
-            header.label(text='on screen for its vertex count.')
-        effective = lod_rules.effective_min_sizes(settings.resolved_table, list(settings.vertex_estimates),
-                                                  settings.msfs_vertex_factor, settings.write_count)
-        factors = (0.3, 0.7) if fs20 else (0.09, 0.17, 0.17, 0.17, 0.40)
-        headers = ('LOD', 'Vertices', 'Quota', 'Used', 'MSFS shows it from')
-        col = layout.column(align=True)
-        for cell, text in zip(table_row(col.row(), factors), headers):
-            cell.label(text=text)
-        for level in range(settings.write_count):
-            cells = table_row(col.row(), factors)
-            cells[0].label(text=f'{level:02}')
-            cells[1].label(text=f'{settings.vertex_estimates[level]:,}')
-            if fs20:
-                continue
-            pct = settings.quota_percents[level]
-            cells[2].label(text=f'{settings.quotas[level]:,}')
-            cells[3].alert = pct > 100.0
-            cells[3].progress(factor=min(pct / 100.0, 1.0), text=format_percent(pct))
-            needed = effective[level] * 100.0
-            table = format_percent(settings.resolved_table[level] * 100.0)
-            if needed > 100.0:
-                text = f'never (needs {format_percent(needed)}; table {table})'
-            else:
-                text = f'{format_percent(needed)} of screen (table {table})'
-            if level == settings.write_count - 1:
-                text += ', fallback'
-            cells[4].label(text=text)
-        dropped = [level for level in range(settings.write_count) if settings.dropped_pieces[level]]
-        if dropped:
-            box = layout.box().column(align=True)
-            box.label(text='Dropped at export (loose pieces below the cut-off):', icon='MOD_EXPLODE')
-            for level in dropped:
-                box.label(text=f'LOD{level:02}: {settings.dropped_pieces[level]:,} pcs, '
-                               f'~{settings.dropped_vertices[level]:,} vtx')
-
-        layout.separator()
         layout.label(text='Per LOD Vertex Contributors')
         sel_row = layout.row(align=True)
         active_lod = (context.scene.fss_viewport_lod
@@ -1040,7 +1036,7 @@ class FSS_PT_LodQuotaHints(bpy.types.Panel):
 class FSS_OT_LodInspectLevel(bpy.types.Operator):
     bl_idname = 'fss.lod_inspect_level'
     bl_label = 'Inspect LOD Hints'
-    bl_description = 'Show Quota and Hints details for this LOD level'
+    bl_description = 'Show the hints for this LOD level'
     level: bpy.props.IntProperty(min=0, max=6, default=0)
 
     def execute(self, context):
@@ -1060,79 +1056,42 @@ class FSS_PT_LodExport(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         settings = context.scene.fss_lod_settings
-        layout.prop(settings, 'model_type')
         if settings.measured_diameter > 0:
             layout.label(text=f'Model diameter: {format_length(settings.measured_diameter)} (measured at Refresh)')
             far = [h for h in settings.hints if h.kind == 'FAR_NODE']
-            if far:
+            if far and settings.lod_diameter:  # 0: the padding changed, these were measured with the old one
                 # MSFS's LOD sphere encloses every node: far origins move and enlarge it, so LODs switch elsewhere
                 box = layout.box()
-                box.label(text=f'{len(far)} origins outside the geometry: LOD sphere '
-                               f'{format_length(settings.mesh_diameter)} -> {format_length(settings.measured_diameter)}',
-                          icon='ERROR')
+                if settings.pad_factor > 1.0:
+                    box.label(text=f'{len(far)} origins outside the padding: LOD sphere '
+                                   f'{format_length(settings.pad_factor * settings.mesh_diameter)} -> '
+                                   f'{format_length(settings.lod_diameter)}', icon='ERROR')
+                else:
+                    box.label(text=f'{len(far)} origins outside the geometry: LOD sphere '
+                                   f'{format_length(settings.mesh_diameter)} -> {format_length(settings.lod_diameter)}',
+                              icon='ERROR')
                 for h in far[:5]:
                     r = box.row(align=True)
                     r.label(text=f'{h.object_name}: {format_length(h.size_m)} outside')
                     r.operator('fss.lod_select_hint', text='', icon='RESTRICT_SELECT_OFF').object_name = h.object_name
                 box.label(text='Move these origins into the geometry, or the empties out of this model')
             layout.prop(context.scene, 'fss_lod_show_sphere', toggle=True, icon='SPHERE')
-            if context.scene.fss_lod_show_sphere:
-                box = layout.box()
-                box.label(text='LOD sphere box faces set by (last Refresh):')
-                for h in _sphere_faces(settings):
-                    r = box.row(align=True)
-                    r.label(text=f'{h.face}: {h.object_name} ({"origin" if h.from_origin else "vertex"})',
-                            icon='ERROR' if h.from_origin else 'DOT')
-                    r.operator('fss.lod_select_hint', text='', icon='RESTRICT_SELECT_OFF').object_name = h.object_name
         else:
             layout.label(text='Model diameter: not measured yet, press Refresh LOD Counts', icon='INFO')
-        layout.prop(settings, 'reference_size')
-        # The field is an input (0 = no padding); the line under it gives the diameter MSFS uses without padding
-        if settings.measured_diameter > 0:
-            layout.label(text=f'Without padding: {format_length(settings.measured_diameter)} (0 = no padding)')
+        layout.prop(settings, 'pad_factor')
+        if settings.mesh_diameter <= 0:
+            layout.label(text='Press Refresh LOD Counts to measure the model')
+        elif not settings.lod_diameter:
+            layout.label(text='Press Refresh LOD Counts to apply', icon='INFO')
+        elif settings.pad_factor <= 1.0:
+            layout.label(text=f'MSFS sees: {format_length(settings.lod_diameter)} (no padding)')
         else:
-            layout.label(text='0 = no padding; press Refresh LOD Counts to measure the model')
-        if settings.reference_size > 0 and settings.measured_diameter > 0:
-            if settings.reference_size <= settings.mesh_diameter:
-                layout.label(text=f'Not larger than the geometry sphere ({format_length(settings.mesh_diameter)}): '
-                                  f'no padding', icon='ERROR')
-            elif not settings.lod_diameter:
-                layout.label(text='Press Refresh LOD Counts to apply', icon='INFO')
-            elif settings.lod_diameter > settings.reference_size + .01:
-                layout.label(text=f'Origins outside the padding: MSFS uses {format_length(settings.lod_diameter)}',
-                             icon='ERROR')
-            else:
-                layout.label(text=f'Export pads the LOD sphere: MSFS sees the model '
-                                  f'{settings.lod_diameter / settings.mesh_diameter:.2f}x larger', icon='INFO')
-        missing = False
-        if settings.model_type == 'INTERIOR':
-            target = settings.preview_target
-            explicit = getattr(settings, 'explicit_' + target) or (target == 'fs20' and settings.explicit_fs24)
-            missing = not explicit and settings.exterior_diameter <= 0
-            row = layout.row()
-            row.alert = missing  # the field to fill is drawn red, with one message below it
-            row.prop(settings, 'exterior_diameter')
-            if missing:
-                layout.label(text="Exterior diameter missing: enter the exterior model's LOD sphere diameter",
-                             icon='ERROR')
+            layout.label(text=f'MSFS sees: {format_length(settings.lod_diameter)} '
+                              f'(geometry {format_length(settings.mesh_diameter)})')
+        if settings.pad_factor > 5.0:
+            layout.label(text='Above 5x has not been tested in the simulator', icon='INFO')
 
-        inputs, reason = cutoff_context(settings)
-        last = last_lod(settings)
-        if not inputs:
-            if not (missing and reason == 'exterior diameter missing'):
-                layout.label(text=reason, icon='INFO')
-        else:
-            layout.prop(settings, 'lowest_cutoff', text=f'LOD{last:02} hides parts smaller than')
-            box = layout.box()
-            box.label(text='Hidden parts, smaller than:')
-            for level in range(1, last + 1):
-                text = f'LOD{level:02}:  {format_length(cutoff_for_level(settings, inputs, level))}'
-                if settings.scanned and level < settings.write_count:
-                    text += f'   ({settings.counts[0] - settings.counts[level]} objects'
-                    if settings.dropped_pieces[level]:
-                        text += f', {settings.dropped_pieces[level]} pieces'
-                    text += ')'
-                box.label(text=text)
+        _draw_hides_table(layout, settings)
         layout.operator('fss.lod_print_settings', icon='CONSOLE')
 
 
@@ -1148,25 +1107,7 @@ class FSS_PT_LodExportAdvanced(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         settings = context.scene.fss_lod_settings
-        layout.prop(settings, 'preview_target')
-        layout.prop(settings, 'screen_height')
-        layout.prop(settings, 'pixel_threshold')
-        layout.label(text='The size above is this threshold in pixels at this screen height')
         layout.prop(settings, 'msfs_vertex_factor')
-        layout.label(text='Vertex reports: High; counts do not affect culling')
-        for target in ('fs24', 'fs20'):
-            layout.label(text='FS20 minSize (unverified)' if target == 'fs20' else 'FS24 minSize')
-            layout.label(text='Screen ratios: 1 = 100%')
-            explicit = getattr(settings, 'explicit_' + target) or (target == 'fs20' and settings.explicit_fs24)
-            if settings.model_type == 'INTERIOR' and not explicit:
-                layout.label(text='Derived from interior / exterior diameter')
-                layout.operator('fss.lod_edit_table').target = target
-                if settings.scanned and target == settings.preview_target:
-                    for level, value in enumerate(settings.resolved_table):
-                        layout.label(text=f'LOD{level:02}: {value:.2%}')
-            else:
-                for level in range(7):
-                    layout.prop(settings, 'min_sizes_' + target, index=level, text=f'LOD{level:02}')
 
 
 def _on_preview_display_change(self, context):
@@ -1197,8 +1138,8 @@ def _on_load_post(*_dummy):
 
 
 CLASSES = (FSS_LodHintItem, FSS_LodSettings, FSS_OT_LodRefresh, FSS_OT_LodSelectHint, FSS_OT_LodInspectLevel,
-           FSS_OT_SetObjectLod, FSS_OT_LodPending, FSS_OT_SetViewportLod, FSS_OT_LodPrintSettings,
-           FSS_OT_LodEditTable, FSS_PT_Lod, FSS_PT_LodViewport, FSS_PT_LodSettings, FSS_PT_LodQuotaHints,
+           FSS_OT_SetObjectLod, FSS_OT_LodPending, FSS_OT_SetViewportLod, FSS_OT_LodViewShown, FSS_OT_LodPrintSettings,
+           FSS_PT_Lod, FSS_PT_LodViewport, FSS_PT_LodSettings, FSS_PT_LodQuotaHints,
            FSS_PT_LodExport, FSS_PT_LodExportAdvanced)
 
 
@@ -1224,6 +1165,7 @@ def register():
         description='Draw the sphere MSFS uses for LOD selection, its box, and the vertex or origin setting each face '
                     '(from the last Refresh LOD Counts)')
     if not bpy.app.background:
+        bpy.app.timers.register(_view_ratio_timer, first_interval=_AUTO_INTERVAL, persistent=True)
         _text_handle = bpy.types.SpaceView3D.draw_handler_add(_draw_viewport_lod_text, (), 'WINDOW', 'POST_PIXEL')
         for draw, kind in ((_draw_lod_sphere, 'POST_VIEW'), (_draw_lod_sphere_labels, 'POST_PIXEL')):
             _sphere_handles.append(bpy.types.SpaceView3D.draw_handler_add(draw, (), 'WINDOW', kind))
@@ -1237,6 +1179,8 @@ def register():
 def unregister():
     global _text_handle
     _stop_auto_timer()
+    if bpy.app.timers.is_registered(_view_ratio_timer):
+        bpy.app.timers.unregister(_view_ratio_timer)
     lod_model.restore_filter(bpy.context)
     for handlers, handler in ((bpy.app.handlers.save_pre, _on_save_pre),
                               (bpy.app.handlers.save_post, _on_save_post),

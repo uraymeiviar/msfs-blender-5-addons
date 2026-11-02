@@ -9,6 +9,12 @@ from dataclasses import dataclass
 
 
 DEFAULT_MIN_SIZES = (1.0, .75, .55, .35, .08, .05, .01)
+# Written to the MSFS 2024 XML: low on purpose (the SDK's own convention), so that the vertex count decides when a LOD shows
+MSFS_MIN_SIZES = (.07, .06, .05, .04, .03, .02, .01)
+
+
+# Screen size a vertex count needs at each MSFS graphics setting, compared with High (the columns of the SDK's table)
+QUALITY_FACTORS = {'ULTRA': .7071, 'HIGH': 1.0, 'MEDIUM': 1.4142, 'LOW': 2.0}
 
 
 def lowest_screen_size_from_vcount(count):
@@ -29,14 +35,15 @@ def max_vertex_count(screen_size):
     return math.floor(2500 + value ** (1 if screen_size <= 1 else 2) * 247500 + .5)
 
 
-def min_sizes(model_type, explicit, table, diameter, exterior_diameter, target):
-    """Resolve scene settings; never substitute exterior defaults for an interior."""
+def vertex_quota_at(ratio, factor=1.0, quality=1.0):
+    """The most vertices a LOD may have, as the panel estimates them, to be shown at this screen size: the curve's
+    limit, which is in MSFS's own count, divided by factor (see effective_min_sizes). quality: QUALITY_FACTORS."""
+    return math.floor(max_vertex_count(ratio / quality) / factor)
+
+
+def min_sizes(table, target):
+    """Validate a scene's minSize table; the same rules for every kind of model."""
     values = tuple(table)
-    if model_type == 'INTERIOR' and not explicit:
-        if exterior_diameter <= 0:
-            raise ValueError("exterior diameter missing")
-        values = (DEFAULT_MIN_SIZES[0],) + tuple(
-            value * diameter / exterior_diameter for value in DEFAULT_MIN_SIZES[1:])
     if len(values) != 7 or any(not math.isfinite(v) or v < 0 for v in values):
         raise ValueError("minSize requires seven finite, non-negative values")
     if any(a < b for a, b in zip(values, values[1:])):
@@ -68,8 +75,7 @@ class Decision:
     cutoff: float
 
 
-def decide(parts, level, diameter, table,
-           screen_height=1440, threshold=4.0, model_type='EXTERIOR'):
+def decide(parts, level, diameter, table, screen_height=1440, threshold=4.0, cutoff=None):
     """Cull whole subtrees, preserving only Auto ancestor chains of Keep objects.
 
 Explicit visibility intervals always win over Keep. A parent's exclusion reason
@@ -85,8 +91,9 @@ propagates to its descendants so the report partitions the input exactly once.
     if len(by_name) != len(parts):
         raise ValueError("LOD part names must be unique")
     upper = table[level - 1] if level else 0.0
-    cutoff = (diameter * threshold / (upper * screen_height) if upper > 0
-              else (math.inf if level and threshold > 0 else 0.0))
+    if cutoff is None:  # the artist's Hides Under wins; otherwise the default from the diameter and the table
+        cutoff = (diameter * threshold / (upper * screen_height) if upper > 0
+                  else (math.inf if level and threshold > 0 else 0.0))
     protected = set()
     warnings = []
     for part in parts:
@@ -125,9 +132,7 @@ propagates to its descendants so the report partitions the input exactly once.
         parent = by_name.get(part.parent)
         absent = reason(parent) if parent is not None else ''
         if not absent:
-            if model_type == 'INTERIOR' and level == 6:
-                absent = 'mark'
-            elif any((hide and level >= hide) or level < show for _, hide, show in part.outside_ancestors):
+            if any((hide and level >= hide) or level < show for _, hide, show in part.outside_ancestors):
                 absent = 'mark'
             elif (part.hide_from and level >= part.hide_from) or level < part.show_from:
                 absent = 'mark'
@@ -178,13 +183,13 @@ def screen_ratio(diameter, distance, fov_y):
     return min(10.0, (0.5 * diameter) / (distance * tan_half))
 
 
-def effective_min_sizes(table, vertex_counts, factor=1.0, write_count=7):
+def effective_min_sizes(table, vertex_counts, factor=1.0, write_count=7, quality=1.0):
     """Screen size from which MSFS shows each written LOD: the larger of its minSize and the size its vertex count
     needs on the curve (measured in DevMode Debug LODs at Objects Level of Detail 100). vertex_counts are scaled by
     factor to MSFS's own count, which differs from the exported file. The last LOD stays MSFS's fallback (see
     lod_from_screen_ratio)."""
     count = max(1, min(len(table), write_count))
-    return [max(table[level], lowest_screen_size_from_vcount(int(vertex_counts[level] * factor)))
+    return [max(table[level], quality * lowest_screen_size_from_vcount(int(vertex_counts[level] * factor)))
             for level in range(count)]
 
 

@@ -489,7 +489,7 @@ def test_gltf_leak():
 
 
 def test_refresh_on_open():
-    """Decision 21: on opening a file, Zones & Merge Tree, Materials and Scan Names refresh; never in background."""
+    """On opening a file, Zones & Merge Tree, Materials, Scan Names and LOD Counts refresh; never in background."""
     from fss_blender_tools import autorefresh
     build_scene()
     scene = bpy.context.scene
@@ -497,10 +497,13 @@ def test_refresh_on_open():
     scene.fss_materials.scanned = False
     scene.fss_merge.scanned = False
     scene.fss_name_check.scanned = False
+    scene.fss_lod_settings.scanned = False
+    scene.fss_lod_settings.hide_sizes = (0.0,) * 7
     ran = autorefresh.refresh_all()
     assert ran == list(autorefresh.REFRESHES), ran
     assert scene.fss_materials.scanned and len(scene.fss_materials.rows) > 0
     assert scene.fss_merge.scanned and scene.fss_name_check.scanned
+    assert scene.fss_lod_settings.scanned and scene.fss_lod_settings.hide_sizes[1] > 0, list(scene.fss_lod_settings.hide_sizes)
     assert autorefresh._on_load_post in bpy.app.handlers.load_post
     autorefresh._on_load_post()  # background: schedules nothing
     assert not bpy.app.timers.is_registered(autorefresh._refresh_timer)

@@ -84,11 +84,11 @@ def _node_positions(obj, scale):
     return points
 
 
-def _far_nodes(positions, mesh_bounds):
-    """(object name, metres outside the mesh box) for node positions beyond FAR_NODE_MARGIN, farthest first."""
-    if mesh_bounds is None:
+def _far_nodes(positions, bounds):
+    """(object name, metres outside the box) for node positions beyond FAR_NODE_MARGIN, farthest first."""
+    if bounds is None:
         return []
-    lo, hi = Vector(mesh_bounds[0]), Vector(mesh_bounds[1])
+    lo, hi = Vector(bounds[0]), Vector(bounds[1])
     far = []
     for name, points in positions.items():
         outside = max(Vector([max(lo[i] - p[i], p[i] - hi[i], 0.0) for i in range(3)]).length for p in points)
@@ -210,7 +210,7 @@ def estimate_scene_stats(context, plan=None):
     """
     from . import merge
     if plan is None:
-        plan = build_plan(context, context.scene.fss_lod_settings.preview_target)
+        plan = build_plan(context)
     scene = context.scene
     depsgraph = context.evaluated_depsgraph_get()
     scale = scene.unit_settings.scale_length
@@ -301,7 +301,6 @@ def estimate_scene_stats(context, plan=None):
         cutoff = decision.cutoff
         intended = plan['table'][level]
         quota = lod_rules.max_vertex_count(intended)
-        forced = plan['model_type'] == 'INTERIOR' and level == 0
 
         seen_instances = set()
         total_vertices = 0
@@ -391,14 +390,13 @@ def estimate_scene_stats(context, plan=None):
 
         required = (lod_rules.lowest_screen_size_from_vcount(total_vertices)
                     if plan['target'] == 'fs24' else 0.0)
-        over = (plan['target'] == 'fs24' and not forced and total_vertices > quota)
+        over = plan['target'] == 'fs24' and total_vertices > quota
         lod_stats.append({
             'level': level,
             'vertices': total_vertices,
             'quota': quota,
             'percent': (100.0 * total_vertices / quota) if quota > 0 else 0.0,
             'over': over,
-            'forced': forced,
             'required_min_size': required,
             'dropped_pieces': total_dropped_pieces,
             'dropped_vertices': total_dropped_vertices,
@@ -492,33 +490,34 @@ evaluated geometry in metres, and a part includes all of its exported descendant
     # corners lie on that sphere. Origins inside the box no longer matter; one outside still widens the sphere.
     mesh_diameter = _sphere_diameter(lod0_bounds, coords)
     padding = None
+    far_bounds = lod0_bounds  # an origin inside the padding box does not change the sphere, one outside it does
+    target_diameter = settings.pad_factor * mesh_diameter if settings.pad_factor > 1.0 else settings.reference_size
     if reference is not None:
         diameter = reference
-    elif settings.reference_size > mesh_diameter and lod0_bounds is not None:
+    elif target_diameter > mesh_diameter and lod0_bounds is not None:
         lo, hi = Vector(lod0_bounds[0]), Vector(lod0_bounds[1])
         half = (hi - lo) / 2 if (hi - lo).length > 0 else Vector((1.0, 1.0, 1.0))
-        half *= settings.reference_size / 2 / half.length
+        half *= target_diameter / 2 / half.length
         padding = (tuple((lo + hi) / 2), tuple(half))
         corners = [tuple(Vector(padding[0]) + Vector((sx * half.x, sy * half.y, sz * half.z)))
                    for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)]
-        sphere_bounds = _union([sphere_bounds, _bounds(corners)])
+        far_bounds = _bounds(corners)
+        sphere_bounds = _union([sphere_bounds, far_bounds])
         diameter = _sphere_diameter(sphere_bounds, coords + [np.array(points) for points in positions.values()]
                                     + [np.array(corners)])
     else:
         diameter = own_diameter
-    table = lod_rules.min_sizes(settings.model_type,
-                               (settings.explicit_fs20 or settings.explicit_fs24) if target == 'fs20'
-                               else settings.explicit_fs24,
-                               settings.min_sizes_fs20 if target == 'fs20' else settings.min_sizes_fs24,
-                               diameter, settings.exterior_diameter, target)
-    decisions = [lod_rules.decide(parts, level, diameter, table,
+    # A LOD without a Hides Under takes the default from the diameter and the SDK's table
+    decisions = [lod_rules.decide(parts, level, diameter, lod_rules.DEFAULT_MIN_SIZES,
                                 screen_height=settings.screen_height, threshold=settings.pixel_threshold,
-                                model_type=settings.model_type) for level in range(7)]
+                                cutoff=settings.hide_sizes[level] if level and settings.hide_sizes[level] > 0 else None)
+                 for level in range(7)]
+    table = lod_rules.min_sizes([value / 100.0 for value in settings.min_sizes], target)
     return {'parts': parts, 'decisions': decisions, 'diameter': diameter, 'own_diameter': own_diameter,
-            'table': table, 'target': target, 'model_type': settings.model_type,
+            'table': table, 'target': target,
             'bounds': sphere_bounds, 'mesh_bounds': lod0_bounds, 'mesh_diameter': mesh_diameter, 'padding': padding,
             'extremes': _box_extremes(candidates) if candidates else [],
-            'far_nodes': _far_nodes(positions, lod0_bounds), 'write_count': lod_rules.written_lod_count(decisions)}
+            'far_nodes': _far_nodes(positions, far_bounds), 'write_count': lod_rules.written_lod_count(decisions)}
 
 
 def begin_export(context, plan, level):
@@ -684,21 +683,13 @@ def report_file(path, plan, level):
     intended = plan['table'][level]
     required = lod_rules.lowest_screen_size_from_vcount(count) if plan['target'] == 'fs24' else 0.0
     effective = max(intended, required)
-    quota = lod_rules.max_vertex_count(intended)
     upper = plan['table'][level - 1] if level else float('inf')
-    forced = plan['model_type'] == 'INTERIOR' and level == 0
     line = (f'[FSS LOD] _LOD{level:02}: {len(plan["parts"])} objects in, '
             f'{len(decision.by_mark)} culled by mark, {len(decision.by_size)} culled by size, '
             f'{_culled_pieces} culled by size (pieces), '
             f'{_merged_meshes} merged meshes; {count:,} vertices (exact stored POSITION accessors, '
             f'instances counted once); intended {intended:.2%}..{upper:.2%}; '
             f'effective minSize {effective:.2%}')
-    if plan['target'] == 'fs24':
-        line += f'; High quota {count:,}/{quota:,} ({100 * count / quota:.1f}%)'
-    if forced:
-        line += '; interior LOD0 forced from the seat'
-    elif required > intended:
-        line += f'; WARNING High vertex limit: skipped between {intended:.2%} and {required:.2%}'
     if plan['target'] == 'fs20':
         line += '; FS20 table unverified; vertex correction disabled'
     line += '; MSFS seam/instance counting unverified'

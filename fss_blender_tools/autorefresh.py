@@ -1,15 +1,15 @@
 """Refresh on opening a file (material-management journal, decision 21).
 
-Zones & Merge Tree, Materials and Scan Names list the opened file's own data without the artist pressing Refresh.
-load_post runs before the window is ready for operators, so the refresh waits for a timer. Not in a background Blender
-(the deploy scripts open files there); LOD Counts and Check All stay manual (seconds to minutes on a cockpit).
+Zones & Merge Tree, Materials, Scan Names and LOD Counts list the opened file's own data without the artist pressing
+Refresh. load_post runs before the window is ready for operators, so the refresh waits for a timer. Not in a background
+Blender (the deploy scripts open files there); Check All stays manual (minutes on a cockpit).
 """
 
 import bpy
 from bpy.app.handlers import persistent
 
 # the operators run on opening, in this order; each is skipped when its poll fails (Materials needs Object Mode)
-REFRESHES = ('merge_refresh', 'materials_refresh', 'name_check_scan')
+REFRESHES = ('merge_refresh', 'materials_refresh', 'name_check_scan', 'lod_refresh')
 
 
 def refresh_all():
