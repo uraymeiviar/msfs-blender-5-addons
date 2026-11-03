@@ -174,8 +174,56 @@ class _Layout:
             self.calls.append((name, args, kwargs))
             if name == 'operator':
                 return SimpleNamespace()
-            return self if name in ('row', 'column', 'box') else None
+            return self if name in ('row', 'column', 'box', 'split') else None
         return call
+
+
+def test_tags_panel():
+    bpy.ops.wm.read_homefile(use_empty=True)
+    carrier = new_cube("CARRIER")
+    tags.set_tags(carrier, ["LIT"])
+    tags.set_tags(new_cube("OTHER"), ["GLASS"])
+    tags.set_keep_tags(bpy.context.scene, ["LIT"])
+    bpy.context.view_layer.objects.active = carrier
+
+    def draw(selected):
+        for obj in bpy.context.view_layer.objects:
+            obj.select_set(obj is carrier and selected)
+        calls = []
+        tags.FSS_PT_Tags.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+        return calls
+
+    def operators(calls, idname):
+        return [kwargs for name, args, kwargs in calls if name == 'operator' and args[0] == idname]
+
+    # The active object's box only with that object selected; nothing is highlighted without a selection
+    calls = draw(False)
+    assert not [call for call in calls if call[0] == 'box']
+    assert not any(kwargs['depress'] for kwargs in operators(calls, tags.FSS_OT_TagSelect.bl_idname))
+
+    calls = draw(True)
+    assert [call for call in calls if call[0] == 'box']
+    # The tag name is the only select button, highlighted for the tag of the selected object
+    names = {kwargs['text']: kwargs for kwargs in operators(calls, tags.FSS_OT_TagSelect.bl_idname)}
+    assert set(names) == {"GLASS (1)", "LIT (1)"}, names
+    assert names["LIT (1)"]['depress'] and names["LIT (1)"]['emboss']
+    assert not names["GLASS (1)"]['depress'] and not names["GLASS (1)"]['emboss']
+
+    # Icons only, with a real icon for each Keep state
+    keep = operators(calls, tags.FSS_OT_TagToggleKeep.bl_idname)
+    assert [(kwargs['text'], kwargs['icon'], kwargs['depress']) for kwargs in keep] == [
+        ("", 'UNPINNED', False), ("", 'PINNED', True)], keep
+    known = bpy.types.UILayout.bl_rna.functions['operator'].parameters['icon'].enum_items
+    assert 'PINNED' in known and 'UNPINNED' in known
+
+    # Per row: rename before the name; merge, Keep, a gap, delete
+    order = [args[0] if name == 'operator' else name for name, args, _kwargs in calls
+             if name in ('operator', 'separator', 'split')]
+    row = order[len(order) - order[::-1].index('split'):]
+    assert row == [tags.FSS_OT_TagRemove.bl_idname, tags.FSS_OT_TagAdd.bl_idname, tags.FSS_OT_TagRename.bl_idname,
+                   tags.FSS_OT_TagSelect.bl_idname, tags.FSS_OT_TagToggleSkipMerge.bl_idname,
+                   tags.FSS_OT_TagToggleKeep.bl_idname, 'separator', tags.FSS_OT_TagDelete.bl_idname], row
+    print("PASS: test_tags_panel")
 
 
 def test_draw_smoke():
@@ -492,6 +540,7 @@ def main():
     test_tree_rows()
     test_zone_mark()
     test_nearest_zone()
+    test_tags_panel()
     test_draw_smoke()
     test_group_picks()
     test_totals()

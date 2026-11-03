@@ -178,7 +178,8 @@ class FSS_OT_TagToggleSkipMerge(bpy.types.Operator):
 class FSS_OT_TagToggleKeep(bpy.types.Operator):
     bl_idname = 'fss.tag_toggle_keep'
     bl_label = 'Keep Tag in LODs'
-    bl_description = 'Keep tagged objects and their Auto ancestor chains against size culling'
+    bl_description = ("Never hide objects with this tag for being small: the automatic LOD size rule leaves them, and "
+                      "the Auto objects above them, in every LOD. A Hidden from or Visible from mark still wins")
     bl_options = {'REGISTER', 'UNDO'}
 
     tag: bpy.props.StringProperty(name='Tag')
@@ -270,10 +271,8 @@ class FSS_PT_Tags(bpy.types.Panel):
         op_rem.active_only = False
 
         obj = context.active_object
-        box = layout.box()
-        if obj is None:
-            box.label(text="No active object", icon='INFO')
-        else:
+        if obj is not None and obj.select_get():
+            box = layout.box()
             tags = get_tags(obj)
             box.label(text=f"{obj.name}: {len(tags)} tag(s)", icon='OBJECT_DATA')
             for tag in tags:
@@ -294,7 +293,10 @@ class FSS_PT_Tags(bpy.types.Panel):
             column = layout.column(align=True)
             for tag in sorted(counts):
                 skipped = tag in skip_tags
-                tag_row = column.row(align=True)
+                kept = tag in keep_tags
+                # A split, so the buttons on the right do not move with the length of the tag name
+                split = column.split(factor=0.7, align=True)
+                tag_row = split.row(align=True)
 
                 if has_selection:
                     can_remove = any(has_tag(o, tag) for o in selected)
@@ -313,25 +315,30 @@ class FSS_PT_Tags(bpy.types.Panel):
                     op_plus = sub_plus.operator(FSS_OT_TagAdd.bl_idname, text="", icon='ADD')
                     op_plus.tag = tag
 
-                tag_row.operator(FSS_OT_TagSelect.bl_idname, text="", icon='RESTRICT_SELECT_OFF').tag = tag
+                tag_row.operator(FSS_OT_TagRename.bl_idname, text="", icon='GREASEPENCIL').tag = tag
                 name_sub = tag_row.row(align=True)
                 name_sub.alignment = 'LEFT'
+                # Filled behind the text when a selected object has the tag
+                carried = any(has_tag(o, tag) for o in context.selected_objects)
                 name_sub.operator(
                     FSS_OT_TagSelect.bl_idname,
                     text=f"{tag} ({counts[tag]})",
-                    emboss=False,
+                    emboss=carried,
+                    depress=carried,
                 ).tag = tag
-                tag_row.label(text="")
 
-                op = tag_row.operator(
+                action_row = split.row(align=True)
+                action_row.alignment = 'RIGHT'
+                op = action_row.operator(
                     FSS_OT_TagToggleSkipMerge.bl_idname, text="",
                     icon='AUTOMERGE_OFF' if skipped else 'AUTOMERGE_ON',
                     depress=skipped,
                 )
                 op.tag = tag
-                tag_row.operator('fss.tag_toggle_keep', text='Keep', depress=tag in keep_tags).tag = tag
-                tag_row.operator(FSS_OT_TagRename.bl_idname, text="", icon='GREASEPENCIL').tag = tag
-                tag_row.operator(FSS_OT_TagDelete.bl_idname, text="", icon='TRASH').tag = tag
+                action_row.operator(FSS_OT_TagToggleKeep.bl_idname, text="", icon='PINNED' if kept else 'UNPINNED',
+                                    depress=kept).tag = tag
+                action_row.separator(factor=0.5)
+                action_row.operator(FSS_OT_TagDelete.bl_idname, text="", icon='TRASH').tag = tag
         else:
             layout.label(text="No tags in this file")
 

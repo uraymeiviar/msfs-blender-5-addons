@@ -22,8 +22,8 @@ objects. Artist guide: [../user/fss-tools.md](../user/fss-tools.md#tags).
 
 - **Status:** implemented
 - **Requirement:** The tag field takes one or more names separated by `;` or `,`; **+** adds them to the selected
-  objects, **-** removes them. The active object's tags are listed, each with **X** to remove it from the active
-  object only. In the tag list, per tag, **-** and **+** remove it from or add it to the selected objects; they are
+  objects, **-** removes them. While the active object is selected, its tags are listed, each with **X** to remove it
+  from the active object only. In the tag list, per tag, **-** and **+** remove it from or add it to the selected objects; they are
   greyed out when they would change nothing. Linked and library-override objects are not changed.
 - **Data:** DAT-006, DAT-020
 - **Decision:** TM S1.2
@@ -35,9 +35,10 @@ objects. Artist guide: [../user/fss-tools.md](../user/fss-tools.md#tags).
 - **Status:** implemented
 - **Requirement:** The panel lists every tag in the file with the number of objects that carry it. Clicking a tag
   selects the visible objects with it (Shift + click adds to the selection); hidden objects are counted but not
-  selected.
-- **Decision:** TM S1.2
-- **Test:** no test
+  selected. The name is highlighted when at least one selected object has the tag. Per row, from the left: **-** and
+  **+**, rename, the name; on the right, at the same place in every row, Don't Merge, Keep, a small gap, delete.
+- **Decision:** TM S1.2; TM S10.1 to S10.6
+- **Test:** `tests/test_zone_tree.py::test_tags_panel` (what the panel draws, not the selection)
 - **Code:** `tags.py` (`FSS_OT_TagSelect`)
 
 ### TAG-004: Rename and delete
@@ -68,9 +69,10 @@ objects. Artist guide: [../user/fss-tools.md](../user/fss-tools.md#tags).
 
 - **Status:** implemented
 - **Requirement:** A tag's Keep toggle adds it to or removes it from `fss_lod_settings.keep_tags`. An object with
-  such a tag is treated like an object with the Keep mark (LOD-003).
+  such a tag is treated like an object with the Keep mark (LOD-003). The toggle is a pin icon, with a tooltip saying
+  what it does.
 - **Data:** DAT-003
-- **Decision:** LOD 11
+- **Decision:** LOD 11; TM S10.7
 - **Test:** `tests/build_lod_scene.py` (`keep_tags` with one tagged object; cannot be re-run as it stands, see
   [README.md](README.md#test-references))
 - **Code:** `tags.py` (`FSS_OT_TagToggleKeep`), `lod_model.py`
