@@ -72,6 +72,16 @@ forks do, not that a single FSS feature works.
 - **Decision:** none recorded (Known Issue of the exporter guide)
 - **Test:** no test
 
+### EXP-015: Multi-exporter settings cleared on file load
+
+- **Status:** implemented
+- **Requirement:** The settings the MSFS 2024 multi-exporter leaves on the glTF hook class (`Export.msfs_export_settings`)
+  live in the scene and are cleared before a file load frees it. Without this, a multi-export, then a new or opened file,
+  then a plain export with the target MSFS 2024 crashes Blender.
+- **Decision:** WNI 3
+- **Test:** `tests/test_export_settings_reference.py`
+- **Code:** `msfs2020_target.py` (`_on_load_pre`)
+
 ### EXP-014: Anisotropic preview
 
 - **Status:** implemented

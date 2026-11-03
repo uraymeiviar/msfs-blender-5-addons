@@ -136,6 +136,10 @@ def _on_load_pre(*_args):
     # Session uids restart with the new file: forget the previous file's scenes before any load_post
     # handler (the MSFS 2024 one runs first) asks for a target
     _detected_scenes.clear()
+    # The multi-exporter leaves its settings on the hook class, and they live in the scene this load frees: the next
+    # plain MSFS 2024 export would read them and crash Blender
+    from .io.exp.gltf_hooks import Export
+    Export.msfs_export_settings = None
 
 
 @persistent
