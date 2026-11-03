@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from dataclasses import dataclass
 
 from copy import copy
+from math import ceil, floor
 from ...com import msfs_logs
 import bpy
 
@@ -115,7 +116,6 @@ class AsoboChannel:
     ):
         self.target_property = target_property
         self.sampler = sampler
-        self.sampler_index = -1
 
 class AsoboMaterialAnimation:
     def __init__(self, channels: list[AsoboChannel], material_name:str):
@@ -127,10 +127,16 @@ class MaterialAction():
     Wrapper arround bpy.types.Action
     Associates an action with a unique action name that is action_name + used slot name on blender >= 4.4.
     """
-    def __init__(self, action: bpy.types.Action, slot: bpy.types.ActionSlot|None = None):
+    def __init__(
+        self,
+        action: bpy.types.Action,
+        slot: bpy.types.ActionSlot|None = None,
+        strip: bpy.types.NlaStrip|None = None
+    ):
 
         self.action = action
         self.slot = slot
+        self.strip = strip
 
     @property
     def unique_name(self)-> str:
@@ -173,8 +179,8 @@ class ExportCache:
         gltf_anim_names : set[str]
             Names of all glTF animations containing one or more material animations.
 
-        sampled_material_anims : dict[str, AsoboMaterialAnimation]
-            Mapping between a unique action-slot identifier and the corresponding
+        sampled_material_anims : dict[tuple, AsoboMaterialAnimation]
+            Mapping between a sampling key (see _get_sampling_key) and the corresponding
             AsoboMaterialAnimation.
 
         animations_to_force_keep : dict[str, set[AnimToKeep]]
@@ -197,7 +203,7 @@ class ExportCache:
         self.treated_materials: set[str] = set()
         self.new_gltf_anim_names: set[str] = set()
         self.gltf_anim_names: set[str] = set()
-        self.sampled_material_anims: dict[str, AsoboMaterialAnimation] = {}
+        self.sampled_material_anims: dict[tuple, AsoboMaterialAnimation] = {}
 
         self.animations_to_force_keep: dict[str, set[AnimToKeep]] = {}
 
@@ -299,8 +305,8 @@ def gather_material_animations(
     for anim_name, material_action in anim_material_action.items():
         # An action can be used by multiple materials.
         # Check whether this action has already been processed to avoid unnecessary sampling.
-        unique_name = material_action.unique_name
-        mat_animation = export_cache.sampled_material_anims.get(unique_name, None)
+        sampling_key = _get_sampling_key(material, material_action)
+        mat_animation = export_cache.sampled_material_anims.get(sampling_key, None)
 
         if mat_animation :
             # This action was already sampled for another material.
@@ -315,7 +321,7 @@ def gather_material_animations(
             )
             if mat_animation:
                 # Add to cache
-                export_cache.sampled_material_anims[unique_name] = mat_animation
+                export_cache.sampled_material_anims[sampling_key] = mat_animation
 
         if not mat_animation:
             continue
@@ -509,8 +515,11 @@ def _get_material_action(
         return None
     if SUPPORTED_ACTION_SLOTS and not slot:
         return None
-    
-    return MaterialAction(action, slot)
+
+    # Unified add-on: in NLA Tracks mode Khronos exports the object at the strip's scene frames; the material follows
+    # it. In Actions mode both use the action's own frames.
+    strip = data if export_cache.export_nla and isinstance(data, bpy.types.NlaStrip) else None
+    return MaterialAction(action, slot, strip)
 
 
 def _get_anim_material_actions(material: bpy.types.Material) -> dict[str, MaterialAction]:
@@ -942,21 +951,21 @@ def _warn_user_of_invalid_target(material_name: str, target_property: str):
         details=details,
     )
 
-def _sample_material_action(
+def _get_target_property_fcurves(
     material: bpy.types.Material,
     mat_action: MaterialAction,
-    khronos_export_settings: dict
-) -> None|AsoboMaterialAnimation:
+    warn: bool = False
+) -> dict[str, list[bpy.types.FCurve]]:
+    """Retrieve all fcurves for each animated material property."""
 
     target_property_fcurves = {}
-    
-    # Retrieve all fcurves for each animated material property
+
     fcurves = _get_action_fcurves(mat_action.action, mat_action.slot)
     if not fcurves:
-        return None
+        return target_property_fcurves
 
     for fcurve in fcurves:
-        
+
         if fcurve.mute:
             continue
         if len(fcurve.keyframe_points) == 0:
@@ -965,30 +974,74 @@ def _sample_material_action(
         target_property = fcurve.data_path
         valid_target_path = CHANNEL_TARGET_PATHS.get(target_property, None)
         if not valid_target_path:
-            _warn_user_of_invalid_target(material.name, target_property)
+            if warn:
+                _warn_user_of_invalid_target(material.name, target_property)
+            continue
+
+        if fcurve.array_index >= len(_get_property_values(material, target_property)):
             continue
 
         if target_property not in target_property_fcurves:
             target_property_fcurves[target_property] = []
 
         target_property_fcurves[target_property].append(fcurve)
-    
-    # Ensure all FCurves of a target property are unmuted if at least one is unmuted.
-    # This prevents exporting invalid values (e.g. colors with missing R, G, B, or A components).
-    for fcurve in fcurves:
-        target_property = fcurve.data_path
-        if fcurve.mute and target_property in target_property_fcurves.keys():
-            fcurve.mute = False
 
-    is_emissive_factor = (
-        target_property == MSFS2024_MaterialProperties.EMISSIVECOLOR.attribute_name()
-    )
+    return target_property_fcurves
+
+
+def _get_sampling_key(material: bpy.types.Material, mat_action: MaterialAction) -> tuple:
+    """
+    Unified add-on: materials can share samples only when they give the same values: same action and slot, same
+    strip placement, and the same material values where they enter the samples (Emissive Scale, components
+    without an F-Curve).
+    """
+    material_values = []
+    for target_property, fcurves in _get_target_property_fcurves(material, mat_action).items():
+        keyed = {fcurve.array_index for fcurve in fcurves}
+        values = _get_property_values(material, target_property)
+        material_values.append(
+            (target_property, tuple((i, v) for i, v in enumerate(values) if i not in keyed))
+        )
+        if target_property == MSFS2024_MaterialProperties.EMISSIVECOLOR.attribute_name():
+            material_values.append(material.msfs_emissive_scale)
+
+    placement = None
+    strip = mat_action.strip
+    if strip:
+        placement = (
+            strip.frame_start, strip.frame_end, strip.action_frame_start, strip.action_frame_end,
+            strip.scale, strip.use_reverse
+        )
+    return (mat_action.unique_name, placement, tuple(material_values))
+
+
+def _sample_material_action(
+    material: bpy.types.Material,
+    mat_action: MaterialAction,
+    khronos_export_settings: dict
+) -> None|AsoboMaterialAnimation:
+
+    # Unified add-on: Asobo unmuted the muted F-Curves of an animated property here, which changed the artist's
+    # animation and still dropped their components. Muted components now hold the material's value, as in the preview.
+    target_property_fcurves = _get_target_property_fcurves(material, mat_action, warn=True)
+
     emissive_scale = material.msfs_emissive_scale
 
     # Create AsoboChannel for each target property
     channels = []
     for target_property, fcurves in target_property_fcurves.items():
-        keyframes = _get_fcurves_keyframes(fcurves, khronos_export_settings)
+        is_emissive_factor = (
+            target_property == MSFS2024_MaterialProperties.EMISSIVECOLOR.attribute_name()
+        )
+        keyframes = _get_fcurves_keyframes(
+            fcurves,
+            _get_property_values(material, target_property),
+            mat_action.strip,
+            khronos_export_settings
+        )
+        if not keyframes:
+            # No frame in the exported range
+            continue
         input_accessor, output_accessor = _construct_input_output_accessors(
             keyframes,
             khronos_export_settings,
@@ -1017,58 +1070,64 @@ def _sample_material_action(
     return animation
 
 
+def _get_property_values(material: bpy.types.Material, target_property: str) -> list[float | int]:
+    value = getattr(material, target_property)
+    return list(value) if hasattr(value, "__len__") else [value]
+
+
+def _strip_action_frame(strip: bpy.types.NlaStrip, frame: float) -> float:
+    """Unified add-on: the action frame an NLA strip plays at a scene frame (placement, scale, repeat, reverse)."""
+    length = strip.action_frame_end - strip.action_frame_start
+    elapsed = max((frame - strip.frame_start) / strip.scale, 0.0)
+    if elapsed >= length:
+        # A repeat starts over on its boundary; the strip's last frame holds the action's end
+        elapsed = elapsed % length if length > 0 and frame < strip.frame_end else length
+    if strip.use_reverse:
+        return strip.action_frame_end - elapsed
+    return strip.action_frame_start + elapsed
+
+
 def _get_fcurves_keyframes(
-    fcurves: list[bpy.types.FCurve], 
+    fcurves: list[bpy.types.FCurve],
+    default_values: list[float | int],
+    strip: None | bpy.types.NlaStrip,
     khronos_export_settings: dict
 ) -> list[Keyframe] :
+    """
+    Unified add-on: one keyframe per scene frame, so the export matches the Blender preview whatever the easing.
+    Every keyframe has all the components of the property, in array order. A component without an F-Curve
+    holds the material's value.
+    """
 
     keyframes: list[Keyframe] = []
-    frame_value: dict[int, list[float | int]] = {}
 
-    crop_negative_frame = False
-    use_gltf_frame_range = False
+    if strip:
+        first_frame = floor(strip.frame_start)
+        last_frame = ceil(strip.frame_end)
+    else:
+        key_frames = [keyframe.co[0] for fcurve in fcurves for keyframe in fcurve.keyframe_points]
+        first_frame = floor(min(key_frames))
+        last_frame = ceil(max(key_frames))
+
     if bpy.app.version >= (3, 6, 0):
         if khronos_export_settings['gltf_negative_frames'] == "CROP":
-            crop_negative_frame = True
+            first_frame = max(first_frame, 0)
         if khronos_export_settings['gltf_frame_range'] is True:
-            use_gltf_frame_range = True
+            first_frame = max(first_frame, bpy.context.scene.frame_start)
+            last_frame = min(last_frame, bpy.context.scene.frame_end)
 
-    # parse fcurve and get each frame value
-    for fcurve in fcurves:
-        frames = set()
-        for keyframe in fcurve.keyframe_points:
-            frame = int(keyframe.co[0])
-            if crop_negative_frame and frame < 0:
-                continue
-            if use_gltf_frame_range and frame < bpy.context.scene.frame_start or frame > bpy.context.scene.frame_end :
-                continue
+    for frame in range(first_frame, last_frame + 1):
+        action_frame = _strip_action_frame(strip, frame) if strip else frame
+        value = list(default_values)
+        for fcurve in fcurves:
+            value[fcurve.array_index] = fcurve.evaluate(action_frame)
 
-            frames.add(frame)
-
-        if not frames:
-            continue
-
-        frames = sorted(frames)
-
-        # Get channel value for each frame
-        for frame in frames:
-            value = fcurve.evaluate(frame)
-
-            if frame not in frame_value:
-                frame_value[frame] = []
-
-            frame_value[frame].append(value)
-
-    for frame, value in frame_value.items():
         key = Keyframe()
         key.frame = frame
         key.value = value
         keyframes.append(key)
 
     return keyframes
-
-def _lerp(start, end, factor):
-    return (1 - factor) * start + factor * end
 
 def _construct_input_output_accessors(
     keyframes: list[Keyframe],
@@ -1078,32 +1137,10 @@ def _construct_input_output_accessors(
 )->tuple[gltf2_io.Accessor, gltf2_io.Accessor]:
     
     # Construct input accessor first
-    first_frame = keyframes[0].frame
-    last_frame = keyframes[-1].frame
-    frame_range = range(first_frame, last_frame + 1)
+    # Unified add-on: keyframes hold every frame of the range (see _get_fcurves_keyframes)
+    final_frame_times = [keyframe.seconds for keyframe in keyframes]
 
-    frame_times = {}
-    for keyframe in keyframes:
-        frame_times[keyframe.frame] = keyframe.seconds
-    
-    # Get time for entire range of frames
-    final_frame_times = []
-    for frame in frame_range:
-        if frame in frame_times:
-            final_frame_times.append(frame_times[frame])
-        else:
-            # Interpolate between the two closest keyframes
-            prev_time = max(k for k in frame_times if k <= frame)
-            next_time = min(k for k in frame_times if k >= frame)
-
-            if prev_time == next_time:
-                final_frame_times.append(frame_times[prev_time])
-            else:
-                factor = (frame - prev_time) / (next_time - prev_time)
-                interpolated_value = _lerp(frame_times[prev_time], frame_times[next_time], factor)
-                final_frame_times.append(interpolated_value)
-
-    min_time = keyframes[0].seconds 
+    min_time = keyframes[0].seconds
     max_time = keyframes[-1].seconds
     if bpy.app.version < (5, 2, 0):
         input_accessor = gltf2_blender_gather_accessors.gather_accessor(
@@ -1133,7 +1170,7 @@ def _construct_input_output_accessors(
                     export_settings
         )
     # Construct output accessor
-    keyframe_values = {}
+    final_values = []
     for keyframe in keyframes:
         keyframe_value = keyframe.value
         # Special case for emissive, in gltf emissive is stored as result of
@@ -1141,27 +1178,7 @@ def _construct_input_output_accessors(
         if is_emissive_factor:
             keyframe_value = [emissive_scale * val for val in keyframe_value]
 
-        keyframe_values[keyframe.frame] = keyframe_value
-
-    # Get value for entire range of frame
-    final_values = []
-    for frame in frame_range:
-        if frame in keyframe_values:
-            final_values += keyframe_values[frame]
-        else:
-            # Interpolate between the two closest keyframes
-            prev_time = max(k for k in keyframe_values if k <= frame)
-            next_time = min(k for k in keyframe_values if k >= frame)
-
-            if prev_time == next_time:
-                final_values += keyframe_values[prev_time]
-            else:
-                factor = (frame - prev_time) / (next_time - prev_time)
-                interpolated_values = [
-                    _lerp(keyframe_values[prev_time][i], keyframe_values[next_time][i], factor)
-                    for i in range(len(keyframe_values[prev_time]))
-                ]
-                final_values += interpolated_values
+        final_values += keyframe_value
 
     # Store the keyframe data in a binary buffer
     component_type = gltf2_io_constants.ComponentType.Float
@@ -1207,7 +1224,6 @@ def _insert_mat_anim_samplers_in_gltf2_anim(
         
         if material_channel.sampler not in gltf2_animation.samplers:
             gltf2_animation.samplers.insert(sampler_index, material_channel.sampler)
-            material_channel.sampler_index = sampler_index
             sampler_index += 1
 
 
@@ -1232,8 +1248,10 @@ def _append_mat_anim_channels_in_extension(
     sucessfull = False
     for material_channel in material_animation.channels:
         channel = {}
-        channel["sampler"] = material_channel.sampler_index
-        
+        # Unified add-on: looked up per animation, a channel can be shared by several animations and materials
+        if material_channel.sampler not in gltf2_animation.samplers:
+            continue
+        channel["sampler"] = gltf2_animation.samplers.index(material_channel.sampler)
 
         # Create Targets
         material_index = None
