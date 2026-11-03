@@ -176,7 +176,7 @@ A section inside **UV Auto Packing**. Measures, from the cameras you include and
 
 ## General
 
-In the tab **FSS Tools**. Helpers for parenting and object origins. Both work in Object Mode on the selected objects, and both can be undone.
+In the tab **FSS Tools**. Helpers for parenting, object origins and mesh names. All work in Object Mode on the selected objects, and all can be undone.
 
 ### Add Parent
 
@@ -202,6 +202,16 @@ Moves the origin of each selected object to a point of its tightest bounding box
 - Use it to bring an origin back into its geometry; far origins change the LOD switch distances (see [lod.md](lod.md#origins-outside-the-geometry)).
 
 Pitfall: the object's rotation values change. Do not use it on an object whose own transform is animated; the animation keys would no longer match.
+
+### Rename Meshes
+
+Names the meshes of the selected objects and of everything below them, hidden objects too. Object names stay as they are.
+
+- A mesh used by one object becomes `MESH_<object name>`.
+- A mesh used by several objects in the file becomes `MESH_SHARED_<first object name>`, with the first name in alphabetical order (`SCREW_10` comes before `SCREW_2`). All its users count, selected or not, so the name also changes for objects outside the selection.
+- `@MERGE_`, `@NOMERGE_` and `@ZONE_` are left out: a mesh on `@NOMERGE_PANEL` becomes `MESH_PANEL`.
+- If a name is taken by a mesh outside the selection or is too long, Blender changes it (for example `.001` at the end), and the report warns about it. Meshes linked from another file are skipped.
+- UV results kept for the session, such as visibility scores and seam counts, may need running again after a rename.
 
 ## Empty Bounds
 

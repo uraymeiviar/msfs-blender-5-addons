@@ -78,6 +78,19 @@ Checks, the check wishes, and other wishes without an area of their own. Artist 
 - **Notes:** the object's rotation values change; an object whose own transform is animated no longer matches its
   keys.
 
+### GEN-014: Rename Meshes
+
+- **Status:** implemented
+- **Requirement:** In Object Mode, the meshes of the selected objects and every object below them, hidden ones too, are
+  renamed: `MESH_<object>` for a mesh with one user, `MESH_SHARED_<first object>` for a mesh with several users in the
+  file, selected or not, the first in alphabetical order. `@MERGE_`, `@NOMERGE_` and `@ZONE_` are left out of the name.
+  Object names do not change. Meshes swapping names within the selection get the right names; a name taken outside
+  the selection or too long is changed by Blender and reported as a warning. Linked and library-override meshes are
+  skipped. One undo step.
+- **Decision:** TM S12.1 to S12.5
+- **Test:** `tests/test_panels.py::test_rename_meshes` (skipping linked meshes is not tested)
+- **Code:** `tools.py` (`FSS_OT_RenameMeshes`)
+
 ## Empty Bounds
 
 ### GEN-003: Boxes around empties' subtrees

@@ -757,6 +757,69 @@ def test_add_parent():
     print("PASS: test_add_parent (siblings get one empty at the active object; others refused with a note)")
 
 
+def test_rename_meshes():
+    bpy.ops.wm.read_homefile(use_empty=True)
+    collection = bpy.context.scene.collection
+
+    def new(name, mesh_name=None, parent=None):
+        data = None
+        if mesh_name is not None:
+            data = bpy.data.meshes.get(mesh_name) or bpy.data.meshes.new(mesh_name)
+        obj = bpy.data.objects.new(name, data)
+        collection.objects.link(obj)
+        obj.parent = parent
+        return obj
+
+    root = new("ROOT")
+    plain = new("PLAIN", "Cube.001", root)
+    marked = new("@NOMERGE_PANEL", "Cube.002", root)
+    deep = new("DEEP", "Cube.003", new("GROUP", None, root))
+    hidden = new("HIDDEN", "Cube.004", root)
+    # Shared with a user outside the selection, which sorts first
+    in_shared = new("SCREW_B", "Screw", root)
+    out_shared = new("SCREW_A", "Screw")
+    # Two meshes holding each other's names, a name taken outside, one already right, one not touched
+    swap_a = new("SWAP_A", "MESH_SWAP_B", root)
+    swap_b = new("SWAP_B", "MESH_SWAP_A", root)
+    taken = new("TAKEN", "Cube.005", root)
+    outside_taken = new("ELSEWHERE", "MESH_TAKEN")
+    done = new("DONE", "MESH_DONE", root)
+    untouched = new("UNTOUCHED", "Cube.006")
+
+    bpy.context.view_layer.update()
+    hidden.hide_set(True)
+    for obj in bpy.context.view_layer.objects:
+        obj.select_set(obj is root)
+    assert bpy.ops.fss.add_empty_parent.poll() and bpy.ops.fss.rename_meshes.poll()
+    assert bpy.ops.fss.rename_meshes() == {'FINISHED'}
+
+    expected = {plain: "MESH_PLAIN", marked: "MESH_PANEL", deep: "MESH_DEEP", hidden: "MESH_HIDDEN",
+                in_shared: "MESH_SHARED_SCREW_A", out_shared: "MESH_SHARED_SCREW_A", swap_a: "MESH_SWAP_A",
+                swap_b: "MESH_SWAP_B", taken: "MESH_TAKEN.001", outside_taken: "MESH_TAKEN", done: "MESH_DONE",
+                untouched: "Cube.006"}
+    got = {obj: obj.data.name for obj in expected}
+    assert got == expected, {obj.name: name for obj, name in got.items()}
+    assert not [mesh.name for mesh in bpy.data.meshes if mesh.name.startswith("FSS_RENAME_")]
+    assert root.name == "ROOT" and marked.name == "@NOMERGE_PANEL", "object names stay"
+
+    # Several roots, and nothing to rename
+    empty = new("EMPTY")
+    other = new("OTHER", "Cube.007")
+    bpy.context.view_layer.update()
+    for obj in bpy.context.view_layer.objects:
+        obj.select_set(obj in (empty, other, untouched))
+    assert bpy.ops.fss.rename_meshes() == {'FINISHED'}
+    assert (other.data.name, untouched.data.name) == ("MESH_OTHER", "MESH_UNTOUCHED")
+    for obj in bpy.context.view_layer.objects:
+        obj.select_set(obj is empty)
+    try:
+        result = bpy.ops.fss.rename_meshes()
+    except RuntimeError:  # the warning of a cancelled operator is raised in background Blender
+        result = {'CANCELLED'}
+    assert result == {'CANCELLED'}
+    print("PASS: test_rename_meshes (subtree with hidden objects, shared, markers, swaps, a taken name, linked not run)")
+
+
 def build_names(scene, obj):
     from fss_blender_tools import tools
     for candidate in bpy.context.view_layer.objects:
@@ -779,6 +842,7 @@ def main():
     test_export_settings_one_table()
     test_lod_settings_bars()
     test_add_parent()
+    test_rename_meshes()
     print("ALL TESTS PASSED")
 
 

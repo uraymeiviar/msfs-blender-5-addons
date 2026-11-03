@@ -1,8 +1,10 @@
-"""Tools: scene authoring helpers for parenting and object origins.
+"""Tools: scene authoring helpers for parenting, object origins and mesh names.
 
-Add Parent inserts one empty parent above the selected objects, at the active object's location and rotation (unit scale), taking over its
-current parent and collections while keeping the object's world transform. Naming supports Manual (single object only,
-defaulting to <SelectedObjectName>_PARENT), Suffix (default _PARENT) and Prefix (default PARENT_).
+Add Parent inserts one empty parent above the selected siblings, at the active object's location and rotation (unit
+scale), taking over their parent and the active object's collections while keeping world transforms. Naming supports
+Manual (default <ActiveObjectName>_PARENT), Suffix (default _PARENT), Prefix (default PARENT_) and the markers @MERGE_,
+@NOMERGE_ and @ZONE_ with an editable name.
+Rename Meshes names the meshes of the selection and everything below it MESH_<object>, or MESH_SHARED_<first object>.
 Origin to Bounding Box computes the minimum-volume oriented bounding box (OBB) of each selected object's own geometry
 (children excluded), aligns the object's origin orientation to the OBB and moves its origin to the chosen point (from
 8 corners, 6 face centers or 12 edge centers) without moving the geometry or any child objects in world space.
@@ -391,6 +393,67 @@ class FSS_OT_AddEmptyParent(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def _objects_below(roots) -> set:
+    """The roots and every object below them, hidden ones too. One pass over the file: obj.children scans it each time."""
+    children = {}
+    for obj in bpy.data.objects:
+        if obj.parent is not None:
+            children.setdefault(obj.parent, []).append(obj)
+    found = set()
+    stack = list(roots)
+    while stack:
+        obj = stack.pop()
+        if obj not in found:
+            found.add(obj)
+            stack.extend(children.get(obj, ()))
+    return found
+
+
+def _mesh_name_for(users) -> str:
+    """MESH_<node>, or MESH_SHARED_<first node> for a mesh with several users; markers are left out."""
+    names = sorted(_without_marker(obj.name) for obj in users)
+    return f"MESH_SHARED_{names[0]}" if len(names) > 1 else f"MESH_{names[0]}"
+
+
+class FSS_OT_RenameMeshes(bpy.types.Operator):
+    bl_idname = "fss.rename_meshes"
+    bl_label = "Rename Meshes"
+    bl_description = ("Name the meshes of the selected objects and everything below them MESH_<object>. A mesh used by "
+                      "several objects in the file becomes MESH_SHARED_<first object>, for all of its users")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and bool(context.selected_objects)
+
+    def execute(self, context):
+        users = {}
+        for obj in bpy.data.objects:
+            if obj.type == 'MESH':
+                users.setdefault(obj.data, []).append(obj)
+        meshes = {obj.data for obj in _objects_below(context.selected_objects) if obj.type == 'MESH'}
+        editable = [mesh for mesh in meshes if mesh.library is None and mesh.override_library is None]
+        if not editable:
+            self.report({'WARNING'}, "No meshes to rename in the selection")
+            return {'CANCELLED'}
+        wanted = {mesh: _mesh_name_for(users[mesh]) for mesh in editable}
+        changing = [mesh for mesh in editable if mesh.name != wanted[mesh]]
+        # Through temporary names, so that meshes swapping names do not take each other's name
+        for index, mesh in enumerate(changing):
+            mesh.name = f"FSS_RENAME_{index}"
+        for mesh in sorted(changing, key=wanted.get):
+            mesh.name = wanted[mesh]
+        taken = sum(mesh.name != wanted[mesh] for mesh in changing)
+
+        message = f"Renamed {len(changing)} mesh(es)"
+        for count, text in ((len(editable) - len(changing), "already named"), (len(meshes) - len(editable), "linked, skipped"),
+                            (taken, "name taken or too long, Blender changed it")):
+            if count:
+                message += f"; {count} {text}"
+        self.report({'WARNING'} if taken else {'INFO'}, message)
+        return {'FINISHED'}
+
+
 class FSS_OT_SelectOriginTarget(bpy.types.Operator):
     bl_idname = "fss.select_origin_target"
     bl_label = "Select Origin Target"
@@ -564,11 +627,15 @@ class FSS_PT_Tools(bpy.types.Panel):
         op.target = target
         row.menu(FSS_MT_OriginToBounds.bl_idname, text=TARGET_LABELS.get(target, target))
 
+        # Row 3: [Rename Meshes]
+        layout.operator(FSS_OT_RenameMeshes.bl_idname, icon='MESH_DATA')
+
 
 CLASSES = (
     FSS_OT_SelectEmptyParentMode,
     FSS_MT_EmptyParentMode,
     FSS_OT_AddEmptyParent,
+    FSS_OT_RenameMeshes,
     FSS_OT_SelectOriginTarget,
     FSS_OT_OriginToBounds,
     FSS_MT_OriginBoundsCorners,

@@ -48,6 +48,7 @@ Based on Asobo's MSFS 2024 exporter 8.4.1 for Blender 5.2; FSS changes live in F
 | :--- | :--- | :--- | :--- |
 | Add Parent (one empty above selected siblings; Manual, Suffix, Prefix, `@MERGE_`, `@NOMERGE_`, `@ZONE_` naming) | implemented | `tools.py` | GEN-001 |
 | Origin to Bounding Box (tightest box, corners, faces, edges) | implemented | `tools.py` | GEN-002 |
+| Rename Meshes (`MESH_<object>`, `MESH_SHARED_<first object>`) | implemented | `tools.py`; tags-and-merge journal Session 12 | GEN-014 |
 | Empty Bounds: boxes of empties' subtrees, parent highlight, clickable hierarchy text | implemented | W29; `20261011.fss-blender-tools-empty-bounds.md` | GEN-003, GEN-004 |
 | Heatmap: Distortion (shear, area, both), Density, Visibility; chart, legend, UV grid with labels | implemented | UV 57 to 63, 66, 84, 89 | GEN-005 to GEN-007 |
 | Scan Names: suffix, collision, case, characters, default names, taken, clash; batch rename | implemented | W2 (without the project contract); `20261011.fss-blender-tools-name-check.md`; UV 87 | GEN-008, GEN-009 |
