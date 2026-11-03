@@ -21,6 +21,7 @@ from .....blender.utils.msfs_material_utils import (
     MSFS2024_MaterialTypes
 )
 from .....io.com.msfs_material_utils import MSFS2024_MaterialUtils
+from ..... import anisotropic_preview  # FSS
 
 class AsoboAnisotropic:
 
@@ -86,7 +87,7 @@ def register():
     bpy.types.Material.msfs_anisotropic_direction_roughness_y_texture = bpy.props.PointerProperty(
         name=MSFS2024_MaterialProperties.ANISODIRECTIONROUGHNESSTEXTURE.property_name(),
         type=bpy.types.Image,
-        # update = MSFS2024_MaterialPropUpdate.update_comp_texture, ## TODO
+        update=anisotropic_preview.update_image,  # FSS
     )
 
 def unregister():

@@ -65,6 +65,17 @@ The reference is shown in the **Export Target** panel while the target is **MSFS
 
 Do not change the reference of a scene with converted materials unless you mean to change how bright they are in MSFS 2020.
 
+### Anisotropic Preview
+
+**Anisotropic** and **Hair** materials with an **Anisotropic Direction (RG), Roughness Y (B)** texture show the effect in **Material Preview** and **Rendered** views: the highlights follow the direction in the texture, for example the woven stripes of a seat belt. It is a preview only; what is exported does not change.
+
+- **Nothing to set up.** Set the texture in the material panel and the effect appears. Clearing the texture returns the material to its plain look.
+- **Existing files:** after updating the add-on, restart Blender and open the file. The preview is added when the file opens.
+- **Update Material Nodes**, in the material panel under that texture, updates every Anisotropic and Hair material of the file. You only need it if the preview is missing, which can happen when another MSFS add-on is enabled next to this one.
+- **Cycles** shows true anisotropy. **Material Preview** and **EEVEE** cannot, so they show an approximation made to match Cycles: the stripes on flat parts are close, on curved parts they are weaker.
+- **MSFS has the final word.** Use the preview to check the direction and placement of the effect, and check the final look in the simulator.
+- A Blender with an older add-on shows these materials without the effect. Their export is the same.
+
 ## Instancing
 
 When several objects share one mesh, the export writes the mesh once and every object refers to it (an instance). This keeps files small, for example for hundreds of identical screws.

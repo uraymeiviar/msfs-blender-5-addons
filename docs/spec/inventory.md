@@ -20,7 +20,7 @@ Sources: **W***n* = item *n* of the wish-list journal (`20261010.fss-blender-too
 
 ## 1. Exporter (`io_scene_gltf2_msfs_fss`)
 
-Based on Asobo's MSFS 2024 exporter 8.4.1 for Blender 5.2; FSS changes live in FSS-owned modules (`instancing.py`, `migration.py`, `legacy_normals.py`, `msfs2020_target.py`, `fss_workflow_ui.py`, `io/exp/gltf_exporter_patches.py`, marked spots in `io/exp/multi_export.py`). Guide: [../user/exporter.md](../user/exporter.md); journal: `20261002.msfs2024-blender5-exporter-conversion.md`.
+Based on Asobo's MSFS 2024 exporter 8.4.1 for Blender 5.2; FSS changes live in FSS-owned modules (`instancing.py`, `migration.py`, `legacy_normals.py`, `msfs2020_target.py`, `fss_workflow_ui.py`, `anisotropic_preview.py`, `io/exp/gltf_exporter_patches.py`, marked spots in `io/exp/multi_export.py`). Guide: [../user/exporter.md](../user/exporter.md); journal: `20261002.msfs2024-blender5-exporter-conversion.md`.
 
 | Feature | Status | Source | Spec |
 | :--- | :--- | :--- | :--- |
@@ -30,6 +30,7 @@ Based on Asobo's MSFS 2024 exporter 8.4.1 for Blender 5.2; FSS changes live in F
 | Target detection on open: a `.blend` without a saved target that holds MSFS 2020 data opens as MSFS 2020; nothing is converted | implemented (added 20261028) | `msfs2020_target.py` | EXP-002 |
 | Export For per object and Prepare for MSFS 2024 (MSFS 2024 gizmos and lights next to the legacy ones) | implemented (added 20261028) | `msfs2020_target.py`, `ui/prepare_msfs2024.py` | EXP-005, EXP-006 |
 | Emissive reference for MSFS 2020 exports (scene value or add-on preference) | implemented (added 20261028) | `migration.py`, exporter guide | EXP-004 |
+| Anisotropic and Hair textures shown in Material Preview and Rendered views, exports unchanged | implemented (added 20261103) | `20261103.anisotropic-preview.md`; `anisotropic_preview.py` | EXP-014 |
 | Instancing: a shared mesh exported once, also when its users have only Auto Smooth with the same angle | implemented | `instancing.py` | EXP-008 |
 | Clean-up on export: NLA tweak mode, Edit and Pose Mode | implemented | exporter guide | EXP-009 |
 | Asobo's export workflow hidden (Multi-Export Hierarchy tab, LOD Tools panel) in favour of the FSS deploy, merge groups and LOD marks | implemented | `fss_workflow_ui.py` | EXP-010 |

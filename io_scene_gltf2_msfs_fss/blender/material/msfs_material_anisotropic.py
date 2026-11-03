@@ -30,8 +30,9 @@ from ..utils.msfs_material_utils import (
 )
 
 from .msfs_material import MSFS2024_Material
+from ... import anisotropic_preview  # FSS
 
-class MSFS2024_Anisotropic(MSFS2024_Material):
+class MSFS2024_Anisotropic(anisotropic_preview.AnisotropicPreviewMixin, MSFS2024_Material):  # FSS: mixin
 
     attributes = [
         MSFS2024_MaterialProperties.BASECOLOR,
@@ -329,4 +330,5 @@ class MSFS2024_Anisotropic(MSFS2024_Material):
             prop=MSFS2024_MaterialProperties.ANISODIRECTIONROUGHNESSTEXTURE.attribute_name(),
             text=MSFS2024_MaterialProperties.ANISODIRECTIONROUGHNESSTEXTURE.property_name()
         )
+        anisotropic_preview.draw_update_operator(box, material)  # FSS
     

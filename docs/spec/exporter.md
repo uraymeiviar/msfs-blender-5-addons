@@ -72,6 +72,20 @@ forks do, not that a single FSS feature works.
 - **Decision:** none recorded (Known Issue of the exporter guide)
 - **Test:** no test
 
+### EXP-014: Anisotropic preview
+
+- **Status:** implemented
+- **Requirement:** An Anisotropic or Hair material with an anisotropic texture shows the effect in Material Preview
+  and Rendered views: true anisotropy in Cycles, an approximation in EEVEE. The material's own Principled BSDF, its
+  Material Output and the artist's image stay as they are, and every export is identical with and without the
+  preview. Metal, emission and alpha work in both engines. Without the texture the material is unchanged. The preview
+  appears when the texture is set and when a file opens; the operator Update Material Nodes applies it to all such
+  materials of the file.
+- **Decision:** AP S1 decisions 1 to 5
+- **Test:** `tests/test_anisotropic_preview.py`
+- **Code:** `anisotropic_preview.py`; marked lines in `blender/material/msfs_material_anisotropic.py`,
+  `blender/material/msfs_material_hair.py`, `io/com/extensions/material/asobo_material_anisotropic.py`
+
 ## One File for Both Simulators
 
 ### EXP-005: Export For
