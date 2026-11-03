@@ -47,17 +47,20 @@ Checks, the check wishes, and other wishes without an area of their own. Artist 
 
 ## General
 
-### GEN-001: Add Empty Parent
+### GEN-001: Add Parent
 
 - **Status:** implemented
-- **Requirement:** In Object Mode, for each selected object, a new Plain Axes empty is created at the object's world
-  location and rotation with scale 1. The empty takes over the object's parent (including a parent bone) and its
-  collections; the object becomes its child without moving. Naming: Manual (one selected object only, default
-  `<object>_PARENT`; with several objects Suffix is used), Suffix (object name + suffix, default `_PARENT`), Prefix
-  (prefix + object name, default `PARENT_`). One undo step.
+- **Requirement:** In Object Mode, one new Plain Axes empty is created above the selected objects, at the world
+  location and rotation of the active object (the first selected object if the active one is not selected) with scale
+  1. The selected objects must have the same parent, parent type and parent bone, or no parent; otherwise the
+  operator is refused and the panel says why. The empty takes over their parent (including a parent bone) and the
+  active object's collections; the objects become its children without moving. Naming from the active object: Manual
+  (default `<object>_PARENT`), Suffix (object name + suffix, default `_PARENT`), Prefix (prefix + object name, default
+  `PARENT_`), `@MERGE_`, `@NOMERGE_`, `@ZONE_` (the marker + an editable name, default the object name without a
+  marker). One undo step.
 - **Data:** DAT-006
-- **Decision:** none recorded
-- **Test:** no test
+- **Decision:** TM S11.1 to S11.6
+- **Test:** `tests/test_panels.py::test_add_parent`
 - **Code:** `tools.py` (`FSS_OT_AddEmptyParent`)
 
 ### GEN-002: Origin to Bounding Box

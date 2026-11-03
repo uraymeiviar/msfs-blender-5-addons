@@ -46,7 +46,7 @@ Based on Asobo's MSFS 2024 exporter 8.4.1 for Blender 5.2; FSS changes live in F
 
 | Feature | Status | Source | Spec |
 | :--- | :--- | :--- | :--- |
-| Add Empty Parent (Manual, Suffix, Prefix naming) | implemented | `tools.py` | GEN-001 |
+| Add Parent (one empty above selected siblings; Manual, Suffix, Prefix, `@MERGE_`, `@NOMERGE_`, `@ZONE_` naming) | implemented | `tools.py` | GEN-001 |
 | Origin to Bounding Box (tightest box, corners, faces, edges) | implemented | `tools.py` | GEN-002 |
 | Empty Bounds: boxes of empties' subtrees, parent highlight, clickable hierarchy text | implemented | W29; `20261011.fss-blender-tools-empty-bounds.md` | GEN-003, GEN-004 |
 | Heatmap: Distortion (shear, area, both), Density, Visibility; chart, legend, UV grid with labels | implemented | UV 57 to 63, 66, 84, 89 | GEN-005 to GEN-007 |

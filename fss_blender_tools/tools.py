@@ -1,6 +1,6 @@
 """Tools: scene authoring helpers for parenting and object origins.
 
-Add Empty Parent inserts an empty parent at each selected object's location and rotation (unit scale), taking over its
+Add Parent inserts one empty parent above the selected objects, at the active object's location and rotation (unit scale), taking over its
 current parent and collections while keeping the object's world transform. Naming supports Manual (single object only,
 defaulting to <SelectedObjectName>_PARENT), Suffix (default _PARENT) and Prefix (default PARENT_).
 Origin to Bounding Box computes the minimum-volume oriented bounding box (OBB) of each selected object's own geometry
@@ -57,10 +57,14 @@ TARGET_LABELS = {item[0]: item[1] for item in ALL_TARGETS}
 TARGET_ENUM_ITEMS = tuple((item[0], item[1], "") for item in ALL_TARGETS)
 
 NAMING_MODES = (
-    ("MANUAL", "Manual", "Type the full empty name (only available when a single object is selected)"),
-    ("SUFFIX", "Suffix", "Append the suffix to each selected object's name"),
-    ("PREFIX", "Prefix", "Prepend the prefix to each selected object's name"),
+    ("MANUAL", "Manual", "Type the full empty name"),
+    ("SUFFIX", "Suffix", "Append the suffix to the active object's name"),
+    ("PREFIX", "Prefix", "Prepend the prefix to the active object's name"),
+    ("MERGE", "@MERGE_", "A merge group: @MERGE_ plus the name you type"),
+    ("NOMERGE", "@NOMERGE_", "Stays out of its merge group: @NOMERGE_ plus the name you type"),
+    ("ZONE", "@ZONE_", "A zone: @ZONE_ plus the name you type"),
 )
+MARKER_PREFIXES = {"MERGE": "@MERGE_", "NOMERGE": "@NOMERGE_", "ZONE": "@ZONE_"}
 NAMING_MODE_LABELS = {item[0]: item[1] for item in NAMING_MODES}
 
 # All 24 right-handed signed permutations of 3 basis vectors
@@ -238,17 +242,29 @@ def compute_obb(obj, depsgraph):
     return rot_mat, b_min, b_max
 
 
-def _single_selected_object(context):
-    if context is None:
+def _anchor_object(context):
+    """The object the new parent follows: the active object if selected, otherwise the first selected one."""
+    selected = context.selected_objects
+    if not selected:
         return None
-    selected = getattr(context, "selected_objects", None)
-    if selected and len(selected) == 1:
-        return selected[0]
-    return None
+    active = context.active_object
+    return active if active is not None and active.select_get() else selected[0]
+
+
+def _have_same_parent(objects) -> bool:
+    keys = {(obj.parent, obj.parent_type, obj.parent_bone) if obj.parent is not None else None for obj in objects}
+    return len(keys) <= 1
+
+
+def _without_marker(name) -> str:
+    for prefix in MARKER_PREFIXES.values():
+        if name.startswith(prefix):
+            return name[len(prefix):]
+    return name
 
 
 def _get_manual_name(scene):
-    obj = _single_selected_object(bpy.context)
+    obj = _anchor_object(bpy.context)
     custom = scene.get("_fss_empty_parent_custom_name", "")
     custom_obj = scene.get("_fss_empty_parent_custom_obj", "")
     if obj is not None:
@@ -259,38 +275,49 @@ def _get_manual_name(scene):
 
 
 def _set_manual_name(scene, value):
-    obj = _single_selected_object(bpy.context)
+    obj = _anchor_object(bpy.context)
     scene["_fss_empty_parent_custom_name"] = value
     scene["_fss_empty_parent_custom_obj"] = obj.name if obj is not None else ""
 
 
-def effective_naming_mode(scene, context) -> str:
+def _get_marker_name(scene):
+    obj = _anchor_object(bpy.context)
+    custom = scene.get("_fss_empty_parent_marker_name", "")
+    custom_obj = scene.get("_fss_empty_parent_marker_obj", "")
+    if obj is not None:
+        if custom and custom_obj == obj.name:
+            return custom
+        return _without_marker(obj.name)
+    return custom or "GROUP"
+
+
+def _set_marker_name(scene, value):
+    obj = _anchor_object(bpy.context)
+    scene["_fss_empty_parent_marker_name"] = value
+    scene["_fss_empty_parent_marker_obj"] = obj.name if obj is not None else ""
+
+
+def build_empty_parent_name(scene, obj) -> str:
     mode = scene.fss_empty_parent_mode
-    if mode == 'MANUAL' and len(context.selected_objects) > 1:
-        return 'SUFFIX'
-    return mode
-
-
-def build_empty_parent_name(scene, context, obj, mode) -> str:
     if mode == 'MANUAL':
         name = scene.fss_empty_parent_manual_name.strip()
         return name if name else f"{obj.name}_PARENT"
     if mode == 'PREFIX':
         return f"{scene.fss_empty_parent_prefix}{obj.name}"
+    if mode in MARKER_PREFIXES:
+        name = _without_marker(scene.fss_empty_parent_marker_name.strip()) or _without_marker(obj.name)
+        return f"{MARKER_PREFIXES[mode]}{name}"
     return f"{obj.name}{scene.fss_empty_parent_suffix}"
 
 
 class FSS_OT_SelectEmptyParentMode(bpy.types.Operator):
     bl_idname = "fss.select_empty_parent_mode"
     bl_label = "Select Empty Parent Naming Rule"
-    bl_description = "Choose how Add Empty Parent names the new empty object(s)"
+    bl_description = "Choose how Add Parent names the new empty"
 
     mode: bpy.props.EnumProperty(name="Rule", items=NAMING_MODES, default="MANUAL")
 
     def execute(self, context):
-        if self.mode == 'MANUAL' and len(context.selected_objects) > 1:
-            self.report({'WARNING'}, "Manual naming is only available when a single object is selected")
-            return {'CANCELLED'}
         context.scene.fss_empty_parent_mode = self.mode
         return {'FINISHED'}
 
@@ -301,69 +328,66 @@ class FSS_MT_EmptyParentMode(bpy.types.Menu):
 
     def draw(self, context):
         layout = self.layout
-        scene = context.scene
-        multi = len(context.selected_objects) > 1
-        current = effective_naming_mode(scene, context)
+        current = context.scene.fss_empty_parent_mode
 
         for mode_id, label, _desc in NAMING_MODES:
-            row = layout.row()
-            if mode_id == 'MANUAL' and multi:
-                row.enabled = False
             icon = 'RADIOBUT_ON' if current == mode_id else 'RADIOBUT_OFF'
-            row.operator(FSS_OT_SelectEmptyParentMode.bl_idname, text=label, icon=icon).mode = mode_id
+            layout.operator(FSS_OT_SelectEmptyParentMode.bl_idname, text=label, icon=icon).mode = mode_id
 
 
 class FSS_OT_AddEmptyParent(bpy.types.Operator):
     bl_idname = "fss.add_empty_parent"
-    bl_label = "Add Empty Parent"
-    bl_description = ("Insert an empty parent at each selected object's location and rotation, "
-                      "keeping all world transforms")
+    bl_label = "Add Parent"
+    bl_description = ("Insert one empty above the selected objects, at the active object's location and rotation, "
+                      "keeping all world transforms. Several objects must have the same parent")
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
     def poll(cls, context):
-        return context.mode == 'OBJECT' and bool(context.selected_objects)
+        if context.mode != 'OBJECT' or not context.selected_objects:
+            return False
+        if not _have_same_parent(context.selected_objects):
+            cls.poll_message_set("The selected objects have different parents")
+            return False
+        return True
 
     def execute(self, context):
         scene = context.scene
         selected = list(context.selected_objects)
-        mode = effective_naming_mode(scene, context)
-        created = []
-        for obj in selected:
-            world = obj.matrix_world.copy()
-            loc, rot, _scale = world.decompose()
-            empty_world = Matrix.LocRotScale(loc, rot, Vector((1.0, 1.0, 1.0)))
+        anchor = _anchor_object(context)
+        worlds = {obj: obj.matrix_world.copy() for obj in selected}
+        loc, rot, _scale = worlds[anchor].decompose()
+        empty_world = Matrix.LocRotScale(loc, rot, Vector((1.0, 1.0, 1.0)))
 
-            parent = obj.parent
-            parent_type = obj.parent_type if parent is not None else 'OBJECT'
-            parent_bone = obj.parent_bone if parent is not None else ""
+        parent = anchor.parent
+        parent_type = anchor.parent_type if parent is not None else 'OBJECT'
+        parent_bone = anchor.parent_bone if parent is not None else ""
 
-            empty_name = build_empty_parent_name(scene, context, obj, mode)
-            empty = bpy.data.objects.new(empty_name, None)
-            empty.empty_display_type = 'PLAIN_AXES'
-            empty.empty_display_size = 0.02
-            collections = list(obj.users_collection) or [context.scene.collection]
-            for collection in collections:
-                collection.objects.link(empty)
+        empty = bpy.data.objects.new(build_empty_parent_name(scene, anchor), None)
+        empty.empty_display_type = 'PLAIN_AXES'
+        empty.empty_display_size = 0.02
+        collections = list(anchor.users_collection) or [context.scene.collection]
+        for collection in collections:
+            collection.objects.link(empty)
 
-            if parent is not None:
-                empty.parent = parent
-                empty.parent_type = parent_type
-                if parent_type == 'BONE':
-                    empty.parent_bone = parent_bone
-                context.view_layer.update()
-            empty.matrix_world = empty_world
+        if parent is not None:
+            empty.parent = parent
+            empty.parent_type = parent_type
+            if parent_type == 'BONE':
+                empty.parent_bone = parent_bone
             context.view_layer.update()
+        empty.matrix_world = empty_world
+        context.view_layer.update()
 
+        for obj in selected:
             obj.parent = empty
             obj.parent_type = 'OBJECT'
             obj.parent_bone = ""
             obj.matrix_parent_inverse.identity()
-            obj.matrix_world = world
-            created.append(empty)
+            obj.matrix_world = worlds[obj]
 
         context.view_layer.update()
-        self.report({'INFO'}, f"Added {len(created)} empty parent(s)")
+        self.report({'INFO'}, f"Added {empty.name} above {len(selected)} object(s)")
         return {'FINISHED'}
 
 
@@ -516,18 +540,22 @@ class FSS_PT_Tools(bpy.types.Panel):
         layout = self.layout
         scene = context.scene
 
-        # Row 1: [Add Empty Parent] Name: [Mode pulldown] [Text input]
-        mode = effective_naming_mode(scene, context)
-        row = layout.row(align=True)
-        row.operator(FSS_OT_AddEmptyParent.bl_idname, text="Add Empty Parent", icon='EMPTY_AXIS')
-        row.label(text="Name:")
-        row.menu(FSS_MT_EmptyParentMode.bl_idname, text=NAMING_MODE_LABELS.get(mode, mode))
+        # Row 1: [Add Parent] [Name: mode pulldown] [Text input]; the label is in the pulldown, so it leaves no gap
+        mode = scene.fss_empty_parent_mode
+        split = layout.split(factor=0.28, align=True)
+        split.operator(FSS_OT_AddEmptyParent.bl_idname, text="Add Parent", icon='EMPTY_AXIS')
+        name_split = split.split(factor=0.42, align=True)
+        name_split.menu(FSS_MT_EmptyParentMode.bl_idname, text=f"Name: {NAMING_MODE_LABELS.get(mode, mode)}")
         if mode == 'MANUAL':
-            row.prop(scene, "fss_empty_parent_manual_name", text="")
+            name_split.prop(scene, "fss_empty_parent_manual_name", text="")
         elif mode == 'PREFIX':
-            row.prop(scene, "fss_empty_parent_prefix", text="")
+            name_split.prop(scene, "fss_empty_parent_prefix", text="")
+        elif mode in MARKER_PREFIXES:
+            name_split.prop(scene, "fss_empty_parent_marker_name", text="")
         else:
-            row.prop(scene, "fss_empty_parent_suffix", text="")
+            name_split.prop(scene, "fss_empty_parent_suffix", text="")
+        if not _have_same_parent(context.selected_objects):
+            layout.label(text="Add Parent: the selected objects have different parents", icon='INFO')
 
         # Row 2: [Origin to Bounding Box] [Target pulldown]
         target = scene.fss_origin_target
@@ -560,7 +588,7 @@ def register():
     )
     bpy.types.Scene.fss_empty_parent_mode = bpy.props.EnumProperty(
         name="Naming Rule", items=NAMING_MODES, default="MANUAL",
-        description="How Add Empty Parent names the created empty object(s)",
+        description="How Add Parent names the new empty",
     )
     bpy.types.Scene.fss_empty_parent_manual_name = bpy.props.StringProperty(
         name="Name", get=_get_manual_name, set=_set_manual_name,
@@ -568,15 +596,20 @@ def register():
     )
     bpy.types.Scene.fss_empty_parent_suffix = bpy.props.StringProperty(
         name="Suffix", default="_PARENT",
-        description="Suffix appended to each selected object's name",
+        description="Suffix appended to the active object's name",
     )
     bpy.types.Scene.fss_empty_parent_prefix = bpy.props.StringProperty(
         name="Prefix", default="PARENT_",
-        description="Prefix prepended to each selected object's name",
+        description="Prefix prepended to the active object's name",
+    )
+    bpy.types.Scene.fss_empty_parent_marker_name = bpy.props.StringProperty(
+        name="Name", get=_get_marker_name, set=_set_marker_name,
+        description="The name after the marker (defaults to the active object's name)",
     )
 
 
 def unregister():
+    del bpy.types.Scene.fss_empty_parent_marker_name
     del bpy.types.Scene.fss_empty_parent_prefix
     del bpy.types.Scene.fss_empty_parent_suffix
     del bpy.types.Scene.fss_empty_parent_manual_name

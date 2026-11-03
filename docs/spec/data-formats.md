@@ -82,7 +82,7 @@ requirements that use it. Properties that are registered (`bpy.props`) are saved
   | `fss_name_check` | group: scan results, `include_bones` (on), `show_rules` (all) | GEN-008 |
   | `fss_tag_name` | string, the tag field of the Tags panel | TAG-002 |
   | `fss_origin_target` | enum, default `FACE_NZ` (Bottom -Z) | GEN-002 |
-  | `fss_empty_parent_mode`, `_suffix`, `_prefix`, `_manual_name` | enum MANUAL / SUFFIX / PREFIX; `_PARENT`; `PARENT_` | GEN-001 |
+  | `fss_empty_parent_mode`, `_suffix`, `_prefix`, `_manual_name`, `_marker_name` | enum MANUAL / SUFFIX / PREFIX / MERGE / NOMERGE / ZONE; `_PARENT`; `PARENT_` | GEN-001 |
   | `fss_empty_bounds_mode`, `_in_front`, `_hierarchy_text` | ALL / SELECTED / OFF, default ALL; on; on | GEN-003 |
   | `fss_uv_heatmap_mode`, `_grid`, `_grid_cells`, `_grid_labels` | SHAPE / DENSITY / VISIBILITY; on; 16; on | GEN-005 |
   | `fss_uv_heatmap_show`, `_distortion`, `_opacity` | not saved; off; BOTH | GEN-005 |
@@ -91,7 +91,8 @@ requirements that use it. Properties that are registered (`bpy.props`) are saved
   | `fss_uv_density_freedom_min`, `_max` | float, default 0.9 and 1.1 | UV-DEN-002 |
 
   The scene custom properties `_fss_empty_parent_custom_name` and `_fss_empty_parent_custom_obj` remember a
-  manual empty-parent name for one object.
+  manual empty-parent name for one object, and `_fss_empty_parent_marker_name` and `_fss_empty_parent_marker_obj` the
+  name typed after a marker.
 - **Decision:** UV 66 (heatmap grid saved), UV 88, UV 106; others none recorded
 - **Test:** `tests/test_panels.py::test_draw_all` (every panel draws with these properties)
 

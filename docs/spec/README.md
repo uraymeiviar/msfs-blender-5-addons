@@ -121,7 +121,7 @@ Gaps found while the specification was drafted; each shows at its requirement as
 | The merge rules have no unit test; the only export check is the LOD pair above, which cannot be re-run as it stands | MRG-001 to MRG-012, DAT-043 |
 | Tags have no test of their behaviour; only what the panel draws is tested (TAG-003) | TAG-001 to TAG-007 |
 | Exporter features without a test: target detection, migration and emissive reference, Prepare for MSFS 2024, legacy normals, instancing, export clean-up, the hidden Asobo workflow; Export For and the unchanged materials after an MSFS 2020 export only indirectly | EXP-002 to EXP-010 |
-| General tools without a test: Add Empty Parent, Origin to Bounding Box, Empty Bounds, batch rename, Fix Broken Bone Parents; Scan Names tested for markers only | GEN-001 to GEN-004, GEN-008, GEN-009, GEN-013 |
+| General tools without a test: Origin to Bounding Box, Empty Bounds, batch rename, Fix Broken Bone Parents; Scan Names tested for markers only | GEN-002 to GEN-004, GEN-008, GEN-009, GEN-013 |
 | LOD features without a test: loose pieces, the loose-piece and near-cut-off hints, the padding object in an export, Show LOD Sphere, Print LOD Settings, hidden reference empties | LOD-007, LOD-012, LOD-016 to LOD-019, DAT-039 |
 | Auto Seam's core rules (no diagonal cuts, chart acceptance) are only measured with prototype scripts, not in a unit suite | UV-SEAM-001 |
 | How Visibility Scoring combines instances was not checked against the code | UV-VIS-005 |

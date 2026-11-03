@@ -178,16 +178,18 @@ A section inside **UV Auto Packing**. Measures, from the cameras you include and
 
 In the tab **FSS Tools**. Helpers for parenting and object origins. Both work in Object Mode on the selected objects, and both can be undone.
 
-### Add Empty Parent
+### Add Parent
 
-Puts a new empty above each selected object.
+Puts one new empty above the selected objects.
 
-- The empty sits at the object's location and rotation, with scale 1. It is a small Plain Axes empty.
-- The empty takes over the object's old parent (also a parent bone) and its collections. The object becomes its child and does not move.
+- **Several objects must be siblings:** they need the same parent (the same bone, if parented to a bone), or no parent at all. Otherwise the button is greyed out and a note below it says so. This guards against selecting everything by mistake.
+- The empty sits at the active object's location and rotation, with scale 1, so choose the active object to place it. If the active object is not selected, the first selected object is used. It is a small Plain Axes empty.
+- The empty takes over the objects' parent (also a parent bone) and the active object's collections. The objects become its children and do not move.
 - **Name:** pick the naming rule from the menu next to the button, then edit the text field:
-  - **Manual:** type the full name. Only for one selected object; the default is `<object name>_PARENT`. With several objects selected, the tool uses **Suffix**.
-  - **Suffix:** object name plus the suffix (default `_PARENT`).
-  - **Prefix:** prefix (default `PARENT_`) plus the object name.
+  - **Manual:** type the full name; the default is `<active object name>_PARENT`.
+  - **Suffix:** active object's name plus the suffix (default `_PARENT`).
+  - **Prefix:** prefix (default `PARENT_`) plus the active object's name.
+  - **@MERGE_**, **@NOMERGE_**, **@ZONE_:** the marker plus the name you type, which starts as the active object's name. For example **@MERGE_** and `PANEL` give `@MERGE_PANEL`. A marker already in the name is not doubled.
 
 ### Origin to Bounding Box
 

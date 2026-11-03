@@ -57,7 +57,7 @@ Steps marked **in development** describe what the tool will do, and how to get t
   - **Its position relative to the aircraft datum** (the world origin) places the scene in the aircraft. Everything below it moves with it: a longer variant's cockpit is the same cockpit with its root moved forward.
   - **Place it at the centre of the LOD sphere**, inside the scene, never on the datum. MSFS measures how large the model is on screen from that centre, so a camera there always sees `_LOD00`. MSFS works out the centre itself, from the geometry and every origin; the root does not set it, but a root far outside the geometry would move and enlarge the sphere (the root is exported, and its origin counts like every other). Compare it with **Show LOD Sphere** (step 5).
   - To move the root without moving what is below it, turn on **Options > Transform > Affect Only: Parents** in the 3D Viewport header, move it, and turn the option off again.
-- Use **Add Empty Parent** to group parts without moving them, and **Origin to Bounding Box** to bring origins back into their geometry (not on objects whose own transform is animated). See [General](fss-tools.md#general) (sidebar tab **FSS Tools**).
+- Use **Add Parent** to group parts without moving them, and **Origin to Bounding Box** to bring origins back into their geometry (not on objects whose own transform is animated). See [General](fss-tools.md#general) (sidebar tab **FSS Tools**).
 - Run **Scan Names** and **Fix Broken Bone Parents** in [Checks](fss-tools.md#checks) (tab **FSS Tools**).
 - **Empty Bounds** (tab **FSS Tools**) shows what each empty contains; use it to check the hierarchy. See [Empty Bounds](fss-tools.md#empty-bounds).
 

@@ -675,6 +675,101 @@ def test_lod_settings_bars():
           f"nothing)")
 
 
+def test_add_parent():
+    bpy.ops.wm.read_homefile(use_empty=True)
+    scene = bpy.context.scene
+    collection = bpy.data.collections.new("PARTS")
+    scene.collection.children.link(collection)
+
+    def new(name, parent=None, location=(0.0, 0.0, 0.0)):
+        obj = bpy.data.objects.new(name, None)
+        collection.objects.link(obj)
+        obj.parent = parent
+        obj.location = location
+        return obj
+
+    def select(*objects, active=None):
+        bpy.context.view_layer.update()  # new objects reach the view layer here
+        for obj in bpy.context.view_layer.objects:
+            obj.select_set(obj in objects)
+        bpy.context.view_layer.objects.active = active
+        assert set(bpy.context.selected_objects) == set(objects)
+
+    root = new("ROOT", location=(1.0, 0.0, 0.0))
+    root.rotation_euler = (0.0, 0.0, 0.5)
+    a, b = new("A", root, (1.0, 2.0, 3.0)), new("B", root, (-1.0, 0.0, 0.0))
+    b.rotation_euler = (0.3, 0.0, 0.0)
+    a.rotation_euler = (0.0, 0.7, 0.0)
+    other = new("OTHER")
+    child = new("CHILD", a)
+
+    def note(calls):
+        return [kwargs for name, _args, kwargs in calls if name == 'label' and 'different parents' in kwargs.get('text', '')]
+
+    def draw():
+        calls = []
+        bpy.types.FSS_PT_tools.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+        return calls
+
+    # Not siblings: refused, with a note in the panel; also a selected object with its own child
+    for objects in ((a, other), (a, child)):
+        select(*objects, active=a)
+        assert not bpy.ops.fss.add_empty_parent.poll()
+        assert note(draw())
+
+    # Siblings: one empty, at the active object, under their parent; nothing moves
+    select(a, b, active=a)
+    assert bpy.ops.fss.add_empty_parent.poll() and not note(draw())
+    before = {a: a.matrix_world.copy(), b: b.matrix_world.copy()}
+    scene.fss_empty_parent_mode = 'MERGE'
+    scene.fss_empty_parent_marker_name = "PANEL"
+    assert bpy.ops.fss.add_empty_parent() == {'FINISHED'}
+    bpy.context.view_layer.update()
+    empty = bpy.data.objects["@MERGE_PANEL"]
+    assert a.parent is empty and b.parent is empty and empty.parent is root
+    assert [o.name for o in empty.users_collection] == ["PARTS"]
+    for obj, world in before.items():
+        assert all(abs(x - y) < 1e-5 for ra, rb in zip(obj.matrix_world, world) for x, y in zip(ra, rb)), obj.name
+    loc, rot, scale = empty.matrix_world.decompose()
+    want_loc, want_rot, _ = before[a].decompose()
+    assert (loc - want_loc).length < 1e-5 and abs(rot.dot(want_rot)) > 1 - 1e-5 and abs(scale.x - 1) < 1e-5
+
+    # An inactive selection follows the first selected object; the name rules
+    assert build_names(scene, other) == {
+        'MANUAL': "OTHER_PARENT", 'SUFFIX': "OTHER_PARENT", 'PREFIX': "PARENT_OTHER", 'MERGE': "@MERGE_OTHER",
+        'NOMERGE': "@NOMERGE_OTHER", 'ZONE': "@ZONE_OTHER"}, build_names(scene, other)
+    # A marker is not doubled, and a typed name stays with its object
+    marked = new("@MERGE_DOOR")
+    select(marked, active=marked)
+    scene.fss_empty_parent_mode = 'ZONE'
+    assert scene.fss_empty_parent_marker_name == "DOOR"
+    assert bpy.ops.fss.add_empty_parent() == {'FINISHED'}
+    assert marked.parent.name == "@ZONE_DOOR"
+
+    # Bones of one armature are different parents
+    armature = bpy.data.objects.new("ARM", bpy.data.armatures.new("ARM"))
+    collection.objects.link(armature)
+    c, d = new("C", armature), new("D", armature)
+    c.parent_type = d.parent_type = 'BONE'
+    c.parent_bone, d.parent_bone = "ONE", "TWO"
+    select(c, d, active=c)
+    assert not bpy.ops.fss.add_empty_parent.poll()
+    print("PASS: test_add_parent (siblings get one empty at the active object; others refused with a note)")
+
+
+def build_names(scene, obj):
+    from fss_blender_tools import tools
+    for candidate in bpy.context.view_layer.objects:
+        candidate.select_set(candidate is obj)
+    bpy.context.view_layer.objects.active = None
+    bpy.context.view_layer.update()
+    names = {}
+    for mode in ('MANUAL', 'SUFFIX', 'PREFIX', 'MERGE', 'NOMERGE', 'ZONE'):
+        scene.fss_empty_parent_mode = mode
+        names[mode] = tools.build_empty_parent_name(scene, tools._anchor_object(bpy.context))
+    return names
+
+
 def main():
     test_layout()
     test_draw_all()
@@ -683,6 +778,7 @@ def main():
     test_viewport_lod_view_quota()
     test_export_settings_one_table()
     test_lod_settings_bars()
+    test_add_parent()
     print("ALL TESTS PASSED")
 
 
