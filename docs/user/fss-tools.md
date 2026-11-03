@@ -83,17 +83,21 @@ Transparent materials (MSFS alpha mode Blend) never share a mesh with opaque one
 
 ## Tags
 
-A tag is a free label you put on objects, for example `SCREEN` or `KEEP_LOD`. An object can have several tags. Tags replace extra collections for grouping, and two toggles tell the export what to do with tagged objects. Tags are stored in the object's custom property `fss_tags` (separated by `;`), so you can also read them under **Object Properties > Custom Properties**.
+A tag is a free label you put on objects, for example `SCREEN` or `KEEP_LOD`. An object can have several tags. Tags replace extra collections for grouping, and toggles on each tag set how tagged objects are treated by the export and by a later AO auto-bake. Tags are stored in the object's custom property `fss_tags` (separated by `;`), so you can also read them under **Object Properties > Custom Properties**.
 
 - **Top row:** type one or more tag names (separate several with `;` or `,`), then **+** adds them to the selected objects, **-** removes them.
 - **Active object box** (only while the active object is selected): the tags of the active object; **X** removes one from the active object only.
 - **Tag list** (every tag in the file, with the number of objects that carry it). Per row:
   - **-** and **+** (only with a selection): remove the tag from, or add it to, the selected objects. They are greyed out when there is nothing to do and highlighted red when several objects are selected.
-  - **Rename** (pencil): renames the tag on every object in the file, and in the Don't Merge and Keep settings.
+  - **Rename** (pencil): renames the tag on every object in the file, and in the settings of the toggles below.
   - **Tag name:** select the visible objects with this tag (**Shift + click** adds to the selection). Hidden objects are counted but not selected. The name has a blue fill when at least one selected object has this tag.
   - **Don't Merge** (merge icon): objects with this tag, and everything below them, stay out of merge groups (see [Zones & Merge Tree](#zones--merge-tree)).
   - **Keep** (pin icon, pinned and blue when on): objects with this tag are never hidden for being small. The automatic LOD size rule leaves them, and the Auto objects above them, in every LOD, like the **Keep** mark (see [Object LOD](lod.md#object-lod)). They cost vertices in the far LODs. A **Hidden from** or **Visible from** mark on the object or a parent still wins.
+  - **Non-AO-Occluder** (ghost icon, blue when on): objects with this tag never darken other objects in the AO auto-bake. They can still get AO of their own.
+  - **Skip-AO-Bake** (render icon, crossed out and blue when on): objects with this tag get no AO in the AO auto-bake. They can still darken other objects.
   - **Delete** (bin): asks for confirmation, then removes the tag from every object in the file. The objects stay.
+
+The two AO toggles only record your choice for now: there is no AO auto-bake tool yet, so they change nothing in the model or the export. They apply to the objects that carry the tag, not to their children. With both on, the bake is meant to ignore the object completely, which suits collision meshes, clickspots, helpers and decals.
 
 Tip: to tag a whole collection, right-click it in the Outliner, **Select Objects**, then press **+** on the tag row.
 

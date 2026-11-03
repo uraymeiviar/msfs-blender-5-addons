@@ -81,6 +81,7 @@ requirements that use it. Properties that are registered (`bpy.props`) are saved
   | :--- | :--- | :--- |
   | `fss_name_check` | group: scan results, `include_bones` (on), `show_rules` (all) | GEN-008 |
   | `fss_tag_name` | string, the tag field of the Tags panel | TAG-002 |
+  | `fss_ao_no_occluder_tags`, `fss_ao_skip_bake_tags` | `;`-separated tag names, default empty | TAG-008, TAG-009 |
   | `fss_origin_target` | enum, default `FACE_NZ` (Bottom -Z) | GEN-002 |
   | `fss_empty_parent_mode`, `_suffix`, `_prefix`, `_manual_name`, `_marker_name` | enum MANUAL / SUFFIX / PREFIX / MERGE / NOMERGE / ZONE; `_PARENT`; `PARENT_` | GEN-001 |
   | `fss_empty_bounds_mode`, `_in_front`, `_hierarchy_text` | ALL / SELECTED / OFF, default ALL; on; on | GEN-003 |
@@ -93,7 +94,7 @@ requirements that use it. Properties that are registered (`bpy.props`) are saved
   The scene custom properties `_fss_empty_parent_custom_name` and `_fss_empty_parent_custom_obj` remember a
   manual empty-parent name for one object, and `_fss_empty_parent_marker_name` and `_fss_empty_parent_marker_obj` the
   name typed after a marker.
-- **Decision:** UV 66 (heatmap grid saved), UV 88, UV 106; others none recorded
+- **Decision:** UV 66 (heatmap grid saved), UV 88, UV 106; TM S13.1; others none recorded
 - **Test:** `tests/test_panels.py::test_draw_all` (every panel draws with these properties)
 
 ### DAT-007: `Scene.fss_materials`
@@ -130,7 +131,7 @@ requirements that use it. Properties that are registered (`bpy.props`) are saved
 - **Status:** implemented
 - **Requirement:** Custom string property on an object: its tags, separated by `;`, each tag any non-empty name
   without `;`. An object without tags has no property.
-- **Used by:** TAG-001 to TAG-007, MRG-007, LOD-003
+- **Used by:** TAG-001 to TAG-009, MRG-007, LOD-003
 - **Decision:** TM S1.1
 - **Test:** no test of the format; read in `tests/build_lod_scene.py`
 - **Code:** `tags.py`

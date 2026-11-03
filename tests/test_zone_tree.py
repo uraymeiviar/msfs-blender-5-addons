@@ -216,13 +216,55 @@ def test_tags_panel():
     known = bpy.types.UILayout.bl_rna.functions['operator'].parameters['icon'].enum_items
     assert 'PINNED' in known and 'UNPINNED' in known
 
-    # Per row: rename before the name; merge, Keep, a gap, delete
+    # Per row: rename before the name; merge, Keep, the two AO toggles, a gap, delete
     order = [args[0] if name == 'operator' else name for name, args, _kwargs in calls
              if name in ('operator', 'separator', 'split')]
     row = order[len(order) - order[::-1].index('split'):]
     assert row == [tags.FSS_OT_TagRemove.bl_idname, tags.FSS_OT_TagAdd.bl_idname, tags.FSS_OT_TagRename.bl_idname,
                    tags.FSS_OT_TagSelect.bl_idname, tags.FSS_OT_TagToggleSkipMerge.bl_idname,
-                   tags.FSS_OT_TagToggleKeep.bl_idname, 'separator', tags.FSS_OT_TagDelete.bl_idname], row
+                   tags.FSS_OT_TagToggleKeep.bl_idname, tags.FSS_OT_TagToggleAONoOccluder.bl_idname,
+                   tags.FSS_OT_TagToggleAOSkipBake.bl_idname, 'separator', tags.FSS_OT_TagDelete.bl_idname], row
+
+    # The AO toggles start off and answer per object: each setting alone, and only for objects carrying the tag
+    scene = bpy.context.scene
+    other = bpy.data.objects["OTHER"]
+    assert all((tags.is_ao_occluder(obj, scene), tags.is_ao_baked(obj, scene)) == (True, True)
+               for obj in (carrier, other))
+    assert [(kwargs['icon'], kwargs['depress']) for kwargs in
+            operators(calls, tags.FSS_OT_TagToggleAONoOccluder.bl_idname)] == [
+        ('GHOST_DISABLED', False), ('GHOST_DISABLED', False)]
+    assert [(kwargs['icon'], kwargs['depress']) for kwargs in
+            operators(calls, tags.FSS_OT_TagToggleAOSkipBake.bl_idname)] == [
+        ('RESTRICT_RENDER_OFF', False), ('RESTRICT_RENDER_OFF', False)]
+    assert all(icon in known for icon in ('GHOST_ENABLED', 'GHOST_DISABLED', 'RESTRICT_RENDER_ON',
+                                          'RESTRICT_RENDER_OFF'))
+
+    bpy.ops.fss.tag_toggle_ao_no_occluder(tag="LIT")
+    assert (tags.is_ao_occluder(carrier, scene), tags.is_ao_baked(carrier, scene)) == (False, True)
+    assert (tags.is_ao_occluder(other, scene), tags.is_ao_baked(other, scene)) == (True, True)
+    bpy.ops.fss.tag_toggle_ao_skip_bake(tag="LIT")
+    assert (tags.is_ao_occluder(carrier, scene), tags.is_ao_baked(carrier, scene)) == (False, False)
+    bpy.ops.fss.tag_toggle_ao_skip_bake(tag="GLASS")
+    assert (tags.is_ao_occluder(other, scene), tags.is_ao_baked(other, scene)) == (True, False)
+    calls = draw(True)
+    # Rows are sorted by name: GLASS, then LIT
+    assert [(kwargs['icon'], kwargs['depress']) for kwargs in
+            operators(calls, tags.FSS_OT_TagToggleAONoOccluder.bl_idname)] == [
+        ('GHOST_DISABLED', False), ('GHOST_ENABLED', True)]
+    assert [(kwargs['icon'], kwargs['depress']) for kwargs in
+            operators(calls, tags.FSS_OT_TagToggleAOSkipBake.bl_idname)] == [
+        ('RESTRICT_RENDER_ON', True), ('RESTRICT_RENDER_ON', True)]
+
+    # A second press turns it off; Rename and Delete Tag carry the settings along
+    bpy.ops.fss.tag_toggle_ao_skip_bake(tag="GLASS")
+    assert tags.is_ao_baked(other, scene)
+    bpy.ops.fss.tag_rename(tag="LIT", new_name="LAMP")
+    assert tags.has_tag(carrier, "LAMP")
+    assert scene.fss_ao_no_occluder_tags == "LAMP" and scene.fss_ao_skip_bake_tags == "LAMP"
+    assert not tags.is_ao_occluder(carrier, scene) and not tags.is_ao_baked(carrier, scene)
+    bpy.ops.fss.tag_delete(tag="LAMP")
+    assert scene.fss_ao_no_occluder_tags == "" and scene.fss_ao_skip_bake_tags == ""
+    assert tags.is_ao_occluder(carrier, scene) and tags.is_ao_baked(carrier, scene)
     print("PASS: test_tags_panel")
 
 
@@ -515,6 +557,8 @@ def test_gltf_leak():
         mat.fss_uv_margin_px = 12
         mesh_obj.data.materials.append(mat)
         mesh_obj.data['fss_probe'] = 1
+        bpy.context.scene.fss_ao_no_occluder_tags = 'LEAK_PROBE'
+        bpy.context.scene.fss_ao_skip_bake_tags = 'LEAK_PROBE'
         path = SCRATCH_DIR / f"zones_extras_{int(extras)}.gltf"
         bpy.ops.export_scene.gltf(filepath=str(path), export_format='GLTF_SEPARATE', use_visible=True,
                                   export_extras=extras)
@@ -522,6 +566,7 @@ def test_gltf_leak():
         gltf = json.loads(text)
         names = {node.get('name') for node in gltf.get('nodes', [])}
         assert 'ZONE_FWD' in names, sorted(names)
+        assert 'LEAK_PROBE' not in text
         results[extras] = ('fss_uv_' in text, fss_extras_keys(gltf),
                            'artist_note' in text and 'artist_mat_note' in text)
         print(f"  export_extras={extras}: {len(gltf.get('nodes', []))} nodes, fss_uv_ in file: "

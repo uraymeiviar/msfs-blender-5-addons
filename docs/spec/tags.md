@@ -36,8 +36,9 @@ objects. Artist guide: [../user/fss-tools.md](../user/fss-tools.md#tags).
 - **Requirement:** The panel lists every tag in the file with the number of objects that carry it. Clicking a tag
   selects the visible objects with it (Shift + click adds to the selection); hidden objects are counted but not
   selected. The name is highlighted when at least one selected object has the tag. Per row, from the left: **-** and
-  **+**, rename, the name; on the right, at the same place in every row, Don't Merge, Keep, a small gap, delete.
-- **Decision:** TM S1.2; TM S10.1 to S10.6
+  **+**, rename, the name; on the right, at the same place in every row, Don't Merge, Keep, Non-AO-Occluder,
+  Skip-AO-Bake, a small gap, delete.
+- **Decision:** TM S1.2; TM S10.1 to S10.6; TM S13.1
 - **Test:** `tests/test_zone_tree.py::test_tags_panel` (what the panel draws, not the selection)
 - **Code:** `tags.py` (`FSS_OT_TagSelect`)
 
@@ -45,11 +46,11 @@ objects. Artist guide: [../user/fss-tools.md](../user/fss-tools.md#tags).
 
 - **Status:** implemented
 - **Requirement:** Rename changes a tag to exactly one new name on every editable object in the file and in the
-  Don't Merge and Keep settings (TAG-005, TAG-006). Delete asks for confirmation, then removes the tag from every
-  editable object and from both settings; the objects stay.
-- **Data:** DAT-002, DAT-003, DAT-020
+  settings of its switches (TAG-005, TAG-006, TAG-008, TAG-009). Delete asks for confirmation, then removes the tag from
+  every editable object and from those settings; the objects stay.
+- **Data:** DAT-002, DAT-003, DAT-006, DAT-020
 - **Decision:** none recorded
-- **Test:** no test
+- **Test:** `tests/test_zone_tree.py::test_tags_panel` (the AO settings only)
 - **Code:** `tags.py` (`FSS_OT_TagRename`, `FSS_OT_TagDelete`)
 
 ## Switches
@@ -83,6 +84,30 @@ objects. Artist guide: [../user/fss-tools.md](../user/fss-tools.md#tags).
 - **Requirement:** `fss_tags` never reaches the glTF (DAT-040).
 - **Decision:** TM S8.5 (by the same rule); UV 87
 - **Test:** no test of `fss_tags` in particular; the strip rule is tested in `tests/test_zone_tree.py::test_gltf_leak`
+
+### TAG-008: Non-AO-Occluder
+
+- **Status:** implemented as a setting; no AO auto-bake reads it yet (GEN-032)
+- **Requirement:** A tag's Non-AO-Occluder toggle (ghost icon) adds it to or removes it from
+  `Scene.fss_ao_no_occluder_tags`. An object carrying such a tag is never used as an occluder by the AO auto-bake;
+  `tags.is_ao_occluder(obj, scene)` answers this for the bake. Only the objects that carry the tag count, not their
+  children.
+- **Data:** DAT-006
+- **Decision:** TM S13.1, S13.2
+- **Test:** `tests/test_zone_tree.py::test_tags_panel`, `tests/test_zone_tree.py::test_gltf_leak`
+- **Code:** `tags.py` (`FSS_OT_TagToggleAONoOccluder`, `is_ao_occluder`)
+
+### TAG-009: Skip-AO-Bake
+
+- **Status:** implemented as a setting; no AO auto-bake reads it yet (GEN-032)
+- **Requirement:** A tag's Skip-AO-Bake toggle (render icon) adds it to or removes it from
+  `Scene.fss_ao_skip_bake_tags`. An object carrying such a tag is never a target of the AO auto-bake;
+  `tags.is_ao_baked(obj, scene)` answers this for the bake. Only the objects that carry the tag count, not their
+  children.
+- **Data:** DAT-006
+- **Decision:** TM S13.1, S13.2
+- **Test:** `tests/test_zone_tree.py::test_tags_panel`, `tests/test_zone_tree.py::test_gltf_leak`
+- **Code:** `tags.py` (`FSS_OT_TagToggleAOSkipBake`, `is_ao_baked`)
 
 ## Wishes
 

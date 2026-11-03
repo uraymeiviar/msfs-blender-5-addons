@@ -10,6 +10,8 @@ import bpy
 
 TAGS_KEY = "fss_tags"
 SEPARATOR = ";"
+AO_NO_OCCLUDER_PROP = "fss_ao_no_occluder_tags"  # scene: the tags of objects that never occlude in an AO bake
+AO_SKIP_BAKE_PROP = "fss_ao_skip_bake_tags"  # scene: the tags of objects that an AO bake leaves out as targets
 
 
 def get_tags(obj) -> list:
@@ -71,6 +73,29 @@ def get_keep_tags(scene):
 
 def set_keep_tags(scene, values):
     scene.fss_lod_settings.keep_tags = SEPARATOR.join(dict.fromkeys(values))
+
+
+def get_ao_tags(scene, prop) -> list:
+    return parse_tag_list(getattr(scene, prop))
+
+
+def set_ao_tags(scene, prop, values):
+    setattr(scene, prop, SEPARATOR.join(dict.fromkeys(values)))
+
+
+def _toggle_ao_tag(scene, prop, tag):
+    current = get_ao_tags(scene, prop)
+    set_ao_tags(scene, prop, [other for other in current if other != tag] if tag in current else current + [tag])
+
+
+def is_ao_occluder(obj, scene) -> bool:
+    """For the AO bake: False when a tag of the object says it must not darken other objects."""
+    return not set(get_tags(obj)).intersection(get_ao_tags(scene, AO_NO_OCCLUDER_PROP))
+
+
+def is_ao_baked(obj, scene) -> bool:
+    """For the AO bake: False when a tag of the object says it gets no AO of its own."""
+    return not set(get_tags(obj)).intersection(get_ao_tags(scene, AO_SKIP_BAKE_PROP))
 
 
 class FSS_OT_TagAdd(bpy.types.Operator):
@@ -191,6 +216,34 @@ class FSS_OT_TagToggleKeep(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class FSS_OT_TagToggleAONoOccluder(bpy.types.Operator):
+    bl_idname = 'fss.tag_toggle_ao_no_occluder'
+    bl_label = 'Non-AO-Occluder Tag'
+    bl_description = ("Objects with this tag never darken other objects in the AO auto-bake. They can still get AO of "
+                      "their own. No auto-bake exists yet: this only records the setting for it")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    tag: bpy.props.StringProperty(name='Tag')
+
+    def execute(self, context):
+        _toggle_ao_tag(context.scene, AO_NO_OCCLUDER_PROP, self.tag)
+        return {'FINISHED'}
+
+
+class FSS_OT_TagToggleAOSkipBake(bpy.types.Operator):
+    bl_idname = 'fss.tag_toggle_ao_skip_bake'
+    bl_label = 'Skip-AO-Bake Tag'
+    bl_description = ("Objects with this tag get no AO in the AO auto-bake. They can still darken other objects. No "
+                      "auto-bake exists yet: this only records the setting for it")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    tag: bpy.props.StringProperty(name='Tag')
+
+    def execute(self, context):
+        _toggle_ao_tag(context.scene, AO_SKIP_BAKE_PROP, self.tag)
+        return {'FINISHED'}
+
+
 class FSS_OT_TagRename(bpy.types.Operator):
     bl_idname = "fss.tag_rename"
     bl_label = "Rename Tag"
@@ -221,6 +274,9 @@ class FSS_OT_TagRename(bpy.types.Operator):
         keep_tags = get_keep_tags(context.scene)
         if self.tag in keep_tags:
             set_keep_tags(context.scene, [new_tags[0] if tag == self.tag else tag for tag in keep_tags])
+        for prop in (AO_NO_OCCLUDER_PROP, AO_SKIP_BAKE_PROP):
+            set_ao_tags(context.scene, prop, [new_tags[0] if tag == self.tag else tag
+                                              for tag in get_ao_tags(context.scene, prop)])
         self.report({'INFO'}, f"Renamed {self.tag} to {new_tags[0]} on {count} object(s)")
         return {'FINISHED'}
 
@@ -246,6 +302,8 @@ class FSS_OT_TagDelete(bpy.types.Operator):
         if self.tag in skip_tags:
             set_skip_tags(context.scene, [tag for tag in skip_tags if tag != self.tag])
         set_keep_tags(context.scene, [tag for tag in get_keep_tags(context.scene) if tag != self.tag])
+        for prop in (AO_NO_OCCLUDER_PROP, AO_SKIP_BAKE_PROP):
+            set_ao_tags(context.scene, prop, [tag for tag in get_ao_tags(context.scene, prop) if tag != self.tag])
         self.report({'INFO'}, f"Removed {self.tag} from {count} object(s)")
         return {'FINISHED'}
 
@@ -290,12 +348,14 @@ class FSS_PT_Tags(bpy.types.Panel):
         if counts:
             skip_tags = set(get_skip_tags(scene))
             keep_tags = set(get_keep_tags(scene))
+            no_occluder_tags = set(get_ao_tags(scene, AO_NO_OCCLUDER_PROP))
+            skip_bake_tags = set(get_ao_tags(scene, AO_SKIP_BAKE_PROP))
             column = layout.column(align=True)
             for tag in sorted(counts):
                 skipped = tag in skip_tags
                 kept = tag in keep_tags
                 # A split, so the buttons on the right do not move with the length of the tag name
-                split = column.split(factor=0.7, align=True)
+                split = column.split(factor=0.6, align=True)
                 tag_row = split.row(align=True)
 
                 if has_selection:
@@ -337,6 +397,14 @@ class FSS_PT_Tags(bpy.types.Panel):
                 op.tag = tag
                 action_row.operator(FSS_OT_TagToggleKeep.bl_idname, text="", icon='PINNED' if kept else 'UNPINNED',
                                     depress=kept).tag = tag
+                no_occluder = tag in no_occluder_tags
+                action_row.operator(FSS_OT_TagToggleAONoOccluder.bl_idname, text="",
+                                    icon='GHOST_ENABLED' if no_occluder else 'GHOST_DISABLED',
+                                    depress=no_occluder).tag = tag
+                skip_bake = tag in skip_bake_tags
+                action_row.operator(FSS_OT_TagToggleAOSkipBake.bl_idname, text="",
+                                    icon='RESTRICT_RENDER_ON' if skip_bake else 'RESTRICT_RENDER_OFF',
+                                    depress=skip_bake).tag = tag
                 action_row.separator(factor=0.5)
                 action_row.operator(FSS_OT_TagDelete.bl_idname, text="", icon='TRASH').tag = tag
         else:
@@ -349,6 +417,8 @@ CLASSES = (
     FSS_OT_TagSelect,
     FSS_OT_TagToggleSkipMerge,
     FSS_OT_TagToggleKeep,
+    FSS_OT_TagToggleAONoOccluder,
+    FSS_OT_TagToggleAOSkipBake,
     FSS_OT_TagRename,
     FSS_OT_TagDelete,
     FSS_PT_Tags,
@@ -360,9 +430,13 @@ def register():
         bpy.utils.register_class(cls)
     bpy.types.Scene.fss_tag_name = bpy.props.StringProperty(
         name="Tag", description="Tag to add or remove (several: separate with ;)")
+    bpy.types.Scene.fss_ao_no_occluder_tags = bpy.props.StringProperty(name="Non-AO-Occluder Tags")
+    bpy.types.Scene.fss_ao_skip_bake_tags = bpy.props.StringProperty(name="Skip-AO-Bake Tags")
 
 
 def unregister():
+    del bpy.types.Scene.fss_ao_skip_bake_tags
+    del bpy.types.Scene.fss_ao_no_occluder_tags
     del bpy.types.Scene.fss_tag_name
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)
