@@ -545,20 +545,51 @@ class glTF2ExportUserExtension:
 
 
 def _group_summary(group):
-    """Counts shown in the Merge Groups tree, from the original objects (no evaluation, cheap)."""
+    """Counts shown in the Merge Groups tree, from the original objects (no evaluation, cheap). Faces decide, as in the
+    export: a slot no face uses does not count, and faces without a material count as one (None)."""
     materials, kinds, uv_slots = [], set(), []
     for obj in group.members:
-        for slot in obj.material_slots:
-            material = source_material(slot.material)
-            if material is not None and material not in materials:
+        for used in _used_materials(obj):
+            material = source_material(used)
+            if material not in materials:
                 materials.append(material)
                 kinds.add(_material_kind(material))
-        if obj.type == 'MESH':
+        if obj.type == 'MESH' and _has_geometry(obj):
             _add_uv_names(uv_slots, obj.data)
     reasons = {}
     for _obj, reason in group.skipped:
         reasons[reason] = reasons.get(reason, 0) + 1
-    return materials, kinds, ["/".join(names) for names in uv_slots], reasons
+    return materials, kinds, uv_slots, reasons
+
+
+def _has_geometry(obj):
+    """A mesh without faces is written as a plain node, unless a modifier other than normals may make faces for it."""
+    if obj.type != 'MESH' or len(obj.data.polygons):
+        return obj.type in MESH_LIKE
+    return any(modifier.type not in {'WEIGHTED_NORMAL', 'NORMAL_EDIT'} for modifier in obj.modifiers)
+
+
+def _used_materials(obj):
+    """The materials the faces of a mesh use, None for faces without one; all slots of another mesh-like type."""
+    slots = [slot.material for slot in obj.material_slots] or [None]
+    if obj.type != 'MESH' or not len(obj.data.polygons):
+        return slots if _has_geometry(obj) else []
+    faces = _read(obj.data.polygons, "material_index", len(obj.data.polygons), 1, np.int32)
+    return [slots[index] for index in np.unique(np.clip(faces, 0, len(slots) - 1))]
+
+
+def _merged_mesh_count(group, kinds):
+    """How many meshes the merge makes of a group: one for each of opaque and transparent faces."""
+    return max(len(kinds), 1) if any(_has_geometry(obj) for obj in group.members) else 0
+
+
+def _name_clashes(group, mesh_count):
+    """The merged meshes named like a node that stays in the group."""
+    root_name = logical_name(group.root)
+    target = root_name[len(PREFIX):] or root_name
+    stays = {logical_name(node) for node in group.kept} | {logical_name(obj) for obj, _ in group.skipped}
+    names = [target, f"{target}_TRANSPARENT"][:mesh_count]
+    return ", ".join(name for name in names if name in stays)
 
 
 def _add_uv_names(uv_slots, mesh):
@@ -570,6 +601,36 @@ def _add_uv_names(uv_slots, mesh):
             uv_slots[index].append(layer.name)
 
 
+def _uses_material(obj, test):
+    return any(test(source_material(material)) for material in _used_materials(obj))
+
+
+def pick_objects(group, what, value="", index=0):
+    """The objects of a group behind one row of the details box: the members using a material, the members with
+    transparent parts, the members with a UV map name at a map position, or the nodes kept separate for a reason. The
+    value of faces without a material is empty."""
+    if what == 'MATERIAL':
+        return [obj for obj in group.members if _uses_material(obj, lambda material: (material.name if material else "") == value)]
+    if what == 'TRANSPARENT':
+        return [obj for obj in group.members
+                if _uses_material(obj, lambda material: _material_kind(material) == "TRANSPARENT")]
+    if what == 'UV':
+        return [obj for obj in group.members if obj.type == 'MESH' and _has_geometry(obj)
+                and index < len(obj.data.uv_layers)
+                and obj.data.uv_layers[index].name == value]
+    return [obj for obj, reason in group.skipped if reason == value]
+
+
+def _row_warns(item):
+    """A row with a warning triangle: what the export warns about for a group, a misplaced zone, the Unzoned row."""
+    if item.kind == 'ZONE':
+        return bool(item.flag)
+    if item.kind == 'GROUP':
+        return (bool(item.root_reason) or bool(item.name_clash) or item.material_count > 1 or item.transparent
+                or any(pick.what == 'UV' for pick in item.picks))
+    return item.kind == 'UNZONED'
+
+
 def _on_tree_active(settings, context):
     if 0 <= settings.active < len(settings.items):
         obj = context.scene.objects.get(settings.items[settings.active].root)
@@ -578,6 +639,18 @@ def _on_tree_active(settings, context):
                 other.select_set(False)
             obj.select_set(True)
             context.view_layer.objects.active = obj
+
+
+PICK_KINDS = (('MATERIAL', "Material", ""), ('TRANSPARENT', "Transparent", ""), ('UV', "UV Map", ""),
+              ('KEPT', "Kept Separate", ""))
+
+
+class FSS_MergePick(bpy.types.PropertyGroup):
+    """One clickable row of a group's details: what it selects, and how many objects it found at Refresh."""
+    what: bpy.props.EnumProperty(items=PICK_KINDS)
+    value: bpy.props.StringProperty()
+    index: bpy.props.IntProperty()
+    count: bpy.props.IntProperty()
 
 
 class FSS_MergeTreeItem(bpy.types.PropertyGroup):
@@ -591,12 +664,14 @@ class FSS_MergeTreeItem(bpy.types.PropertyGroup):
     groups: bpy.props.IntProperty()
     depth: bpy.props.IntProperty()
     objects: bpy.props.IntProperty()
+    # Zone rows: the meshes left below the zone after the merge (objects is the meshes before it)
+    merged: bpy.props.IntProperty()
     material_count: bpy.props.IntProperty()
     kept: bpy.props.IntProperty()
     transparent: bpy.props.BoolProperty()
     root_reason: bpy.props.StringProperty()
-    material_names: bpy.props.StringProperty()
-    reasons: bpy.props.StringProperty()
+    name_clash: bpy.props.StringProperty()
+    picks: bpy.props.CollectionProperty(type=FSS_MergePick)
     uv_names: bpy.props.StringProperty()
 
 
@@ -604,6 +679,12 @@ class FSS_MergeSettings(bpy.types.PropertyGroup):
     items: bpy.props.CollectionProperty(type=FSS_MergeTreeItem)
     active: bpy.props.IntProperty(update=_on_tree_active)
     scanned: bpy.props.BoolProperty()
+    # The totals above the list, from the last Refresh
+    zone_count: bpy.props.IntProperty()
+    group_count: bpy.props.IntProperty()
+    nomerge_count: bpy.props.IntProperty()
+    warning_count: bpy.props.IntProperty()
+    material_count: bpy.props.IntProperty()
     enabled: bpy.props.BoolProperty(
         name="Merge on Export", default=True,
         description=f"At export, merge every node named {PREFIX}<name> and its subtree into one mesh named <name>")
@@ -640,13 +721,23 @@ class FSS_OT_MergeRefresh(bpy.types.Operator):
 
         # The zone of each visible object (the nearest zone above it) and of each outermost group. A hidden zone with
         # visible groups below is still listed, so its groups are not reported as unzoned.
-        zone_groups, zone_objects, zoned = {}, {}, {}
+        zone_groups, zone_meshes, zone_merged, zoned = {}, {}, {}, {}
         for obj in visible:
             zone = nearest_zone(obj.parent)
             if zone is not None:
-                zone_objects[zone] = zone_objects.get(zone, 0) + 1
+                if _has_geometry(obj):
+                    zone_meshes[zone] = zone_meshes.get(zone, 0) + 1
                 if obj in by_root:
                     zone_groups[zone] = zone_groups.get(zone, 0) + 1
+        # A member leaves its own zone and the merged mesh appears at the root's: they differ for a zone inside a group
+        for group in groups:
+            for obj in group.members:
+                if _has_geometry(obj):
+                    zone = nearest_zone(obj.parent)
+                    zone_merged[zone] = zone_merged.get(zone, 0) - 1
+            zone = nearest_zone(group.root.parent)
+            count = _merged_mesh_count(group, _group_summary(group)[1])
+            zone_merged[zone] = zone_merged.get(zone, 0) + count
         for root in children.get(None, []):
             zoned.setdefault(nearest_zone(root.parent), []).append(root)
         zones = {obj for obj in visible if is_zone(obj)} | {zone for zone in zoned if zone is not None}
@@ -665,7 +756,7 @@ class FSS_OT_MergeRefresh(bpy.types.Operator):
 
         def add(root, depth):
             group = by_root[root]
-            materials, kinds, uv_names, reasons = _group_summary(group)
+            materials, kinds, uv_slots, reasons = _group_summary(group)
             item = settings.items.add()
             item.kind = 'GROUP'
             item.name = strip_markers(logical_name(root))
@@ -676,10 +767,25 @@ class FSS_OT_MergeRefresh(bpy.types.Operator):
             item.kept = len(group.skipped)
             item.transparent = len(kinds) > 1
             item.root_reason = group.root_reason
-            item.material_names = ", ".join(material.name for material in materials)
-            ordered = sorted(reasons.items(), key=lambda entry: -entry[1])
-            item.reasons = ", ".join(f"{reason}: {count}" for reason, count in ordered)
-            item.uv_names = ", ".join(uv_names)
+            item.name_clash = _name_clashes(group, _merged_mesh_count(group, kinds))
+            item.uv_names = ", ".join("/".join(names) for names in uv_slots)
+
+            def add_pick(what, value="", index=0):
+                pick = item.picks.add()
+                pick.what, pick.value, pick.index = what, value, index
+                pick.count = len(pick_objects(group, what, value, index))
+
+            for material in materials:
+                add_pick('MATERIAL', material.name if material else "")
+            if item.transparent:
+                add_pick('TRANSPARENT')
+            # The UV maps the export warns about: a position named differently by its members, and any third map
+            for index, names in enumerate(uv_slots):
+                if index >= 2 or len(names) > 1:
+                    for name in names:
+                        add_pick('UV', name, index)
+            for reason, _count in sorted(reasons.items(), key=lambda entry: -entry[1]):
+                add_pick('KEPT', reason)
             # The @NOMERGE_ nodes the merge stops at, so the artist sees what stays separate under the merged tree
             separate = [obj for obj, _reason in group.skipped if logical_name(obj).startswith(NO_MERGE_PREFIX)]
             for obj in sorted(separate, key=lambda obj: obj.name):
@@ -699,7 +805,8 @@ class FSS_OT_MergeRefresh(bpy.types.Operator):
             item.zone = zone
             item.flag = zone_flag(zone)
             item.groups = zone_groups.get(zone, 0)
-            item.objects = zone_objects.get(zone, 0)
+            item.objects = zone_meshes.get(zone, 0)
+            item.merged = item.objects + zone_merged.get(zone, 0)
             for root in sorted(zoned.get(zone, []), key=lambda obj: obj.name):
                 add(root, 1)
         # Decision 34 of the UV journal: a merge group's topmost marked ancestor must be a zone
@@ -710,11 +817,26 @@ class FSS_OT_MergeRefresh(bpy.types.Operator):
             item.groups = len(zoned[None])
             for root in sorted(zoned[None], key=lambda obj: obj.name):
                 add(root, 1)
+        settings.zone_count = len(zones)
+        settings.group_count = len(groups)
+        settings.nomerge_count = sum(1 for item in settings.items if item.kind == 'NOMERGE')
+        settings.warning_count = sum(1 for item in settings.items if _row_warns(item))
+        settings.material_count = len({source_material(material) for obj in visible if obj.type in MESH_LIKE
+                                       for material in _used_materials(obj)} - {None})
         settings.scanned = True
         if settings.active >= len(settings.items):
             settings.active = max(len(settings.items) - 1, 0)
         self.report({'INFO'}, f"{len(zones)} zone(s), {len(groups)} merge group(s)")
         return {'FINISHED'}
+
+
+def _plural(count, word):
+    return f"{count} {word}" if count == 1 else f"{count} {word}s"
+
+
+def _totals_text(settings):
+    return (f"{_plural(settings.zone_count, 'zone')}  {settings.group_count} merge  {settings.nomerge_count} no-merge  "
+            f"{_plural(settings.warning_count, 'warning')}  {_plural(settings.material_count, 'material')}")
 
 
 def _draw_zone_mark(row, zone, text):
@@ -735,8 +857,8 @@ class FSS_UL_MergeTree(bpy.types.UIList):
             row.label(icon='BLANK1')
         if item.kind == 'ZONE':
             row.label(text=f"{item.name} ({item.flag})" if item.flag else item.name,
-                      icon='ERROR' if item.flag else 'OUTLINER_OB_EMPTY')
-            row.label(text=f"{item.groups} grp  {item.objects} obj")
+                      icon='ERROR' if item.flag else 'SHADING_BBOX')
+            row.label(text=f"{item.objects} -> {item.merged} obj")
             if item.zone is not None:
                 _draw_zone_mark(row, item.zone, "")
             return
@@ -749,33 +871,57 @@ class FSS_UL_MergeTree(bpy.types.UIList):
         if item.root_reason:
             row.label(text=f"{item.name} (not merged: {item.root_reason})", icon='ERROR')
             return
-        warning = item.material_count > 1 or item.transparent
-        row.label(text=item.name, icon='ERROR' if warning else 'MESH_DATA')
+        row.label(text=item.name, icon='ERROR' if _row_warns(item) else 'MESH_DATA')
         row.label(text=f"{item.objects} obj  {item.material_count} mat  {item.kept} kept")
 
 
-class FSS_OT_MergePreview(bpy.types.Operator):
-    bl_idname = "fss.merge_preview"
-    bl_label = "Print Details"
-    bl_description = "Print what the export would merge (visible objects) to the console, without changing anything"
+class FSS_OT_MergeSelect(bpy.types.Operator):
+    bl_idname = "fss.merge_select"
+    bl_label = "Select"
+    bl_description = "Select the visible objects of this merge group behind this row (Shift: add to the selection)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    root: bpy.props.StringProperty(name="Group")
+    what: bpy.props.EnumProperty(name="What", items=PICK_KINDS)
+    value: bpy.props.StringProperty(name="Value")
+    index: bpy.props.IntProperty(name="Index")
+    extend: bpy.props.BoolProperty(options={'SKIP_SAVE'})
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT'
+
+    def invoke(self, context, event):
+        self.extend = event.shift
+        return self.execute(context)
 
     def execute(self, context):
-        settings = context.scene.fss_merge
-        skip_tags = set(tags.parse_tag_list(settings.skip_tags))
+        root = context.scene.objects.get(self.root)
+        if root is None:
+            self.report({'ERROR'}, f"No object '{self.root}': press Refresh")
+            return {'CANCELLED'}
         view_layer = context.view_layer
-        groups = plan(context.scene, lambda obj: obj.visible_get(view_layer=view_layer), skip_tags)
-        if not groups:
-            self.report({'INFO'}, f"No visible {PREFIX} empties")
-            return {'FINISHED'}
-        for group in groups:
-            materials = {slot.material.name for obj in group.members for slot in obj.material_slots if slot.material}
-            print(f"{LOG_PREFIX} {logical_name(group.root)}: {len(group.members)} mesh(es) to merge, "
-                  f"{len(materials)} material(s) {sorted(materials)}, {len(group.skipped)} kept separate")
-            for obj, reason in group.skipped:
-                print(f"{LOG_PREFIX}   kept separate: {obj.name} ({reason})")
-        total = sum(len(group.members) for group in groups)
-        self.report({'INFO'}, f"{len(groups)} group(s), {total} mesh(es) would merge; details in the console")
+        skip_tags = set(tags.parse_tag_list(context.scene.fss_merge.skip_tags))
+        # Worked out from the scene as it is now, so a list older than the last edit cannot select the wrong objects
+        group = collect_group(root, lambda obj: obj.visible_get(view_layer=view_layer), skip_tags)
+        objects = pick_objects(group, self.what, self.value, self.index)
+        if not objects:
+            self.report({'WARNING'}, "No visible object matches any more: press Refresh")
+            return {'CANCELLED'}
+        if not self.extend:
+            for obj in view_layer.objects:
+                if obj.select_get(view_layer=view_layer):
+                    obj.select_set(False, view_layer=view_layer)
+        for obj in objects:
+            obj.select_set(True, view_layer=view_layer)
+        view_layer.objects.active = objects[0]
+        self.report({'INFO'}, f"{len(objects)} object(s) selected")
         return {'FINISHED'}
+
+
+def _draw_pick(column, item, pick, text, icon):
+    op = column.operator(FSS_OT_MergeSelect.bl_idname, text=f"{text}  {pick.count} obj", icon=icon)
+    op.root, op.what, op.value, op.index = item.root, pick.what, pick.value, pick.index
 
 
 class FSS_OT_MergeCreateGroup(bpy.types.Operator):
@@ -850,13 +996,14 @@ class FSS_PT_Merge(bpy.types.Panel):
         if not settings.items:
             layout.label(text=f"No visible {ZONE_PREFIX} or {PREFIX} nodes", icon='INFO')
             return
+        layout.label(text=_totals_text(settings))
         layout.template_list(FSS_UL_MergeTree.bl_idname, "", settings, "items", settings, "active", rows=6)
         item = settings.items[settings.active] if 0 <= settings.active < len(settings.items) else None
         if item is not None and item.kind != 'GROUP':
             box = layout.box()
             if item.kind == 'ZONE':
-                box.label(text=f"{item.root}: {item.groups} merge group(s), {item.objects} object(s)",
-                          icon='OUTLINER_OB_EMPTY')
+                box.label(text=f"{item.root}: {item.groups} merge group(s), {item.objects} -> {item.merged} object(s)",
+                          icon='SHADING_BBOX')
                 if item.flag:
                     box.label(text=f"Zone {item.flag}", icon='ERROR')
                 if item.zone is not None:
@@ -873,25 +1020,29 @@ class FSS_PT_Merge(bpy.types.Panel):
             else:
                 column = box.column(align=True)
                 column.label(text=f"Merged: {item.objects} object(s), {item.material_count} material(s)")
-                if item.material_names:
-                    column.label(text=item.material_names, icon='MATERIAL')
-                if item.transparent:
-                    column.label(text=f"Transparent parts become {item.name}_TRANSPARENT", icon='ERROR')
+                picks = {what: [pick for pick in item.picks if pick.what == what] for what, _name, _text in PICK_KINDS}
+                for pick in picks['MATERIAL']:
+                    _draw_pick(column, item, pick, pick.value or "(no material)", 'MATERIAL')
+                for pick in picks['TRANSPARENT']:
+                    _draw_pick(column, item, pick, f"Transparent parts become {item.name}_TRANSPARENT", 'ERROR')
                 if item.uv_names:
-                    uv_icon = 'ERROR' if item.uv_names.count(",") >= 2 or "/" in item.uv_names else 'GROUP_UVS'
-                    column.label(text=f"UV maps: {item.uv_names}", icon=uv_icon)
+                    column.label(text=f"UV maps: {item.uv_names}", icon='ERROR' if picks['UV'] else 'GROUP_UVS')
+                for pick in picks['UV']:
+                    _draw_pick(column, item, pick, f"UV map {pick.index + 1}: {pick.value}", 'ERROR')
+                if item.name_clash:
+                    column.label(text=f"{item.name_clash}: named like a node that stays; rename one", icon='ERROR')
                 column.label(text=f"Kept separate: {item.kept}", icon='OUTLINER_OB_GROUP_INSTANCE')
-                if item.reasons:
-                    column.label(text=item.reasons)
-        layout.operator(FSS_OT_MergePreview.bl_idname, icon='CONSOLE')
+                for pick in picks['KEPT']:
+                    _draw_pick(column, item, pick, pick.value, 'RESTRICT_SELECT_OFF')
 
 
 CLASSES = (
+    FSS_MergePick,
     FSS_MergeTreeItem,
     FSS_MergeSettings,
     FSS_OT_MergeRefresh,
     FSS_UL_MergeTree,
-    FSS_OT_MergePreview,
+    FSS_OT_MergeSelect,
     FSS_OT_MergeCreateGroup,
     FSS_PT_Merge,
 )

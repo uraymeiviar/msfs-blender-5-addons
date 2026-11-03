@@ -34,7 +34,7 @@ sys.path.insert(0, repo_root_str)
 
 import io_scene_gltf2_msfs_fss  # noqa: E402,F401
 import fss_blender_tools  # noqa: E402
-from fss_blender_tools import merge, uv_marks  # noqa: E402
+from fss_blender_tools import merge, tags, uv_marks  # noqa: E402
 
 for name in ADDONS:
     addon_utils.enable(name, default_set=True)
@@ -108,11 +108,11 @@ def test_tree_rows():
     by_name = {(item.kind, item.name): item for item in items}
     flags = {name: by_name[('ZONE', name)].flag for name in ('AFT', 'BAD', 'FWD', 'INNER')}
     assert flags == {'AFT': '', 'BAD': 'inside @MERGE_STRAY', 'FWD': '', 'INNER': 'inside @ZONE_AFT'}, flags
-    counts = {name: (by_name[('ZONE', name)].groups, by_name[('ZONE', name)].objects)
+    counts = {name: (by_name[('ZONE', name)].groups, by_name[('ZONE', name)].objects, by_name[('ZONE', name)].merged)
               for name in ('AFT', 'BAD', 'FWD', 'INNER')}
-    # FWD: PANEL, PANEL_SHELL, SCREEN, KNOB, KNOB_CAP, LOOSE_PART (the hidden group and part are not counted);
-    # AFT: SHELF, SHELF_BOARD and the @ZONE_INNER empty (what is below INNER counts for INNER)
-    assert counts == {'AFT': (1, 3),'BAD': (0, 1), 'FWD': (2, 6), 'INNER': (1, 2)}, counts
+    # Meshes, before and after. FWD: PANEL_SHELL, SCREEN, KNOB_CAP, LOOSE_PART (the hidden part is not counted), each
+    # a mesh of its own after the merge too; BAD: its part merges away into STRAY, outside the zone
+    assert counts == {'AFT': (1, 1, 1), 'BAD': (0, 1, 0), 'FWD': (2, 4, 4), 'INNER': (1, 1, 1)}, counts
     assert by_name[('UNZONED', 'Unzoned')].groups == 1
     for name in ('AFT', 'BAD', 'FWD', 'INNER'):
         assert by_name[('ZONE', name)].zone == o[name.lower()], name
@@ -172,6 +172,8 @@ class _Layout:
     def __getattr__(self, name):
         def call(*args, **kwargs):
             self.calls.append((name, args, kwargs))
+            if name == 'operator':
+                return SimpleNamespace()
             return self if name in ('row', 'column', 'box') else None
         return call
 
@@ -191,7 +193,7 @@ def test_draw_smoke():
         mark = [(item.zone, name) for name in (uv_marks.OWN_PROP, uv_marks.MIN_PROP, uv_marks.MAX_PROP)]
         assert props == (mark if item.kind == 'ZONE' else []), (item.name, props)
         assert item.kind != 'ZONE' or item.zone == o[item.name.lower()], item.name
-    assert texts[2] == ["BAD (inside @MERGE_STRAY)", "0 grp  1 obj"], texts[2]
+    assert texts[2] == ["BAD (inside @MERGE_STRAY)", "1 -> 0 obj"], texts[2]
     assert texts[5] == ["SCREEN (stays separate)"], texts[5]
     assert texts[9] == ["Unzoned: 1 group(s) outside every @ZONE_ empty"], texts[9]
     assert merge.FSS_PT_Merge.bl_label == "Zones & Merge Tree"
@@ -201,6 +203,233 @@ def test_draw_smoke():
         merge.FSS_PT_Merge.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
         assert any(name == 'template_list' for name, _args, _kwargs in calls)
     print(f"PASS: test_draw_smoke ({len(settings.items)} rows and their details)")
+
+
+def build_pick_scene():
+    """One group with several materials, a transparent part, UV warnings, and every kind of part kept out."""
+    bpy.ops.wm.read_homefile(use_empty=True)
+    bpy.context.scene.fss_merge.skip_tags = "SCREEN"
+    zone = new_empty("@ZONE_FWD")
+    root = new_empty("@MERGE_MIX", zone)
+    o = {'root': root}
+    red, blue = bpy.data.materials.new("RED"), bpy.data.materials.new("BLUE")
+    glass = bpy.data.materials.new("GLASS")
+    glass.msfs_alpha_mode = 'BLEND'
+    for name, materials, uv_maps in (("A", [red], ["UVMap"]), ("B", [blue], ["OTHER"]),
+                                     ("C", [red, glass], ["UVMap", "UV2", "UV3"])):
+        o[name] = new_cube(name, root)
+        for material in materials:
+            o[name].data.materials.append(material)
+        for uv_map in uv_maps:
+            o[name].data.uv_layers.new(name=uv_map)
+    o['C'].data.polygons[0].material_index = 1
+    o['anim1'] = new_cube("ANIM1", root)
+    o['anim2'] = new_cube("ANIM2", root)
+    for key in ('anim1', 'anim2'):
+        o[key].keyframe_insert("location", frame=1)
+    # Below an animated part: moves with it, so it is not a part of the group's walk at all
+    o['below'] = new_cube("BELOW_ANIM", o['anim1'])
+    o['below'].data.materials.append(red)
+    o['tagged'] = new_cube("TAGGED", root)
+    tags.set_tags(o['tagged'], ["SCREEN"])
+    o['nomerge'] = new_cube("@NOMERGE_PART", root)
+    o['inner'] = new_empty("@MERGE_INNER", root)
+    o['hidden'] = new_cube("HIDDEN_RED", root)
+    o['hidden'].data.materials.append(red)
+    bpy.context.view_layer.update()
+    o['hidden'].hide_set(True)
+    return o
+
+
+def selected_names():
+    return sorted(obj.name for obj in bpy.context.view_layer.objects if obj.select_get())
+
+
+def test_group_picks():
+    o = build_pick_scene()
+    bpy.ops.fss.merge_refresh()
+    item = next(item for item in bpy.context.scene.fss_merge.items if item.kind == 'GROUP' and item.name == 'MIX')
+    picks = {(pick.what, pick.value, pick.index): pick.count for pick in item.picks}
+    assert picks == {
+        ('MATERIAL', 'RED', 0): 2, ('MATERIAL', 'BLUE', 0): 1, ('MATERIAL', 'GLASS', 0): 1,
+        ('TRANSPARENT', '', 0): 1,
+        ('UV', 'UVMap', 0): 2, ('UV', 'OTHER', 0): 1, ('UV', 'UV3', 2): 1,
+        ('KEPT', 'animated', 0): 2, ('KEPT', 'tag SCREEN', 0): 1, ('KEPT', '@NOMERGE_ node', 0): 1,
+        ('KEPT', 'own @MERGE_ group', 0): 1,
+    }, picks
+
+    def select(what, value="", index=0, **options):
+        return bpy.ops.fss.merge_select(root=o['root'].name, what=what, value=value, index=index, **options)
+
+    # Each row selects exactly its objects, replacing the selection, and the first becomes active. Neither the hidden
+    # part with the same material nor the part below an animated one is picked
+    cases = (
+        (('MATERIAL', 'RED'), ["A", "C"]), (('MATERIAL', 'BLUE'), ["B"]), (('TRANSPARENT',), ["C"]),
+        (('UV', 'OTHER'), ["B"]), (('UV', 'UV3', 2), ["C"]), (('KEPT', 'animated'), ["ANIM1", "ANIM2"]),
+        (('KEPT', 'tag SCREEN'), ["TAGGED"]), (('KEPT', '@NOMERGE_ node'), ["@NOMERGE_PART"]),
+        (('KEPT', 'own @MERGE_ group'), ["@MERGE_INNER"]),
+    )
+    for args, expected in cases:
+        assert select(*args) == {'FINISHED'}, args
+        assert selected_names() == expected, (args, selected_names())
+        assert bpy.context.view_layer.objects.active.name in expected, args
+
+    # Extending keeps what is selected; a click takes Shift from the event
+    select('MATERIAL', 'BLUE')
+    select('KEPT', 'animated', extend=True)
+    assert selected_names() == ["ANIM1", "ANIM2", "B"], selected_names()
+    probe = SimpleNamespace(extend=False, execute=lambda context: {'FINISHED'})
+    merge.FSS_OT_MergeSelect.invoke(probe, bpy.context, SimpleNamespace(shift=True))
+    assert probe.extend is True
+
+    # The selection comes from the scene as it is now, not from the list of the last Refresh
+    o['A'].data.materials[0] = bpy.data.materials['BLUE']
+    assert select('MATERIAL', 'RED') == {'FINISHED'}
+    assert selected_names() == ["C"], selected_names()
+    o['C'].data.materials[0] = bpy.data.materials['BLUE']
+    before = selected_names()
+    assert select('MATERIAL', 'RED') == {'CANCELLED'}
+    assert selected_names() == before, "a row that finds nothing leaves the selection alone"
+    try:
+        bpy.ops.fss.merge_select(root="GONE", what='MATERIAL', value='RED')
+        raise AssertionError("a deleted group must be reported")
+    except RuntimeError as error:
+        assert "press Refresh" in str(error), error
+
+    # Refreshed, the details draw a button per row with the row's own settings; a clean group keeps its plain UV label
+    bpy.ops.fss.merge_refresh()
+    settings = bpy.context.scene.fss_merge
+    settings.active = next(index for index, item in enumerate(settings.items) if item.name == 'MIX')
+    calls = []
+    merge.FSS_PT_Merge.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+    texts = [kwargs['text'] for name, args, kwargs in calls
+             if name == 'operator' and args[0] == merge.FSS_OT_MergeSelect.bl_idname]
+    assert "animated  2 obj" in texts and "BLUE  3 obj" in texts, texts
+    assert "Transparent parts become MIX_TRANSPARENT  1 obj" in texts and "UV map 3: UV3  1 obj" in texts, texts
+    icons = [kwargs.get('icon') for name, _args, kwargs in calls
+             if name == 'label' and kwargs.get('text', '').startswith("UV maps")]
+    assert icons == ['ERROR'], icons
+
+    bpy.ops.wm.read_homefile(use_empty=True)
+    zone = new_empty("@ZONE_FWD")
+    clean = new_empty("@MERGE_CLEAN", zone)
+    part = new_cube("PART", clean)
+    part.data.uv_layers.new(name="UVMap")
+    bpy.ops.fss.merge_refresh()
+    settings = bpy.context.scene.fss_merge
+    settings.active = next(index for index, item in enumerate(settings.items) if item.name == 'CLEAN')
+    assert not [pick for pick in settings.items[settings.active].picks if pick.what == 'UV']
+    calls = []
+    merge.FSS_PT_Merge.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+    icons = [kwargs.get('icon') for name, _args, kwargs in calls
+             if name == 'label' and kwargs.get('text', '').startswith("UV maps")]
+    assert icons == ['GROUP_UVS'], icons
+    print(f"PASS: test_group_picks ({len(cases)} rows)")
+
+
+def build_totals_scene():
+    """One zone: a split group, a group with a transparent slot no face uses, a group whose only problem is its UV
+    names, a group with faces without a material, kept parts, a loose part, and a hidden part with a material of its
+    own."""
+    bpy.ops.wm.read_homefile(use_empty=True)
+    red, glass = bpy.data.materials.new("RED"), bpy.data.materials.new("GLASS")
+    glass.msfs_alpha_mode = 'BLEND'
+    zone = new_empty("@ZONE_FWD")
+    o = {'split': new_empty("@MERGE_SPLIT", zone), 'unused': new_empty("@MERGE_UNUSED", zone),
+         'uvs': new_empty("@MERGE_UVS", zone), 'none': new_empty("@MERGE_NONE", zone)}
+    for name, parent, materials, uv_map in (("A", 'split', [red], ""), ("G", 'split', [red, glass], ""),
+                                            ("U", 'unused', [red, glass], ""), ("V", 'unused', [red], ""),
+                                            ("P", 'uvs', [red], "UVMap"), ("Q", 'uvs', [red], "OTHER"),
+                                            ("X", 'none', [red], ""), ("Y", 'none', [], "")):
+        o[name] = new_cube(name, o[parent])
+        for material in materials:
+            o[name].data.materials.append(material)
+        if uv_map:
+            o[name].data.uv_layers.new(name=uv_map)
+    o['G'].data.polygons[0].material_index = 1
+    o['nomerge'] = new_cube("@NOMERGE_N", o['uvs'])
+    o['anim'] = new_cube("ANIM", o['split'])
+    o['anim'].keyframe_insert("location", frame=1)
+    o['loose'] = new_cube("LOOSE", zone)
+    o['loose'].data.materials.append(bpy.data.materials.new("BLUE"))
+    o['hidden'] = new_cube("HIDDEN", zone)
+    o['hidden'].data.materials.append(bpy.data.materials.new("HIDDEN_MAT"))
+    # Meshes without faces are not counted, loose, in a group, or as the only part of a group
+    for name, parent in (("FACELESS_LOOSE", zone), ("FACELESS_MEMBER", o['uvs']),
+                         ("FACELESS_ONLY", new_empty("@MERGE_FACELESS", zone))):
+        obj = bpy.data.objects.new(name, bpy.data.meshes.new(name + "_Mesh"))
+        bpy.context.scene.collection.objects.link(obj)
+        obj.parent = parent
+    bpy.context.view_layer.update()
+    o['hidden'].hide_set(True)
+    return o
+
+
+def test_totals():
+    build_totals_scene()
+    bpy.ops.fss.merge_refresh()
+    settings = bpy.context.scene.fss_merge
+    by_name = {item.name: item for item in settings.items}
+    # A, G, U, V, P, Q, X, Y, @NOMERGE_N, ANIM, LOOSE -> SPLIT, SPLIT_TRANSPARENT, UNUSED, UVS, NONE, N, ANIM, LOOSE
+    assert (by_name['FWD'].objects, by_name['FWD'].merged) == (11, 8), (by_name['FWD'].objects, by_name['FWD'].merged)
+    # As in the export: UV names alone and faces without a material warn, a slot no face uses does not
+    assert [item.name for item in settings.items if merge._row_warns(item)] == ['NONE', 'SPLIT', 'UVS']
+    unused = by_name['UNUSED']
+    assert (unused.material_count, unused.transparent) == (1, False), (unused.material_count, unused.transparent)
+    picks = {(pick.what, pick.value): pick.count for pick in by_name['NONE'].picks}
+    assert picks == {('MATERIAL', 'RED'): 1, ('MATERIAL', ''): 1}, picks
+    assert bpy.ops.fss.merge_select(root="@MERGE_NONE", what='MATERIAL', value="") == {'FINISHED'}
+    assert selected_names() == ["Y"], selected_names()
+
+    def row_icons(item):
+        calls = []
+        merge.FSS_UL_MergeTree.draw_item(None, bpy.context, _Layout(calls), settings, item, 0, settings, "active", 0)
+        return [kwargs.get('icon') for name, _args, kwargs in calls if name == 'label']
+
+    assert 'ERROR' in row_icons(by_name['UVS'])
+    assert 'SHADING_BBOX' in row_icons(by_name['FWD'])
+    icons = bpy.types.UILayout.bl_rna.functions['label'].parameters['icon'].enum_items
+    assert 'SHADING_BBOX' in icons.keys()
+    settings.active = list(settings.items).index(by_name['FWD'])
+    calls = []
+    merge.FSS_PT_Merge.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+    labels = [kwargs.get('text') for name, _args, kwargs in calls if name == 'label']
+    # Neither the hidden part's material nor faces without a material are counted as a material of the scene
+    assert "1 zone  5 merge  1 no-merge  3 warnings  3 materials" in labels, labels
+    assert not hasattr(merge, 'FSS_OT_MergePreview')
+
+    # The count after the merge is what an export writes: mesh nodes below the zone
+    if SCRATCH_DIR.exists():
+        shutil.rmtree(SCRATCH_DIR)
+    SCRATCH_DIR.mkdir(parents=True)
+    path = SCRATCH_DIR / "totals.gltf"
+    bpy.ops.export_scene.gltf(filepath=str(path), export_format='GLTF_SEPARATE', use_visible=True)
+    nodes = json.loads(path.read_text(encoding='utf-8'))['nodes']
+
+    def meshes_below(index):
+        node = nodes[index]
+        return ([node['name']] if 'mesh' in node else []) + [name for child in node.get('children', [])
+                                                             for name in meshes_below(child)]
+
+    zone_index = next(index for index, node in enumerate(nodes) if node['name'] == 'ZONE_FWD')
+    exported = sorted(meshes_below(zone_index))
+    assert len(exported) == by_name['FWD'].merged, exported
+    assert 'SPLIT_TRANSPARENT' in exported and 'UNUSED_TRANSPARENT' not in exported, exported
+
+    # A merged mesh named like a node that stays warns, and the details say so
+    bpy.ops.wm.read_homefile(use_empty=True)
+    root = new_empty("@MERGE_CLASH", new_empty("@ZONE_FWD"))
+    new_cube("PART", root)
+    new_cube("CLASH", root).keyframe_insert("location", frame=1)
+    bpy.ops.fss.merge_refresh()
+    settings = bpy.context.scene.fss_merge
+    settings.active = next(index for index, item in enumerate(settings.items) if item.kind == 'GROUP')
+    item = settings.items[settings.active]
+    assert item.name_clash == "CLASH" and merge._row_warns(item), item.name_clash
+    calls = []
+    merge.FSS_PT_Merge.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+    assert any(kwargs.get('text', '').startswith("CLASH: named like") for name, _args, kwargs in calls if name == 'label')
+    print(f"PASS: test_totals (zone 11 -> 8 meshes, export {len(exported)})")
 
 
 def fss_extras_keys(value, path=''):
@@ -264,6 +493,8 @@ def main():
     test_zone_mark()
     test_nearest_zone()
     test_draw_smoke()
+    test_group_picks()
+    test_totals()
     test_gltf_leak()
     print("ALL TESTS PASSED")
 
