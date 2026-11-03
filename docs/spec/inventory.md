@@ -98,7 +98,7 @@ Based on Asobo's MSFS 2024 exporter 8.4.1 for Blender 5.2; FSS changes live in F
 | Export-time merge of each `@MERGE_` group's subtree into one mesh; `@NOMERGE_`, animated, skinned, bone-parented, shape-key, Don't Merge and non-mesh objects stay separate; transparent parts as `<name>_TRANSPARENT` | implemented | W8; tags-and-merge journal | MRG-001 to MRG-007 |
 | Only in a deploy or the MSFS 2024 multi-exporter, never in a plain File > Export | implemented | tags-and-merge journal | MRG-008 |
 | Merge on Export: merging on or off per scene, on by default | implemented (added 20261028) | `merge.py` | MRG-001 |
-| New Merge Group, Refresh tree, Print Details | implemented | `merge.py` | MRG-010 to MRG-012 |
+| New Merge Group, Refresh tree, selecting from a group's details, scene totals, meshes before and after per zone | implemented (selection, totals and counts added 20261103; they replace Print Details) | `merge.py`; tags-and-merge journal Session 9 | MRG-010 to MRG-013 |
 | Decal merge per zone, decal material and Draw Order | wish (today decals, as blended surfaces, merge into their group's `<name>_TRANSPARENT` mesh, without grouping by Draw Order) | W14 | MRG-020 |
 | Merged animation names keep a `@MERGE_` marker when the action is named after the root | implemented (action names are exported as authored; accepted behaviour) | tags-and-merge journal, Known Issues | DAT-044 |
 

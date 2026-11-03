@@ -121,10 +121,14 @@ with a `@NOMERGE_Button`) in seven LOD exports for both simulators, and cannot b
 - **Requirement:** Refresh lists the visible objects' zones (ZON-002) and merge groups, nested as in the scene, with
   objects, materials and kept-separate counts per group, and `@NOMERGE_` rows one level below their group.
   Clicking a row selects the object. The active group shows its materials, the transparency split, its UV map names
-  and why objects were kept separate. The list does not follow later changes until the next Refresh.
+  and why objects were kept separate. Materials and the transparency split come from the faces, as in the export: a
+  slot no face uses does not count, and faces without a material count as one. A group row shows a warning triangle
+  exactly when the export would warn about the group (MRG-007). The list does not follow later changes until the next
+  Refresh.
 - **Data:** DAT-002
-- **Decision:** TM Session 4; TM S8.1 to S8.3
-- **Test:** `tests/test_zone_tree.py::test_tree_rows`, `tests/test_zone_tree.py::test_draw_smoke`
+- **Decision:** TM Session 4; TM S8.1 to S8.3; TM S9.5
+- **Test:** `tests/test_zone_tree.py::test_tree_rows`, `tests/test_zone_tree.py::test_draw_smoke`,
+  `tests/test_zone_tree.py::test_totals`
 - **Code:** `merge.py` (`FSS_OT_MergeRefresh`)
 
 ### MRG-011: New Merge Group
@@ -138,14 +142,28 @@ with a `@NOMERGE_Button`) in seven LOD exports for both simulators, and cannot b
 - **Test:** no test
 - **Code:** `merge.py`
 
-### MRG-012: Print Details
+### MRG-012: Selecting from the group's details
 
 - **Status:** implemented
-- **Requirement:** Print Details prints every group and every object kept separate, with its reason, to the system
-  console.
-- **Decision:** TM S3 (merge report on the console)
-- **Test:** no test
-- **Code:** `merge.py`
+- **Requirement:** The rows of the active group's details (each material, transparent parts, each UV map with a
+  warning, each reason for staying separate) are buttons with their object count. A click selects those visible
+  objects, and Shift adds to the selection; the objects come from the scene at that moment, not from the last Refresh.
+  Objects are not listed in the panel. This replaces the Print Details console listing; the export still writes each
+  kept object and its reason to its log.
+- **Decision:** TM S9.1; TM S9.2
+- **Test:** `tests/test_zone_tree.py::test_group_picks`
+- **Code:** `merge.py` (`FSS_OT_MergeSelect`, `pick_objects`)
+
+### MRG-013: Scene totals and zone counts
+
+- **Status:** implemented
+- **Requirement:** A line above the list shows, for the visible objects, the zones, merge groups, `@NOMERGE_` rows,
+  rows with a warning, and the materials faces use. Each zone row shows the meshes below the zone before and after the
+  merge. After the merge, each group counts one mesh, or two with both opaque and transparent faces; a mesh without
+  faces counts in neither number unless a modifier other than a normals modifier could give it faces.
+- **Decision:** TM S9.3; TM S9.4
+- **Test:** `tests/test_zone_tree.py::test_totals` (the count after the merge against the mesh nodes of an export)
+- **Code:** `merge.py` (`_totals_text`, `_merged_mesh_count`, `_has_geometry`)
 
 ## Wishes
 

@@ -23,11 +23,12 @@ groups of that part. Artist guide: [../user/README.md](../user/README.md#2-zones
 
 - **Status:** implemented
 - **Requirement:** Refresh lists the visible objects' zones as top-level rows (name without the marker) with the
-  number of merge groups and objects below each, and their merge groups nested below them (MRG-010). Warnings: an
+  meshes below each before and after the merge (MRG-013), and their merge groups nested below them (MRG-010). The
+  zone's details show the number of merge groups. Warnings: an
   Unzoned entry for merge groups with no zone above them; on a zone row, a zone inside a merge group or inside
   another zone. Clicking a row selects the object.
 - **Data:** DAT-002
-- **Decision:** UV 34; TM S8.1 to S8.3
+- **Decision:** UV 34; TM S8.1 to S8.3; TM S9.4
 - **Test:** `tests/test_zone_tree.py::test_tree_rows`, `tests/test_zone_tree.py::test_draw_smoke`
 - **Code:** `merge.py`
 
