@@ -31,7 +31,7 @@ Based on Asobo's MSFS 2024 exporter 8.4.1 for Blender 5.2; FSS changes live in F
 | Export For per object and Prepare for MSFS 2024 (MSFS 2024 gizmos and lights next to the legacy ones) | implemented (added 20261028) | `msfs2020_target.py`, `ui/prepare_msfs2024.py` | EXP-005, EXP-006 |
 | Emissive reference for MSFS 2020 exports (scene value or add-on preference) | implemented (added 20261028) | `migration.py`, exporter guide | EXP-004 |
 | Anisotropic and Hair textures shown in Material Preview and Rendered views, exports unchanged | implemented (added 20261103) | `20261103.anisotropic-preview.md`; `anisotropic_preview.py` | EXP-014 |
-| Instancing: a shared mesh exported once, also when its users have only Auto Smooth with the same angle | implemented | `instancing.py` | EXP-008 |
+| Instancing: a shared mesh exported once, also when its users have only Auto Smooth with the same angle, and on throwaway objects when users with only Weighted Normal or Auto Smooth evaluate identically | implemented | `instancing.py`, `tests/test_instancing.py` | EXP-008 |
 | Clean-up on export: NLA tweak mode, Edit and Pose Mode | implemented | exporter guide | EXP-009 |
 | Asobo's export workflow hidden (Multi-Export Hierarchy tab, LOD Tools panel) in favour of the FSS deploy, merge groups and LOD marks | implemented | `fss_workflow_ui.py` | EXP-010 |
 | Export speed of the LOD deploy (E2 cockpit 973 s to 67 s) | implemented | `20261017.export-performance.md` | — (a measurement, not a requirement) |

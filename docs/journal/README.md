@@ -17,6 +17,7 @@ Task journals of this repository: design, decisions, progress and hand-offs, one
 | [20261021.artist-pipeline-guide.md](20261021.artist-pipeline-guide.md) | The artist guide's pipeline (`docs/user/`): reasoning, redo points, terms | In progress |
 | [20261028.material-management.md](20261028.material-management.md) | Materials panel: material checks, zone distribution, texture sizes and splits; zone tool on hold | Design |
 | [20261103.anisotropic-preview.md](20261103.anisotropic-preview.md) | Anisotropic and Hair textures in Material Preview and Rendered views, exports unchanged | Implemented, review open |
+| [20261103.weighted-normal-instancing.md](20261103.weighted-normal-instancing.md) | Shared meshes with Weighted Normal exported once, for batched draw calls | Implemented, review open |
 
 The first five were started in the FSS aircraft repository (`codes/wasm/doc/journal/`) and moved here; their copies
 there end with a session pointing here.

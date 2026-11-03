@@ -201,6 +201,7 @@ class glTF2ExportUserExtension:
         else:
             self._impl = _ExportMSFS2024()
         self._instancing = []
+        self._instanced_names = {}
 
     # Both simulators: shared meshes whose users only have the converted Auto Smooth modifier are exported once
     # (see instancing.py); restored after the export
@@ -214,11 +215,21 @@ class glTF2ExportUserExtension:
         # exporter, no purge) exports the objects themselves.
         scene_objects = bpy.context.scene.objects
         duplicates = [obj for obj in scene_objects if "msfs_original_name" in obj]
-        gltf_exporter_patches.assign_linked_materials(
-            duplicates or (list(scene_objects) if bpy.app.background else []))
+        throwaway = duplicates or (list(scene_objects) if bpy.app.background else [])
+        self._instanced_names = instancing.instance_throwaways(throwaway, export_settings)
+        gltf_exporter_patches.assign_linked_materials(throwaway)
         hook = getattr(self._impl, "pre_export_hook", None)
         if hook:
             hook(export_settings)
+
+    def gather_mesh_hook(self, gltf2_mesh, blender_mesh, *args):
+        # A mesh made by instancing.instance_throwaways keeps the name the users' copies had in the glTF
+        hook = getattr(self._impl, "gather_mesh_hook", None)
+        if hook:
+            hook(gltf2_mesh, blender_mesh, *args)
+        name = self._instanced_names.get(blender_mesh.name)
+        if name is not None:
+            gltf2_mesh.name = name
 
     def post_export_hook(self, export_settings):
         from . import instancing

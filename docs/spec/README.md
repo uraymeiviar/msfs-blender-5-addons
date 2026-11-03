@@ -101,6 +101,7 @@ to the inventory's Rejected table, so references to its ID still resolve.
 | EB, NC | the Session 1 decisions of [20261011.fss-blender-tools-empty-bounds.md](../journal/20261011.fss-blender-tools-empty-bounds.md) and [20261011.fss-blender-tools-name-check.md](../journal/20261011.fss-blender-tools-name-check.md), by their title or label (D1 to D5) |
 | PERF S*x* | Session *x* of [20261017.export-performance.md](../journal/20261017.export-performance.md) |
 | MAT *n* | decision *n* of [20261028.material-management.md](../journal/20261028.material-management.md) |
+| WNI *n* | decision *n* of [20261103.weighted-normal-instancing.md](../journal/20261103.weighted-normal-instancing.md) |
 
 ## Test References
 

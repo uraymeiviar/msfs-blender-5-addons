@@ -78,15 +78,24 @@ Do not change the reference of a scene with converted materials unless you mean 
 
 ## Instancing
 
-When several objects share one mesh, the export writes the mesh once and every object refers to it (an instance). This keeps files small, for example for hundreds of identical screws.
+When several objects share one mesh, the export writes the mesh once and every object refers to it (an instance). This keeps files small, for example for hundreds of identical screws, and MSFS draws instances of one mesh with one material in one draw call (not for skinned meshes).
 
-Blender 4.1 and later turned the old Auto Smooth setting into a Geometry Nodes modifier named **Auto Smooth**. The glTF exporter writes a separate mesh copy for every object that has any modifier. The FSS exporter keeps the instancing when all of these hold:
+The glTF exporter writes a separate mesh copy for every object that has any modifier. Blender 4.1 and later also turned the old Auto Smooth setting into a Geometry Nodes modifier named **Auto Smooth**. The FSS exporter keeps the instancing in two cases.
+
+**In every export,** when all of these hold:
 
 - every user of the shared mesh is exported;
 - each user's only modifier is **Auto Smooth**, enabled in the viewport, with the same angle on all users;
 - the mesh has no shape keys and no custom normals, and is not linked from a library.
 
-Any other modifier (for example Weighted Normal) gives each object its own copy. To keep instances, apply such a modifier once on the shared mesh data and remove it from the objects.
+**In the MSFS 2024 multi-exporter and in background exports (the deploy),** which work on objects that are thrown away afterwards, also when all of these hold:
+
+- the mesh has two or more exported users, no shape keys, and is not linked from a library;
+- every modifier of every exported user is **Weighted Normal** or **Auto Smooth**, and no user is skinned.
+
+Users with the same result then share one mesh: same vertices and normals, same UVs and the same material on each face. Users with a different result (for example other Weighted Normal settings, or another material linked to the object) form their own group, and a user alone in its group keeps its own copy. Your objects, their modifiers and their meshes stay as they are.
+
+Any other modifier (for example Mirror) on one user gives each user of that mesh its own copy. A File > Export from an open Blender window keeps the first case only. To keep instances in those cases, apply the modifier once on the shared mesh data and remove it from the objects.
 
 ## Legacy Normals (Files from Blender 4.0 or Older)
 

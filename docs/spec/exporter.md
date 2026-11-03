@@ -129,16 +129,23 @@ forks do, not that a single FSS feature works.
 - **Test:** no test
 - **Code:** `legacy_normals.py`
 
-### EXP-008: Instancing with Auto Smooth
+### EXP-008: Instancing with Auto Smooth and Weighted Normal
 
 - **Status:** implemented
 - **Requirement:** A mesh shared by several objects is exported once, with every object referring to it, also when
   each user's only modifier is Auto Smooth, enabled in the viewport, with the same angle on all users, provided every
-  user is exported and the mesh has no shape keys, no custom normals and is not linked from a library. Any other
-  modifier gives each user its own copy.
-- **Decision:** LOD 23 (instancing kept on trimmed meshes); none recorded for the Auto Smooth rule (CONV Session 12)
-- **Test:** no test
-- **Code:** `instancing.py`
+  user is exported and the mesh has no shape keys, no custom normals and is not linked from a library. On throwaway
+  objects (multi-exporter duplicates, background exports), the exported users of a mesh without shape keys, not linked
+  from a library, none skinned, whose every modifier is Weighted Normal or the converted Auto Smooth, are grouped by
+  their evaluated result (vertex order, positions within 1e-5, corner normals within 1e-3, UVs within 1e-4, the
+  material of each face); each group of two or more shares one new mesh without modifiers, written under the source
+  mesh's name. An interactive export and the source objects stay unchanged. Any other modifier gives each user its own
+  copy.
+- **Decision:** LOD 23 (instancing kept on trimmed meshes); WNI 1 (the exporter fix before a detection tool); throwaway
+  objects only and Weighted Normal and Auto Smooth only follow proposals P1 and P2 of WNI Session 1, not answered by the
+  maintainer; none recorded for the Auto Smooth rule (CONV Session 12)
+- **Test:** `tests/test_instancing.py`
+- **Code:** `instancing.py`, the dispatcher in `__init__.py`
 
 ### EXP-009: Clean-up on export
 
