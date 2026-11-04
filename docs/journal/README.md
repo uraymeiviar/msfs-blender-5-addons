@@ -18,6 +18,7 @@ Task journals of this repository: design, decisions, progress and hand-offs, one
 | [20261028.material-management.md](20261028.material-management.md) | Materials panel: material checks, zone distribution, texture sizes and splits; zone tool on hold | Design |
 | [20261103.anisotropic-preview.md](20261103.anisotropic-preview.md) | Anisotropic and Hair textures in Material Preview and Rendered views, exports unchanged | Implemented, review open |
 | [20261103.weighted-normal-instancing.md](20261103.weighted-normal-instancing.md) | Shared meshes with Weighted Normal exported once, for batched draw calls | Reviewed, MSFS check open |
+| [20261105.uv-seam-mismatch-substance.md](20261105.uv-seam-mismatch-substance.md) | Artists' seam mismatch in Substance Painter (triplanar), and 16-bit UVs | Paused, waiting for a session with Substance |
 
 The first five were started in the FSS aircraft repository (`codes/wasm/doc/journal/`) and moved here; their copies
 there end with a session pointing here.
