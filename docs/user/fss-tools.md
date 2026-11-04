@@ -85,7 +85,7 @@ Transparent materials (MSFS alpha mode Blend) never share a mesh with opaque one
 
 ## Tags
 
-A tag is a free label you put on objects, for example `SCREEN` or `KEEP_LOD`. An object can have several tags. Tags replace extra collections for grouping, and toggles on each tag set how tagged objects are treated by the export and by a later AO auto-bake. Tags are stored in the object's custom property `fss_tags` (separated by `;`), so you can also read them under **Object Properties > Custom Properties**.
+A tag is a free label you put on objects, for example `SCREEN` or `KEEP_LOD`. An object can have several tags. Tags replace extra collections for grouping, and toggles on each tag set how tagged objects are treated by the export, by the panels and by a later AO auto-bake. Tags are stored in the object's custom property `fss_tags` (separated by `;`), so you can also read them under **Object Properties > Custom Properties**.
 
 - **Top row:** type one or more tag names (separate several with `;` or `,`), then **+** adds them to the selected objects, **-** removes them.
 - **Active object box** (only while the active object is selected): the tags of the active object; **X** removes one from the active object only.
@@ -139,8 +139,8 @@ The same panel is also in the **UV Editor**'s sidebar (**N**), tab **FSS MSFS To
 - **Texture set list:** every material of the selected objects, the active object's first. Each row shows the material and its last result (see **Last run**; empty before the first run). The list shows 5 rows and scrolls; drag its lower edge to show more, or type in its filter field to find a material by name. A lock marks a set with **Keep UVs**, a warning sign a set whose last run found faces without area or triangles without UV area. With nothing selected, the panel says so.
 - **Texture set box**, below the list: the row you clicked (before you click one, the first row):
   - **Size:** the texture set's size, square, 256 to 8192 pixels per side (default 4096 × 4096). Choose the size; **Pack** and **Check All** report when the islands do not fit at their density, or leave space, and which size would fit. Files from versions before 0.33.0 had a width and a height: the larger of the two becomes the size when the file opens.
-  - **Margin:** the space around each island, in pixels of this texture set (default 8). 8 pixels keep islands apart down to the second mip level after the 4 × 4 block compression of the textures; below 4 pixels the box warns that compressed blocks bleed across islands.
-  - **Keep UVs:** leave this texture set alone: **Pack** is greyed out and **Check All** lists it as **kept**. For fur and hair cards, decal sheets and colliders, whose UVs map onto a strand or label sheet on purpose. It is stored on the material.
+  - **Margin:** the gap between two islands, in pixels of this texture set (default 8). 8 pixels keep islands apart down to the second mip level after the 4 × 4 block compression of the textures; below 4 pixels the box warns that compressed blocks bleed across islands.
+  - **Keep UVs:** leave this texture set alone: **Pack** is greyed out and **Check All** lists it as **kept**. For fur and hair cards, decal sheets and colliders, whose UVs map onto a strand or label sheet on purpose, and for any material whose UVs you laid out by hand: **Pack** would replace them. It is stored on the material.
   - **Pack:** packs the texture set (see [Pack](#pack) below). It replaces the UVs of every face with this material; **Ctrl + Z** undoes it.
   - **Last run:** the result of the last **Pack** or **Check All** of this texture set in this Blender session (not saved in the file; cleared when a file is opened), with **(checked)** when it came from Check All:
     - **fits 73 %:** the islands fit at their density and fill 73 % of the texture; **, 2048 x 2048 would do** when a smaller size would still hold them.
@@ -156,11 +156,12 @@ The same panel is also in the **UV Editor**'s sidebar (**N**), tab **FSS MSFS To
 
 - **Density first:** every island gets its density from its range (the **Result** row above), at one common position inside the ranges for the whole set: the top of the ranges when the islands fit with space left, the highest density that still fits, or the bottom of the ranges when they do not fit.
 - **When the islands do not fit,** they are still written at their density: the layout then reaches beyond the texture, from the corner at the UV origin, and the result names the size it needs. Fitting it into the texture is your choice: a larger **Size** and **Pack** again, Blender's **Pack Islands** with scaling, or by hand.
+- **Free space is used:** small islands go inside closed shapes (the inside of a window frame, for example) and into the gaps beside large islands, so the layout is smaller than Blender's **Pack Islands** alone gives. **Pack** makes both layouts, keeps the smaller and names in the report which one it is. An island only moves and turns here; its density stays.
 - **Direction marks:** **Upright** and **Flip** islands keep their rotation; a set with a **Quarter** island turns its islands in 90-degree steps only.
-- **Margin:** each island keeps the margin on every side, so two islands are at least twice the margin apart.
+- **Margin:** two islands are at least the margin apart, measured between their closest points. The report's smallest gap shows the actual value.
 - **Kept unchanged:** islands without UV area (a line or a point in the UVs) keep their UVs; the report lists them.
 - Works in Object Mode and Edit Mode; the selection, the mode and the active UV map stay as they were.
-- Blender waits while a texture set packs (up to about half a minute for thousands of islands); the panel and the status bar show the step in work.
+- Blender waits while a texture set packs (up to about a minute and a half for a set of over a thousand islands); the panel and the status bar show the step in work.
 
 ### Packing Report
 
@@ -169,7 +170,7 @@ The same panel is also in the **UV Editor**'s sidebar (**N**), tab **FSS MSFS To
 - the result, the mode (fit, underflow: room even at the top of the ranges, or overflow), the position in the ranges (t, 0 to 1) and k, the layout's size against the texture's;
 - the needed size, the fill of the needed size and of the current size;
 - the smallest gap between islands, margin violations and overlapping triangles (both should be 0), and how far any island's density lies outside its range;
-- the number of islands, and those packed by their bounding box (when Blender's outline of an island fails);
+- the number of islands and which layout was kept: **placed into free space**, or **Pack Islands** with the shapes it used and the islands it packed by their bounding box (when Blender's outline of an island fails);
 - islands kept unchanged, and islands not checked for density (a sliver in the UVs, or no 3D area);
 - **WARNING faces without area:** objects of the set with faces that have no area. Fix them with [Find Faces Without Area](#find-faces-without-area);
 - **WARNING triangles without UV area:** the number of islands of the set that contain a triangle with area on the model but none in the UVs (a needle: its corners on one line in the UVs), and their objects, the one whose island spans the most layout pixels first (so the parts that push the layout out lead the list, not small screws). Such islands land far out of the layout, so k and the needed size grow; the set is still packed. Re-unwrap those parts (for example **Accept + Unwrap**, or Blender's **Unwrap**) and pack again; [Find Faces Without UV Area](#find-faces-without-uv-area) selects them;

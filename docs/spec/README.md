@@ -118,7 +118,6 @@ Gaps found while the specification was drafted; each shows at its requirement as
 
 | Gap | Requirements |
 | :--- | :--- |
-| The packer's margin check counts a violation below one margin; the requirement is two margins between islands | UV-PCK-007 |
 | The merge rules have no unit test; the only export check is the LOD pair above, which cannot be re-run as it stands | MRG-001 to MRG-012, DAT-043 |
 | Tags have no test of their behaviour; only what the panel draws is tested (TAG-003) | TAG-001 to TAG-007 |
 | Exporter features without a test: target detection, migration and emissive reference, Prepare for MSFS 2024, legacy normals, instancing, export clean-up, the hidden Asobo workflow; Export For and the unchanged materials after an MSFS 2020 export only indirectly | EXP-002 to EXP-010 |

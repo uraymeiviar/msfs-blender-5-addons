@@ -383,16 +383,16 @@ its own and can be repeated, none requires another to have run (UV 7, 42). Artis
 ### UV-PCK-007: Margin in pixels
 
 - **Status:** implemented
-- **Requirement:** Each set has a margin in pixels of its texture (DAT-026, default 8). Every island keeps the margin
-  on every side, so two islands are at least twice the margin apart, and no triangles of different islands overlap.
+- **Requirement:** Each set has a margin in pixels of its texture (DAT-026, default 8). Two islands are
+  at least the margin apart, and no triangles of different islands overlap.
   Below 4 px the box warns that compressed blocks bleed across islands.
 - **Data:** DAT-026
-- **Decision:** UV 105
+- **Decision:** UV 105, 122
 - **Test:** `tests/test_uv_pack.py::test_fit` and the other packer tests (helper `ok`: 0 margin violations,
   0 overlaps)
 - **Code:** `uv_pack.py` (`layout_metrics`)
-- **Notes:** NOT TESTED: the two-margin gap. `layout_metrics` counts a violation only when a gap is below one margin,
-  so a layout with gaps between one and two margins passes. The report's "smallest gap" shows the actual value.
+- **Notes:** `layout_metrics` counts a violation when a gap is below the margin. The report's "smallest gap" shows the
+  actual value.
 
 ### UV-PCK-008: Check All
 

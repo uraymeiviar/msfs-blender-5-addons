@@ -9,8 +9,9 @@ for the whole set (decision 113): 1 when the set fits at the top of its ranges, 
 and the layout then spills into [0, k] x [0, k] (decision 112).
 
 Packing runs on a temporary mesh per set with Pack Islands at scale=False, so the source objects' selection, modes,
-pins and active UV maps are never touched. pack() writes only the UVs of the set's faces back; measure() writes
-nothing. Islands without UV area (lines, points) are left out and keep their UVs. Textures are square (decision
+pins and active UV maps are never touched. Every pack of the search then places the same islands on a raster (uv_fill),
+into the free space inside closed shapes and beside large islands, which Pack Islands does not use; of the two layouts
+the smaller counts. pack() writes only the UVs of the set's faces back; measure() writes nothing. Islands without UV area (lines, points) are left out and keep their UVs. Textures are square (decision
 120). Triangles with 3D area but no UV area inside islands that have UV area (needles) push islands far out of the
 layout; the packer still packs and the report lists them (decision 118). The core takes a material, not the
 selection, so any way of choosing a texture set can call it. No UI here: the operators and the panel rows are in
@@ -23,7 +24,7 @@ import time
 import bpy
 import numpy as np
 
-from . import uv_marks, visibility_core  # uv_marks imports this module too (its operators call pack and measure)
+from . import uv_fill, uv_marks, visibility_core  # uv_marks imports this module too (its operators call pack and measure)
 
 REPORT_TEXT_NAME = 'FSS Packing Report'
 MIN_SIZE, MAX_SIZE = 256, 8192  # square texture sizes (decisions 9, 110 and 120)
@@ -35,6 +36,7 @@ FLAT_RATIO = 1e-5  # UV area / UV bbox diagonal^2 at or below which an island is
 COLLAPSE_Q = 20.0  # UV bbox diagonal / (3D bbox diagonal x density) at the area-based scale: above it, collapsed
 PROXY_ROUNDS = 3  # rounds of packing offending islands through their bounding box before the AABB fallback
 SEARCH_PACKS = 6  # packs of the search for t after the two at t = 1 and t = 0
+FILL_MIN_GAIN = 1e-3  # the raster's layout counts when its side is smaller by this part (a single island: no reason)
 FACE_AREA_MIN_CM2 = 1e-6  # world-space face area in cm^2 at or below which a face has no area (decision 117)
 # UV area in px^2 of the set's texture at or below which a triangle with 3D area has none in UV (decision 118), the
 # island threshold applied per triangle (with FLAT_RATIO for lines, MeshData.uv_zero_faces). Measured on the cockpit:
@@ -541,6 +543,7 @@ class TextureSet:
         self.upright = np.isin(self.dirs, ['UPRIGHT', 'FLIP'])  # FLIP: pinned as UPRIGHT (no 180-degree rule)
         self.quarter = bool((self.dirs == 'QUARTER').any())
         self.proxy = np.zeros(self.n, bool)  # islands packed through their proxy quad
+        self.use_fill = True  # try the raster layout next to Pack Islands' (uv_fill)
         self.no_area_objects = sorted(set(self.no_area_objects))
 
     def objects(self):
@@ -767,12 +770,31 @@ class TextureSet:
             Q[pl] = np.stack([ca * d[:, 0] - sa * d[:, 1], sa * d[:, 0] + ca * d[:, 1]], 1) + c1[li]
         zl = self.zero_area[self.loop_isl]
         Q[zl] = self.uv0[zl]
-        Qp = Q[~zl]
+        k, ext = self._extent(Q)
+        return Q, k, ext, P
+
+    def _extent(self, Q):
+        """(k, extent px (x, y)) of a layout: how far the packed islands reach from the UV origin."""
+        Qp = Q[~self.zero_area[self.loop_isl]]
         ext = Qp.max(0) * self.size
         if Qp.min() < -1e-7:
             ext = ext + np.maximum(0, -Qp.min(0) * self.size)
-        k = float(ext.max()) / self.size
-        return Q, k, ext, P
+        return float(ext.max()) / self.size, ext
+
+    def fill(self, Q):
+        """The same islands at the same scale, placed on the raster so that small islands use the free space inside
+        and beside the large ones (uv_fill), from the orientation Pack Islands gave them: Upright and Flip islands do
+        not turn; every other island may turn by 90 degrees, in a Quarter set as well. Returns (UVs, k, extent px), or
+        None when the raster could not hold them."""
+        keep = ~self.zero_area
+        px = self.px(Q)
+        kt = keep[self.tri_isl]
+        placed = uv_fill.place(px[self.TLt][kt], self.tri_isl[kt], self.n, keep, ~self.upright,
+                               self.margin_px + MARGIN_EXTRA)
+        if placed is None:
+            return None
+        F = uv_fill.apply(px, self.loop_isl, keep, *placed) / self.size
+        return (F, *self._extent(F))
 
 
 def search(ts, shape_method, progress=None):
@@ -785,7 +807,14 @@ def search(ts, shape_method, progress=None):
             progress(f'{shape_method.lower()} pack {len(packs) + 1}, t {t:.2f}')
         Q, k, ext, P = ts.pack(t, shape_method=shape_method)
         packs.append(t)
-        return {'t': t, 'Q': Q, 'k': k, 'ext': ext, 'pre': P}
+        filled = None
+        if ts.use_fill:
+            if progress is not None:
+                progress(f'placing into free space, pack {len(packs)}, t {t:.2f}')
+            filled = ts.fill(Q)
+        if filled is not None and filled[1] < k * (1.0 - FILL_MIN_GAIN):
+            return {'t': t, 'Q': filled[0], 'k': filled[1], 'ext': filled[2], 'pre': P, 'filled': True}
+        return {'t': t, 'Q': Q, 'k': k, 'ext': ext, 'pre': P, 'filled': False}
 
     r1 = run(1.0)
     if r1['k'] <= 1.0:
@@ -824,15 +853,19 @@ def pack_set(ts, progress=None):
         if progress is not None:
             progress('measuring the layout')
         row, offenders = evaluate(ts, res)
-        if row['margin_violations'] == 0 and row['overlap_tri_pairs'] == 0 or shape == 'AABB':
+        clean = row['margin_violations'] == 0 and row['overlap_tri_pairs'] == 0
+        if clean or (shape == 'AABB' and not res['filled']):
             break
-        if rounds < PROXY_ROUNDS:
+        if res['filled']:  # the raster's footprints should rule this out; Pack Islands alone from here on
+            ts.use_fill = False
+        elif rounds < PROXY_ROUNDS:
             ts.proxy[sorted(offenders)] = True
             rounds += 1
         else:
             ts.proxy[:] = False
             shape = 'AABB'
-    row.update(mode=mode, packs=packs, shape_method=shape, proxy_islands=int(ts.proxy.sum()))
+    row.update(mode=mode, packs=packs, shape_method=shape, filled=res['filled'],
+               proxy_islands=0 if res['filled'] else int(ts.proxy.sum()))
     return res, mode, row
 
 
@@ -1041,7 +1074,8 @@ def _set_block(r, selected=None):
         f"margin violations {r['margin_violations']}, overlapping triangle pairs {r['overlap_tri_pairs']}",
         f"  Density outside its range: max {100 * r['density_out_of_range_max']:.2f} % "
         f"({100 * r['density_out_of_range_max_ge100px']:.3f} % for islands of 100 px^2 or more)",
-        f"  Islands {r['islands']}; shapes {r['shape_method']}"
+        f"  Islands {r['islands']}; "
+        + ('placed into free space' if r['filled'] else f"Pack Islands, shapes {r['shape_method']}")
         + (f", {r['proxy_islands']} packed by their bounding box" if r['proxy_islands'] else '')
         + (f", {r['upright_islands']} upright" if r['upright_islands'] else '')
         + (', quarter turns only' if r['quarter'] else ''),

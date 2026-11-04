@@ -3,7 +3,8 @@ fit and overflow with k and the needed size (256 to 8192, "does not fit even at 
 duplicates, islands split by material, islands without UV area kept, Pack and its undo, Check All writing nothing,
 Keep UVs, objects included that were not selected, Find Faces Without Area, Find Faces Without UV Area and the report's
 needle warning, the migration to square sizes, the texture set list and the Packing panel in the 3D viewport and the
-UV editor. The synthetic cases are those of tests/uv_prototype/pack_density_proto.py, run through uv_pack.
+UV editor, and the raster step that uses free space (uv_fill): islands inside a ring, direction marks, its fallback to
+Pack Islands. The synthetic cases are those of tests/uv_prototype/pack_density_proto.py, run through uv_pack.
 
 To run:
 "<blender>" -b --factory-startup --python tests/test_uv_pack.py
@@ -34,7 +35,7 @@ while repo_root_str in sys.path:
 sys.path.insert(0, repo_root_str)
 
 import fss_blender_tools  # noqa: E402
-from fss_blender_tools import checks, uv_marks, uv_pack  # noqa: E402
+from fss_blender_tools import checks, uv_fill, uv_marks, uv_pack  # noqa: E402
 
 fss_blender_tools.register()
 assert Path(uv_pack.__file__).resolve().is_relative_to(REPO_ROOT), uv_pack.__file__
@@ -636,7 +637,227 @@ def test_report_order():
     print("PASS: test_report_order (B_CEILING 1800 px, C_BAR 600 px, A_SCREW 10 px: largest first)")
 
 
+def ring_obj(name, m, outer=1.0, inner=0.6, y=0.0):
+    """A square ring in the XY plane, one island, UVs = its coordinates x 0.1."""
+    a, b = (outer - inner) / 2, (outer + inner) / 2
+    out = [(0, 0), (outer, 0), (outer, outer), (0, outer)]
+    ins = [(a, a), (b, a), (b, b), (a, b)]
+    verts = [(px, py + y, 0) for px, py in out + ins]
+    me = bpy.data.meshes.new(name)
+    me.from_pydata(verts, [], [(i, (i + 1) % 4, 4 + (i + 1) % 4, 4 + i) for i in range(4)])
+    uvl = me.uv_layers.new(name='UVMap')
+    lv = np.zeros(len(me.loops), np.int64)
+    me.loops.foreach_get('vertex_index', lv)
+    uvl.data.foreach_set('uv', (np.array(verts)[:, :2] * 0.1)[lv].ravel())
+    me.materials.append(m)
+    return quad_obj(name, None, mesh=me)
+
+
+def plain_k(m):
+    """k of the same set with Pack Islands alone (the layout before the raster step)."""
+    parts, _conflicts = uv_pack.gather(bpy.context.view_layer, m)
+    ts = uv_pack.TextureSet(m, parts, bpy.context.scene, {})
+    ts.use_fill = False
+    ts.build_temp()
+    try:
+        return uv_pack.pack_set(ts)[2]
+    finally:
+        ts.remove_temp()
+
+
+def inside_ring(ring, obj, m):
+    """How many of the object's quads (4 corners each) lie inside the ring's hole, with the set's gap."""
+    q = uvs(ring).reshape(-1, 4, 2) * 4096
+    # each of the ring's 4 quads has its outer corners first: corner 3 is on the inner side
+    inner = np.array([q[i, 3] for i in range(4)])
+    lo, hi = inner.min(0), inner.max(0)
+    gap = uv_marks.margin(m)
+    corners = uvs(obj).reshape(-1, 4, 2) * 4096
+    return int(((corners.min(1) >= lo + gap - 1e-3) & (corners.max(1) <= hi - gap + 1e-3)).all(1).sum())
+
+
+def test_fill_ring():
+    # 25 squares fit the ring's hole. Pack Islands (CONCAVE) uses the hole too, but leaves one square out and the layout
+    # grows beyond the ring; the step gets all of them in
+    reset()
+    m = mat('RING')
+    ring = ring_obj('RING', m)
+    small = quad_obj('SMALL', [(2 + 0.2 * (i % 5), 0.2 * (i // 5), 0.1, 0.1) for i in range(25)], mats=[m] * 25)
+    plain = plain_k(m)
+    assert not plain['filled'] and plain['margin_violations'] == 0, plain
+    assert max(plain['extent_px']) > 2048 * 1.05, plain  # Pack Islands: the layout is larger than the ring
+    measured = uv_pack.measure(m)
+    before = uvs(small).copy()
+    r = uv_pack.pack(m)
+    assert r['filled'] and r['k'] == measured['k'] and np.abs(uvs(small) - before).max() > 1e-3, r
+    assert r['k'] < plain['k'] and ok(r), (r['k'], plain['k'], r)
+    assert r['margin_violations'] == 0 and r['overlap_tri_pairs'] == 0, r
+    inside = inside_ring(ring, small, m)
+    assert inside == 25, inside
+    assert max(r['extent_px']) < 2048 * 1.01, r  # the layout is the ring
+    # only moved and turned: the density of every square as asked
+    q = uvs(small).reshape(-1, 4, 2) * 4096
+    d = [quad_density(p, 10, 10) for p in q]
+    assert max(abs(x - 20.48) for x in d) / 20.48 < 1e-4, d
+    report_row = uv_pack._set_block(r)
+    assert any('placed into free space' in line for line in report_row), report_row
+    # the same input gives the same layout: a set rebuilt the same way
+    first = uvs(small).copy()
+    reset()
+    m = mat('RING')
+    ring_obj('RING', m)
+    small = quad_obj('SMALL', [(2 + 0.2 * (i % 5), 0.2 * (i // 5), 0.1, 0.1) for i in range(25)], mats=[m] * 25)
+    uv_pack.pack(m)
+    assert np.array_equal(first, uvs(small)), 'not deterministic'
+    print(f"PASS: test_fill_ring (25 of 25 squares inside the ring; k {plain['k']:.3f} with Pack Islands alone, "
+          f"{r['k']:.3f} with the step; gap {r['min_gap_px']:.2f} px, 0 violations, 0 overlaps; deterministic)")
+
+
+def turn_of(q):
+    """Per quad, the angle of its first edge in degrees."""
+    e = q[:, 1] - q[:, 0]
+    return np.degrees(np.arctan2(e[:, 1], e[:, 0]))
+
+
+def test_fill_directions():
+    # Upright and Flip islands moved by the step keep their rotation, in a set without Quarter
+    reset()
+    m = mat('FILL_DIR')
+    ring = ring_obj('DIR_RING', m)
+    # 25 squares, as in test_fill_ring: Pack Islands leaves one out of the hole
+    up = quad_obj('DIR_UP', [(2 + 0.3 * i, 0, 0.1, 0.1) for i in range(10)], mats=[m] * 10)
+    up['fss_uv_direction'] = 'UPRIGHT'
+    fl = quad_obj('DIR_FLIP', [(2 + 0.3 * i, 1, 0.1, 0.1) for i in range(10)], mats=[m] * 10)
+    fl['fss_uv_direction'] = 'FLIP'
+    free = quad_obj('DIR_FREE', [(2 + 0.3 * i, 2, 0.1, 0.1) for i in range(5)], mats=[m] * 5)
+    plain = plain_k(m)
+    r = uv_pack.pack(m)
+    assert r['filled'] and r['k'] < plain['k'] and ok(r), (r, plain['k'])
+    assert r['upright_rotation_err_rad'] < 1e-4 and r['upright_islands'] == 20 and not r['quarter'], r
+    for obj in (up, fl):
+        angles = turn_of(uvs(obj).reshape(-1, 4, 2))
+        assert np.abs(angles).max() < 1e-3, (obj.name, angles)
+    inside = inside_ring(ring, up, m) + inside_ring(ring, fl, m)
+    assert inside == 20, inside  # the marked islands were moved into the ring, without a turn
+    # the free islands may have turned, by whatever Pack Islands gave and steps of 90 degrees; their size stays
+    q = uvs(free).reshape(-1, 4, 2) * 4096
+    assert max(abs(quad_density(p, 10, 10) - 20.48) for p in q) / 20.48 < 1e-4
+    # a Quarter island: every island of the set turns in steps of 90 degrees, Upright ones not at all
+    reset()
+    m = mat('FILL_QUARTER')
+    ring = ring_obj('Q_RING', m)
+    quarter = quad_obj('Q_TURN', [(2 + 0.3 * i, 0, 0.1, 0.1) for i in range(10)], mats=[m] * 10)
+    quarter['fss_uv_direction'] = 'QUARTER'
+    up = quad_obj('Q_UP', [(2 + 0.3 * i, 1, 0.1, 0.1) for i in range(5)], mats=[m] * 5)
+    up['fss_uv_direction'] = 'UPRIGHT'
+    free = quad_obj('Q_FREE', [(2 + 0.3 * i, 2, 0.1, 0.1) for i in range(10)], mats=[m] * 10)
+    plain = plain_k(m)
+    r = uv_pack.pack(m)
+    assert r['filled'] and r['quarter'] and r['k'] < plain['k'] and ok(r), (r, plain['k'])
+    for obj in (quarter, free, ring):
+        angles = turn_of(uvs(obj).reshape(-1, 4, 2))
+        off = np.abs(angles - np.round(angles / 90.0) * 90.0)
+        assert off.max() < 1e-3, (obj.name, angles)
+    assert np.abs(turn_of(uvs(up).reshape(-1, 4, 2))).max() < 1e-3
+    print(f"PASS: test_fill_directions (Upright and Flip moved into the ring without a turn; in a Quarter set every "
+          f"island in 90-degree steps, Upright ones unturned; k {plain['k']:.3f} -> {r['k']:.3f})")
+
+
+def test_fill_footprints():
+    # the raster's promise: for random triangles, every point of a triangle lies in a cell of its spans
+    rng = np.random.default_rng(3)
+    T = rng.uniform(0, 40, (400, 3, 2))
+    T[:50, 2] = T[:50, 0] + (T[:50, 1] - T[:50, 0]) * 0.3  # lines
+    T[50:60, 1:] = T[50:60, 0:1]  # points
+    rows, x0, x1 = uv_fill.spans(T)
+    mask = uv_fill.solid_mask(rows, x0, x1)
+    w = rng.dirichlet((1, 1, 1), (len(T), 200))
+    P = np.einsum('nsv,nvi->nsi', w, T).reshape(-1, 2)
+    cy, cx = np.floor(P[:, 1]).astype(int), np.floor(P[:, 0]).astype(int)
+    assert mask[cy, cx].all()
+    # placing many shapes: the exact distance between any two is at least the gap
+    gap = 8.1
+    tri = []
+    isl = []
+    for i in range(120):
+        x, y = rng.uniform(0, 9000, 2)
+        a, b = rng.uniform(5, 200, 2)
+        c = rng.uniform(0.1, 1.0)
+        tri += [[(x, y), (x + a, y), (x + a, y + b * c)], [(x, y), (x + a, y + b * c), (x + a * 0.2, y + b)]]
+        isl += [i, i]
+    tri = np.array(tri)
+    isl = np.array(isl)
+    active = np.ones(120, bool)
+    active[7] = False  # not placed: stays where it is
+    t, origin, offset = uv_fill.place(tri[isl != 7], isl[isl != 7], 120, active, np.ones(120, bool), gap)
+    moved = uv_fill.apply(tri.reshape(-1, 2), np.repeat(isl, 3), active, t, origin, offset).reshape(-1, 3, 2)
+    assert np.array_equal(moved[isl == 7], tri[isl == 7])
+    keep = isl != 7
+    seg = np.concatenate([moved[keep][:, [0, 1]], moved[keep][:, [1, 2]], moved[keep][:, [2, 0]]])
+    seg_isl = np.tile(isl[keep], 3)
+    remap = np.searchsorted(np.unique(isl[keep]), isl[keep])
+    metrics, _offenders = uv_pack.layout_metrics(moved[keep], remap, seg, np.tile(remap, 3), 119, gap)
+    assert metrics['margin_violations'] == 0 and metrics['overlap_tri_pairs'] == 0, metrics
+    assert len(seg_isl) == len(seg)
+    assert moved[keep].reshape(-1, 2).min() >= gap * 0.5 - 1e-6
+    # scale unchanged: the triangles' areas
+    assert np.abs(uv_pack.tri_area(moved) - uv_pack.tri_area(tri)).max() < 1e-6
+    print(f"PASS: test_fill_footprints (conservative spans for triangles, lines and points; 119 shapes placed, gap "
+          f"{metrics['min_gap_px']:.2f} px for {gap} px, areas unchanged)")
+
+
+def test_fill_fallbacks():
+    # Pack Islands alone still works with its proxy islands and the AABB fallback
+    reset()
+    m = mat('SPIKES', 1024)
+    verts, faces, uv_co = [], [], []
+    for i in range(6):
+        b = len(verts)
+        x = i * 1.0
+        verts += [(x, 0, 0), (x + 0.2, 0, 0), (x + 0.2, 0.2, 0), (x, 0.2, 0), (x + 0.5, 0.1, 0)]
+        faces += [(b, b + 1, b + 2, b + 3), (b + 1, b + 4, b + 2)]
+        uv_co += [(0.0, 0.0), (0.2, 0.0), (0.2, 0.2), (0.0, 0.2), (0.2, 1.0)]
+    me = bpy.data.meshes.new('SPIKES')
+    me.from_pydata(verts, [], faces)
+    uvl = me.uv_layers.new(name='UVMap')
+    lv = np.zeros(len(me.loops), np.int64)
+    me.loops.foreach_get('vertex_index', lv)
+    uvl.data.foreach_set('uv', (np.array(uv_co) * 0.1)[lv].ravel())
+    me.materials.append(m)
+    quad_obj('SPIKES', None, mesh=me)
+    quad_obj('SPIKES_SMALL', [(i * 0.3, 3, 0.04 + 0.01 * (i % 4), 0.05) for i in range(40)], mats=[m] * 40)
+    plain = plain_k(m)
+    assert not plain['filled'] and plain['margin_violations'] == 0 and plain['overlap_tri_pairs'] == 0, plain
+    # the step found wanting (never measured; it is what the check after the search is for): Pack Islands takes over
+    original = uv_pack.TextureSet.fill
+    calls = []
+
+    def broken(self, Q):
+        calls.append(1)
+        li = self.loop_isl
+        lo = np.full((self.n, 2), np.inf)
+        np.minimum.at(lo, li, Q)
+        F = Q - lo[li]  # every island at the origin: all of them overlap
+        return F, 1e-3, np.array([1.0, 1.0])
+
+    uv_pack.TextureSet.fill = broken
+    try:
+        r = uv_pack.measure(m)
+    finally:
+        uv_pack.TextureSet.fill = original
+    assert calls and not r['filled'] and r['margin_violations'] == 0 and r['overlap_tri_pairs'] == 0, r
+    # the step on the same set: the needles count in its footprints
+    r = uv_pack.measure(m)
+    assert r['filled'] and r['k'] <= plain['k'] and ok(r), (r, plain['k'])
+    print(f"PASS: test_fill_fallbacks (Pack Islands alone: k {plain['k']:.3f}, {plain['proxy_islands']} proxy islands, "
+          f"{plain['shape_method']}; a broken step falls back to it; with the step k {r['k']:.3f}, 0 violations)")
+
+
 def main():
+    test_fill_footprints()
+    test_fill_ring()
+    test_fill_directions()
+    test_fill_fallbacks()
     test_exact_density()
     test_underflow_and_sizes()
     test_fit()
