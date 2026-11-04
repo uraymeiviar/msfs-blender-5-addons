@@ -287,6 +287,14 @@ A face whose model has area but whose UVs have none, or only part of it: one of 
 - **Fix:** re-unwrap those parts, for example with **Accept + Unwrap** in [UV Auto Seam](#uv-auto-seam) or Blender's **Unwrap**, then run the check again and pack.
 - It works in Object Mode. On the cockpit it takes about 3 seconds.
 
+### Find Animations Not 0 to 100
+
+Every animation of the project runs from frame 0 to 100. This is a project rule that keeps the files consistent: MSFS itself plays any range from its start to its end, so an animation outside the rule still works in the simulator. **Find Animations Not 0 to 100** checks the local objects of the view layer: the active action, each NLA strip's placement and each strip's action. Muted strips count, because they can be unmuted.
+
+- It selects the visible objects that break the rule and reports how many, with the first ranges. Hidden ones are counted but not selected. The system console lists every range.
+- It changes no animation: you correct the keys.
+- It works in Object Mode.
+
 ### Fix Broken Bone Parents
 
 When a bone-parented object gets a new parent through the parent field (instead of `Ctrl + P`), Blender keeps the old parent bone. Blender then reports "Failed to add relation Bone Parent" on every update, and the Relations panel cannot fix it. **Fix Broken Bone Parents** finds every such object in the file and resets it to normal object parenting, without moving it. It reports how many objects it fixed.

@@ -8,6 +8,9 @@ the check selects the objects that have them, so the artist fixes the mesh.
 Faces without UV area: faces with a triangle that has 3D area but no UV area (uv_pack.UV_TRI_AREA_MIN_PX2) inside an
 island that has UV area. These needles push islands far out of the packed layout (decision 118); re-unwrapping the
 part fixes them. A second button, not part of Find Faces Without Area: the two need different fixes.
+Animation range: the project's rule is that every animation runs from frame 0 to 100. MSFS itself plays any range as
+start to end (dimensionless), so an offender still works there; the rule keeps the files consistent. The check reports
+and selects the objects that break it and changes nothing: the artist corrects the keys.
 Rules and decisions: codes/wasm/doc/journal/20261014.fss-blender-tools-tags-and-merge.md (FSS repository).
 """
 
@@ -169,6 +172,70 @@ class FSS_OT_FindFacesWithoutUvArea(bpy.types.Operator):
         return {'FINISHED'}
 
 
+ANIM_FRAME_START, ANIM_FRAME_END = 0.0, 100.0
+
+
+def _off_standard(start, end):
+    return abs(start - ANIM_FRAME_START) > 1e-3 or abs(end - ANIM_FRAME_END) > 1e-3
+
+
+def animations_off_range(view_layer):
+    """{object: [(description, start, end)]} over the view layer's local objects whose active action, an NLA strip's
+    placement or a strip's action does not run from frame 0 to 100. Muted strips count: they can be unmuted."""
+    found = {}
+    for obj in view_layer.objects:
+        data = obj.animation_data
+        if obj.library or data is None:
+            continue
+        off = []
+        if data.action and _off_standard(*data.action.frame_range):
+            off.append((f"action {data.action.name}", *data.action.frame_range))
+        for track in data.nla_tracks:
+            for strip in track.strips:
+                if _off_standard(strip.frame_start, strip.frame_end):
+                    off.append((f"strip {strip.name}", strip.frame_start, strip.frame_end))
+                if strip.action and _off_standard(*strip.action.frame_range):
+                    off.append((f"action {strip.action.name}", *strip.action.frame_range))
+        if off:
+            found[obj] = off
+    return found
+
+
+class FSS_OT_FindAnimationsOffRange(bpy.types.Operator):
+    bl_idname = "fss.find_animations_off_range"
+    bl_label = "Find Animations Not 0 to 100"
+    bl_description = ("Select the objects whose action or NLA strips do not run from frame 0 to 100, the project's "
+                      "rule. Nothing is changed. The ranges are listed in the system console")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT'
+
+    def execute(self, context):
+        found = animations_off_range(context.view_layer)
+        if not found:
+            self.report({'INFO'}, "All animations run from frame 0 to 100")
+            return {'FINISHED'}
+        shown = [obj for obj in found if obj.visible_get()]
+        if shown:
+            for obj in context.selected_objects:
+                obj.select_set(False)
+            for obj in shown:
+                obj.select_set(True)
+            context.view_layer.objects.active = shown[0]
+        ordered = sorted(found.items(), key=lambda item: item[0].name)
+        for obj, off in ordered:
+            for what, start, end in off:
+                print(f"FSS checks: {obj.name}: {what} runs {start:g} to {end:g}")
+        hidden = len(found) - len(shown)
+        names = ", ".join(f"{obj.name} ({off[0][1]:g}-{off[0][2]:g})" for obj, off in ordered[:5])
+        self.report({'WARNING'}, f"{len(found)} object(s) with animation not 0 to 100, selected"
+                                 + (f" ({hidden} hidden, not selected)" if hidden else "") + f": {names}"
+                                 + (" ..." if len(found) > 5 else ""))
+        return {'FINISHED'}
+
+
 class FSS_PT_Checks(bpy.types.Panel):
     bl_idname = "FSS_PT_checks"
     bl_label = "Checks"
@@ -184,12 +251,14 @@ class FSS_PT_Checks(bpy.types.Panel):
         layout.operator(FSS_OT_FixBoneParents.bl_idname, icon='BONE_DATA')
         layout.operator(FSS_OT_FindFacesWithoutArea.bl_idname, icon='MESH_PLANE')
         layout.operator(FSS_OT_FindFacesWithoutUvArea.bl_idname, icon='UV')
+        layout.operator(FSS_OT_FindAnimationsOffRange.bl_idname, icon='ANIM')
 
 
 CLASSES = (
     FSS_OT_FixBoneParents,
     FSS_OT_FindFacesWithoutArea,
     FSS_OT_FindFacesWithoutUvArea,
+    FSS_OT_FindAnimationsOffRange,
     FSS_PT_Checks,
 )
 

@@ -169,6 +169,7 @@ def test_draw_all():
     bpy.types.FSS_PT_checks.draw(SimpleNamespace(layout=_Layout(checks_calls)), bpy.context)
     ops = [args[0] for name, args, _kwargs in checks_calls if name == 'operator']
     assert 'fss.find_faces_without_area' in ops and 'fss.find_faces_without_uv_area' in ops, ops
+    assert 'fss.find_animations_off_range' in ops, ops
     materials_calls = []
     bpy.types.FSS_PT_materials.draw(SimpleNamespace(layout=_Layout(materials_calls)), bpy.context)
     ops = [args[0] for name, args, _kwargs in materials_calls if name == 'operator']

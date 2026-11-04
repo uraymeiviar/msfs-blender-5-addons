@@ -267,6 +267,18 @@ Checks, the check wishes, and other wishes without an area of their own. Artist 
 - **Test:** no test
 - **Code:** `checks.py` (`FSS_OT_FixBoneParents`)
 
+### GEN-014: Find Animations Not 0 to 100
+
+- **Status:** implemented
+- **Requirement:** In Object Mode, checks the view layer's local objects: an active action, an NLA strip's placement
+  or a strip's action that does not run from frame 0 to 100 is a breach, muted strips included. Selects the visible
+  offenders (first active), reports the count with hidden ones and the first ranges, lists every range on the console,
+  and changes nothing else. 0 to 100 is a project rule: MSFS plays any range from start to end, so a breach is not a
+  simulator fault.
+- **Decision:** none recorded; the maintainer stated the rule on 20261104
+- **Test:** `tests/test_animation_ranges.py`, `tests/test_panels.py::test_draw_all` (drawn)
+- **Code:** `checks.py` (`animations_off_range`, `FSS_OT_FindAnimationsOffRange`)
+
 ## Check Wishes
 
 ### GEN-020: Stupidity check
