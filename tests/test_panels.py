@@ -1,5 +1,5 @@
 """The FSS sidebar layout of material-management decision 16: the tab FSS MSFS Tools with the top-level panels in
-pipeline order (Zones & Merge Tree, Materials with By Zone, Tags, Object LOD, Viewport LOD, LOD Settings with its
+pipeline order (Zones & Merge Tree, Materials with By Texture Need, Tags, Object LOD, Viewport LOD, LOD Settings with its
 subpanels (decision 22), UV Auto Seam, UV Auto Packing (decision 26)), the tab FSS Tools with General, Empty Bounds, Heatmap, Checks (top-level, closed by default), Packing in the
 UV editor's FSS MSFS Tools tab too, no other tab, and every panel drawing without errors. Object LOD draws the
 selection, the active object's mark, "mixed" and the number row only for Hidden from / Visible from, without writing.
@@ -40,7 +40,7 @@ TOOLS = 'FSS Tools'
 EXPECTED = {
     'FSS_PT_merge': ("Zones & Merge Tree", '', 0, MSFS),
     'FSS_PT_materials': ("Materials", '', 1, MSFS),
-    'FSS_PT_materials_by_zone': ("By Zone", 'FSS_PT_materials', 0, MSFS),
+    'FSS_PT_materials_by_need': ("By Texture Need", 'FSS_PT_materials', 0, MSFS),
     'FSS_PT_tags': ("Tags", '', 2, MSFS),
     'FSS_PT_lod': ("Object LOD", '', 3, MSFS),
     'FSS_PT_lod_viewport': ("Viewport LOD", '', 4, MSFS),

@@ -25,14 +25,16 @@ Tools. Artist guide: [../user/materials.md](../user/materials.md). Decisions: ma
 ### MTL-002: Material list
 
 - **Status:** implemented
-- **Requirement:** One row per material of the file except grease pencil materials, filterable by name and by All /
+- **Requirement:** One row per material of the file except grease pencil materials and materials whose faces are
+  only on objects outside the view layer, filterable by name and by All /
   Warnings, with:
   - a warning when the material is **never used** (no face of a mesh object of the view layer, visible or hidden, uses
-    it; a material only in an empty slot, on objects outside the view layer, or in no slot) or **shared across zones**
+    it; a material only in an empty slot or in no slot) or **shared across zones**
     (its objects lie in more than one zone; objects outside every zone count as the zone "(no zone)");
   - the marks **transparent** (MSFS alpha mode Blend, not an alpha value) and **emissive** (an MSFS emissive texture
     assigned), read without error when the exporter add-on is absent; a legend explains the icons;
-  - the number of using objects, their zones, the texture size and the last Pack or Check All result.
+  - the number of using objects, their zones, the texture size and the last Pack or Check All result. The name column's
+    width is the slider Name Width; the texture column has a narrow fixed width.
 - **Data:** DAT-007, DAT-025
 - **Decision:** MAT 3, 9, 11; objectives 1, 3 (Session 1)
 - **Test:** `tests/test_materials.py::test_rows`, `tests/test_materials.py::test_kinds`
@@ -44,7 +46,7 @@ Tools. Artist guide: [../user/materials.md](../user/materials.md). Decisions: ma
 - **Requirement:** For the clicked row: objects (total, hidden, meshes shared by several users of the material); per zone
   the objects and world-space 3D area, with a warning when there is more than one zone; the total area and the estimate
   (MTL-004) or "kept" (MTL-005); the texture size and last result; Keep UVs (MTL-006); Select Objects and, with several
-  zones, Select in <zone> (MTL-007). A mesh shared by several objects counts its area once, in the zone of its first
+  zones, a select button on each zone's line (MTL-007). For a material never used: how many objects hold it in a slot. A mesh shared by several objects counts its area once, in the zone of its first
   user by name; faces whose material index lies past the last slot use no material.
 - **Data:** DAT-007
 - **Decision:** MAT 1 (Session 1, Proposed Content); Session 7 (accepted proposals)
@@ -92,10 +94,12 @@ Tools. Artist guide: [../user/materials.md](../user/materials.md). Decisions: ma
 ### MTL-007: Select Objects
 
 - **Status:** implemented
-- **Requirement:** Select Objects selects the visible objects that use the material (in one zone with Select in
-  <zone>), makes the first active, and changes nothing else; Object Mode. The artist tags them, for example with a
+- **Requirement:** Select Objects selects the visible objects that use the material (in one zone with the button on
+  that zone's line), makes the first active, and changes nothing else; Object Mode. Only for a material never used, it
+  selects the visible objects that hold it in a slot of the object or of its mesh, also a mesh slot that an object-linked
+  slot replaces; for a used material it never selects holders, so a tag given to the selection reaches only users. The artist tags them, for example with a
   Don't Merge tag (TAG-005); the tool sets no tags.
-- **Decision:** MAT 4, 8
+- **Decision:** MAT 4, 8; MAT S32.2
 - **Test:** `tests/test_materials.py::test_select`
 - **Code:** `materials.py` (`FSS_OT_MaterialsSelect`)
 
@@ -108,14 +112,17 @@ Tools. Artist guide: [../user/materials.md](../user/materials.md). Decisions: ma
 - **Test:** `tests/test_materials.py::test_draw` (drawn); NOT TESTED: a run started from this panel
 - **Code:** `materials.py`, `uv_marks.py`
 
-### MTL-009: By Zone
+### MTL-009: By Texture Need
 
 - **Status:** implemented
-- **Requirement:** A subpanel, closed by default, lists per zone, and for "(no zone)", its materials with objects, area
-  and share of the zone's area, from the rows of the last Refresh.
-- **Decision:** MAT 1 (Proposed Content)
+- **Requirement:** A subpanel, closed by default, lists per material, from the rows of the last Refresh, the estimate
+  (MTL-004), the texture size and a verdict in square power-of-two sizes (about right, oversized, too small), or the
+  last Check All result in place of the verdict. Largest estimate first; kept materials last, by name. Left out:
+  materials never used, the MSFS types Invisible, Environment Occluder and Collision (by type, not by name), and
+  materials whose users all carry a No Texture tag (TAG-015). Replaces the former per-zone list.
+- **Decision:** MAT S32.3, S32.4
 - **Test:** `tests/test_materials.py::test_draw`
-- **Code:** `materials.py` (`FSS_PT_MaterialsByZone`, `zone_table`)
+- **Code:** `materials.py` (`FSS_PT_MaterialsByNeed`, `need_table`, `texture_verdict`, `is_not_rendered`)
 
 ## Planned and Wishes
 

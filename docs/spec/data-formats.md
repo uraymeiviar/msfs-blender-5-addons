@@ -104,7 +104,7 @@ requirements that use it. Properties that are registered (`bpy.props`) are saved
 - **Requirement:** Property group of the Materials panel: `rows` (per material: `name`, `objects`, `hidden`,
   `shared_meshes`, `zone_names`, `zones` with `name`, `zone` (the zone empty's name, empty outside every zone),
   `objects`, `area`; `area` in m², `estimate` in px, `with_visibility`, `never_used`, `shared_zones`, `transparent`,
-  `emissive`), `active_name` (the active row by material name) with `active` reading it as an index, `scanned`, `show`
+  `emissive`, `holders`, `no_texture`), `name_width` (factor, default 0.3), `active_name` (the active row by material name) with `active` reading it as an index, `scanned`, `show`
   (ALL or WARNINGS). Written only by Refresh; saved with the file like the Zones & Merge Tree rows.
 - **Used by:** MTL-001 to MTL-009, GEN-041
 - **Decision:** MAT 1

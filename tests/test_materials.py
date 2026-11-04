@@ -36,7 +36,7 @@ sys.path.insert(0, repo_root_str)
 
 import io_scene_gltf2_msfs_fss  # noqa: E402,F401
 import fss_blender_tools  # noqa: E402
-from fss_blender_tools import materials, uv_marks, visibility_core  # noqa: E402
+from fss_blender_tools import materials, tags, uv_marks, visibility_core  # noqa: E402
 
 for name in ADDONS:
     addon_utils.enable(name, default_set=True)
@@ -107,6 +107,22 @@ def build_scene():
     setattr(o['est'], uv_marks.MIN_PROP, EST_MARK)
     # MAT_ORPHAN only on an object outside the view layer
     o['orphan'] = new_planes('ORPHAN', [(0, 0, 1, 1)], [m['MAT_ORPHAN']], [0], link=False)
+    # Outside the view layer, in an excluded collection: one material only there, one in a slot without faces there
+    # (still never used), one also on an object in the view layer (counted for that object only)
+    excluded = bpy.data.collections.new('EXCLUDED')
+    bpy.context.scene.collection.children.link(excluded)
+    for name in ('MAT_EXCLUDED', 'MAT_EXCLUDED_SLOT', 'MAT_BOTH'):
+        m[name] = bpy.data.materials.new(name)
+    o['in_excluded'] = new_planes('IN_EXCLUDED', [(0, 0, 1, 1), (2, 0, 1, 1)],
+                                  [m['MAT_EXCLUDED'], m['MAT_BOTH'], m['MAT_EXCLUDED_SLOT']], [0, 1], link=False)
+    excluded.objects.link(o['in_excluded'])
+    o['both'] = new_planes('BOTH', [(0, 0, 1, 1)], [m['MAT_BOTH']], [0], o['fwd'])
+    # The mesh holds MAT_SHADOWED, an object-linked slot shows MAT_BOTH instead: no face uses MAT_SHADOWED
+    m['MAT_SHADOWED'] = bpy.data.materials.new('MAT_SHADOWED')
+    o['shadow'] = new_planes('SHADOW_OBJECT', [(0, 0, 1, 1)], [m['MAT_SHADOWED']], [0], o['fwd'])
+    o['shadow'].material_slots[0].link = 'OBJECT'
+    o['shadow'].material_slots[0].material = m['MAT_BOTH']
+    bpy.context.view_layer.layer_collection.children['EXCLUDED'].exclude = True
     bpy.context.view_layer.update()
     o['hidden'].hide_set(True)
     return o
@@ -129,7 +145,9 @@ def test_rows():
     assert bpy.ops.fss.materials_refresh() == {'FINISHED'}
     r = rows()
     assert 'GP_MAT' not in r, sorted(r)
-    assert sorted(r) == sorted(o['mat']), sorted(r)
+    # Faces only outside the view layer: no row
+    assert sorted(r) == sorted(set(o['mat']) - {'MAT_ORPHAN', 'MAT_EXCLUDED'}), sorted(r)
+    assert o['in_excluded'].name not in bpy.context.view_layer.objects
     # Refresh changes nothing but Scene.fss_materials
     assert {obj.name for obj in bpy.context.view_layer.objects if obj.select_get()} == selected
     assert bpy.context.view_layer.objects.active == active
@@ -140,7 +158,12 @@ def test_rows():
     assert zones_of(shared) == {'AFT': (1, 2.0), 'FWD': (1, 1.0)}, zones_of(shared)
     assert abs(shared.area - 3.0) < 1e-6 and shared.zone_names == 'AFT, FWD', (shared.area, shared.zone_names)
 
-    for name in ('MAT_EMPTY_SLOT', 'MAT_NO_SLOT', 'MAT_ORPHAN'):
+    assert r['MAT_BOTH'].objects == 2 and not r['MAT_BOTH'].never_used
+    # The objects that only hold a material never used
+    assert {name: r[name].holders for name in ('MAT_EMPTY_SLOT', 'MAT_NO_SLOT', 'MAT_EXCLUDED_SLOT', 'MAT_SHADOWED',
+                                               'MAT_SHARED')} == {
+        'MAT_EMPTY_SLOT': 1, 'MAT_NO_SLOT': 0, 'MAT_EXCLUDED_SLOT': 0, 'MAT_SHADOWED': 1, 'MAT_SHARED': 0}
+    for name in ('MAT_EMPTY_SLOT', 'MAT_NO_SLOT', 'MAT_EXCLUDED_SLOT', 'MAT_SHADOWED'):
         row = r[name]
         assert row.never_used and row.warning and row.objects == 0 and not row.zones, name
     hidden = r['MAT_HIDDEN']
@@ -180,13 +203,14 @@ def test_rows():
     settings.show = 'WARNINGS'
     flags, _order = materials.FSS_UL_Materials.filter_items(ul, bpy.context, settings, 'rows')
     shown = sorted(row.name for row, flag in zip(settings.rows, flags) if flag)
-    assert shown == ['AAA_FIRST', 'MAT_EMPTY_SLOT', 'MAT_NO_SLOT', 'MAT_ORPHAN', 'MAT_SHARED'], shown
+    assert shown == ['AAA_FIRST', 'MAT_EMPTY_SLOT', 'MAT_EXCLUDED_SLOT', 'MAT_NO_SLOT', 'MAT_SHADOWED',
+                     'MAT_SHARED'], shown
     settings.show = 'ALL'
     ul.filter_name = '*INST*'
     flags, _order = materials.FSS_UL_Materials.filter_items(ul, bpy.context, settings, 'rows')
     assert [row.name for row, flag in zip(settings.rows, flags) if flag] == ['MAT_INST']
-    print(f"PASS: test_rows ({len(settings.rows)} rows; shared across zones, never used (empty slot, no slot, outside "
-          f"the view layer), hidden user, shared mesh, area per zone, estimate {est_px:.1f} px)")
+    print(f"PASS: test_rows ({len(settings.rows)} rows; shared across zones, never used (empty slot, no slot), no row "
+          f"for faces only outside the view layer, hidden user, shared mesh, area per zone, estimate {est_px:.1f} px)")
 
 
 def write_visibility(blend_path, objects, stale=()):
@@ -309,7 +333,34 @@ def test_select():
     assert bpy.ops.fss.materials_select(material='MAT_HIDDEN') == {'CANCELLED'}
     assert selection() == (['INST_1', 'INST_2'], o['inst1']), selection()
     assert bpy.ops.fss.materials_select(material='MAT_SHARED', in_zone=True, zone='') == {'CANCELLED'}
-    print("PASS: test_select (all zones, one zone, (no zone), shared mesh, hidden and empty cases)")
+    # A material never used, held without a face using it: in a slot no face uses, and in a mesh slot that an
+    # object-linked slot replaces. Select Objects finds the objects; the zone buttons do not
+    assert bpy.ops.fss.materials_select(material='MAT_EMPTY_SLOT') == {'FINISHED'}
+    assert selection() == (['FWD_A'], o['fwd_a']), selection()
+    shadow = o['mat']['MAT_SHADOWED']
+    assert 'SHADOW_OBJECT' in bpy.data.objects and bpy.data.objects['SHADOW_OBJECT'].material_slots[0].material != shadow
+    assert bpy.ops.fss.materials_select(material='MAT_SHADOWED') == {'FINISHED'}
+    assert selection() == (['SHADOW_OBJECT'], bpy.data.objects['SHADOW_OBJECT']), selection()
+    assert bpy.ops.fss.materials_select(material='MAT_SHADOWED', in_zone=True, zone='@ZONE_FWD') == {'CANCELLED'}
+    # A used material selects only its users: an object that only holds it stays out
+    bpy.data.objects['SHADOW_OBJECT'].name = 'AAA_SHADOW'
+    o['aaa'] = bpy.data.objects['AAA_SHADOW']
+    o['aaa'].data.materials[0] = o['mat']['MAT_INST']
+    assert bpy.ops.fss.materials_select(material='MAT_INST') == {'FINISHED'}
+    assert selection() == (['INST_1', 'INST_2'], o['inst1']), selection()
+    assert o['aaa'] in materials.holding_objects(bpy.context.view_layer, o['mat']['MAT_INST'])
+    # Used only by a hidden object, held by a visible one: a used material, so nothing to select
+    o['aaa'].data.materials[0] = o['mat']['MAT_HIDDEN']
+    assert bpy.ops.fss.materials_select(material='MAT_HIDDEN') == {'CANCELLED'}
+    assert selection() == (['INST_1', 'INST_2'], o['inst1']), selection()
+    # Hidden holders are counted, not selected
+    o['aaa'].hide_set(True)
+    o['aaa'].data.materials[0] = shadow
+    bpy.ops.fss.materials_refresh()
+    assert rows()['MAT_SHADOWED'].holders == 1 and rows()['MAT_SHADOWED'].never_used
+    assert bpy.ops.fss.materials_select(material='MAT_SHADOWED') == {'CANCELLED'}
+    print("PASS: test_select (all zones, one zone, (no zone), shared mesh, hidden and empty cases, objects that only "
+          "hold a material never used, and not a used one)")
 
 
 class _Layout:
@@ -322,20 +373,30 @@ class _Layout:
         def call(*args, **kwargs):
             self.calls.append((name, args, kwargs))
             if name == 'operator':
-                return SimpleNamespace()  # panels set operator properties on it
+                kwargs['properties'] = SimpleNamespace()  # panels set operator properties on it
+                return kwargs['properties']
             return self if name in ('row', 'column', 'box', 'split') else None
         return call
 
 
 def snapshot(settings):
     """Everything Refresh wrote, to show that drawing writes nothing."""
-    values = [settings.active_name, settings.scanned, settings.show]
+    values = [settings.active_name, settings.scanned, settings.show, settings.name_width]
     for row in settings.rows:
         values.append(tuple(getattr(row, key) for key in (
             'name', 'objects', 'hidden', 'shared_meshes', 'zone_names', 'area', 'estimate', 'with_visibility',
-            'never_used', 'shared_zones', 'transparent', 'emissive')))
+            'never_used', 'holders', 'no_texture', 'shared_zones', 'transparent', 'emissive')))
         values += [(zone.name, zone.zone, zone.objects, zone.area) for zone in row.zones]
     return values
+
+
+class approx(float):
+    def __eq__(self, other):
+        return abs(self - other) < 1e-6
+
+
+def _texture(row):
+    return materials._texture_text(row, short=True)
 
 
 def test_draw():
@@ -354,6 +415,16 @@ def test_draw():
         materials.FSS_UL_Materials.draw_item(None, bpy.context, _Layout(calls), settings, row, 0, settings, 'active',
                                              index)
         used_icons |= {kwargs['icon'] for _name, _args, kwargs in calls if 'icon' in kwargs}
+    # The columns: the name at the slider's width, the zones in what is left, the texture narrow and fixed
+    settings.name_width = 0.4
+    layout = _Layout(calls := [])
+    materials.FSS_UL_Materials.draw_item(None, bpy.context, layout, settings, settings.rows['MAT_SHARED'], 0, settings,
+                                         'active', 0)
+    assert [kwargs['factor'] for name, _args, kwargs in calls if name == 'split'] == [approx(0.4)], calls
+    assert layout.ui_units_x == materials.TEXTURE_COLUMN_UNITS  # _Layout hands itself out for each row
+    assert [kwargs.get('text') for name, _args, kwargs in calls if name == 'label'][-3:] == [
+        'MAT_SHARED', '2 obj  AFT, FWD', _texture(settings.rows['MAT_SHARED'])], calls
+    settings.name_width = 0.3
     details = {}
     for index, row in enumerate(settings.rows):
         settings.active = index
@@ -362,30 +433,133 @@ def test_draw():
         materials.FSS_PT_Materials.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
         assert snapshot(settings) == before, f"the panel wrote while drawing ({row.name})"
         assert any(name == 'template_list' for name, _args, _kwargs in calls)
+        assert any(name == 'prop' and args[1] == 'name_width' and kwargs.get('slider') for name, args, kwargs in calls)
         used_icons |= {kwargs['icon'] for _name, _args, kwargs in calls if 'icon' in kwargs}
         details[row.name] = calls
     calls = []
-    materials.FSS_PT_MaterialsByZone.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
-    assert snapshot(settings) == before, "By Zone wrote while drawing"
+    materials.FSS_PT_MaterialsByNeed.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+    assert snapshot(settings) == before, "By Texture Need wrote while drawing"
     used_icons |= {kwargs['icon'] for _name, _args, kwargs in calls if 'icon' in kwargs}
-    zone_lines = [kwargs.get('text') for name, _args, kwargs in calls if name == 'label']
-    assert zone_lines[0].startswith('AFT: 3 material(s), 3.250 m'), zone_lines
-    assert any(line.startswith('MAT_SHARED: 1 obj, 2.000 m') and line.endswith('62%') for line in zone_lines), \
-        zone_lines
-    assert zone_lines[-3].startswith(f'{materials.NO_ZONE}: 2 material(s), 1.000 m'), zone_lines
+    need_lines = [kwargs.get('text') for name, _args, kwargs in calls if name == 'label']
+    # Per material, largest estimate first, without the materials never used
+    table = materials.need_table(settings)
+    estimates = [row.estimate for row, _material in table]
+    assert estimates == sorted(estimates, reverse=True) and estimates[0] > 0, estimates
+    assert {row.name for row, _m in table} == {row.name for row in settings.rows if not row.never_used}
+    assert not any(row.never_used for row, _m in table)
+    assert need_lines[1] == table[0][0].name, need_lines
+    assert need_lines[2].startswith(f'about {round(table[0][0].estimate)} px, texture '), need_lines
+    assert not any('material(s)' in line for line in need_lines), need_lines
+
+    # What the estimate says against the texture size, in power-of-two sizes
+    plain = table[0][1]
+    verdict = materials.texture_verdict
+    plain_size = uv_marks.texture_size(plain)
+    plain.fss_uv_texture_size = '1024'
+    assert verdict(SimpleNamespace(estimate=1024.0), plain) == 'about right'
+    assert verdict(SimpleNamespace(estimate=600.0), plain) == 'about right'
+    assert verdict(SimpleNamespace(estimate=1100.0), plain) == 'too small, 2048 needed'
+    assert verdict(SimpleNamespace(estimate=512.0), plain) == 'oversized, 512 would do'
+    assert verdict(SimpleNamespace(estimate=3.0), plain) == 'oversized, 256 would do'
+    assert verdict(SimpleNamespace(estimate=9000.0), plain) == 'too small, 8192 or more'
+    plain.fss_uv_texture_size = str(plain_size)
+
+    # A material that draws nothing leaves this list, by its MSFS type and not by its name; the main list keeps it
+    invisible = table[0][1]
+    invisible.msfs_material_type = 'msfs_invisible'
+    assert invisible not in [material for _row, material in materials.need_table(settings)]
+    assert invisible.name in settings.rows
+    invisible.msfs_material_type = 'msfs_standard'
+    assert invisible in [material for _row, material in materials.need_table(settings)]
+    named = bpy.data.materials.new('NAMED_COLLIDER')
+    assert not materials.is_not_rendered(named)
+    bpy.data.materials.remove(named)
+
+    class Typed(dict):
+        msfs_material_type = 'NONE'
+
+    assert all(materials.is_not_rendered(Typed(msfs_material_type=kind))  # the custom property, without the exporter
+               for kind in ('msfs_invisible', 'msfs_environment_occluder', 'msfs_collision'))
+    assert not materials.is_not_rendered(Typed(msfs_material_type='msfs_glass')) and not materials.is_not_rendered(Typed())
+
+    # A kept material goes last and says so; a Check All result replaces the estimate's verdict
+    keep = table[0][1]
+    setattr(keep, uv_marks.KEEP_UVS_PROP, True)
+    assert materials.need_table(settings)[-1][1] == keep
+    calls = []
+    materials.FSS_PT_MaterialsByNeed.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+    lines = [kwargs.get('text') for name, _args, kwargs in calls if name == 'label']
+    assert lines[-2:] == [keep.name, f'texture {uv_marks.texture_size(keep)}: kept'], lines
+    setattr(keep, uv_marks.KEEP_UVS_PROP, False)
+    uv_marks._results[keep.name] = {'set': keep.name, 'mode': 'overflow', 'fits_8192': True, 'k': 1.5, 'needed_size': 8192,
+                                    'size': 4096, 'written': False}
+    calls = []
+    materials.FSS_PT_MaterialsByNeed.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+    lines = [(kwargs.get('text'), kwargs.get('icon')) for name, _args, kwargs in calls if name == 'label']
+    assert lines[1] == (keep.name, materials.ICON_WARNING), lines
+    assert lines[2][0].endswith(': needs x1.50: 8192 x 8192 (checked)'), lines
+    del uv_marks._results[keep.name]
     assert used_icons <= icons, sorted(used_icons - icons)
 
     def operators(calls):
         return [kwargs.get('text') or args[0] for name, args, kwargs in calls if name == 'operator']
 
-    assert operators(details['MAT_SHARED']) == ['fss.materials_refresh', 'Select Objects', 'Select in AFT', 'Select in FWD',
-                                                'Check All'], operators(details['MAT_SHARED'])
+    # Shared across zones: one icon on each zone line, after that line's label, then Select Objects for all of them
+    shared = [call for call in details['MAT_SHARED'] if call[0] in ('label', 'operator')]
+    zone_icons = [index for index, (name, args, kwargs) in enumerate(shared) if name == 'operator'
+                  and args[0] == materials.FSS_OT_MaterialsSelect.bl_idname and kwargs['properties'].in_zone]
+    assert [shared[index][2]['properties'].zone for index in zone_icons] == ['@ZONE_AFT', '@ZONE_FWD'], shared
+    assert all(shared[index][2]['text'] == '' and shared[index][2]['icon'] == 'RESTRICT_SELECT_OFF'
+               and shared[index][2]['properties'].material == 'MAT_SHARED' for index in zone_icons), shared
+    assert [shared[index - 1][2]['text'].split(':')[0] for index in zone_icons] == ['AFT', 'FWD'], shared
+    assert operators(details['MAT_SHARED'])[-2:] == ['Select Objects', 'Check All'], operators(details['MAT_SHARED'])
+    # One zone: Select Objects does the same, so no icon
+    assert operators(details['MAT_INST']) == ['fss.materials_refresh', 'Select Objects', 'Check All'], \
+        operators(details['MAT_INST'])
+    tips = {materials.FSS_OT_MaterialsSelect.description(bpy.context, SimpleNamespace(in_zone=in_zone))
+            for in_zone in (False, True)}
+    assert len(tips) == 2, tips
     assert operators(details['MAT_NO_SLOT']) == ['fss.materials_refresh', 'Check All'], operators(details['MAT_NO_SLOT'])
+    # A material never used that an object holds: the button to find it, and the count
+    assert operators(details['MAT_SHADOWED']) == ['fss.materials_refresh', 'Select Objects', 'Check All'], \
+        operators(details['MAT_SHADOWED'])
+    assert '1 hold it in a slot no face uses' in [kwargs.get('text') for name, _args, kwargs in details['MAT_SHADOWED']
+                                                  if name == 'label']
     labels = [kwargs.get('text') for name, _args, kwargs in details['MAT_EST'] if name == 'label']
     assert any(text and text.startswith('about ') and text.endswith(' px square (estimate, no visibility data)')
                for text in labels), labels
-    print(f"PASS: test_draw ({len(settings.rows)} rows and their details, By Zone with shares, no write while drawing, "
+    print(f"PASS: test_draw ({len(settings.rows)} rows and their details, By Texture Need per material, no write while drawing, "
           f"{len(used_icons)} icons valid)")
+
+
+def test_no_texture():
+    """A tag with No Texture: a material only its objects use leaves By Texture Need at the next Refresh; one other
+    object keeps it listed; hidden users count; the main list keeps every material."""
+    o = build_scene()
+    scene = bpy.context.scene
+    settings = scene.fss_materials
+    for obj in (o['inst1'], o['inst2'], o['fwd_a'], o['hidden']):
+        tags.set_tags(obj, ['SCREEN'])
+    bpy.ops.fss.materials_refresh()
+
+    def listed():
+        return {row.name for row, _material in materials.need_table(settings)}
+
+    assert {'MAT_INST', 'MAT_SHARED', 'MAT_HIDDEN'} <= listed(), listed()
+    assert not any(row.no_texture for row in settings.rows)
+    bpy.ops.fss.tag_toggle_no_texture(tag='SCREEN')
+    assert 'MAT_INST' in listed()  # shows at the next Refresh
+    bpy.ops.fss.materials_refresh()
+    no_texture = {row.name for row in settings.rows if row.no_texture}
+    assert no_texture == {'MAT_INST', 'MAT_HIDDEN'}, no_texture  # MAT_SHARED has an object without the tag
+    assert not ({'MAT_INST', 'MAT_HIDDEN'} & listed()) and 'MAT_SHARED' in listed(), listed()
+    assert {'MAT_INST', 'MAT_HIDDEN', 'MAT_NO_SLOT'} <= {row.name for row in settings.rows}
+    assert not settings.rows['MAT_NO_SLOT'].no_texture  # never used, so nothing says it needs no texture
+    bpy.ops.fss.tag_toggle_no_texture(tag='SCREEN')
+    bpy.ops.fss.materials_refresh()
+    assert 'MAT_INST' in listed()
+    print("PASS: test_no_texture (only tagged users leave By Texture Need, a mixed material stays, hidden users count, "
+          "main list unchanged, shown at the next Refresh)")
 
 
 def test_keep_uvs():
@@ -516,6 +690,7 @@ def main():
     test_kinds(with_exporter=True)
     test_select()
     test_draw()
+    test_no_texture()
     test_keep_uvs()
     test_gltf_leak()
     test_refresh_on_open()

@@ -9,7 +9,11 @@ property as in Packing), which Blender writes on the artist's click; a kept mate
 estimate (decision 13), read from the material when drawing, so it shows without Refresh.
 
 - Used: a mesh object of the view layer (visible or hidden) has a face whose material index points at a slot with the
-  material. A material only in an empty slot, only on objects outside the view layer, or in no slot is never used.
+  material. A material only in an empty slot or in no slot is never used. A material whose faces are only on objects
+  outside the view layer (for example in an excluded collection) is not part of the model at all: it gets no row.
+- Holding: an object of the view layer has the material in a slot or its mesh does, with or without faces: also a mesh
+  slot that an object-linked slot replaces. For a material never used, Select Objects selects the visible ones, to find
+  the leftover; for a used material it selects only the users, so a tag given to the selection reaches only those.
 - Zones: the nearest @ZONE_ empty at or above each using object (merge.nearest_zone); objects outside every zone count
   as (no zone), which counts as a zone for "shared across zones".
 - Kinds (decisions 3, 9, 11): transparent when the MSFS alpha mode is Blend, emissive when an MSFS emissive texture is
@@ -31,7 +35,7 @@ from pathlib import Path
 import bpy
 import numpy as np
 
-from . import merge, uv_marks, uv_pack, visibility_core
+from . import merge, tags, uv_marks, uv_pack, visibility_core
 
 NO_ZONE = '(no zone)'
 NO_ZONE_SHORT = '–'  # an en dash: a list row's zone column for objects outside every zone
@@ -41,9 +45,22 @@ ICON_TRANSPARENT = 'XRAY'
 ICON_EMISSIVE = 'LIGHT'
 
 
+NOT_RENDERED_TYPES = {'msfs_invisible', 'msfs_environment_occluder', 'msfs_collision'}
+
+
 def in_scope(material):
     """Every material of the file except grease pencil materials."""
     return material is not None and not material.is_grease_pencil
+
+
+def is_not_rendered(material):
+    """True for an MSFS material type that draws nothing, so its texture size does not matter: the types Visibility
+    Scoring treats as invisible (visibility_core.classify_material), by the type only, not by the name (decision 2).
+    Read as there, so the panel works without the exporter add-on."""
+    kind = getattr(material, 'msfs_material_type', None)
+    if kind in (None, 'NONE') and 'msfs_material_type' in material:
+        kind = material['msfs_material_type']
+    return kind in NOT_RENDERED_TYPES
 
 
 def is_transparent(material):
@@ -85,6 +102,34 @@ def using_objects(view_layer, material, visible_only=False):
         if _uses(obj, np.unique(mi).tolist(), material):
             found.append(obj)
     return sorted(found, key=lambda obj: obj.name)
+
+
+def holding_objects(view_layer, material, visible_only=False):
+    """The objects of the view layer that hold material in a slot of the object or of its data, used or not, by name."""
+    found = []
+    for obj in view_layer.objects:
+        if visible_only and not obj.visible_get(view_layer=view_layer):
+            continue
+        data_materials = getattr(obj.data, 'materials', None)
+        if (any(slot.material == material for slot in obj.material_slots)
+                or (data_materials is not None and any(item == material for item in data_materials))):
+            found.append(obj)
+    return sorted(found, key=lambda obj: obj.name)
+
+
+def _used_outside(view_layer):
+    """The materials with a face on a mesh object outside the view layer (reads only)."""
+    inside = set(view_layer.objects)
+    found = set()
+    for obj in bpy.data.objects:
+        if obj.type != 'MESH' or obj in inside or obj.data is None or not len(obj.data.polygons):
+            continue
+        mi = np.zeros(len(obj.data.polygons), np.int64)
+        obj.data.polygons.foreach_get('material_index', mi)
+        slots = obj.material_slots
+        found.update(slots[index].material for index in np.unique(mi).tolist() if index < len(slots))
+    found.discard(None)
+    return found
 
 
 class _Stats:
@@ -221,6 +266,8 @@ class FSS_MaterialRow(bpy.types.PropertyGroup):
     estimate: bpy.props.FloatProperty()  # px, side of the square
     with_visibility: bpy.props.BoolProperty()  # the estimate used visibility data of at least one object
     never_used: bpy.props.BoolProperty()
+    holders: bpy.props.IntProperty()  # of a material never used: the objects that hold it (holding_objects)
+    no_texture: bpy.props.BoolProperty()  # every object using it has a tag with No Texture
     shared_zones: bpy.props.BoolProperty()
     transparent: bpy.props.BoolProperty()
     emissive: bpy.props.BoolProperty()
@@ -247,6 +294,9 @@ class FSS_MaterialsSettings(bpy.types.PropertyGroup):
     show: bpy.props.EnumProperty(
         name='Show', items=(('ALL', 'All', 'List every material'),
                             ('WARNINGS', 'Warnings', 'List only materials never used or shared across zones')))
+    name_width: bpy.props.FloatProperty(
+        name='Name Width', description='The width of the name column in the list; the zones get what is left',
+        default=0.3, min=0.15, max=0.7, subtype='FACTOR')
 
 
 def active_row(settings):
@@ -257,8 +307,9 @@ def active_row(settings):
 class FSS_OT_MaterialsRefresh(bpy.types.Operator):
     bl_idname = 'fss.materials_refresh'
     bl_label = 'Refresh'
-    bl_description = ('List every material with the objects of the view layer that use it, their zones and surface, '
-                      'without changing anything (Object Mode)')
+    bl_description = ('List the materials with the objects of the view layer that use them, their zones and surface, '
+                      'without changing anything. Materials used only outside the view layer (excluded collections) '
+                      'are left out (Object Mode)')
 
     @classmethod
     def poll(cls, context):
@@ -269,8 +320,11 @@ class FSS_OT_MaterialsRefresh(bpy.types.Operator):
         stats = scan(context)
         settings = context.scene.fss_materials
         settings.rows.clear()
+        outside = _used_outside(context.view_layer)
         for material in sorted(stats, key=lambda material: material.name.lower()):
             entry = stats[material]
+            if not entry.objects and material in outside:
+                continue
             row = settings.rows.add()
             row.name = material.name
             row.objects = len(entry.objects)
@@ -280,6 +334,9 @@ class FSS_OT_MaterialsRefresh(bpy.types.Operator):
             row.estimate = math.sqrt(entry.estimate_sq)
             row.with_visibility = entry.with_visibility
             row.never_used = not entry.objects
+            row.holders = len(holding_objects(context.view_layer, material)) if row.never_used else 0
+            row.no_texture = (not row.never_used
+                              and all(tags.needs_no_texture(obj, context.scene) for obj in entry.objects))
             row.shared_zones = len(entry.zones) > 1
             row.transparent = is_transparent(material)
             row.emissive = is_emissive(material)
@@ -305,13 +362,20 @@ class FSS_OT_MaterialsSelect(bpy.types.Operator):
     bl_idname = 'fss.materials_select'
     bl_label = 'Select Objects'
     bl_description = ('Select the visible objects that use this material (for example to give them a tag with Don\'t '
-                      'Merge); the first becomes active')
+                      'Merge); the first becomes active. For a material never used: the objects that hold it in a slot '
+                      'no face uses, also a mesh slot that an object-linked material replaces')
     bl_options = {'REGISTER', 'UNDO'}
 
     material: bpy.props.StringProperty(name='Material')
     in_zone: bpy.props.BoolProperty(name='In Zone', description='Only the objects in the zone given by Zone')
     zone: bpy.props.StringProperty(name='Zone', description='The zone empty\'s name; empty for objects outside every '
                                                              'zone')
+
+    @classmethod
+    def description(cls, context, properties):
+        if properties.in_zone:
+            return 'Select the visible objects in this zone that use this material; the first becomes active'
+        return cls.bl_description
 
     @classmethod
     def poll(cls, context):
@@ -329,6 +393,8 @@ class FSS_OT_MaterialsSelect(bpy.types.Operator):
                 zone = merge.nearest_zone(obj)
                 return zone.name if zone is not None else ''
             objects = [obj for obj in objects if zone_name(obj) == self.zone]
+        elif not using_objects(view_layer, material):  # never used, also not by a hidden object
+            objects = holding_objects(view_layer, material, visible_only=True)
         zone = bpy.data.objects.get(self.zone) if self.zone else None
         where = f' in {zone_label(zone)}' if self.in_zone else ''
         if not objects:
@@ -361,6 +427,9 @@ def _filter(row, show):
     return show == 'ALL' or row.warning
 
 
+TEXTURE_COLUMN_UNITS = 3.0  # holds a size such as 4096; the details below the list show a Check All result in full
+
+
 class FSS_UL_Materials(bpy.types.UIList):
     bl_idname = 'FSS_UL_materials'
 
@@ -369,10 +438,13 @@ class FSS_UL_Materials(bpy.types.UIList):
         row.label(text='', icon=ICON_WARNING if item.warning else 'BLANK1')
         row.label(text='', icon=ICON_TRANSPARENT if item.transparent else 'BLANK1')
         row.label(text='', icon=ICON_EMISSIVE if item.emissive else 'BLANK1')
-        split = row.split(factor=0.45)
+        split = row.split(factor=data.name_width)
         split.label(text=item.name)
-        split.label(text=f'{item.objects} obj  {item.zone_names}' if item.objects else 'never used')
-        split.label(text=_texture_text(item, short=True))
+        rest = split.row(align=True)
+        rest.label(text=f'{item.objects} obj  {item.zone_names}' if item.objects else 'never used')
+        texture = rest.row(align=True)
+        texture.ui_units_x = TEXTURE_COLUMN_UNITS
+        texture.label(text=_texture_text(item, short=True))
 
     def filter_items(self, context, data, propname):
         rows = getattr(data, propname)
@@ -390,7 +462,7 @@ def _labelled(layout, text):
     return split.column(align=True)
 
 
-def _select_button(layout, row, text, zone=None):
+def _select_button(layout, row, text='', zone=None):
     op = layout.operator(FSS_OT_MaterialsSelect.bl_idname, text=text, icon='RESTRICT_SELECT_OFF')
     op.material = row.name
     op.in_zone = zone is not None
@@ -416,13 +488,18 @@ def _draw_active(layout, row):
         box.label(text=', '.join(kinds), icon=ICON_TRANSPARENT if row.transparent else ICON_EMISSIVE)
     if row.never_used:
         box.label(text='Never used: no face of a mesh in the view layer has it', icon=ICON_WARNING)
+        if row.holders:
+            _labelled(box, 'Objects').label(text=f'{row.holders} hold it in a slot no face uses')
     else:
         _labelled(box, 'Objects').label(text=f'{row.objects} ({row.hidden} hidden, {row.shared_meshes} shared '
                                              'mesh(es))')
         column = _labelled(box, 'Zones')
         for zone in row.zones:
-            column.label(text=f'{zone.name}: {zone.objects} obj, {area_text(zone.area)}',
-                         icon=ICON_WARNING if row.shared_zones else 'OUTLINER_OB_EMPTY')
+            line = column.row(align=True)
+            line.label(text=f'{zone.name}: {zone.objects} obj, {area_text(zone.area)}',
+                       icon=ICON_WARNING if row.shared_zones else 'OUTLINER_OB_EMPTY')
+            if len(row.zones) > 1:
+                _select_button(line, row, zone=zone.zone)
         if row.shared_zones:
             box.label(text=f'Shared across {len(row.zones)} zones', icon=ICON_WARNING)
         column = _labelled(box, 'Surface')
@@ -432,12 +509,9 @@ def _draw_active(layout, row):
     if material is not None:
         # decision 14: the panel's only control that changes data; Blender writes it on the artist's click
         _labelled(box, '').prop(material, uv_marks.KEEP_UVS_PROP, text='Keep UVs')
-    if not row.never_used:
+    if not row.never_used or row.holders:
         column = box.column(align=True)
         _select_button(column, row, 'Select Objects')
-        if len(row.zones) > 1:
-            for zone in row.zones:
-                _select_button(column, row, f'Select in {zone.name}', zone.zone)
 
 
 class FSS_PT_Materials(bpy.types.Panel):
@@ -457,6 +531,7 @@ class FSS_PT_Materials(bpy.types.Panel):
             return
         layout.label(text='Shows the scene at the last Refresh', icon='INFO')
         layout.row().prop(settings, 'show', expand=True)
+        layout.prop(settings, 'name_width', slider=True)
         layout.template_list(FSS_UL_Materials.bl_idname, '', settings, 'rows', settings, 'active', rows=LIST_ROWS)
         legend = layout.row()
         legend.label(text='warning', icon=ICON_WARNING)
@@ -472,23 +547,36 @@ class FSS_PT_Materials(bpy.types.Panel):
             layout.operator(uv_marks.FSS_OT_UvPackCheckAll.bl_idname, text='Check All', icon='VIEWZOOM')
 
 
-def zone_table(settings):
-    """[(label, total area m2, [(row, zone entry)])] per zone, (no zone) last, from the rows (reads only)."""
-    table = {}
-    for row in settings.rows:
-        for zone in row.zones:
-            table.setdefault(zone.zone, (zone.name, []))[1].append((row, zone))
-    result = []
-    for key in sorted(table, key=lambda key: (key == '', table[key][0].lower(), key)):
-        label, entries = table[key]
-        entries.sort(key=lambda entry: -entry[1].area)
-        result.append((label, sum(zone.area for _row, zone in entries), entries))
-    return result
+def texture_verdict(row, material):
+    """What the row's estimate says about the material's texture size, in square power-of-two sizes. An estimate only:
+    at the top of the density range, without packing or margins, so it can be off either way (Check All tells)."""
+    size = uv_marks.texture_size(material)
+    need = uv_pack.MIN_SIZE
+    while need < row.estimate and need < uv_pack.MAX_SIZE:
+        need *= 2
+    if row.estimate > uv_pack.MAX_SIZE:
+        return f'too small, {uv_pack.MAX_SIZE} or more'
+    if need > size:
+        return f'too small, {need} needed'
+    return f'oversized, {need} would do' if need < size else 'about right'
 
 
-class FSS_PT_MaterialsByZone(bpy.types.Panel):
-    bl_idname = 'FSS_PT_materials_by_zone'
-    bl_label = 'By Zone'
+def need_table(settings):
+    """[(row, material)] of the materials with faces that are rendered and need a texture, the largest estimate first,
+    the kept ones last by name; from the rows of the last Refresh (reads only)."""
+    table = [(row, bpy.data.materials.get(row.name)) for row in settings.rows if not (row.never_used or row.no_texture)]
+    table = [(row, material) for row, material in table if material is not None and not is_not_rendered(material)]
+
+    def order(item):
+        kept = uv_pack.is_kept(item[1])
+        return (kept, item[0].name.lower() if kept else '', -item[0].estimate)
+
+    return sorted(table, key=order)
+
+
+class FSS_PT_MaterialsByNeed(bpy.types.Panel):
+    bl_idname = 'FSS_PT_materials_by_need'
+    bl_label = 'By Texture Need'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'FSS MSFS Tools'
@@ -498,22 +586,28 @@ class FSS_PT_MaterialsByZone(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         settings = context.scene.fss_materials
-        table = zone_table(settings) if settings.scanned else []
+        table = need_table(settings) if settings.scanned else []
         if not table:
-            layout.label(text='Press Refresh to list the materials per zone', icon='INFO')
+            layout.label(text='Press Refresh to compare the materials', icon='INFO')
             return
-        for label, total, entries in table:
-            box = layout.box()
-            box.label(text=f'{label}: {len(entries)} material(s), {area_text(total)}', icon='OUTLINER_OB_EMPTY')
-            column = box.column(align=True)
-            for row, zone in entries:
-                share = zone.area / total if total > 0 else 0.0
-                column.label(text=f'{row.name}: {zone.objects} obj, {area_text(zone.area)}, {share:.0%}',
-                             icon=ICON_WARNING if row.shared_zones else 'MATERIAL')
+        layout.label(text='Estimates, largest first; Check All gives the packed result', icon='INFO')
+        column = layout.column(align=True)
+        for row, material in table:
+            line = column.split(factor=settings.name_width)
+            size = uv_marks.texture_size(material)
+            if uv_pack.is_kept(material):
+                line.label(text=row.name, icon='MATERIAL')
+                line.label(text=f'texture {size}: kept')
+                continue
+            checked = uv_marks.last_result_text(material, short=True)
+            verdict = checked or texture_verdict(row, material)
+            warn = verdict.startswith('too small') or verdict.startswith(('needs x', 'does not fit'))
+            line.label(text=row.name, icon=ICON_WARNING if warn else 'MATERIAL')
+            line.label(text=f'about {round(row.estimate)} px, texture {size}: {verdict}')
 
 
 CLASSES = (FSS_MaterialZone, FSS_MaterialRow, FSS_MaterialsSettings, FSS_OT_MaterialsRefresh, FSS_OT_MaterialsSelect,
-           FSS_UL_Materials, FSS_PT_Materials, FSS_PT_MaterialsByZone)
+           FSS_UL_Materials, FSS_PT_Materials, FSS_PT_MaterialsByNeed)
 
 
 def register():

@@ -13,7 +13,7 @@ It matches **FSS Blender Tools 0.36.9** and the FSS exporter based on Asobo expo
   | Page | Contents |
   | :--- | :--- |
   | [fss-tools.md](fss-tools.md) | The two sidebar tabs: in **FSS MSFS Tools** the panels **Zones & Merge Tree**, **Tags**, **UV Auto Seam** and **UV Auto Packing** (with **Visibility Scoring**); in **FSS Tools** the panels **General**, **Empty Bounds**, **Heatmap** and **Checks** |
-  | [materials.md](materials.md) | The **Materials** panel (**FSS MSFS Tools** sidebar tab): every material with its objects, zones and surface, the warnings never used and shared across zones, the transparent and emissive marks, a texture size estimate, Select Objects, and **By Zone** |
+  | [materials.md](materials.md) | The **Materials** panel (**FSS MSFS Tools** sidebar tab): every material with its objects, zones and surface, the warnings never used and shared across zones, the transparent and emissive marks, a texture size estimate, Select Objects, and **By Texture Need** |
   | [lod.md](lod.md) | The panels **Object LOD**, **Viewport LOD** and **LOD Settings** (**FSS MSFS Tools** sidebar tab): automatic LODs, marks, viewport preview, the table of what MSFS does at your view, contributors, the settings per LOD, the LOD sphere, and exporting with LODs |
   | [uv.md](uv.md) | The **UV Auto Seam** panel (**FSS MSFS Tools** sidebar tab: proposed and current seams, workflow, reports, limits) and the **Heatmap** panel (**FSS Tools** sidebar tab: distortion, texel density and visibility on the model, the distribution chart, the UV grid) |
   | [exporter.md](exporter.md) | The exporter: export target MSFS 2024 or MSFS 2020, one `.blend` for both simulators, materials, instancing, legacy normals |
@@ -199,7 +199,7 @@ So the topology you model decides what disappears together. A floor plate and it
 **Do:** in **FSS MSFS Tools** > **UV Auto Packing** (the same panel is in the UV Editor's sidebar, tab **FSS MSFS Tools**):
 
 1. Set **Target density** and the density marks (step 7 explains them). Select the objects; the list shows their texture sets. Click a row and set that set's **Size** (square: 256 to 8192 pixels per side) and **Margin**.
-2. Tick **Keep UVs** on texture sets that must not be packed: fur and hair cards, decal sheets, colliders.
+2. Tick **Keep UVs** on texture sets that must not be packed: fur and hair cards, decal sheets, colliders, and any UVs you laid out by hand.
 3. Before packing, run [Find Faces Without UV Area](fss-tools.md#find-faces-without-uv-area) (tab **FSS Tools** > **Checks**) and re-unwrap the parts it selects (for example **Accept + Unwrap**): their islands would land far out of the layout and make the set need a larger texture.
 4. **Check All**, then read each set's **Last run** and the **FSS Packing Report**. If a set's report warns about **triangles without UV area**, re-unwrap the objects it names and check again. Change sizes or marks until each set fits at a size you accept.
 5. Click the set's row and press **Pack**. **Ctrl + Z** undoes it.
@@ -253,7 +253,7 @@ Some work has no step of its own, because it runs through several:
 ## Where to Find the Tools
 
 - **FSS MSFS Tools and FSS Tools:** in the 3D Viewport, press `N` to open the sidebar. FSS Blender Tools has two tabs there:
-  - **FSS MSFS Tools**, the panels from top to bottom: **Zones & Merge Tree**, **Materials** (with the section **By Zone**), **Tags**, **Object LOD**, **Viewport LOD**, **LOD Settings** (with the sections **Hints** and **Export Settings**), **UV Auto Seam** and **UV Auto Packing** (with the section **Visibility Scoring**). UV Auto Seam and UV Auto Packing are closed at first.
+  - **FSS MSFS Tools**, the panels from top to bottom: **Zones & Merge Tree**, **Materials** (with the section **By Texture Need**), **Tags**, **Object LOD**, **Viewport LOD**, **LOD Settings** (with the sections **Hints** and **Export Settings**), **UV Auto Seam** and **UV Auto Packing** (with the section **Visibility Scoring**). UV Auto Seam and UV Auto Packing are closed at first.
   - **FSS Tools**, the panels from top to bottom: **General**, **Empty Bounds**, **Heatmap** and **Checks**, all closed at first.
   - The UV Editor's sidebar has an **FSS MSFS Tools** tab too, with **UV Auto Packing**.
   - When you open a `.blend`, **Zones & Merge Tree**, **Materials** (in Object Mode) and **Scan Names** fill their lists by themselves; press **Refresh** after later changes.

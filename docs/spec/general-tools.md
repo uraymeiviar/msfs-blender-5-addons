@@ -14,7 +14,7 @@ Checks, the check wishes, and other wishes without an area of their own. Artist 
 - **Status:** implemented
 - **Requirement:** fss_blender_tools draws its 3D Viewport panels in two sidebar tabs and in no other tab; no panel
   only groups other panels.
-  - **FSS MSFS Tools**, top-level panels in this order: Zones & Merge Tree, Materials (subpanel By Zone), Tags,
+  - **FSS MSFS Tools**, top-level panels in this order: Zones & Merge Tree, Materials (subpanel By Texture Need), Tags,
     Object LOD, Viewport LOD, LOD Settings (subpanels Hints, Export Settings with Advanced), UV Auto Seam,
     UV Auto Packing (subpanel Visibility Scoring). UV Auto Seam and UV Auto Packing are closed by default.
   - **FSS Tools**, top-level panels in this order, each closed by default: General, Empty Bounds, Heatmap, Checks.
