@@ -37,7 +37,7 @@ objects. Artist guide: [../user/fss-tools.md](../user/fss-tools.md#tags).
   selects the visible objects with it (Shift + click adds to the selection); hidden objects are counted but not
   selected. The name is highlighted when at least one selected object has the tag. Per row, from the left: **-** and
   **+**, rename, the name; on the right, at the same place in every row, Don't Merge, Keep, Non-AO-Occluder,
-  Skip-AO-Bake, a small gap, delete.
+  Skip-AO-Bake, Invisible, Animated, Whole, No Texture, a small gap, delete.
 - **Decision:** TM S1.2; TM S10.1 to S10.6; TM S13.1
 - **Test:** `tests/test_zone_tree.py::test_tags_panel` (what the panel draws, not the selection)
 - **Code:** `tags.py` (`FSS_OT_TagSelect`)
@@ -46,7 +46,7 @@ objects. Artist guide: [../user/fss-tools.md](../user/fss-tools.md#tags).
 
 - **Status:** implemented
 - **Requirement:** Rename changes a tag to exactly one new name on every editable object in the file and in the
-  settings of its switches (TAG-005, TAG-006, TAG-008, TAG-009). Delete asks for confirmation, then removes the tag from
+  settings of its switches (TAG-005, TAG-006, TAG-008, TAG-009, TAG-012 to TAG-015). Delete asks for confirmation, then removes the tag from
   every editable object and from those settings; the objects stay.
 - **Data:** DAT-002, DAT-003, DAT-006, DAT-020
 - **Decision:** none recorded
@@ -101,13 +101,56 @@ objects. Artist guide: [../user/fss-tools.md](../user/fss-tools.md#tags).
 
 - **Status:** implemented as a setting; no AO auto-bake reads it yet (GEN-032)
 - **Requirement:** A tag's Skip-AO-Bake toggle (render icon) adds it to or removes it from
-  `Scene.fss_ao_skip_bake_tags`. An object carrying such a tag is never a target of the AO auto-bake;
+  `Scene.fss_ao_skip_bake_tags`. An object carrying such a tag, or a No Texture tag (TAG-015), is never a target of the AO auto-bake;
   `tags.is_ao_baked(obj, scene)` answers this for the bake. Only the objects that carry the tag count, not their
   children.
 - **Data:** DAT-006
 - **Decision:** TM S13.1, S13.2
 - **Test:** `tests/test_zone_tree.py::test_tags_panel`, `tests/test_zone_tree.py::test_gltf_leak`
 - **Code:** `tags.py` (`FSS_OT_TagToggleAOSkipBake`, `is_ao_baked`)
+
+### TAG-012: Invisible
+
+- **Status:** implemented
+- **Requirement:** A tag's Invisible toggle (eye icon) adds it to or removes it from `Scene.fss_invisible_tags`. An
+  object carrying such a tag is not counted as stray (MRG-014). Only a mark: the model and the export do not read it.
+- **Data:** DAT-006
+- **Decision:** TM S15.1
+- **Test:** `tests/test_zone_tree.py::test_stray`
+- **Code:** `tags.py` (`FSS_OT_TagToggleInvisible`, `is_marked_invisible`)
+
+### TAG-013: Animated
+
+- **Status:** implemented
+- **Requirement:** A tag's Animated toggle (action icon) adds it to or removes it from `Scene.fss_animated_tags`, for
+  parts Blender has no animation for (model XML). An object carrying such a tag, and a direct child of an empty carrying
+  one, is not counted as stray (MRG-014). Only a mark: the merge and the export do not read it.
+- **Data:** DAT-006
+- **Decision:** TM S15.1
+- **Test:** `tests/test_zone_tree.py::test_stray`
+- **Code:** `tags.py` (`FSS_OT_TagToggleAnimated`, `is_marked_animated`), `merge.py` (`is_animated_object`)
+
+### TAG-014: Whole
+
+- **Status:** implemented
+- **Requirement:** A tag's Whole toggle (cube icon) adds it to or removes it from `Scene.fss_whole_tags`. The loose
+  pieces of an object carrying such a tag are not dropped one by one (LOD-007); the object itself follows the rules as
+  usual, so it leaves by size or by a mark, all at once. A tag attribute only, with no Object LOD control.
+- **Data:** DAT-006
+- **Decision:** TM S15.2
+- **Test:** `tests/test_zone_tree.py::test_whole`
+- **Code:** `tags.py` (`FSS_OT_TagToggleWhole`, `is_whole`), `lod_model.py`, `lod_rules.py`
+
+### TAG-015: No Texture
+
+- **Status:** implemented; Pack does not read it yet
+- **Requirement:** A tag's No Texture toggle (texture icon) adds it to or removes it from `Scene.fss_no_texture_tags`.
+  A material leaves By Texture Need at the next Refresh when every object using it, hidden ones included, carries such
+  a tag (MTL-009). The AO auto-bake skips these objects (TAG-009), while they still occlude others.
+- **Data:** DAT-006
+- **Decision:** TM S15.3
+- **Test:** `tests/test_materials.py::test_no_texture`
+- **Code:** `tags.py` (`FSS_OT_TagToggleNoTexture`, `needs_no_texture`), `materials.py`
 
 ## Wishes
 

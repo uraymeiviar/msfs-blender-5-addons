@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import addon_utils
 import bmesh
 import bpy
+from mathutils import Matrix
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ADDONS = ('io_scene_gltf2_msfs_fss', 'fss_blender_tools')
@@ -34,7 +35,7 @@ sys.path.insert(0, repo_root_str)
 
 import io_scene_gltf2_msfs_fss  # noqa: E402,F401
 import fss_blender_tools  # noqa: E402
-from fss_blender_tools import merge, tags, uv_marks  # noqa: E402
+from fss_blender_tools import lod_model, lod_rules, merge, tags, uv_marks  # noqa: E402
 
 for name in ADDONS:
     addon_utils.enable(name, default_set=True)
@@ -216,14 +217,17 @@ def test_tags_panel():
     known = bpy.types.UILayout.bl_rna.functions['operator'].parameters['icon'].enum_items
     assert 'PINNED' in known and 'UNPINNED' in known
 
-    # Per row: rename before the name; merge, Keep, the two AO toggles, a gap, delete
+    # Per row: rename before the name; merge, Keep, the two AO toggles, Invisible, Animated, Whole, No Texture, a gap,
+    # delete
     order = [args[0] if name == 'operator' else name for name, args, _kwargs in calls
              if name in ('operator', 'separator', 'split')]
     row = order[len(order) - order[::-1].index('split'):]
     assert row == [tags.FSS_OT_TagRemove.bl_idname, tags.FSS_OT_TagAdd.bl_idname, tags.FSS_OT_TagRename.bl_idname,
                    tags.FSS_OT_TagSelect.bl_idname, tags.FSS_OT_TagToggleSkipMerge.bl_idname,
                    tags.FSS_OT_TagToggleKeep.bl_idname, tags.FSS_OT_TagToggleAONoOccluder.bl_idname,
-                   tags.FSS_OT_TagToggleAOSkipBake.bl_idname, 'separator', tags.FSS_OT_TagDelete.bl_idname], row
+                   tags.FSS_OT_TagToggleAOSkipBake.bl_idname, tags.FSS_OT_TagToggleInvisible.bl_idname,
+                   tags.FSS_OT_TagToggleAnimated.bl_idname, tags.FSS_OT_TagToggleWhole.bl_idname,
+                   tags.FSS_OT_TagToggleNoTexture.bl_idname, 'separator', tags.FSS_OT_TagDelete.bl_idname], row
 
     # The AO toggles start off and answer per object: each setting alone, and only for objects carrying the tag
     scene = bpy.context.scene
@@ -255,15 +259,70 @@ def test_tags_panel():
             operators(calls, tags.FSS_OT_TagToggleAOSkipBake.bl_idname)] == [
         ('RESTRICT_RENDER_ON', True), ('RESTRICT_RENDER_ON', True)]
 
+    # The Invisible mark, alone: off at first, on for objects with the tag, the AO answers unchanged
+    assert not tags.is_marked_invisible(carrier, scene) and not tags.is_marked_invisible(other, scene)
+    assert [(kwargs['icon'], kwargs['depress']) for kwargs in
+            operators(calls, tags.FSS_OT_TagToggleInvisible.bl_idname)] == [('HIDE_OFF', False), ('HIDE_OFF', False)]
+    assert 'HIDE_ON' in known and 'HIDE_OFF' in known
+    bpy.ops.fss.tag_toggle_invisible(tag="LIT")
+    assert tags.is_marked_invisible(carrier, scene) and not tags.is_marked_invisible(other, scene)
+    assert tags.is_ao_baked(other, scene) is False
+    calls = draw(True)
+    assert [(kwargs['icon'], kwargs['depress']) for kwargs in
+            operators(calls, tags.FSS_OT_TagToggleInvisible.bl_idname)] == [('HIDE_OFF', False), ('HIDE_ON', True)]
+
+    # The Animated mark, the same way, with one icon and the highlight
+    assert not tags.is_marked_animated(carrier, scene)
+    assert 'ACTION' in known
+    bpy.ops.fss.tag_toggle_animated(tag="LIT")
+    assert tags.is_marked_animated(carrier, scene) and not tags.is_marked_animated(other, scene)
+    calls = draw(True)
+    assert [(kwargs['icon'], kwargs['depress']) for kwargs in
+            operators(calls, tags.FSS_OT_TagToggleAnimated.bl_idname)] == [('ACTION', False), ('ACTION', True)]
+
+    # The Whole setting, the same way
+    assert not tags.is_whole(carrier, scene)
+    assert 'MESH_CUBE' in known
+    bpy.ops.fss.tag_toggle_whole(tag="LIT")
+    assert tags.is_whole(carrier, scene) and not tags.is_whole(other, scene)
+    calls = draw(True)
+    assert [(kwargs['icon'], kwargs['depress']) for kwargs in
+            operators(calls, tags.FSS_OT_TagToggleWhole.bl_idname)] == [('MESH_CUBE', False), ('MESH_CUBE', True)]
+
+    # No Texture, the same way; it also means no AO bake for the object, without pressing Skip-AO-Bake, and the object
+    # still occludes. Measured on OTHER, whose tag GLASS has no AO setting of its own after this press
+    assert 'TEXTURE' in known
+    bpy.ops.fss.tag_toggle_ao_skip_bake(tag="GLASS")
+    assert tags.is_ao_baked(other, scene) and not tags.needs_no_texture(other, scene)
+    bpy.ops.fss.tag_toggle_no_texture(tag="GLASS")
+    assert tags.needs_no_texture(other, scene) and not tags.needs_no_texture(carrier, scene)
+    assert not tags.is_ao_baked(other, scene) and tags.is_ao_occluder(other, scene)
+    assert "GLASS" not in tags.get_mark_tags(scene, tags.AO_SKIP_BAKE_PROP)
+    calls = draw(True)
+    assert [(kwargs['icon'], kwargs['depress']) for kwargs in
+            operators(calls, tags.FSS_OT_TagToggleNoTexture.bl_idname)] == [('TEXTURE', True), ('TEXTURE', False)]
+    bpy.ops.fss.tag_toggle_no_texture(tag="GLASS")
+    assert tags.is_ao_baked(other, scene) and not tags.needs_no_texture(other, scene)
+    bpy.ops.fss.tag_toggle_ao_skip_bake(tag="GLASS")
+    bpy.ops.fss.tag_toggle_no_texture(tag="LIT")
+
     # A second press turns it off; Rename and Delete Tag carry the settings along
     bpy.ops.fss.tag_toggle_ao_skip_bake(tag="GLASS")
     assert tags.is_ao_baked(other, scene)
     bpy.ops.fss.tag_rename(tag="LIT", new_name="LAMP")
     assert tags.has_tag(carrier, "LAMP")
     assert scene.fss_ao_no_occluder_tags == "LAMP" and scene.fss_ao_skip_bake_tags == "LAMP"
+    assert scene.fss_invisible_tags == "LAMP" and tags.is_marked_invisible(carrier, scene)
+    assert scene.fss_animated_tags == "LAMP" and tags.is_marked_animated(carrier, scene)
+    assert scene.fss_whole_tags == "LAMP" and tags.is_whole(carrier, scene)
+    assert scene.fss_no_texture_tags == "LAMP" and tags.needs_no_texture(carrier, scene)
     assert not tags.is_ao_occluder(carrier, scene) and not tags.is_ao_baked(carrier, scene)
     bpy.ops.fss.tag_delete(tag="LAMP")
     assert scene.fss_ao_no_occluder_tags == "" and scene.fss_ao_skip_bake_tags == ""
+    assert scene.fss_invisible_tags == "" and not tags.is_marked_invisible(carrier, scene)
+    assert scene.fss_animated_tags == "" and not tags.is_marked_animated(carrier, scene)
+    assert scene.fss_whole_tags == "" and not tags.is_whole(carrier, scene)
+    assert scene.fss_no_texture_tags == "" and not tags.needs_no_texture(carrier, scene)
     assert tags.is_ao_occluder(carrier, scene) and tags.is_ao_baked(carrier, scene)
     print("PASS: test_tags_panel")
 
@@ -586,6 +645,10 @@ def test_gltf_leak():
         mesh_obj.data['fss_probe'] = 1
         bpy.context.scene.fss_ao_no_occluder_tags = 'LEAK_PROBE'
         bpy.context.scene.fss_ao_skip_bake_tags = 'LEAK_PROBE'
+        bpy.context.scene.fss_invisible_tags = 'LEAK_PROBE'
+        bpy.context.scene.fss_animated_tags = 'LEAK_PROBE'
+        bpy.context.scene.fss_whole_tags = 'LEAK_PROBE'
+        bpy.context.scene.fss_no_texture_tags = 'LEAK_PROBE'
         path = SCRATCH_DIR / f"zones_extras_{int(extras)}.gltf"
         bpy.ops.export_scene.gltf(filepath=str(path), export_format='GLTF_SEPARATE', use_visible=True,
                                   export_extras=extras)
@@ -608,6 +671,169 @@ def test_gltf_leak():
     print("PASS: test_gltf_leak")
 
 
+def test_stray():
+    bpy.ops.wm.read_homefile(use_empty=True)
+    scene = bpy.context.scene
+    zone = new_empty("@ZONE_FWD")
+    knob = new_empty("@NOMERGE_KNOB", zone)
+    new_cube("IN_NESTED", new_empty("@MERGE_NESTED", knob))  # merges, though a @NOMERGE_ is above it
+    new_cube("BELOW_KNOB", knob)
+    group = new_empty("@MERGE_G", zone)
+    new_cube("MEMBER", group)
+    new_cube("@NOMERGE_OWN", group)
+    # A mesh's animation moves that mesh: its children do not count as animated
+    moving = new_cube("MOVING", group)
+    moving.keyframe_insert("location", frame=1)
+    new_cube("GRAND_BELOW", new_cube("CHILD_MOVING", moving))
+    new_cube("LOOSE", zone)
+    new_cube("OUTSIDE")
+    new_cube("LOOSE_ANIM", zone).keyframe_insert("location", frame=1)
+    # The armrest: a part directly under an animated empty is animated, its own child is stray again
+    pivot = new_empty("PIVOT", zone)
+    pivot.keyframe_insert("location", frame=1)
+    new_cube("GRAND", new_cube("DIRECT", pivot))
+    new_cube("PART_UNDER", new_empty("@MERGE_UNDER", pivot))  # merges
+    # Moves through the model XML only: stray until a tag marks it, a mesh or an empty
+    new_cube("XML_GRAND", new_cube("XML_CHILD", new_cube("XML_PART", zone)))
+    tags.set_tags(bpy.data.objects["XML_PART"], ["XML"])
+    xml_empty = new_empty("XML_EMPTY", zone)
+    tags.set_tags(xml_empty, ["XML"])
+    new_cube("XML_DIRECT", xml_empty)
+    tags.set_tags(new_cube("DONT_MERGE", zone), ["SCREEN"])
+    scene.fss_merge.skip_tags = "SCREEN"
+    tags.set_tags(new_cube("COLLIDER", zone), ["INVIS"])
+    new_empty("JUST_EMPTY", zone)
+    faceless = bpy.data.objects.new("FACELESS", bpy.data.meshes.new("FACELESS_Mesh"))
+    scene.collection.objects.link(faceless)
+    hidden = new_cube("HIDDEN", zone)
+    bpy.context.view_layer.update()
+    hidden.hide_set(True)
+
+    def press(below, extend=False):
+        result = bpy.ops.fss.merge_select_stray(below=below, extend=extend)
+        return result, selected_names()
+
+    # Nothing marked yet: the collider and the XML parts count as stray
+    bpy.ops.fss.merge_refresh()
+    settings = scene.fss_merge
+    counts = (settings.stray_count, settings.stray_below_count)
+    assert counts == (8, 3), counts
+    # DIRECT, LOOSE_ANIM and MOVING are animated, so in neither list
+    assert press(False) == ({'FINISHED'}, ["COLLIDER", "GRAND", "LOOSE", "OUTSIDE", "XML_CHILD", "XML_DIRECT",
+                                           "XML_GRAND", "XML_PART"]), selected_names()
+    assert press(True) == ({'FINISHED'}, ["BELOW_KNOB", "CHILD_MOVING", "GRAND_BELOW"]), selected_names()
+    assert press(False, extend=True)[1] == ["BELOW_KNOB", "CHILD_MOVING", "COLLIDER", "GRAND", "GRAND_BELOW", "LOOSE",
+                                            "OUTSIDE", "XML_CHILD", "XML_DIRECT", "XML_GRAND",
+                                            "XML_PART"], selected_names()
+
+    # The marks: the marked mesh, and the child of the marked empty, leave the list; the count waits for a Refresh
+    bpy.ops.fss.tag_toggle_invisible(tag="INVIS")
+    bpy.ops.fss.tag_toggle_animated(tag="XML")
+    assert press(False)[1] == ["GRAND", "LOOSE", "OUTSIDE", "XML_CHILD", "XML_GRAND"], selected_names()
+    assert settings.stray_count == 8
+    bpy.ops.fss.merge_refresh()
+    counts = (settings.stray_count, settings.stray_below_count)
+    assert counts == (5, 3), counts
+
+    # The merge does not read the Animated mark: a marked part still merges
+    tags.set_tags(bpy.data.objects["MEMBER"], ["XML"])
+    assert bpy.data.objects["MEMBER"] in {obj for group in merge.plan(
+        scene, lambda obj: obj.visible_get(), {"SCREEN"}) for obj in group.members}
+
+    # The buttons, below the Objects line, each with its own tooltip
+    calls = []
+    merge.FSS_PT_Merge.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+    texts = [kwargs.get('text') for name, args, kwargs in calls if name == 'operator'
+             and args[0] == merge.FSS_OT_MergeSelectStray.bl_idname]
+    assert texts == ["Stray: 5", "Below @NOMERGE_: 3"], texts
+    tips = {merge.FSS_OT_MergeSelectStray.description(bpy.context, SimpleNamespace(below=below))
+            for below in (False, True)}
+    assert len(tips) == 2, tips
+
+    # Nothing left to select leaves the selection alone
+    names = ["GRAND", "LOOSE", "OUTSIDE", "XML_CHILD", "XML_GRAND"]
+    press(False)
+    for name in names:
+        tags.set_tags(bpy.data.objects[name], ["INVIS"])
+    assert press(False) == ({'CANCELLED'}, names), selected_names()
+    print("PASS: test_stray")
+
+
+def new_pieces(name, sizes):
+    """One mesh object of separate cubes in a row, with these sizes in metres."""
+    mesh = bpy.data.meshes.new(name)
+    bm = bmesh.new()
+    for index, size in enumerate(sizes):
+        bmesh.ops.create_cube(bm, size=size, matrix=Matrix.Translation((index * 2.0, 0, 0)))
+    bm.to_mesh(mesh)
+    bm.free()
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.scene.collection.objects.link(obj)
+    return obj
+
+
+def test_whole():
+    """The Whole tag: no loose piece is dropped on its own, in the export and in the counts; the object still leaves."""
+    bpy.ops.wm.read_homefile(use_empty=True)
+    context, scene = bpy.context, bpy.context.scene
+    objects = {name: new_pieces(name, sizes) for name, sizes in (
+        ("PLAIN", (1.0, 0.02, 0.02)), ("WHOLE", (1.0, 0.02, 0.02)), ("KEPT", (1.0, 0.02, 0.02)),
+        ("WHOLE_MARKED", (1.0, 0.02, 0.02)))}
+    # Three small pieces close together: the object as a whole is below the cut-off
+    tiny = bpy.data.meshes.new("WHOLE_TINY")
+    bm = bmesh.new()
+    for index in range(3):
+        bmesh.ops.create_cube(bm, size=0.02, matrix=Matrix.Translation((index * 0.04, 0, 0)))
+    bm.to_mesh(tiny)
+    bm.free()
+    objects["WHOLE_TINY"] = bpy.data.objects.new("WHOLE_TINY", tiny)
+    scene.collection.objects.link(objects["WHOLE_TINY"])
+    context.view_layer.update()
+    for name in ("WHOLE", "WHOLE_MARKED", "WHOLE_TINY"):
+        tags.set_tags(objects[name], ["INTACT"])
+    tags.set_tags(objects["KEPT"], ["HOLD"])
+    objects["WHOLE_MARKED"][lod_model.HIDE_KEY] = 5
+    bpy.ops.fss.tag_toggle_whole(tag="INTACT")
+    bpy.ops.fss.tag_toggle_keep(tag="HOLD")
+
+    def run():
+        plan = lod_model.build_plan(context)
+        parts = {part.name: part for part in plan['parts']}
+        decision = lod_rules.decide(plan['parts'], 3, plan['diameter'], plan['table'], cutoff=0.5)
+        kept = [obj for obj in scene.objects if obj.name in decision.present]
+        return parts, decision, lod_model.drop_small_pieces(context, kept, parts, 0.5)
+
+    # The tag reaches the plan; it never decides presence: the tiny object leaves by size, all at once
+    plan = lod_model.build_plan(context)
+    parts = {part.name: part for part in plan['parts']}
+    assert [name for name in sorted(parts) if parts[name].whole] == ["WHOLE", "WHOLE_MARKED", "WHOLE_TINY"]
+    assert not parts["PLAIN"].whole and not parts["KEPT"].whole
+    verts_before = {name: len(obj.data.vertices) for name, obj in objects.items()}
+
+    # The counts, before the export copies are changed: only PLAIN loses pieces
+    stats = lod_model.estimate_scene_stats(context, plan)
+    level = next(index for index, value in enumerate(stats['lods']) if value['loose_pieces'])
+    listed = {item[0] for item in stats['lods'][level]['loose_pieces']}
+    assert listed == {"PLAIN"}, listed
+
+    parts, decision, dropped = run()
+    assert "WHOLE_TINY" in decision.by_size, decision.by_size
+    assert {"PLAIN", "WHOLE", "KEPT", "WHOLE_MARKED"} <= decision.present, decision.present
+    assert dropped == 2, dropped
+    after = {name: len(obj.data.vertices) for name, obj in objects.items()}
+    assert after["PLAIN"] == 8 and verts_before["PLAIN"] == 24, after
+    assert all(after[name] == verts_before[name] for name in ("WHOLE", "KEPT", "WHOLE_MARKED", "WHOLE_TINY")), after
+
+    # A mark still applies to a Whole object
+    assert "WHOLE_MARKED" in lod_rules.decide(plan['parts'], 5, plan['diameter'], plan['table'], cutoff=0.5).by_mark
+
+    # Turning it off gives the pieces back to the rule
+    bpy.ops.fss.tag_toggle_whole(tag="INTACT")
+    assert not any(part.whole for part in lod_model.build_plan(context)['parts'])
+    assert run()[2] == 4
+    print("PASS: test_whole")
+
+
 def main():
     test_tree_rows()
     test_zone_mark()
@@ -616,6 +842,8 @@ def main():
     test_draw_smoke()
     test_group_picks()
     test_totals()
+    test_stray()
+    test_whole()
     test_gltf_leak()
     print("ALL TESTS PASSED")
 

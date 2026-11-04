@@ -82,6 +82,7 @@ requirements that use it. Properties that are registered (`bpy.props`) are saved
   | `fss_name_check` | group: scan results, `include_bones` (on), `show_rules` (all) | GEN-008 |
   | `fss_tag_name` | string, the tag field of the Tags panel | TAG-002 |
   | `fss_ao_no_occluder_tags`, `fss_ao_skip_bake_tags` | `;`-separated tag names, default empty | TAG-008, TAG-009 |
+  | `fss_invisible_tags`, `fss_animated_tags`, `fss_whole_tags`, `fss_no_texture_tags` | `;`-separated tag names, default empty | TAG-012 to TAG-015 |
   | `fss_origin_target` | enum, default `FACE_NZ` (Bottom -Z) | GEN-002 |
   | `fss_empty_parent_mode`, `_suffix`, `_prefix`, `_manual_name`, `_marker_name` | enum MANUAL / SUFFIX / PREFIX / MERGE / NOMERGE / ZONE; `_PARENT`; `PARENT_` | GEN-001 |
   | `fss_empty_bounds_mode`, `_in_front`, `_hierarchy_text` | ALL / SELECTED / OFF, default ALL; on; on | GEN-003 |

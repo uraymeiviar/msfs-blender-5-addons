@@ -109,10 +109,11 @@ counts as separate); the **cut-off** of a LOD is the size below which Auto parts
 
 - **Status:** implemented
 - **Requirement:** Per LOD, in the export copy of each mesh, the faces of loose pieces whose size is below the cut-off
-  are removed, before merging. The `.blend` is not changed; the viewport preview does not show dropped pieces, the
-  panel counts them.
-- **Decision:** LOD 18
-- **Test:** no test
+  are removed, before merging, except on an object with Keep or a Whole tag (TAG-014), a mesh with shape keys, or a mesh
+  with an Armature modifier. The `.blend` is not changed; the viewport preview does not show dropped pieces, the panel
+  counts them.
+- **Decision:** LOD 18; TM S15.2
+- **Test:** `tests/test_zone_tree.py::test_whole` (Whole only)
 - **Code:** `lod_model.py` (`mesh_pieces`)
 - **Notes:** checked once on the E2 cockpit (LOD journal Session 6).
 

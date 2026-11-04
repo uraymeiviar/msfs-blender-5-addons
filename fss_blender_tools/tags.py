@@ -12,6 +12,11 @@ TAGS_KEY = "fss_tags"
 SEPARATOR = ";"
 AO_NO_OCCLUDER_PROP = "fss_ao_no_occluder_tags"  # scene: the tags of objects that never occlude in an AO bake
 AO_SKIP_BAKE_PROP = "fss_ao_skip_bake_tags"  # scene: the tags of objects that an AO bake leaves out as targets
+INVISIBLE_PROP = "fss_invisible_tags"  # scene: the tags of objects marked as invisible in MSFS; only a mark
+ANIMATED_PROP = "fss_animated_tags"  # scene: the tags of objects marked as animated; only a mark
+WHOLE_PROP = "fss_whole_tags"  # scene: the tags of objects whose loose pieces the LOD export never drops one by one
+NO_TEXTURE_PROP = "fss_no_texture_tags"  # scene: the tags of objects that need no texture, for example gauge screens
+MARK_PROPS = (AO_NO_OCCLUDER_PROP, AO_SKIP_BAKE_PROP, INVISIBLE_PROP, ANIMATED_PROP, WHOLE_PROP, NO_TEXTURE_PROP)
 
 
 def get_tags(obj) -> list:
@@ -75,27 +80,48 @@ def set_keep_tags(scene, values):
     scene.fss_lod_settings.keep_tags = SEPARATOR.join(dict.fromkeys(values))
 
 
-def get_ao_tags(scene, prop) -> list:
+def get_mark_tags(scene, prop) -> list:
     return parse_tag_list(getattr(scene, prop))
 
 
-def set_ao_tags(scene, prop, values):
+def set_mark_tags(scene, prop, values):
     setattr(scene, prop, SEPARATOR.join(dict.fromkeys(values)))
 
 
-def _toggle_ao_tag(scene, prop, tag):
-    current = get_ao_tags(scene, prop)
-    set_ao_tags(scene, prop, [other for other in current if other != tag] if tag in current else current + [tag])
+def _toggle_mark_tag(scene, prop, tag):
+    current = get_mark_tags(scene, prop)
+    set_mark_tags(scene, prop, [other for other in current if other != tag] if tag in current else current + [tag])
 
 
 def is_ao_occluder(obj, scene) -> bool:
     """For the AO bake: False when a tag of the object says it must not darken other objects."""
-    return not set(get_tags(obj)).intersection(get_ao_tags(scene, AO_NO_OCCLUDER_PROP))
+    return not set(get_tags(obj)).intersection(get_mark_tags(scene, AO_NO_OCCLUDER_PROP))
 
 
 def is_ao_baked(obj, scene) -> bool:
-    """For the AO bake: False when a tag of the object says it gets no AO of its own."""
-    return not set(get_tags(obj)).intersection(get_ao_tags(scene, AO_SKIP_BAKE_PROP))
+    """For the AO bake: False when a tag of the object says it gets no AO of its own, or that it needs no texture to
+    bake it into."""
+    return not (set(get_tags(obj)).intersection(get_mark_tags(scene, AO_SKIP_BAKE_PROP)) or needs_no_texture(obj, scene))
+
+
+def is_marked_invisible(obj, scene) -> bool:
+    """True when a tag of the object marks it as invisible in MSFS. A mark only: the export does not read it."""
+    return bool(set(get_tags(obj)).intersection(get_mark_tags(scene, INVISIBLE_PROP)))
+
+
+def is_marked_animated(obj, scene) -> bool:
+    """True when a tag of the object marks it as animated. A mark only: the export and the merge do not read it."""
+    return bool(set(get_tags(obj)).intersection(get_mark_tags(scene, ANIMATED_PROP)))
+
+
+def needs_no_texture(obj, scene) -> bool:
+    """True when a tag of the object says it needs no texture."""
+    return bool(set(get_tags(obj)).intersection(get_mark_tags(scene, NO_TEXTURE_PROP)))
+
+
+def is_whole(obj, scene) -> bool:
+    """True when a tag of the object says that the LOD export must not drop its loose pieces one by one."""
+    return bool(set(get_tags(obj)).intersection(get_mark_tags(scene, WHOLE_PROP)))
 
 
 class FSS_OT_TagAdd(bpy.types.Operator):
@@ -226,7 +252,7 @@ class FSS_OT_TagToggleAONoOccluder(bpy.types.Operator):
     tag: bpy.props.StringProperty(name='Tag')
 
     def execute(self, context):
-        _toggle_ao_tag(context.scene, AO_NO_OCCLUDER_PROP, self.tag)
+        _toggle_mark_tag(context.scene, AO_NO_OCCLUDER_PROP, self.tag)
         return {'FINISHED'}
 
 
@@ -240,7 +266,65 @@ class FSS_OT_TagToggleAOSkipBake(bpy.types.Operator):
     tag: bpy.props.StringProperty(name='Tag')
 
     def execute(self, context):
-        _toggle_ao_tag(context.scene, AO_SKIP_BAKE_PROP, self.tag)
+        _toggle_mark_tag(context.scene, AO_SKIP_BAKE_PROP, self.tag)
+        return {'FINISHED'}
+
+
+class FSS_OT_TagToggleInvisible(bpy.types.Operator):
+    bl_idname = 'fss.tag_toggle_invisible'
+    bl_label = 'Invisible Tag'
+    bl_description = ("Mark objects with this tag as invisible in MSFS. Only a mark: it changes nothing in the model "
+                      "or the export")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    tag: bpy.props.StringProperty(name='Tag')
+
+    def execute(self, context):
+        _toggle_mark_tag(context.scene, INVISIBLE_PROP, self.tag)
+        return {'FINISHED'}
+
+
+class FSS_OT_TagToggleAnimated(bpy.types.Operator):
+    bl_idname = 'fss.tag_toggle_animated'
+    bl_label = 'Animated Tag'
+    bl_description = ("Mark objects with this tag as animated, for parts Blender has no animation for (model XML). They "
+                      "are not counted as stray, and neither are the direct children of a marked empty. Only a mark: "
+                      "it changes nothing in the model, the merge or the export")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    tag: bpy.props.StringProperty(name='Tag')
+
+    def execute(self, context):
+        _toggle_mark_tag(context.scene, ANIMATED_PROP, self.tag)
+        return {'FINISHED'}
+
+
+class FSS_OT_TagToggleWhole(bpy.types.Operator):
+    bl_idname = 'fss.tag_toggle_whole'
+    bl_label = 'Whole Mesh Tag'
+    bl_description = ("Keep the mesh of objects with this tag whole in the LODs: the export does not drop its small "
+                      "loose pieces one by one. The object still leaves by the size rule or a mark, all at once")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    tag: bpy.props.StringProperty(name='Tag')
+
+    def execute(self, context):
+        _toggle_mark_tag(context.scene, WHOLE_PROP, self.tag)
+        return {'FINISHED'}
+
+
+class FSS_OT_TagToggleNoTexture(bpy.types.Operator):
+    bl_idname = 'fss.tag_toggle_no_texture'
+    bl_label = 'No Texture Tag'
+    bl_description = ("Objects with this tag need no texture, for example gauge screens. A material only they use leaves "
+                      "By Texture Need at the next Refresh in Materials, and the AO auto-bake skips them. They can "
+                      "still darken other objects. Pack does not read it yet")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    tag: bpy.props.StringProperty(name='Tag')
+
+    def execute(self, context):
+        _toggle_mark_tag(context.scene, NO_TEXTURE_PROP, self.tag)
         return {'FINISHED'}
 
 
@@ -274,9 +358,9 @@ class FSS_OT_TagRename(bpy.types.Operator):
         keep_tags = get_keep_tags(context.scene)
         if self.tag in keep_tags:
             set_keep_tags(context.scene, [new_tags[0] if tag == self.tag else tag for tag in keep_tags])
-        for prop in (AO_NO_OCCLUDER_PROP, AO_SKIP_BAKE_PROP):
-            set_ao_tags(context.scene, prop, [new_tags[0] if tag == self.tag else tag
-                                              for tag in get_ao_tags(context.scene, prop)])
+        for prop in MARK_PROPS:
+            set_mark_tags(context.scene, prop, [new_tags[0] if tag == self.tag else tag
+                                              for tag in get_mark_tags(context.scene, prop)])
         self.report({'INFO'}, f"Renamed {self.tag} to {new_tags[0]} on {count} object(s)")
         return {'FINISHED'}
 
@@ -302,8 +386,8 @@ class FSS_OT_TagDelete(bpy.types.Operator):
         if self.tag in skip_tags:
             set_skip_tags(context.scene, [tag for tag in skip_tags if tag != self.tag])
         set_keep_tags(context.scene, [tag for tag in get_keep_tags(context.scene) if tag != self.tag])
-        for prop in (AO_NO_OCCLUDER_PROP, AO_SKIP_BAKE_PROP):
-            set_ao_tags(context.scene, prop, [tag for tag in get_ao_tags(context.scene, prop) if tag != self.tag])
+        for prop in MARK_PROPS:
+            set_mark_tags(context.scene, prop, [tag for tag in get_mark_tags(context.scene, prop) if tag != self.tag])
         self.report({'INFO'}, f"Removed {self.tag} from {count} object(s)")
         return {'FINISHED'}
 
@@ -348,14 +432,18 @@ class FSS_PT_Tags(bpy.types.Panel):
         if counts:
             skip_tags = set(get_skip_tags(scene))
             keep_tags = set(get_keep_tags(scene))
-            no_occluder_tags = set(get_ao_tags(scene, AO_NO_OCCLUDER_PROP))
-            skip_bake_tags = set(get_ao_tags(scene, AO_SKIP_BAKE_PROP))
+            no_occluder_tags = set(get_mark_tags(scene, AO_NO_OCCLUDER_PROP))
+            skip_bake_tags = set(get_mark_tags(scene, AO_SKIP_BAKE_PROP))
+            invisible_tags = set(get_mark_tags(scene, INVISIBLE_PROP))
+            animated_tags = set(get_mark_tags(scene, ANIMATED_PROP))
+            whole_tags = set(get_mark_tags(scene, WHOLE_PROP))
+            no_texture_tags = set(get_mark_tags(scene, NO_TEXTURE_PROP))
             column = layout.column(align=True)
             for tag in sorted(counts):
                 skipped = tag in skip_tags
                 kept = tag in keep_tags
                 # A split, so the buttons on the right do not move with the length of the tag name
-                split = column.split(factor=0.6, align=True)
+                split = column.split(factor=0.37, align=True)
                 tag_row = split.row(align=True)
 
                 if has_selection:
@@ -405,6 +493,15 @@ class FSS_PT_Tags(bpy.types.Panel):
                 action_row.operator(FSS_OT_TagToggleAOSkipBake.bl_idname, text="",
                                     icon='RESTRICT_RENDER_ON' if skip_bake else 'RESTRICT_RENDER_OFF',
                                     depress=skip_bake).tag = tag
+                invisible = tag in invisible_tags
+                action_row.operator(FSS_OT_TagToggleInvisible.bl_idname, text="",
+                                    icon='HIDE_ON' if invisible else 'HIDE_OFF', depress=invisible).tag = tag
+                action_row.operator(FSS_OT_TagToggleAnimated.bl_idname, text="", icon='ACTION',
+                                    depress=tag in animated_tags).tag = tag
+                action_row.operator(FSS_OT_TagToggleWhole.bl_idname, text="", icon='MESH_CUBE',
+                                    depress=tag in whole_tags).tag = tag
+                action_row.operator(FSS_OT_TagToggleNoTexture.bl_idname, text="", icon='TEXTURE',
+                                    depress=tag in no_texture_tags).tag = tag
                 action_row.separator(factor=0.5)
                 action_row.operator(FSS_OT_TagDelete.bl_idname, text="", icon='TRASH').tag = tag
         else:
@@ -419,6 +516,10 @@ CLASSES = (
     FSS_OT_TagToggleKeep,
     FSS_OT_TagToggleAONoOccluder,
     FSS_OT_TagToggleAOSkipBake,
+    FSS_OT_TagToggleInvisible,
+    FSS_OT_TagToggleAnimated,
+    FSS_OT_TagToggleWhole,
+    FSS_OT_TagToggleNoTexture,
     FSS_OT_TagRename,
     FSS_OT_TagDelete,
     FSS_PT_Tags,
@@ -432,9 +533,17 @@ def register():
         name="Tag", description="Tag to add or remove (several: separate with ;)")
     bpy.types.Scene.fss_ao_no_occluder_tags = bpy.props.StringProperty(name="Non-AO-Occluder Tags")
     bpy.types.Scene.fss_ao_skip_bake_tags = bpy.props.StringProperty(name="Skip-AO-Bake Tags")
+    bpy.types.Scene.fss_invisible_tags = bpy.props.StringProperty(name="Invisible Tags")
+    bpy.types.Scene.fss_animated_tags = bpy.props.StringProperty(name="Animated Tags")
+    bpy.types.Scene.fss_whole_tags = bpy.props.StringProperty(name="Whole Mesh Tags")
+    bpy.types.Scene.fss_no_texture_tags = bpy.props.StringProperty(name="No Texture Tags")
 
 
 def unregister():
+    del bpy.types.Scene.fss_no_texture_tags
+    del bpy.types.Scene.fss_whole_tags
+    del bpy.types.Scene.fss_animated_tags
+    del bpy.types.Scene.fss_invisible_tags
     del bpy.types.Scene.fss_ao_skip_bake_tags
     del bpy.types.Scene.fss_ao_no_occluder_tags
     del bpy.types.Scene.fss_tag_name

@@ -82,6 +82,7 @@ Based on Asobo's MSFS 2024 exporter 8.4.1 for Blender 5.2; FSS changes live in F
 | Free, multi-valued tags per object (`fss_tags`), independent of collections; add, remove, select, rename, delete | implemented | W5 (as generic tags); tags-and-merge journal | TAG-001 to TAG-004, TAG-007 |
 | Tag switches: Don't Merge (merge), Keep (LOD) | implemented | tags-and-merge journal; LOD journal | TAG-005, TAG-006 |
 | Tag switches for a later AO auto-bake: Non-AO-Occluder, Skip-AO-Bake | implemented as settings; the bake is wish GEN-032 | tags-and-merge journal Session 13 | TAG-008, TAG-009 |
+| Tag attributes: Invisible and Animated (marks), Whole (loose pieces stay), No Texture; Stray counts with selection | implemented; Pack does not read No Texture yet | tags-and-merge journal Session 15 | TAG-012 to TAG-015, MRG-014 |
 | Functional roles with meaning (clickspot, screen, light mesh, emitter, debug mesh) inferred from materials and `panel.cfg` | wish (tags were built instead, without inference) | W5 | TAG-010 |
 | Conversion of the functional collections into tags or roles | wish | W5 | TAG-011 |
 

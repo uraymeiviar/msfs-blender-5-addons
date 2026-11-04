@@ -167,6 +167,18 @@ with a `@NOMERGE_Button`) in seven LOD exports for both simulators, and cannot b
   zone and for the scene)
 - **Code:** `merge.py` (`_totals_text`, `_objects_text`, `_merged_mesh_count`, `_has_geometry`)
 
+### MRG-014: Stray objects
+
+- **Status:** implemented
+- **Requirement:** Two buttons below the totals show, at the last Refresh, the visible objects with geometry that no
+  group merges, that are not `@NOMERGE_` themselves, are not marked Invisible (TAG-012), are not animated (an action,
+  NLA tracks or TAG-013, on the object or on an empty directly above it), and can merge (MRG-003). **Stray**: no
+  `@MERGE_` or `@NOMERGE_` node above them. **Below `@NOMERGE_`**: such a node above them. A click selects them from the
+  scene as it is now, Shift adds to the selection.
+- **Decision:** TM S15.1
+- **Test:** `tests/test_zone_tree.py::test_stray`
+- **Code:** `merge.py` (`stray_objects`, `is_animated_object`, `FSS_OT_MergeSelectStray`)
+
 ## Wishes
 
 ### MRG-020: Decal merge by zone, material and Draw Order

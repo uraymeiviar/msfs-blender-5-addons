@@ -264,6 +264,7 @@ def estimate_scene_stats(context, plan=None):
             can_drop_pieces = (
                 n_comps > 1
                 and not part.keep
+                and not part.whole
                 and (obj.data.shape_keys is None or len(obj.data.shape_keys.key_blocks) <= 1)
                 and not any(m.type == 'ARMATURE' for m in obj.modifiers)
             )
@@ -474,7 +475,7 @@ evaluated geometry in metres, and a part includes all of its exported descendant
         parts.append(lod_rules.Part(obj.name, obj.parent.name if obj.parent in exported else None, size,
                                    mark(obj, HIDE_KEY), mark(obj, SHOW_KEY),
                                    bool(obj.get(KEEP_KEY)) or bool(keep_tags.intersection(tags.get_tags(obj))),
-                                   tuple(outside)))
+                                   tuple(outside), tags.is_whole(obj, scene)))
     initial = lod_rules.decide(parts, 0, 0, lod_rules.DEFAULT_MIN_SIZES)
     present = [obj for obj in objects if obj.name in initial.present]
     lod0_bounds = _union([own_bounds[obj] for obj in present])
@@ -575,7 +576,7 @@ def end_export(context):
 def drop_small_pieces(context, objects, parts_by_name, cutoff):
     """Remove faces of disconnected pieces below cutoff on throwaway export meshes (decision 18).
 
-    Keep on an object protects all its pieces. Returns the number of dropped pieces.
+    Keep or a Whole tag on an object protects all its pieces. Returns the number of dropped pieces.
     Objects without modifiers that share a mesh are exported as instances of one glTF mesh; when their trimmed
     results are identical (same mesh, same dropped pieces, same materials) they share one trimmed mesh, so the
     instancing survives.
@@ -591,7 +592,7 @@ def drop_small_pieces(context, objects, parts_by_name, cutoff):
             continue
         name = obj.get('msfs_original_name', obj.name)
         part = parts_by_name.get(name)
-        if part is None or part.keep:
+        if part is None or part.keep or part.whole:
             continue
         if obj.data.shape_keys is not None and len(obj.data.shape_keys.key_blocks) > 1:
             continue

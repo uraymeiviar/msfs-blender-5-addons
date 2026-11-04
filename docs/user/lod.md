@@ -77,6 +77,34 @@ When to use them:
 - **Hidden from:** a large part that costs many vertices but is not needed at lower detail (for example seat covers from LOD 1), or a part that sits just above a cut-off (see [Near cut-off](#per-lod-vertex-contributors)).
 - **Visible from:** a simplified replacement that should take over from a LOD; mark the detailed original **Hidden from** the same LOD.
 
+### How Nesting Affects the Size Rule
+
+**A mesh with children is measured together with them.** Its size is the box around its own mesh and everything below it, including the distance between them. A tiny mesh with a large child, or with a small child far away, therefore counts as large, and the size rule keeps it in every LOD. This is easy to miss, because the mesh looks small enough to disappear.
+
+| Hierarchy | What the size rule does with the small mesh |
+| :--- | :--- |
+| Small mesh with children, as one connected piece | **Stays** as long as the box around it and its children is above the cut-off, also in LODs where those children are already gone |
+| Small mesh with children, made of two or more loose pieces | Disappears: its pieces are dropped by their own size, although the object stays. A tag with **Whole** prevents this |
+| Small mesh without children, directly under an empty or under nested empties | Disappears at its own size |
+
+Empties are free: nesting under empties changes nothing for the meshes below them, because each mesh is still measured on its own. A group is not held together either: a small mesh under an empty disappears alone, even if its neighbours stay.
+
+What to do:
+
+- **A part that sits on a body** (a screw on its panel): parent it to the body's mesh. The body then cannot disappear while the part stays, so no screw is left floating.
+- **Parts that are only grouped:** put them under empties, so that each disappears at its own size. Inside a `@MERGE_` group, keep the root itself an empty.
+- **A small mesh with a large or distant child that does not sit on it** (for example, the child only follows its animation): move the mesh to a new child of its own, so that an empty carries the children and the animation:
+
+  ```text
+  A (empty, carries any animation)
+  ├── A_MESH (the small mesh)
+  └── B (the large mesh)
+  ```
+
+- **A small mesh that should stay because of its child:** leave it as it is, but use **Keep** if it must stay in every LOD. The child's size only holds it while the box is above the cut-off.
+- **A mesh of loose pieces that must stay complete:** give it a tag with [Whole](fss-tools.md#tags). The pieces then stay together, and the object leaves all at once.
+- **To check:** with **Viewport LOD** on a number, a mesh that should be gone but is still there often has children. Loose pieces are not shown as dropped in the viewport, so a mesh of loose pieces can look present in the preview and still be missing from the file.
+
 ## Viewport LOD
 
 The **Viewport LOD** panel shows in the viewport what an export would put in each file. Its row of buttons:

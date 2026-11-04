@@ -621,6 +621,34 @@ def pick_objects(group, what, value="", index=0):
     return [obj for obj, reason in group.skipped if reason == value]
 
 
+def is_animated_object(obj, scene) -> bool:
+    """An object with animation or the Animated mark, or directly under an empty with either. The animation of a parent
+    that is not an empty animates that parent's own geometry, so its children do not count."""
+    def animated(item):
+        return _is_animated(item) or tags.is_marked_animated(item, scene)
+
+    parent = obj.parent
+    return animated(obj) or (parent is not None and parent.type == 'EMPTY' and animated(parent))
+
+
+def stray_objects(scene, visible, groups, skip_tags):
+    """Objects that may have missed a merge group, as (with no marker above, below a @MERGE_ or @NOMERGE_ node): visible
+    objects with geometry that no group merges, not @NOMERGE_ themselves, not marked invisible, not animated, and able
+    to merge."""
+    members = {obj for group in groups for obj in group.members}
+    stray, below = [], []
+    for obj in visible:
+        if (not _has_geometry(obj) or obj in members or logical_name(obj).startswith(NO_MERGE_PREFIX)
+                or tags.is_marked_invisible(obj, scene) or is_animated_object(obj, scene)
+                or _unmergeable(obj, skip_tags)):
+            continue
+        parent = obj.parent
+        while parent is not None and not (is_merge_root(parent) or logical_name(parent).startswith(NO_MERGE_PREFIX)):
+            parent = parent.parent
+        (stray if parent is None else below).append(obj)
+    return stray, below
+
+
 def _row_warns(item):
     """A row with a warning triangle: what the export warns about for a group, a misplaced zone, the Unzoned row."""
     if item.kind == 'ZONE':
@@ -687,6 +715,8 @@ class FSS_MergeSettings(bpy.types.PropertyGroup):
     material_count: bpy.props.IntProperty()
     objects_before: bpy.props.IntProperty()  # every visible object with geometry, in a zone or not
     objects_after: bpy.props.IntProperty()
+    stray_count: bpy.props.IntProperty()
+    stray_below_count: bpy.props.IntProperty()
     enabled: bpy.props.BoolProperty(
         name="Merge on Export", default=True,
         description=f"At export, merge every node named {PREFIX}<name> and its subtree into one mesh named <name>")
@@ -827,6 +857,8 @@ class FSS_OT_MergeRefresh(bpy.types.Operator):
                                        for material in _used_materials(obj)} - {None})
         settings.objects_before = sum(1 for obj in visible if _has_geometry(obj))
         settings.objects_after = settings.objects_before + sum(zone_merged.values())
+        stray, below = stray_objects(context.scene, visible, groups, skip_tags)
+        settings.stray_count, settings.stray_below_count = len(stray), len(below)
         settings.scanned = True
         if settings.active >= len(settings.items):
             settings.active = max(len(settings.items) - 1, 0)
@@ -929,6 +961,48 @@ class FSS_OT_MergeSelect(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class FSS_OT_MergeSelectStray(bpy.types.Operator):
+    bl_idname = "fss.merge_select_stray"
+    bl_label = "Select Stray"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    below: bpy.props.BoolProperty(options={'SKIP_SAVE'})
+    extend: bpy.props.BoolProperty(options={'SKIP_SAVE'})
+
+    @classmethod
+    def description(cls, context, properties):
+        if properties.below:
+            return (f"Select the objects below a {NO_MERGE_PREFIX} node, or below another node that stays out of a "
+                    f"{PREFIX} group, that nothing merges: for review, many can be meant to stay (Shift: add to the "
+                    "selection)")
+        return (f"Select the objects with no {PREFIX} or {NO_MERGE_PREFIX} node above them that could merge but are "
+                "not marked: they may have missed a group (Shift: add to the selection)")
+
+    def invoke(self, context, event):
+        self.extend = event.shift
+        return self.execute(context)
+
+    def execute(self, context):
+        scene, view_layer = context.scene, context.view_layer
+        skip_tags = set(tags.parse_tag_list(scene.fss_merge.skip_tags))
+        visible = [obj for obj in scene.objects if obj.visible_get(view_layer=view_layer)]
+        visible_set = set(visible)
+        # Worked out from the scene as it is now, so a count older than the last edit cannot select the wrong objects
+        objects = stray_objects(scene, visible, plan(scene, visible_set.__contains__, skip_tags), skip_tags)[self.below]
+        if not objects:
+            self.report({'WARNING'}, "No such object now: press Refresh")
+            return {'CANCELLED'}
+        if not self.extend:
+            for obj in view_layer.objects:
+                if obj.select_get(view_layer=view_layer):
+                    obj.select_set(False, view_layer=view_layer)
+        for obj in objects:
+            obj.select_set(True, view_layer=view_layer)
+        view_layer.objects.active = objects[0]
+        self.report({'INFO'}, f"{len(objects)} object(s) selected")
+        return {'FINISHED'}
+
+
 def _draw_pick(column, item, pick, text, icon):
     op = column.operator(FSS_OT_MergeSelect.bl_idname, text=f"{text}  {pick.count} obj", icon=icon)
     op.root, op.what, op.value, op.index = item.root, pick.what, pick.value, pick.index
@@ -1008,6 +1082,9 @@ class FSS_PT_Merge(bpy.types.Panel):
             return
         layout.label(text=_totals_text(settings))
         layout.label(text=_objects_text(settings))
+        row = layout.row(align=True)
+        row.operator(FSS_OT_MergeSelectStray.bl_idname, text=f"Stray: {settings.stray_count}").below = False
+        row.operator(FSS_OT_MergeSelectStray.bl_idname, text=f"Below {NO_MERGE_PREFIX}: {settings.stray_below_count}").below = True
         layout.template_list(FSS_UL_MergeTree.bl_idname, "", settings, "items", settings, "active", rows=6)
         item = settings.items[settings.active] if 0 <= settings.active < len(settings.items) else None
         if item is not None and item.kind != 'GROUP':
@@ -1054,6 +1131,7 @@ CLASSES = (
     FSS_OT_MergeRefresh,
     FSS_UL_MergeTree,
     FSS_OT_MergeSelect,
+    FSS_OT_MergeSelectStray,
     FSS_OT_MergeCreateGroup,
     FSS_PT_Merge,
 )

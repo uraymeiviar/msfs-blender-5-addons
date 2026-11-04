@@ -64,6 +64,7 @@ class Part:
     show_from: int = 0
     keep: bool = False
     outside_ancestors: tuple = ()
+    whole: bool = False  # its loose pieces are not dropped one by one; the part itself follows the rules as usual
 
 
 @dataclass
