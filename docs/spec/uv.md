@@ -363,7 +363,7 @@ its own and can be repeated, none requires another to have run (UV 7, 42). Artis
 - **Status:** implemented
 - **Requirement:** Each set has a square size, 256 to 8192 px per side (DAT-025), chosen by the artist. When the
   islands do not fit at their density they are still written at their density: the layout reaches beyond the texture
-  from the corner at the UV origin, and the result names the smallest power-of-two size that holds them, or that none
+  from the layout corner (UV-PCK-016), and the result names the smallest power-of-two size that holds them, or that none
   up to 8192 does. When a smaller size would hold them, the result says so. Results: "fits n %", ", s × s would do",
   "needs xk: s × s", "does not fit even at 8192 (xk)", "kept".
 - **Data:** DAT-025
@@ -484,6 +484,19 @@ its own and can be repeated, none requires another to have run (UV 7, 42). Artis
 - **Decision:** UV 115
 - **Test:** `tests/test_uv_pack.py::test_texture_set_list`
 - **Code:** `uv_pack.py`, `uv_marks.py`
+
+### UV-PCK-016: Layout corner
+
+- **Status:** implemented
+- **Requirement:** A scene setting (`fss_uv_pack_corner`, default Bottom-Left) in the packing panels' Advanced
+  subpanel, closed by default, names the corner of the texture that Pack moves each layout to, as one block and by
+  whole pixels. The layout keeps the distance from that corner's edges that it had from the origin. Size, gaps and
+  densities do not change; islands without UV area keep their UVs; Check All writes nothing. A layout that does not
+  fit spills past the opposite edges. The report names a corner other than Bottom-Left.
+- **Decision:** UV 123
+- **Test:** `tests/test_uv_pack.py::test_layout_corner`, `tests/test_panels.py::test_layout`
+- **Code:** `uv_pack.py` (`aligned_to_corner`), `uv_marks.py` (`_PackingAdvanced`)
+- **Notes:** the most accurate corner for 16-bit UVs is not confirmed; the default stays until it is.
 
 ### UV-PCK-020: Packing picked per material
 

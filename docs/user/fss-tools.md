@@ -150,12 +150,14 @@ The same panel is also in the **UV Editor**'s sidebar (**N**), tab **FSS MSFS To
   - Below **Last run**, a warning when the last run found islands with triangles without UV area, or objects with faces without area (see the [Packing Report](#packing-report)).
 - **Check All:** below the texture set box. Measures every texture set of the scene's view layer as **Pack** would, but writes no UVs, and fills each set's **Last run**. Use it as the overview of which texture sizes give a consistent density. While it runs, the panel shows a progress bar instead of its fields; **Cancel** or **Esc** stops after the texture set in work.
 
+- **Advanced:** a section below the packing panel, closed at first. **Layout corner** (default **Bottom-Left**) is the corner of the texture every **Pack** moves its layout to, for the whole scene: the layout moves as one block, and its size, gaps and densities stay the same. It only makes a difference when the layout has free space. It changes UVs at the next **Pack** only, so choose it before painting. A layout that does not fit spills past the edges opposite the corner.
+
 ### Pack
 
 **Pack** takes every face that uses the texture set's material in the view layer, also on objects that are not selected or are hidden: a texture set is one texture, so all its islands share one layout. A mesh used by several objects is packed once.
 
 - **Density first:** every island gets its density from its range (the **Result** row above), at one common position inside the ranges for the whole set: the top of the ranges when the islands fit with space left, the highest density that still fits, or the bottom of the ranges when they do not fit.
-- **When the islands do not fit,** they are still written at their density: the layout then reaches beyond the texture, from the corner at the UV origin, and the result names the size it needs. Fitting it into the texture is your choice: a larger **Size** and **Pack** again, Blender's **Pack Islands** with scaling, or by hand.
+- **When the islands do not fit,** they are still written at their density: the layout then reaches beyond the texture, from the **Layout corner**, and the result names the size it needs. Fitting it into the texture is your choice: a larger **Size** and **Pack** again, Blender's **Pack Islands** with scaling, or by hand.
 - **Free space is used:** small islands go inside closed shapes (the inside of a window frame, for example) and into the gaps beside large islands, so the layout is smaller than Blender's **Pack Islands** alone gives. **Pack** makes both layouts, keeps the smaller and names in the report which one it is. An island only moves and turns here; its density stays.
 - **Direction marks:** **Upright** and **Flip** islands keep their rotation; a set with a **Quarter** island turns its islands in 90-degree steps only.
 - **Margin:** two islands are at least the margin apart, measured between their closest points. The report's smallest gap shows the actual value.

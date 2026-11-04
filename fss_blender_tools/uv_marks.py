@@ -44,6 +44,10 @@ OLD_SIZE_KEYS = ('fss_uv_texture_width', 'fss_uv_texture_height')
 MARGIN_REFERENCE = 4096  # old margin fractions convert at 4K (the old default 0.002 is 8 px)
 DEFAULT_TARGET = 20.48  # px/cm: 2048 px per metre
 DEFAULT_FREEDOM = (0.9, 1.1)
+PACK_CORNERS = (('BOTTOM_LEFT', 'Bottom-Left', 'The UV origin, as the layout comes out of packing'),
+                ('TOP_LEFT', 'Top-Left', 'U at 0, V at 1'),
+                ('TOP_RIGHT', 'Top-Right', 'U at 1, V at 1'),
+                ('BOTTOM_RIGHT', 'Bottom-Right', 'U at 1, V at 0'))
 DEFAULT_MARGIN = 8  # px: islands stay apart to the second mip level after 4x4 block compression
 DEFAULT_TEXTURE = '4096'
 TEXTURE_SIZES = [(str(1 << n), str(1 << n), f'{1 << n} pixels') for n in range(8, 14)]  # 256 to 8192
@@ -86,6 +90,15 @@ def scene_freedom(scene=None):
 def target_density(scene=None):
     scene = scene or bpy.context.scene
     return DEFAULT_TARGET if scene is None else scene.fss_uv_target_density
+
+
+def pack_corner(scene):
+    """The corner of the texture Pack moves a layout to (decision 123)."""
+    return scene.fss_uv_pack_corner
+
+
+def corner_label(corner):
+    return next(label for key, label, _text in PACK_CORNERS if key == corner)
 
 
 def parent_density(obj, scene=None):
@@ -908,6 +921,15 @@ class _PackingSection:
         _draw_texture_sets(layout, context)
 
 
+class _PackingAdvanced:
+    bl_label = 'Advanced'
+    bl_options = {'DEFAULT_CLOSED'}
+    bl_order = 1
+
+    def draw(self, context):
+        _labelled(self.layout, 'Layout corner').prop(context.scene, 'fss_uv_pack_corner', text='')
+
+
 class FSS_PT_UvMarks(_PackingSection, bpy.types.Panel):
     bl_idname = 'FSS_PT_uv_marks'
     bl_label = 'UV Auto Packing'
@@ -932,8 +954,25 @@ class FSS_PT_UvMarksImageEditor(_PackingSection, bpy.types.Panel):
         return getattr(context.space_data, 'mode', 'UV') == 'UV'
 
 
+class FSS_PT_UvMarksAdvanced(_PackingAdvanced, bpy.types.Panel):
+    bl_idname = 'FSS_PT_uv_marks_advanced'
+    bl_parent_id = 'FSS_PT_uv_marks'
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'FSS MSFS Tools'
+
+
+class FSS_PT_UvMarksImageEditorAdvanced(_PackingAdvanced, bpy.types.Panel):
+    bl_idname = 'FSS_PT_uv_marks_image_advanced'
+    bl_parent_id = 'FSS_PT_uv_marks_image'
+    bl_space_type = 'IMAGE_EDITOR'
+    bl_region_type = 'UI'
+    bl_category = 'FSS MSFS Tools'
+
+
 CLASSES = (FSS_OT_UvSetDensity, FSS_OT_UvSetDirection, FSS_OT_UvSetSkipAutoseam, FSS_OT_UvPackTextureSet,
-           FSS_OT_UvPackCheckAll, FSS_OT_UvPackCancel, FSS_UL_TextureSets, FSS_PT_UvMarks, FSS_PT_UvMarksImageEditor)
+           FSS_OT_UvPackCheckAll, FSS_OT_UvPackCancel, FSS_UL_TextureSets, FSS_PT_UvMarks, FSS_PT_UvMarksImageEditor,
+           FSS_PT_UvMarksAdvanced, FSS_PT_UvMarksImageEditorAdvanced)
 HANDLERS = ((bpy.app.handlers.load_post, _on_load_post),
             (bpy.app.handlers.depsgraph_update_post, _on_depsgraph_update_post))
 
@@ -956,6 +995,10 @@ def register():
         name='Target Density', default=DEFAULT_TARGET, min=0.01, soft_min=1.0, soft_max=100.0, precision=2,
         description='Texel density at factor 1.0 for the whole scene, in pixels per centimetre (20.48 is 2048 px '
                     'per metre)')
+    bpy.types.Scene.fss_uv_pack_corner = bpy.props.EnumProperty(
+        name='Layout Corner', items=PACK_CORNERS, default='BOTTOM_LEFT',
+        description='The corner of the texture Pack moves each layout to, as one block. Changes the UVs at the next '
+                    'Pack only, so choose it before painting')
     names = ('fss_uv_density_freedom_min', 'fss_uv_density_freedom_max')
     bpy.types.Scene.fss_uv_density_freedom_min = bpy.props.FloatProperty(
         name='Min', default=DEFAULT_FREEDOM[0], update=_keep_order(*names, names[0]),
@@ -968,7 +1011,7 @@ def register():
         description='Size of this square texture set in pixels per side')
     bpy.types.Material.fss_uv_margin_px = bpy.props.IntProperty(
         name='UV Margin', default=DEFAULT_MARGIN, min=0, soft_max=64, subtype='PIXEL',
-        description='Space around each island in pixels of this texture set (8 keeps islands apart to the second '
+        description='The gap between two islands in pixels of this texture set (8 keeps islands apart to the second '
                     'mip level after 4x4 block compression)')
     bpy.types.Material.fss_uv_keep_uvs = bpy.props.BoolProperty(
         name='Keep UVs', default=False,
@@ -1000,7 +1043,7 @@ def unregister():
     del bpy.types.WindowManager.fss_uv_pack_active_name
     for name in (KEEP_UVS_PROP, 'fss_uv_margin_px', SIZE_PROP):
         delattr(bpy.types.Material, name)
-    for name in ('fss_uv_density_freedom_max', 'fss_uv_density_freedom_min', 'fss_uv_target_density'):
+    for name in ('fss_uv_density_freedom_max', 'fss_uv_density_freedom_min', 'fss_uv_pack_corner', 'fss_uv_target_density'):
         delattr(bpy.types.Scene, name)
     for name in (MAX_PROP, MIN_PROP, OWN_PROP):
         delattr(bpy.types.Object, name)

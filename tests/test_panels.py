@@ -51,6 +51,7 @@ EXPECTED = {
     'FSS_PT_uv_autoseam': ("UV Auto Seam", '', 6, MSFS),
     'FSS_PT_uv_marks': ("UV Auto Packing", '', 7, MSFS),
     'FSS_PT_visibility': ("Visibility Scoring", 'FSS_PT_uv_marks', 0, MSFS),
+    'FSS_PT_uv_marks_advanced': ("Advanced", 'FSS_PT_uv_marks', 1, MSFS),
     'FSS_PT_tools': ("General", '', 0, TOOLS),
     'FSS_PT_empty_bounds': ("Empty Bounds", '', 1, TOOLS),
     'FSS_PT_uv_heatmap': ("Heatmap", '', 2, TOOLS),
@@ -61,6 +62,7 @@ DEFAULT_CLOSED = ('FSS_PT_tools', 'FSS_PT_empty_bounds', 'FSS_PT_uv_heatmap', 'F
 # The UV editor's sidebar: Packing again (UV journal decision 119), drawn by the same code
 EXPECTED_IMAGE_EDITOR = {
     'FSS_PT_uv_marks_image': ("UV Auto Packing", '', 0, MSFS),
+    'FSS_PT_uv_marks_image_advanced': ("Advanced", 'FSS_PT_uv_marks_image', 1, MSFS),
 }
 
 

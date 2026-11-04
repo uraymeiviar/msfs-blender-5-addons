@@ -853,7 +853,59 @@ def test_fill_fallbacks():
           f"{plain['shape_method']}; a broken step falls back to it; with the step k {r['k']:.3f}, 0 violations)")
 
 
+def test_layout_corner():
+    """The block moves to the scene's corner, by whole pixels, and nothing else changes; measuring moves nothing."""
+    reset(0.9, 1.1)
+    scene = bpy.context.scene
+    assert scene.fss_uv_pack_corner == 'BOTTOM_LEFT'
+    m = mat('CORNER')
+    rects = [(i * 0.6, 0, 0.3 + 0.02 * i, 0.2) for i in range(10)] + [(7, 0, 0.1, 0.1)]
+    uv_rects = [(0.01 * i, 0.02, 0.1, 0.1) for i in range(10)] + [(0.7, 0.7, 0.0, 0.1)]  # the last has no UV area
+    obj = quad_obj('CO', rects, mats=[m] * len(rects), uv_rects=uv_rects)
+    line = np.array([(0.7, 0.7), (0.7, 0.7), (0.7, 0.8), (0.7, 0.8)])
+
+    def block():
+        uv = uvs(obj)
+        assert np.abs(uv[-4:] - line).max() < 1e-6, uv[-4:]  # the island without UV area keeps its UVs
+        return uv[:-4], uv[:-4].min(0), uv[:-4].max(0)
+
+    base = uv_pack.pack(m)
+    _uv, lo0, hi0 = block()
+    assert ok(base) and base['mode'] == 'underflow' and base['corner'] == 'BOTTOM_LEFT' and hi0.max() < 0.9, base
+    pixel = 1 / 4096
+    for corner, right, top in (('TOP_LEFT', False, True), ('TOP_RIGHT', True, True), ('BOTTOM_RIGHT', True, False),
+                               ('BOTTOM_LEFT', False, False)):
+        scene.fss_uv_pack_corner = corner
+        before = uvs(obj).copy()
+        measured = uv_pack.measure(m)
+        assert np.array_equal(uvs(obj), before), corner  # Check All's measure writes nothing, on any corner
+        r = uv_pack.pack(m)
+        _uv, lo, hi = block()
+        assert ok(r) and r['corner'] == corner and abs(r['k'] - base['k']) < 1e-3, (corner, r)
+        assert abs(measured['k'] - r['k']) < 1e-9, (measured['k'], r['k'])
+        assert np.abs((hi - lo) - (hi0 - lo0)).max() < 2e-3, (corner, hi - lo, hi0 - lo0)  # the same extent
+        for axis, far in ((0, right), (1, top)):
+            if far:  # as far from the far edge as the layout is from the origin, on the whole pixel below
+                assert hi[axis] <= 1.0 - lo0[axis] + 2e-3 and 1.0 - hi[axis] < lo0[axis] + 2 * pixel + 2e-3, (corner, hi)
+            else:
+                assert lo[axis] < lo0[axis] + 2e-3, (corner, lo)
+    # beyond the texture: the layout keeps the corner and spills past the opposite edges; the size asked for stays
+    m.fss_uv_texture_size = '256'
+    scene.fss_uv_pack_corner = 'BOTTOM_LEFT'
+    over = uv_pack.pack(m)
+    assert over['mode'] == 'overflow' and over['k'] > 1.0, over
+    scene.fss_uv_pack_corner = 'TOP_LEFT'
+    r = uv_pack.pack(m)
+    _uv, lo, hi = block()
+    assert abs(r['k'] - over['k']) < 1e-2 and r['needed_size'] == over['needed_size'], (r['k'], over['k'])
+    assert hi[1] <= 1.0 and lo[1] < 0.0 and lo[0] >= 0.0, (lo, hi)
+    assert any('corner Top-Left' in text for text in uv_pack._set_block(r)), uv_pack._set_block(r)
+    scene.fss_uv_pack_corner = 'BOTTOM_LEFT'
+    print(f"PASS: test_layout_corner (4 corners at k {base['k']:.3f}, overflow k {r['k']:.2f} spills to V {lo[1]:.2f})")
+
+
 def main():
+    test_layout_corner()
     test_fill_footprints()
     test_fill_ring()
     test_fill_directions()

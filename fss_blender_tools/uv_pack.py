@@ -6,7 +6,9 @@ and 114), with the mesh's active UV map; a mesh shared by several objects is pac
 its first user. Every island is scaled to the density lo + t (hi - lo) in px/cm, where [lo, hi] = target density x
 the object's final factor range (uv_marks.density) x the island's visibility (decisions 82 and 111), and one t holds
 for the whole set (decision 113): 1 when the set fits at the top of its ranges, else the largest t that fits, else 0,
-and the layout then spills into [0, k] x [0, k] (decision 112).
+and the layout then spills into [0, k] x [0, k] (decision 112). When written, the layout moves as one block to the
+scene's corner (decision 123, aligned_to_corner); k, the gaps and the densities are measured before that and do not
+change, and a layout that does not fit then spills past the edges opposite that corner.
 
 Packing runs on a temporary mesh per set with Pack Islands at scale=False, so the source objects' selection, modes,
 pins and active UV maps are never touched. Every pack of the search then places the same islands on a raster (uv_fill),
@@ -912,6 +914,22 @@ def evaluate(ts, res):
     return m, offenders
 
 
+def aligned_to_corner(ts, Q, corner):
+    """The layout Q moved as one block to a corner of the texture, by whole pixels, as far from that corner's edges as
+    the layout was from the origin's. Islands without UV area keep their UVs (they do not take part in the layout).
+    BOTTOM_LEFT, the layout's own corner, moves nothing."""
+    keep = ~ts.zero_area[ts.loop_isl]
+    lo, hi = Q[keep].min(0), Q[keep].max(0)
+    shift = np.zeros(2)
+    if corner.endswith('RIGHT'):
+        shift[0] = np.floor((1.0 - lo[0] - hi[0]) * ts.size) / ts.size
+    if corner.startswith('TOP'):
+        shift[1] = np.floor((1.0 - lo[1] - hi[1]) * ts.size) / ts.size
+    moved = Q.copy()
+    moved[keep] += shift
+    return moved
+
+
 def write_back(ts, res):
     """Write the chosen layout into the source meshes' active UV maps (only the set's loops)."""
     uv = res['Q']
@@ -994,8 +1012,9 @@ def _run(material, write, progress=None, vis_cache=None):
             'upright_islands': int(ts.upright.sum()),
         })
         if write:
-            write_back(ts, res)
-            result['written'] = True
+            corner = uv_marks.pack_corner(context.scene)
+            write_back(ts, dict(res, Q=aligned_to_corner(ts, res['Q'], corner)))
+            result.update(written=True, corner=corner)
     finally:
         if ts is not None:
             ts.remove_temp()
@@ -1080,6 +1099,8 @@ def _set_block(r, selected=None):
         + (f", {r['upright_islands']} upright" if r['upright_islands'] else '')
         + (', quarter turns only' if r['quarter'] else ''),
     ]
+    if r.get('corner', 'BOTTOM_LEFT') != 'BOTTOM_LEFT':
+        lines.append(f"  Layout moved to the corner {uv_marks.corner_label(r['corner'])}")
     if r['zero_area_islands']:
         lines.append(f"  Kept unchanged: {r['zero_area_islands']} island(s) without UV area (lines or points) in "
                      f"{_names(r['zero_area_objects'])}")

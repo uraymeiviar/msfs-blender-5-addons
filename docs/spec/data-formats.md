@@ -91,6 +91,7 @@ requirements that use it. Properties that are registered (`bpy.props`) are saved
   | `fss_uv_autoseam_limit` | float 1.05 to 2.0, default 1.25 | UV-SEAM-004 |
   | `fss_uv_target_density` | float px/cm, default 20.48 | UV-DEN-001 |
   | `fss_uv_density_freedom_min`, `_max` | float, default 0.9 and 1.1 | UV-DEN-002 |
+  | `fss_uv_pack_corner` | enum BOTTOM_LEFT, TOP_LEFT, TOP_RIGHT, BOTTOM_RIGHT, default BOTTOM_LEFT | UV-PCK-016 |
 
   The scene custom properties `_fss_empty_parent_custom_name` and `_fss_empty_parent_custom_obj` remember a
   manual empty-parent name for one object, and `_fss_empty_parent_marker_name` and `_fss_empty_parent_marker_obj` the

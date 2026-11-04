@@ -55,6 +55,7 @@ Based on Asobo's MSFS 2024 exporter 8.4.1 for Blender 5.2; FSS changes live in F
 | Scan Names: suffix, collision, case, characters, default names, taken, clash; batch rename | implemented | W2 (without the project contract); `20261011.fss-blender-tools-name-check.md`; UV 87 | GEN-008, GEN-009 |
 | Fix Broken Bone Parents | implemented | W28 (first rule); tags-and-merge journal Session 6 | GEN-013 |
 | Find Faces Without Area (3D) | implemented | UV 117 | GEN-010 |
+| Layout corner for Pack, one scene setting in Advanced | implemented; default until the accurate corner is confirmed | UV 123 | UV-PCK-016 |
 | Find Faces Without UV Area (needles) | implemented | UV 118 | GEN-011 |
 | Find Animations Not 0 to 100 (reports the project rule's breaches, changes nothing) | implemented | maintainer, 20261104 | GEN-014 |
 | Find Thin UV Faces: any UV triangle under 1 px wide on a 1K texture, size and width as settings, replacing Find Faces Without UV Area | wish (proposed 20261023) | UV journal Session 102, open item 1 | GEN-012 |

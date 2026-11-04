@@ -21,7 +21,7 @@ install them into their own Blender.
 ## Working Model
 
 - **The maintainer decides.** Before a significant change (a new feature, a changed behaviour, a changed file or data format), propose it with the options and a recommendation, and wait for an answer. Small fixes follow an approved direction.
-- **Decisions are numbered in the task journal** (for the UV work: `docs/journal/20261019.automated-uv-unwrap.md`, decisions 1 to 122 so far, the index of those in force in Session 102, later ones in the sessions after it). Record only what the maintainer decided; an agent's own choices are proposals until answered.
+- **Decisions are numbered in the task journal** (for the UV work: `docs/journal/20261019.automated-uv-unwrap.md`, decisions 1 to 123 so far, the index of those in force in Session 102, later ones in the sessions after it). Record only what the maintainer decided; an agent's own choices are proposals until answered.
 - **Hand-offs:** moderate or large work is written as a hand-off in the journal (read first, steps, finish line, do-not list) and executed by another agent (Antigravity, a sub-agent), which appends its own session and commits by name without pushing.
 - **Review by re-running:** the reviewer re-runs the tests and measurements and inspects images before accepting a session; a claim that was not re-checked is reported as not verified. Findings go into a review session. Earlier agents' reports were wrong often enough (circular tests, criteria passed "with an explanation") that this is the rule, not an option.
 - **Finish lines are measurable;** a criterion that is not met is reported as NOT MET with its numbers.
