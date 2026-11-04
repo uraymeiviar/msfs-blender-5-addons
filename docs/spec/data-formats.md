@@ -26,7 +26,7 @@ requirements that use it. Properties that are registered (`bpy.props`) are saved
 - **Status:** implemented
 - **Requirement:** Property group with `enabled` (Merge on Export, bool, default on) and `skip_tags` (Don't Merge
   tags, `;`-separated string). `items`, `active`, `scanned` and the totals (`zone_count`, `group_count`,
-  `nomerge_count`, `warning_count`, `material_count`) hold the last Refresh of the Zones & Merge Tree panel and are
+  `nomerge_count`, `warning_count`, `material_count`, `objects_before`, `objects_after`) hold the last Refresh of the Zones & Merge Tree panel and are
   rebuilt by Refresh.
 - **Used by:** MRG-001, MRG-010, MRG-012, MRG-013, TAG-005, ZON-002, GEN-041
 - **Decision:** TM S1.6; TM S8.2

@@ -160,10 +160,12 @@ with a `@NOMERGE_Button`) in seven LOD exports for both simulators, and cannot b
 - **Requirement:** A line above the list shows, for the visible objects, the zones, merge groups, `@NOMERGE_` rows,
   rows with a warning, and the materials faces use. Each zone row shows the meshes below the zone before and after the
   merge. After the merge, each group counts one mesh, or two with both opaque and transparent faces; a mesh without
-  faces counts in neither number unless a modifier other than a normals modifier could give it faces.
-- **Decision:** TM S9.3; TM S9.4
-- **Test:** `tests/test_zone_tree.py::test_totals` (the count after the merge against the mesh nodes of an export)
-- **Code:** `merge.py` (`_totals_text`, `_merged_mesh_count`, `_has_geometry`)
+  faces counts in neither number unless a modifier other than a normals modifier could give it faces. A second line
+  shows the same before and after counts for every visible object, in a zone or not, with the change in percent.
+- **Decision:** TM S9.3; TM S9.4; TM S14.1, S14.2
+- **Test:** `tests/test_zone_tree.py::test_totals` (the count after the merge against the mesh nodes of an export, for a
+  zone and for the scene)
+- **Code:** `merge.py` (`_totals_text`, `_objects_text`, `_merged_mesh_count`, `_has_geometry`)
 
 ## Wishes
 

@@ -505,6 +505,33 @@ def test_totals():
     exported = sorted(meshes_below(zone_index))
     assert len(exported) == by_name['FWD'].merged, exported
     assert 'SPLIT_TRANSPARENT' in exported and 'UNUSED_TRANSPARENT' not in exported, exported
+    assert "Objects: 11 -> 8 (-27%)" in labels, labels
+
+    # The scene total counts what lies outside every zone too, and matches every mesh node of the export
+    bpy.ops.wm.read_homefile(use_empty=True)
+    zone = new_empty("@ZONE_FWD")
+    inside = new_empty("@MERGE_IN", zone)
+    outside = new_empty("@MERGE_OUT")
+    for name, parent in (("A", inside), ("B", inside), ("LOOSE_IN", zone), ("C", outside), ("D", outside),
+                         ("LOOSE_OUT", None)):
+        new_cube(name, parent)
+    hidden = new_cube("HIDDEN", zone)
+    bpy.context.view_layer.update()
+    hidden.hide_set(True)
+    bpy.ops.fss.merge_refresh()
+    settings = bpy.context.scene.fss_merge
+    zone_row = next(item for item in settings.items if item.kind == 'ZONE')
+    assert (zone_row.objects, zone_row.merged) == (3, 2), (zone_row.objects, zone_row.merged)
+    assert merge._objects_text(settings) == "Objects: 6 -> 4 (-33%)", merge._objects_text(settings)
+    path = SCRATCH_DIR / "totals_scene.gltf"
+    bpy.ops.export_scene.gltf(filepath=str(path), export_format='GLTF_SEPARATE', use_visible=True)
+    mesh_nodes = [node['name'] for node in json.loads(path.read_text(encoding='utf-8'))['nodes'] if 'mesh' in node]
+    assert len(mesh_nodes) == settings.objects_after, mesh_nodes
+
+    # Nothing to count, nothing merged, and a merge that adds a transparent mesh
+    assert merge._objects_text(SimpleNamespace(objects_before=0, objects_after=0)) == "Objects: 0 -> 0 (0%)"
+    assert merge._objects_text(SimpleNamespace(objects_before=4, objects_after=4)) == "Objects: 4 -> 4 (0%)"
+    assert merge._objects_text(SimpleNamespace(objects_before=1, objects_after=2)) == "Objects: 1 -> 2 (+100%)"
 
     # A merged mesh named like a node that stays warns, and the details say so
     bpy.ops.wm.read_homefile(use_empty=True)

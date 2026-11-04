@@ -685,6 +685,8 @@ class FSS_MergeSettings(bpy.types.PropertyGroup):
     nomerge_count: bpy.props.IntProperty()
     warning_count: bpy.props.IntProperty()
     material_count: bpy.props.IntProperty()
+    objects_before: bpy.props.IntProperty()  # every visible object with geometry, in a zone or not
+    objects_after: bpy.props.IntProperty()
     enabled: bpy.props.BoolProperty(
         name="Merge on Export", default=True,
         description=f"At export, merge every node named {PREFIX}<name> and its subtree into one mesh named <name>")
@@ -823,6 +825,8 @@ class FSS_OT_MergeRefresh(bpy.types.Operator):
         settings.warning_count = sum(1 for item in settings.items if _row_warns(item))
         settings.material_count = len({source_material(material) for obj in visible if obj.type in MESH_LIKE
                                        for material in _used_materials(obj)} - {None})
+        settings.objects_before = sum(1 for obj in visible if _has_geometry(obj))
+        settings.objects_after = settings.objects_before + sum(zone_merged.values())
         settings.scanned = True
         if settings.active >= len(settings.items):
             settings.active = max(len(settings.items) - 1, 0)
@@ -837,6 +841,12 @@ def _plural(count, word):
 def _totals_text(settings):
     return (f"{_plural(settings.zone_count, 'zone')}  {settings.group_count} merge  {settings.nomerge_count} no-merge  "
             f"{_plural(settings.warning_count, 'warning')}  {_plural(settings.material_count, 'material')}")
+
+
+def _objects_text(settings):
+    before, after = settings.objects_before, settings.objects_after
+    percent = round((after - before) * 100 / before) if before else 0
+    return f"Objects: {before} -> {after} ({percent:+d}%)" if percent else f"Objects: {before} -> {after} (0%)"
 
 
 def _draw_zone_mark(row, zone, text):
@@ -997,6 +1007,7 @@ class FSS_PT_Merge(bpy.types.Panel):
             layout.label(text=f"No visible {ZONE_PREFIX} or {PREFIX} nodes", icon='INFO')
             return
         layout.label(text=_totals_text(settings))
+        layout.label(text=_objects_text(settings))
         layout.template_list(FSS_UL_MergeTree.bl_idname, "", settings, "items", settings, "active", rows=6)
         item = settings.items[settings.active] if 0 <= settings.active < len(settings.items) else None
         if item is not None and item.kind != 'GROUP':
