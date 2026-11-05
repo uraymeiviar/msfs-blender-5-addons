@@ -87,12 +87,12 @@ def test_finds_every_breach_and_only_those():
     found = checks.animations_off_range(bpy.context.view_layer)
     assert {obj.name for obj in found} == BAD, sorted(obj.name for obj in found)
     by_name = {obj.name: off for obj, off in found.items()}
-    assert [off[1:] for off in by_name['ACTION_50_100']] == [(50.0, 100.0)], by_name['ACTION_50_100']
-    assert [off[1:] for off in by_name['ACTION_SINGLE_KEY']] == [(100.0, 100.0)], by_name['ACTION_SINGLE_KEY']
+    assert [off[1:] for off in by_name['ACTION_50_100']] == [(50.0, 100.0, None)], by_name['ACTION_50_100']
+    assert [off[1:] for off in by_name['ACTION_SINGLE_KEY']] == [(100.0, 100.0, None)], by_name['ACTION_SINGLE_KEY']
     # A strip moved in time is off even though its action is 0 to 100.
-    assert [off[1:] for off in by_name['STRIP_MOVED']] == [(10.0, 110.0)], by_name['STRIP_MOVED']
-    # A strip at 0 to 100 does not hide an action keyed elsewhere.
-    assert [off[1:] for off in by_name['STRIP_ACTION_OFF']] == [(100.0, 200.0)], by_name['STRIP_ACTION_OFF']
+    assert [off[1:] for off in by_name['STRIP_MOVED']] == [(10.0, 110.0, None)], by_name['STRIP_MOVED']
+    # A strip at 0 to 100 does not hide an action keyed elsewhere, and it says where the strip plays it.
+    assert [off[1:] for off in by_name['STRIP_ACTION_OFF']] == [(100.0, 200.0, (0.0, 100.0))], by_name['STRIP_ACTION_OFF']
     print("PASS: every breach found, exact ranges, nothing else listed")
 
 
@@ -110,20 +110,83 @@ def _state():
     return scene.frame_current, scene.frame_start, scene.frame_end, objects, actions
 
 
-def test_operator_selects_and_changes_nothing():
+def _selected():
+    return {obj.name for obj in bpy.context.selected_objects}
+
+
+class _Recorder:
+    """Records what a panel draws (background Blender has no UI to draw into)."""
+
+    def __init__(self, calls):
+        self.calls = calls
+
+    def __getattr__(self, name):
+        def call(*args, **kwargs):
+            self.calls.append((name, args, kwargs))
+            return self if name in ('row', 'column', 'box', 'split', 'operator') else None
+        return call
+
+
+def test_list_and_click_select():
     _build()
-    bpy.data.objects['OK_ACTION'].select_set(True)
+    wm = bpy.context.window_manager
+    keep = bpy.data.objects['OK_ACTION']
+    keep.select_set(True)
     hidden = bpy.data.objects['ACTION_1_100']
     hidden.hide_set(True)
     bpy.context.view_layer.update()
     before = _state()
+
+    # Finding lists every offender, hidden ones too, sorted, and selects nothing
     assert bpy.ops.fss.find_animations_off_range() == {'FINISHED'}
     assert _state() == before, "the check changed animation data"
-    selected = {obj.name for obj in bpy.context.selected_objects}
-    assert selected == BAD - {'ACTION_1_100'}, sorted(selected)
-    assert bpy.context.view_layer.objects.active.name in selected
-    assert hidden.name in {obj.name for obj in checks.animations_off_range(bpy.context.view_layer)}
-    print("PASS: operator selects the visible offenders, keeps hidden ones reported, changes no animation data")
+    rows = wm.fss_anim_off_rows
+    names = [row.name for row in rows]
+    assert names == sorted(BAD), names
+    assert wm.fss_anim_off_active == -1 and _selected() == {'OK_ACTION'}, _selected()
+    by_name = {row.name: row for row in rows}
+    assert by_name['ACTION_50_100'].ranges == '50 - 100' and by_name['ACTION_50_100'].details.endswith(': 50 to 100')
+    assert by_name['STRIP_ACTION_OFF'].details.split('\n')[-1] == 'keys stored at 100 to 200, plays at 0 to 100', by_name['STRIP_ACTION_OFF'].details
+
+    # A click on a row selects its object alone and makes it active
+    wm.fss_anim_off_active = names.index('ACTION_50_100')
+    assert _selected() == {'ACTION_50_100'} and bpy.context.view_layer.objects.active.name == 'ACTION_50_100'
+    wm.fss_anim_off_active = names.index('STRIP_MOVED')
+    assert _selected() == {'STRIP_MOVED'} and bpy.context.view_layer.objects.active.name == 'STRIP_MOVED'
+
+    # The same row again, after clicking elsewhere: Select does it, as a list does not call a row clicked twice
+    bpy.data.objects['STRIP_MOVED'].select_set(False)
+    assert bpy.ops.fss.animation_off_range_select() == {'FINISHED'} and _selected() == {'STRIP_MOVED'}
+
+    # A hidden object's row: the selection stays, Select says why, and the row says so
+    wm.fss_anim_off_active = names.index('ACTION_1_100')
+    assert _selected() == {'STRIP_MOVED'}, _selected()
+    assert bpy.ops.fss.animation_off_range_select() == {'CANCELLED'} and _selected() == {'STRIP_MOVED'}
+
+    # Drawn: the list under the button, with the details of the active row
+    calls = []
+    checks._draw_animations_off_range(_Recorder(calls), bpy.context)
+    assert [name for name, _a, _k in calls][:2] == ['operator', 'template_list'], calls
+    labels = [kw.get('text') for name, _a, kw in calls if name == 'label']
+    assert 'Hidden or no longer there: not selected' in labels, labels
+
+    # Select All: every listed object Blender can select, as the check did before
+    assert bpy.ops.fss.animation_off_range_select_all() == {'FINISHED'}
+    assert _selected() == BAD - {'ACTION_1_100'}, _selected()
+
+    # An object deleted after finding: its row does nothing, and nothing fails
+    bpy.data.objects.remove(bpy.data.objects['ACTION_0_101'])
+    wm.fss_anim_off_active = names.index('ACTION_0_101')
+    assert bpy.ops.fss.animation_off_range_select() == {'CANCELLED'}
+    assert _state()[0] == before[0]
+
+    # Opening a file empties the list
+    checks._on_load_post()
+    assert len(wm.fss_anim_off_rows) == 0 and wm.fss_anim_off_active == -1
+    calls = []
+    checks._draw_animations_off_range(_Recorder(calls), bpy.context)
+    assert [name for name, _a, _k in calls] == ['operator'], calls
+    print("PASS: the list shows every offender, a click selects its object, hidden and deleted rows do no harm, nothing else changes")
 
 
 def test_clean_scene_keeps_selection():
@@ -135,7 +198,8 @@ def test_clean_scene_keeps_selection():
     assert checks.animations_off_range(bpy.context.view_layer) == {}
     assert bpy.ops.fss.find_animations_off_range() == {'FINISHED'}
     assert other.select_get() and not good.select_get()
-    print("PASS: a clean scene reports nothing and keeps the selection")
+    assert len(bpy.context.window_manager.fss_anim_off_rows) == 0
+    print("PASS: a clean scene lists nothing and keeps the selection")
 
 
 if __name__ == '__main__':
@@ -143,7 +207,7 @@ if __name__ == '__main__':
     fss_blender_tools.register()
     try:
         test_finds_every_breach_and_only_those()
-        test_operator_selects_and_changes_nothing()
+        test_list_and_click_select()
         test_clean_scene_keeps_selection()
         print("ALL ANIMATION RANGE TESTS PASSED")
     except Exception:

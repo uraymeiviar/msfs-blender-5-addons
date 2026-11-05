@@ -9,8 +9,9 @@ Faces without UV area: faces with a triangle that has 3D area but no UV area (uv
 island that has UV area. These needles push islands far out of the packed layout (decision 118); re-unwrapping the
 part fixes them. A second button, not part of Find Faces Without Area: the two need different fixes.
 Animation range: the project's rule is that every animation runs from frame 0 to 100. MSFS itself plays any range as
-start to end (dimensionless), so an offender still works there; the rule keeps the files consistent. The check reports
-and selects the objects that break it and changes nothing: the artist corrects the keys.
+start to end (dimensionless), so an offender still works there; the rule keeps the files consistent. The check lists
+the objects that break it under its button, a click on a row selects that object, and it changes nothing else: the
+artist corrects the keys.
 Rules and decisions: codes/wasm/doc/journal/20261014.fss-blender-tools-tags-and-merge.md (FSS repository).
 """
 
@@ -19,8 +20,11 @@ import time
 import numpy as np
 
 import bpy
+from bpy.app.handlers import persistent
 
 from . import name_check, uv_marks, uv_pack
+
+ANIM_LIST_ROWS = 5  # rows of the animation list before it scrolls (the artist can drag it longer)
 
 
 def broken_bone_parents():
@@ -180,8 +184,9 @@ def _off_standard(start, end):
 
 
 def animations_off_range(view_layer):
-    """{object: [(description, start, end)]} over the view layer's local objects whose active action, an NLA strip's
-    placement or a strip's action does not run from frame 0 to 100. Muted strips count: they can be unmuted."""
+    """{object: [(description, start, end, plays)]} over the view layer's local objects whose active action, an NLA
+    strip's placement or a strip's action does not run from frame 0 to 100. plays is where a strip plays that action in
+    the scene, None for the others. Muted strips count: they can be unmuted."""
     found = {}
     for obj in view_layer.objects:
         data = obj.animation_data
@@ -189,24 +194,91 @@ def animations_off_range(view_layer):
             continue
         off = []
         if data.action and _off_standard(*data.action.frame_range):
-            off.append((f"action {data.action.name}", *data.action.frame_range))
+            off.append((f"action {data.action.name}", *data.action.frame_range, None))
         for track in data.nla_tracks:
             for strip in track.strips:
                 if _off_standard(strip.frame_start, strip.frame_end):
-                    off.append((f"strip {strip.name}", strip.frame_start, strip.frame_end))
+                    off.append((f"strip {strip.name}", strip.frame_start, strip.frame_end, None))
                 if strip.action and _off_standard(*strip.action.frame_range):
-                    off.append((f"action {strip.action.name}", *strip.action.frame_range))
+                    off.append((f"action {strip.action.name}", *strip.action.frame_range,
+                                (strip.frame_start, strip.frame_end)))
         if off:
             found[obj] = off
     return found
 
 
+def _breach_lines(what, start, end, plays):
+    """A breach in words. In tweak mode the Action Editor draws a strip's keys at their scene time, so a strip's action
+    says both numbers: where its keys are stored, which the editors do not show, and where it plays."""
+    if plays is None:
+        return [f"{what}: {start:g} to {end:g}"]
+    return [f"{what}:", f"keys stored at {start:g} to {end:g}, plays at {plays[0]:g} to {plays[1]:g}"]
+
+
+class FSS_AnimationOffRangeRow(bpy.types.PropertyGroup):
+    """One object in the list; `name` is the object's name."""
+    ranges: bpy.props.StringProperty()  # the first range, and how many more
+    details: bpy.props.StringProperty()  # every breach, one per line
+
+
+_filling = False  # the list is being filled: setting the active row is not a click
+
+
+def _can_select(obj, view_layer):
+    """Blender cannot select an object that is hidden or outside the view layer."""
+    return obj is not None and obj.name in view_layer.objects and obj.visible_get(view_layer=view_layer)
+
+
+def _select_only(context, objects):
+    """Select these objects and nothing else, the first active. In Object Mode."""
+    for obj in context.selected_objects:
+        obj.select_set(False)
+    for obj in objects:
+        obj.select_set(True)
+    if objects:
+        context.view_layer.objects.active = objects[0]
+
+
+def _select_listed_row(context):
+    """Select the list's active row's object. False when there is none, or Blender cannot select it."""
+    wm = context.window_manager
+    rows = wm.fss_anim_off_rows
+    if context.mode != 'OBJECT' or not 0 <= wm.fss_anim_off_active < len(rows):
+        return False
+    obj = bpy.data.objects.get(rows[wm.fss_anim_off_active].name)
+    if not _can_select(obj, context.view_layer):
+        return False
+    _select_only(context, [obj])
+    return True
+
+
+def _anim_row_clicked(_wm, context):
+    if not _filling:
+        _select_listed_row(context)
+
+
+def _fill_animation_rows(wm, found):
+    global _filling
+    _filling = True
+    try:
+        rows = wm.fss_anim_off_rows
+        rows.clear()
+        for obj, off in sorted(found.items(), key=lambda item: item[0].name):
+            row = rows.add()
+            row.name = obj.name
+            row.ranges = f"{off[0][1]:g} - {off[0][2]:g}" + (f" (+{len(off) - 1})" if len(off) > 1 else "")
+            row.details = "\n".join(line for breach in off for line in _breach_lines(*breach))
+        wm.fss_anim_off_active = -1  # no row is clicked yet: finding selects nothing
+    finally:
+        _filling = False
+
+
 class FSS_OT_FindAnimationsOffRange(bpy.types.Operator):
     bl_idname = "fss.find_animations_off_range"
     bl_label = "Find Animations Not 0 to 100"
-    bl_description = ("Select the objects whose action or NLA strips do not run from frame 0 to 100, the project's "
-                      "rule. Nothing is changed. The ranges are listed in the system console")
-    bl_options = {'REGISTER', 'UNDO'}
+    bl_description = ("List the objects whose action or NLA strips do not run from frame 0 to 100, the project's "
+                      "rule. Nothing is changed. A click on a row selects its object")
+    bl_options = {'REGISTER'}
 
     @classmethod
     def poll(cls, context):
@@ -214,26 +286,93 @@ class FSS_OT_FindAnimationsOffRange(bpy.types.Operator):
 
     def execute(self, context):
         found = animations_off_range(context.view_layer)
+        _fill_animation_rows(context.window_manager, found)
         if not found:
             self.report({'INFO'}, "All animations run from frame 0 to 100")
             return {'FINISHED'}
-        shown = [obj for obj in found if obj.visible_get()]
-        if shown:
-            for obj in context.selected_objects:
-                obj.select_set(False)
-            for obj in shown:
-                obj.select_set(True)
-            context.view_layer.objects.active = shown[0]
-        ordered = sorted(found.items(), key=lambda item: item[0].name)
-        for obj, off in ordered:
-            for what, start, end in off:
-                print(f"FSS checks: {obj.name}: {what} runs {start:g} to {end:g}")
-        hidden = len(found) - len(shown)
-        names = ", ".join(f"{obj.name} ({off[0][1]:g}-{off[0][2]:g})" for obj, off in ordered[:5])
-        self.report({'WARNING'}, f"{len(found)} object(s) with animation not 0 to 100, selected"
-                                 + (f" ({hidden} hidden, not selected)" if hidden else "") + f": {names}"
-                                 + (" ..." if len(found) > 5 else ""))
+        for obj, off in sorted(found.items(), key=lambda item: item[0].name):
+            for breach in off:
+                print(f"FSS checks: {obj.name}: {' '.join(_breach_lines(*breach))}")
+        self.report({'WARNING'}, f"{len(found)} object(s) with animation not 0 to 100, listed under the button")
         return {'FINISHED'}
+
+
+class FSS_OT_AnimationOffRangeSelect(bpy.types.Operator):
+    bl_idname = "fss.animation_off_range_select"
+    bl_label = "Select"
+    bl_description = "Select the object of the list's active row"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and 0 <= context.window_manager.fss_anim_off_active < len(context.window_manager.fss_anim_off_rows)
+
+    def execute(self, context):
+        if not _select_listed_row(context):
+            self.report({'WARNING'}, "This object is hidden or no longer there, so it cannot be selected")
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+
+class FSS_OT_AnimationOffRangeSelectAll(bpy.types.Operator):
+    bl_idname = "fss.animation_off_range_select_all"
+    bl_label = "Select All"
+    bl_description = "Select every listed object that is not hidden"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and len(context.window_manager.fss_anim_off_rows) > 0
+
+    def execute(self, context):
+        rows = context.window_manager.fss_anim_off_rows
+        listed = [bpy.data.objects.get(row.name) for row in rows]
+        shown = [obj for obj in listed if _can_select(obj, context.view_layer)]
+        if shown:
+            _select_only(context, shown)
+        hidden = len(rows) - len(shown)
+        self.report({'INFO'}, f"{len(shown)} object(s) selected" + (f", {hidden} hidden, not selected" if hidden else ""))
+        return {'FINISHED'}
+
+
+class FSS_UL_AnimationsOffRange(bpy.types.UIList):
+    bl_idname = 'FSS_UL_animations_off_range'
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        obj = bpy.data.objects.get(item.name)
+        split = layout.split(factor=0.68)
+        split.label(text=item.name, icon='OBJECT_DATA' if _can_select(obj, context.view_layer) else 'HIDE_ON')
+        split.label(text=item.ranges)
+
+
+def _draw_animations_off_range(layout, context):
+    """The button, and under it what it found: a click on a row selects its object."""
+    wm = context.window_manager
+    layout.operator(FSS_OT_FindAnimationsOffRange.bl_idname, icon='ANIM')
+    rows = wm.fss_anim_off_rows
+    if not rows:
+        return
+    layout.template_list(FSS_UL_AnimationsOffRange.bl_idname, '', wm, 'fss_anim_off_rows', wm, 'fss_anim_off_active',
+                         rows=ANIM_LIST_ROWS)
+    buttons = layout.row(align=True)
+    buttons.operator(FSS_OT_AnimationOffRangeSelect.bl_idname, icon='RESTRICT_SELECT_OFF')
+    buttons.operator(FSS_OT_AnimationOffRangeSelectAll.bl_idname)
+    if 0 <= wm.fss_anim_off_active < len(rows):
+        row = rows[wm.fss_anim_off_active]
+        details = layout.column(align=True)
+        details.scale_y = 0.8
+        for line in row.details.split("\n"):
+            details.label(text=line)
+        if not _can_select(bpy.data.objects.get(row.name), context.view_layer):
+            details.label(text="Hidden or no longer there: not selected", icon='INFO')
+
+
+@persistent
+def _on_load_post(*_args):
+    """The list belongs to the file it was found in."""
+    wm = bpy.context.window_manager
+    if wm is not None and hasattr(bpy.types.WindowManager, 'fss_anim_off_rows'):
+        _fill_animation_rows(wm, {})
 
 
 class FSS_PT_Checks(bpy.types.Panel):
@@ -251,14 +390,18 @@ class FSS_PT_Checks(bpy.types.Panel):
         layout.operator(FSS_OT_FixBoneParents.bl_idname, icon='BONE_DATA')
         layout.operator(FSS_OT_FindFacesWithoutArea.bl_idname, icon='MESH_PLANE')
         layout.operator(FSS_OT_FindFacesWithoutUvArea.bl_idname, icon='UV')
-        layout.operator(FSS_OT_FindAnimationsOffRange.bl_idname, icon='ANIM')
+        _draw_animations_off_range(layout, context)
 
 
 CLASSES = (
     FSS_OT_FixBoneParents,
     FSS_OT_FindFacesWithoutArea,
     FSS_OT_FindFacesWithoutUvArea,
+    FSS_AnimationOffRangeRow,
     FSS_OT_FindAnimationsOffRange,
+    FSS_OT_AnimationOffRangeSelect,
+    FSS_OT_AnimationOffRangeSelectAll,
+    FSS_UL_AnimationsOffRange,
     FSS_PT_Checks,
 )
 
@@ -266,8 +409,18 @@ CLASSES = (
 def register():
     for cls in CLASSES:
         bpy.utils.register_class(cls)
+    wm = bpy.types.WindowManager
+    wm.fss_anim_off_rows = bpy.props.CollectionProperty(type=FSS_AnimationOffRangeRow)
+    wm.fss_anim_off_active = bpy.props.IntProperty(name='Active Object', default=-1, update=_anim_row_clicked,
+                                                   description='A click on a row selects its object')
+    bpy.app.handlers.load_post.append(_on_load_post)
 
 
 def unregister():
+    if _on_load_post in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_on_load_post)
+    wm = bpy.types.WindowManager
+    del wm.fss_anim_off_active
+    del wm.fss_anim_off_rows
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)
