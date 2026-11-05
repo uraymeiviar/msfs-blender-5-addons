@@ -12,9 +12,11 @@ To run:
 
 import math
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
+import bmesh
 import bpy
 import numpy as np
 
@@ -35,7 +37,7 @@ while repo_root_str in sys.path:
 sys.path.insert(0, repo_root_str)
 
 import fss_blender_tools  # noqa: E402
-from fss_blender_tools import checks, uv_fill, uv_marks, uv_pack  # noqa: E402
+from fss_blender_tools import checks, uv_fill, uv_islands, uv_marks, uv_pack, visibility_core  # noqa: E402
 
 fss_blender_tools.register()
 assert Path(uv_pack.__file__).resolve().is_relative_to(REPO_ROOT), uv_pack.__file__
@@ -450,7 +452,7 @@ def test_panel_rows():
     last = labels[labels.index('Last run') + 1]
     assert last == uv_pack.result_text(r) + ' (checked)', last
     ops = [kw.get('text') for name, _a, kw in calls if name == 'operator']
-    assert ops == ['Lower', 'Higher', 'Clear', 'Free', 'Upright', 'Flip', 'Quarter', 'Clear', 'Pack', 'Check All'], ops
+    assert ops == ['Check All', 'Lower', 'Higher', 'Clear', 'Free', 'Upright', 'Flip', 'Quarter', 'Clear', 'Pack'], ops
     # the active row: FUR
     bpy.context.window_manager.fss_uv_pack_active = list(bpy.data.materials).index(fur)
     calls, labels = draw_panel()
@@ -904,7 +906,268 @@ def test_layout_corner():
     print(f"PASS: test_layout_corner (4 corners at k {base['k']:.3f}, overflow k {r['k']:.2f} spills to V {lo[1]:.2f})")
 
 
+class _Recorder:
+    """Records what a panel draws (background Blender has no UI to draw into)."""
+
+    def __init__(self, calls):
+        self.calls = calls
+
+    def __getattr__(self, name):
+        def call(*args, **kwargs):
+            self.calls.append((name, args, kwargs))
+            return self if name in ('row', 'column', 'box', 'split') else None
+        return call
+
+
+def draw_islands(obj):
+    calls = []
+    uv_islands.draw(_Recorder(calls), bpy.context, obj)
+    return calls, [kwargs.get('text') for name, _args, kwargs in calls if name == 'label']
+
+
+def test_island_list():
+    reset(0.9, 1.1)
+    wm = bpy.context.window_manager
+    scene = bpy.context.scene
+    view_layer = bpy.context.view_layer
+    a, b = mat('ISL_A'), mat('ISL_B')
+    # four islands of 1 x 1 m, 1 x 1, 2 x 1 and 1 x 1, seen 1.0, 0.5, not at all, 0.25; the last in another texture set
+    rects = [(0, 0, 1, 1), (2, 0, 1, 1), (4, 0, 2, 1), (7, 0, 1, 1)]
+    obj = quad_obj('ISL', rects, mats=[a, a, a, b])
+    other = quad_obj('ISL_OTHER', [(0, 3, 3, 3)], mats=[a])  # in the same set: the list reads this mesh only
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+
+    # No visibility data: every multiplier x1.00, and the list says so
+    uv_islands.sync(obj, scene, view_layer, wm)
+    assert [row.factor for row in wm.fss_uv_island_rows] == [1.0] * 4 and uv_islands._state['stale']
+    wm.fss_uv_islands_open = True
+    _calls, labels = draw_islands(obj)
+    assert 'No visibility data: multipliers are x1.00' in labels, labels
+
+    # With data, through the packer's own path (a saved file is what makes it read visibility)
+    folder = Path(tempfile.mkdtemp(prefix='fss_islands_'))
+    bpy.ops.wm.save_as_mainfile(filepath=str(folder / 'islands.blend'))
+    obj = bpy.data.objects['ISL']
+    other = bpy.data.objects['ISL_OTHER']
+    a, b = bpy.data.materials['ISL_A'], bpy.data.materials['ISL_B']
+    scene = bpy.context.scene
+    view_layer = bpy.context.view_layer
+    scores = {'ISL': np.array([1.0, 0.5, 0.0, 0.25], np.float32), 'ISL_OTHER': np.array([1.0], np.float32)}
+    facing = {'ISL': np.array([1.0, 0.5, 0.0, 0.5], np.float32), 'ISL_OTHER': np.array([1.0], np.float32)}
+
+    def stand_in(user, uv_name=None, vis_path=None, use_cache=True):
+        areas = np.array([p.area for p in user.data.polygons], np.float32)
+        return {'stale': False, 'face_scores': scores[user.data.name], 'orig_areas': areas, 'vis_omega': None,
+                'unocc_omega': None, 'object_score': 0.5, 'island_values': {}, 'face_facing': facing[user.data.name]}
+
+    real = visibility_core.get_object_visibility
+    visibility_core.get_object_visibility = stand_in
+    try:
+        uv_islands.sync(obj, scene, view_layer, wm)
+        rows = wm.fss_uv_island_rows
+        # highest density first; a never-seen island takes the floor x0.10; the numbers stay with the islands
+        got = [(row.number, row.material, round(row.factor, 3)) for row in rows]
+        assert got == [(1, 'ISL_A', 1.0), (2, 'ISL_A', 0.5), (4, 'ISL_B', 0.25), (3, 'ISL_A', 0.1)], got
+        assert [row.high for row in rows] == sorted((row.high for row in rows), reverse=True)
+        # the packer's own values: the texture set with all its objects gives each island the same numbers
+        parts, _conflicts = uv_pack.gather(view_layer, a)
+        ts = uv_pack.TextureSet(a, parts, scene, {})
+        part = next(i for i, p in enumerate(parts) if p[1][0] == obj)
+        isl = ts.face_isl[part]
+        for row, position in zip(rows, range(len(rows))):
+            if row.material != 'ISL_A':
+                continue
+            k = isl[np.searchsorted(parts[part][2], uv_islands._state['faces'][position][0])]
+            assert abs(row.low - ts.lo[k]) < 1e-4 and abs(row.high - ts.hi[k]) < 1e-4, (row.low, ts.lo[k])
+            assert abs(row.area - ts.a3[k]) < 1e-1 and abs(row.now - ts.cur[k]) < 1e-3, (row.area, ts.a3[k])
+        by_number = {row.number: row for row in rows}
+        target = uv_marks.target_density(scene)
+        assert abs(by_number[1].high - target * 1.1) < 1e-4 and abs(by_number[3].low - target * 0.9 * 0.1) < 1e-4
+        assert (by_number[1].seen, by_number[3].seen) == (1.0, 0.0) and by_number[3].faces == 1
+        assert abs(by_number[3].area - 20000.0) < 1e-1, by_number[3].area
+
+        # Density: the range; after Pack or Check All, the value at that set's t; a kept set says so
+        row = by_number[1]
+        assert uv_islands.density_text(row) == f'{row.low:.2f} - {row.high:.2f}', uv_islands.density_text(row)
+        uv_marks._results['ISL_A'] = {'t': 0.5, 'mode': 'fit'}
+        assert uv_islands.density_text(row) == f'{(row.low + row.high) / 2:.2f}', uv_islands.density_text(row)
+        uv_marks._results.pop('ISL_A')
+
+        # A refill keeps the active island: island 3 was the first row without data, and is still active
+        assert rows[wm.fss_uv_island_active].number == 3, rows[wm.fss_uv_island_active].number
+        assert obj.mode == 'OBJECT'  # a refill is not a click
+        wm.fss_uv_island_active = 0
+        assert obj.mode == 'EDIT'  # a click is
+        bpy.ops.object.mode_set(mode='OBJECT')
+        uv_islands.sync(obj, scene, view_layer, wm)
+        assert wm.fss_uv_island_active == 0 and obj.mode == 'OBJECT'
+
+        # Drawing writes nothing and asks for no refill while the key holds
+        calls, labels = draw_islands(obj)
+        assert not uv_islands._pending and not any(name == 'operator' and args[0] != 'fss.uv_island_select'
+                                                   for name, args, _kw in calls)
+        assert labels[:4] == ['#', 'Area', 'Multiplier', 'Density px/cm'], labels
+        assert [name for name, _args, _kw in calls].count('template_list') == 1
+        assert ['Material', 'ISL_A'] == labels[4:6] and '100 % of its surface' in labels, labels
+        assert labels[labels.index('Facing') + 1] == '1.00', labels
+        assert labels[labels.index('Visibility') + 1] == 'x1.00', labels
+        # Multiplier is the final number: the scene's 1.1 at full facing, and the floor x0.10 with no range left at facing 0
+        assert abs(by_number[1].multiplier - 1.1) < 1e-4 and abs(by_number[3].multiplier - 0.09) < 1e-4, (
+            by_number[1].multiplier, by_number[3].multiplier)
+        # facing moves the top of the range: the never-seen island, facing 0, has no range left
+        assert by_number[3].high == by_number[3].low and abs(by_number[2].high - by_number[2].low - target * 0.2 * 0.5 * 0.5) < 1e-4
+        # visibility data from before facing: the list says so
+        facing_before = dict(facing)
+        facing.update(ISL=None)
+        uv_islands.sync(obj, scene, view_layer, wm)
+        _calls, labels = draw_islands(obj)
+        assert labels[0] == 'No facing data: run Update Visibility once', labels
+        assert labels[labels.index('Facing') + 1] == 'no data: top of the range', labels
+        facing.update(facing_before)
+        uv_islands.sync(obj, scene, view_layer, wm)
+        rows = wm.fss_uv_island_rows
+
+        # What makes the rows out of date: a mark, a kept set, a changed UV
+        key = uv_islands._key(obj, scene)
+        obj.fss_uv_density_own, obj.fss_uv_density_min, obj.fss_uv_density_max = True, 0.5, 0.5
+        assert uv_islands._key(obj, scene) != key
+        draw_islands(obj)
+        assert uv_islands._pending  # the refill is scheduled, not done in the draw
+        assert abs(rows[0].high - target * 1.1) < 1e-4
+        uv_islands._pending = False
+        uv_islands.sync(obj, scene, view_layer, wm)
+        assert abs(wm.fss_uv_island_rows[0].high - target * 1.1 * 0.5) < 1e-4  # the scene freedom x the mark
+        obj.fss_uv_density_own = False
+        uv_islands.sync(obj, scene, view_layer, wm)
+        key = uv_islands._key(obj, scene)
+        obj.data.update()
+        bpy.context.view_layer.update()
+        assert uv_islands._key(obj, scene) != key, 'a geometry update must refresh the list'
+        uv_islands.sync(obj, scene, view_layer, wm)
+
+        # A click on a row, from Object Mode, enters Edit Mode with the island's faces; the next click moves the selection
+        rows = wm.fss_uv_island_rows
+        assert obj.mode == 'OBJECT'
+        wm.fss_uv_island_active = 3
+        assert obj.mode == 'EDIT'
+
+        def selected():
+            bm = bmesh.from_edit_mesh(obj.data)
+            return [face.index for face in bm.faces if face.select]
+
+        assert selected() == [2], selected()  # island 3, the never-seen one, is the last row
+        wm.fss_uv_island_active = 0
+        assert selected() == [0], selected()
+        # Select Faces, for the row already active, from Object Mode too
+        bpy.ops.object.mode_set(mode='OBJECT')
+        assert bpy.ops.fss.uv_island_select() == {'FINISHED'} and obj.mode == 'EDIT'
+        assert selected() == [0], selected()
+        _calls, labels = draw_islands(obj)  # in Edit Mode the rows stay
+        assert '#' in labels and not uv_islands._pending
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+        # A shared mesh, an object with no list yet in Edit Mode, and a mesh the packer does not take
+        twin = bpy.data.objects.new('ISL_TWIN', obj.data)
+        scene.collection.objects.link(twin)
+        view_layer.update()
+        uv_islands.sync(obj, scene, view_layer, wm)
+        assert uv_islands._state['users'] == 2
+        _calls, labels = draw_islands(obj)
+        assert any(text and text.startswith('Mesh shared by 2') for text in labels), labels
+        no_uv = bpy.data.meshes.new('ISL_NO_UV')
+        no_uv.from_pydata([(0, 0, 0), (1, 0, 0), (1, 1, 0)], [], [(0, 1, 2)])
+        plain = bpy.data.objects.new('ISL_NO_UV', no_uv)
+        scene.collection.objects.link(plain)
+        view_layer.update()
+        uv_islands.sync(plain, scene, view_layer, wm)
+        _calls, labels = draw_islands(plain)
+        assert len(wm.fss_uv_island_rows) == 0 and any('no UV map' in (text or '') for text in labels), labels
+        assert uv_pack.object_islands(plain, scene, view_layer) is None
+    finally:
+        visibility_core.get_object_visibility = real
+        wm.fss_uv_islands_open = False
+    print("PASS: test_island_list (the packer's values per island, highest density first, floor x0.10, seen share, "
+          "range or value at t, refill after the draw, Select Faces and a click in Edit Mode, shared mesh, no UV map)")
+
+
+def test_partly_seen():
+    """The scene's Partly Seen Islands: 1 any seen part counts for the whole island, 0.5 the seen share, 0 only an island
+    seen whole; 0.75 and 0.25 biased either way; the minimum holds, the list follows."""
+    reset(1.0, 1.0)
+    m = mat('PARTLY')
+    # One island of two faces sharing an edge and its UVs: 1 m and 3 m wide, the first seen; and a second island, a tiny
+    # seen face beside a large unseen one
+    verts = [(0, 0, 0), (1, 0, 0), (4, 0, 0), (0, 1, 0), (1, 1, 0), (4, 1, 0),
+             (0, 2, 0), (0.1, 2, 0), (9.9, 2, 0), (0, 3, 0), (0.1, 3, 0), (9.9, 3, 0)]
+    faces = [(0, 1, 4, 3), (1, 2, 5, 4), (6, 7, 10, 9), (7, 8, 11, 10)]
+    me = bpy.data.meshes.new('PARTLY')
+    me.from_pydata(verts, [], faces)
+    layer = me.uv_layers.new(name='UVMap')
+    lv = np.zeros(len(me.loops), np.int64)
+    me.loops.foreach_get('vertex_index', lv)
+    layer.data.foreach_set('uv', (np.array(verts)[:, :2] * 0.05)[lv].ravel())
+    me.materials.append(m)
+    obj = bpy.data.objects.new('PARTLY', me)
+    bpy.context.scene.collection.objects.link(obj)
+    bpy.context.view_layer.update()
+    folder = Path(tempfile.mkdtemp(prefix='fss_partly_'))
+    bpy.ops.wm.save_as_mainfile(filepath=str(folder / 'partly.blend'))
+    obj = bpy.data.objects['PARTLY']
+    m = bpy.data.materials['PARTLY']
+    scene = bpy.context.scene
+    view_layer = bpy.context.view_layer
+    scores = np.array([0.8, 0.0, 0.8, 0.0], np.float32)
+
+    def stand_in(user, uv_name=None, vis_path=None, use_cache=True):
+        return {'stale': False, 'face_scores': scores, 'orig_areas': np.array([p.area for p in user.data.polygons], np.float32),
+                'vis_omega': None, 'unocc_omega': None, 'object_score': 0.5, 'island_values': {}, 'face_facing': None}
+
+    def factors():
+        parts, _conflicts = uv_pack.gather(view_layer, m)
+        ts = uv_pack.TextureSet(m, parts, scene, {})
+        return ts.vis[ts.face_isl[0][0]], ts.vis[ts.face_isl[0][2]], ts
+
+    real = visibility_core.get_object_visibility
+    visibility_core.get_object_visibility = stand_in
+    try:
+        # the first island is 25 % seen, the second 0.1 m of 9.9 m, both with score 0.8; the minimum is 0.1
+        expected = {1.0: (0.8, 0.8), 0.75: (0.8 * 0.25 ** (1 / 3), 0.8 * (0.1 / 9.9) ** (1 / 3)), 0.5: (0.2, 0.1), 0.25: (0.1, 0.1), 0.0: (0.1, 0.1)}
+        assert scene.fss_uv_partly_seen_value == 0.75  # the default
+        for value, (want_first, want_second) in expected.items():
+            scene.fss_uv_partly_seen_value = value
+            first, second, ts = factors()
+            assert abs(first - want_first) < 1e-4 and abs(second - want_second) < 1e-4, (value, first, second)
+        # 0.25 is the cube of the share, above the minimum for a larger share
+        assert abs(uv_marks.partly_seen_factor(0.8, 0.25) - 0.8 ** 3) < 1e-9 and abs(uv_marks.partly_seen_factor(0.5, 0.5) - 0.5) < 1e-9
+        # An island seen whole loses nothing at any value, 0 included
+        assert all(uv_marks.island_visibility(0.8, 1.0, value) == 0.8 for value in expected)
+        scene.fss_uv_partly_seen_value = 0.75
+        first, second, ts = factors()
+        assert abs(ts.lo[ts.face_isl[0][0]] - scene.fss_uv_target_density * first) < 1e-3
+        # The list follows the slider, and Pack still meets the density
+        wm = bpy.context.window_manager
+        uv_islands.sync(obj, scene, view_layer, wm)
+        key = uv_islands._key(obj, scene)
+        scene.fss_uv_partly_seen_value = 0.5
+        assert uv_islands._key(obj, scene) != key
+        uv_islands.sync(obj, scene, view_layer, wm)
+        assert abs(max(row.factor for row in wm.fss_uv_island_rows) - 0.2) < 1e-5
+        result = uv_pack.pack(m)
+        assert result['margin_violations'] == 0 and result['overlap_tri_pairs'] == 0, result
+    finally:
+        visibility_core.get_object_visibility = real
+        scene.fss_uv_partly_seen_value = 0.75
+    # The panel draws it in Advanced
+    calls = []
+    bpy.types.FSS_PT_uv_marks_advanced.draw(SimpleNamespace(layout=_Recorder(calls)), bpy.context)
+    assert any(name == 'prop' and args[1] == 'fss_uv_partly_seen_value' for name, args, _kw in calls), calls
+    print("PASS: test_partly_seen (1 whole island, 0.75 and 0.25 biased, 0.5 the seen share, 0 only seen whole; the minimum holds; the list and Pack follow)")
+
+
 def main():
+    test_partly_seen()
+    test_island_list()
     test_layout_corner()
     test_fill_footprints()
     test_fill_ring()

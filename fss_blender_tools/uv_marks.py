@@ -7,9 +7,10 @@ the target density (scene, px/cm) x that range x the island's visibility. Direct
 from the nearest marked ancestor. Density marks, texture sizes and margins are registered properties; the export
 hooks keep every fss_ key out of the glTF extras (merge._strip_fss_extras).
 
-The Packing section also packs: a list of the texture sets of the selected objects (decision 121), the active row's
-size (square, decision 120), margin, Keep UVs (decision 116) and Pack (uv_pack.pack, decision 114) below it, and Check
-All (uv_pack.measure on every texture set, decision 115). The section is drawn in the 3D viewport's and the UV editor's
+The Packing section has three boxes, by what their settings apply to. Scene: target density, density freedom and Check
+All (uv_pack.measure on every texture set, decision 115). Object: the marks of the active object. Texture set: a list of
+the texture sets of the selected objects (decision 121), the active row's size (square, decision 120), margin, Keep UVs
+(decision 116) and Pack (uv_pack.pack, decision 114). The section is drawn in the 3D viewport's and the UV editor's
 sidebar (decision 119). The results stay in memory for the session (not in the file) and are cleared when a file is
 loaded.
 """
@@ -53,6 +54,8 @@ DEFAULT_TEXTURE = '4096'
 TEXTURE_SIZES = [(str(1 << n), str(1 << n), f'{1 << n} pixels') for n in range(8, 14)]  # 256 to 8192
 DENSITY_PRESETS = {'LOWER': 0.75, 'HIGHER': 1.5}
 NEVER_SEEN_FACTOR = 0.1  # decision 74: what never-seen faces get instead of visibility 0
+FULLY_SEEN = 0.9999  # a seen share counted as the whole island (areas are rounded)
+DEFAULT_PARTLY_SEEN = 0.75
 MAX_LISTED = 5  # nested marks shown in the panel
 LIST_ROWS = 5  # rows the texture set list shows before it scrolls (the artist can drag it longer)
 DIRECTIONS = [
@@ -95,6 +98,27 @@ def target_density(scene=None):
 def pack_corner(scene):
     """The corner of the texture Pack moves a layout to (decision 123)."""
     return scene.fss_uv_pack_corner
+
+
+def partly_seen(scene):
+    """The scene's Partly Seen Islands value, see island_visibility."""
+    return scene.fss_uv_partly_seen_value
+
+
+def partly_seen_factor(seen_share, value):
+    """What an island keeps of its score when only a share of it is seen. value 1: all of it, any seen part makes the
+    island visible. 0.5: the share itself. 0: nothing unless the whole island is seen. Between them the share to the
+    power (1 - value) / value: 0.75 is biased towards visible (cube root), 0.25 towards scaling down (cube)."""
+    if value >= 1.0 or seen_share >= FULLY_SEEN:
+        return 1.0
+    if value <= 0.0:
+        return 0.0
+    return seen_share ** ((1.0 - value) / value)
+
+
+def island_visibility(score, seen_share, value):
+    """The density factor of an island: its score x partly_seen_factor, never below the minimum."""
+    return visibility_factor(score * partly_seen_factor(seen_share, value))
 
 
 def corner_label(corner):
@@ -533,7 +557,7 @@ def _draw_object(layout, scene, obj):
     from . import merge  # merge imports this module for the zone row
 
     box = layout.box()
-    box.label(text=obj.name, icon='OBJECT_DATA')
+    box.label(text=f'Object: {obj.name}', icon='OBJECT_DATA')
     (low, high), source = parent_density(obj, scene)
     origin = f'from {source.name}' if source is not None else '(scene freedom)'
     _labelled(box, 'Parent').label(text=f'{_factor_text(low, high)} {origin}')
@@ -568,6 +592,9 @@ def _draw_object(layout, scene, obj):
         row.operator(FSS_OT_UvSetDirection.bl_idname, text=item[1], depress=item[0] == value).direction = item[0]
     if source is not None and source != obj:
         _labelled(box, '').label(text=f'{value.lower()} from {source.name}')
+    box.separator(type='LINE')
+    from . import uv_islands  # it imports this module
+    uv_islands.draw(box, bpy.context, obj)
 
 
 def texture_set_materials(context):
@@ -653,32 +680,44 @@ class FSS_UL_TextureSets(bpy.types.UIList):
 
 def _draw_texture_sets(layout, context):
     material = active_texture_set(context)
+    box = layout.box()
     if material is None:
-        layout.label(text='Select objects to list their texture sets', icon='INFO')
-    else:
-        layout.template_list(FSS_UL_TextureSets.bl_idname, '', bpy.data, 'materials', context.window_manager,
-                             'fss_uv_pack_active', rows=LIST_ROWS)
-        box = layout.box()
-        box.label(text=f'Texture set: {material.name}', icon='MATERIAL')
-        _labelled(box, 'Size').prop(material, SIZE_PROP, text='')
-        _labelled(box, 'Margin').prop(material, 'fss_uv_margin_px', text='')
-        if margin(material) < BLOCK_PIXELS:
-            box.label(text=f'Under {BLOCK_PIXELS} px: compressed 4x4 blocks bleed across islands', icon='ERROR')
-        row = _labelled(box, '')
-        row.prop(material, KEEP_UVS_PROP, text='Keep UVs', toggle=True)
-        sub = row.row(align=True)
-        sub.enabled = not uv_pack.is_kept(material)
-        sub.operator(FSS_OT_UvPackTextureSet.bl_idname, text='Pack', icon='UV').material = material.name
-        _labelled(box, 'Last run').label(text=last_result_text(material))
-        result = _results.get(material.name)
-        if result and result.get('uv_zero_islands'):
-            box.label(text=f"{result['uv_zero_islands']} island(s) with triangles without UV area: re-unwrap them",
-                      icon='ERROR')
-        if result and result.get('no_area_objects'):
-            box.label(text=f"Faces without area in {len(result['no_area_objects'])} object(s)", icon='ERROR')
-    layout.operator(FSS_OT_UvPackCheckAll.bl_idname, text='Check All', icon='VIEWZOOM')
+        box.label(text='Texture set', icon='MATERIAL')
+        box.label(text='Select objects to list their texture sets', icon='INFO')
+        return
+    box.label(text=f'Texture set: {material.name}', icon='MATERIAL')
+    box.template_list(FSS_UL_TextureSets.bl_idname, '', bpy.data, 'materials', context.window_manager,
+                      'fss_uv_pack_active', rows=LIST_ROWS)
+    _labelled(box, 'Size').prop(material, SIZE_PROP, text='')
+    _labelled(box, 'Margin').prop(material, 'fss_uv_margin_px', text='')
+    if margin(material) < BLOCK_PIXELS:
+        box.label(text=f'Under {BLOCK_PIXELS} px: compressed 4x4 blocks bleed across islands', icon='ERROR')
+    row = _labelled(box, '')
+    row.prop(material, KEEP_UVS_PROP, text='Keep UVs', toggle=True)
+    sub = row.row(align=True)
+    sub.enabled = not uv_pack.is_kept(material)
+    sub.operator(FSS_OT_UvPackTextureSet.bl_idname, text='Pack', icon='UV').material = material.name
+    _labelled(box, 'Last run').label(text=last_result_text(material))
+    result = _results.get(material.name)
+    if result and result.get('uv_zero_islands'):
+        box.label(text=f"{result['uv_zero_islands']} island(s) with triangles without UV area: re-unwrap them",
+                  icon='ERROR')
+    if result and result.get('no_area_objects'):
+        box.label(text=f"Faces without area in {len(result['no_area_objects'])} object(s)", icon='ERROR')
+
+
+def _draw_scene(layout, scene):
+    box = layout.box()
+    box.label(text='Scene', icon='SCENE_DATA')
+    row = _labelled(box, 'Target density')
+    row.prop(scene, 'fss_uv_target_density', text='')
+    row.label(text='px/cm')
+    row = _labelled(box, 'Density freedom')
+    row.prop(scene, 'fss_uv_density_freedom_min', text='Min')
+    row.prop(scene, 'fss_uv_density_freedom_max', text='Max')
+    box.operator(FSS_OT_UvPackCheckAll.bl_idname, text='Check All', icon='VIEWZOOM')
     if bpy.data.texts.get(uv_pack.REPORT_TEXT_NAME) is not None:
-        layout.label(text=f"Full report: Text Editor > '{uv_pack.REPORT_TEXT_NAME}'", icon='INFO')
+        box.label(text=f"Full report: Text Editor > '{uv_pack.REPORT_TEXT_NAME}'", icon='INFO')
 
 
 def _draw_progress(layout):
@@ -907,15 +946,12 @@ class _PackingSection:
             return
         if _migration:
             _draw_migration(layout)
-        row = _labelled(layout, 'Target density')
-        row.prop(scene, 'fss_uv_target_density', text='')
-        row.label(text='px/cm')
-        row = _labelled(layout, 'Density freedom')
-        row.prop(scene, 'fss_uv_density_freedom_min', text='Min')
-        row.prop(scene, 'fss_uv_density_freedom_max', text='Max')
+        _draw_scene(layout, scene)
         obj = context.active_object
         if obj is None:
-            layout.label(text='No active object', icon='INFO')
+            box = layout.box()
+            box.label(text='Object', icon='OBJECT_DATA')
+            box.label(text='No active object', icon='INFO')
         else:
             _draw_object(layout, scene, obj)
         _draw_texture_sets(layout, context)
@@ -927,7 +963,9 @@ class _PackingAdvanced:
     bl_order = 1
 
     def draw(self, context):
+        self.layout.label(text='Whole scene', icon='SCENE_DATA')
         _labelled(self.layout, 'Layout corner').prop(context.scene, 'fss_uv_pack_corner', text='')
+        _labelled(self.layout, 'Partly Seen Islands').prop(context.scene, 'fss_uv_partly_seen_value', text='', slider=True)
 
 
 class FSS_PT_UvMarks(_PackingSection, bpy.types.Panel):
@@ -995,6 +1033,12 @@ def register():
         name='Target Density', default=DEFAULT_TARGET, min=0.01, soft_min=1.0, soft_max=100.0, precision=2,
         description='Texel density at factor 1.0 for the whole scene, in pixels per centimetre (20.48 is 2048 px '
                     'per metre)')
+    bpy.types.Scene.fss_uv_partly_seen_value = bpy.props.FloatProperty(
+        name='Partly Seen Islands', default=DEFAULT_PARTLY_SEEN, min=0.0, max=1.0, precision=2,
+        description='What happens to an island when only part of it is seen. 1: any seen part makes the whole island visible. '
+                    '0.75: scaled by the seen share, biased towards visible. 0.5: scaled by the seen share of its area. '
+                    '0.25: biased towards scaling down. 0: only an island seen whole counts, any other gets the minimum. '
+                    'Lower saves texture but blurs the part you see. Used by Pack and Check All, with no new Update Visibility')
     bpy.types.Scene.fss_uv_pack_corner = bpy.props.EnumProperty(
         name='Layout Corner', items=PACK_CORNERS, default='BOTTOM_LEFT',
         description='The corner of the texture Pack moves each layout to, as one block. Changes the UVs at the next '
@@ -1043,7 +1087,7 @@ def unregister():
     del bpy.types.WindowManager.fss_uv_pack_active_name
     for name in (KEEP_UVS_PROP, 'fss_uv_margin_px', SIZE_PROP):
         delattr(bpy.types.Material, name)
-    for name in ('fss_uv_density_freedom_max', 'fss_uv_density_freedom_min', 'fss_uv_pack_corner', 'fss_uv_target_density'):
+    for name in ('fss_uv_density_freedom_max', 'fss_uv_density_freedom_min', 'fss_uv_pack_corner', 'fss_uv_partly_seen_value', 'fss_uv_target_density'):
         delattr(bpy.types.Scene, name)
     for name in (MAX_PROP, MIN_PROP, OWN_PROP):
         delattr(bpy.types.Object, name)

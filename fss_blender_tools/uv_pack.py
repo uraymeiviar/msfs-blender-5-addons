@@ -3,10 +3,12 @@ decisions 112 to 121; the method was measured with tests/uv_prototype/pack_densi
 
 A texture set is every face of one material over all mesh objects of the view layer, selected or not (decisions 100
 and 114), with the mesh's active UV map; a mesh shared by several objects is packed once, with the material slots of
-its first user. Every island is scaled to the density lo + t (hi - lo) in px/cm, where [lo, hi] = target density x
-the object's final factor range (uv_marks.density) x the island's visibility (decisions 82 and 111), and one t holds
-for the whole set (decision 113): 1 when the set fits at the top of its ranges, else the largest t that fits, else 0,
-and the layout then spills into [0, k] x [0, k] (decision 112). When written, the layout moves as one block to the
+its first user. Every island is scaled to the density lo + t (hi - lo) in px/cm, where lo = target density x the object's
+minimum factor (uv_marks.density) x the island's visibility (decisions 82 and 111), and hi is the same with the maximum
+factor, moved towards lo by the island's facing (hi = lo + facing x (top - lo)): an island facing the cameras can reach
+the top of the object's range, one facing away stays at its minimum. One t holds for the whole set (decision 113): 1
+when the set fits at the top of its ranges, else the largest t that fits, else 0, and the layout then spills into
+[0, k] x [0, k] (decision 112). When written, the layout moves as one block to the
 scene's corner (decision 123, aligned_to_corner); k, the gaps and the densities are measured before that and do not
 change, and a layout that does not fit then spills past the edges opposite that corner.
 
@@ -460,9 +462,12 @@ class TextureSet:
         self.bl = []  # per part: boundary loops
         self.bl_isl = []
         self.stale_meshes = []
+        self.no_facing_meshes = []  # visibility data written before facing existed: facing 1.0
         self.linked_range_differs = 0
         self.no_area_objects = []  # objects with faces of the set without 3D area (decision 117)
         uv_zero = []  # per part and island: it has a triangle without UV area (decision 118)
+        factors = []  # per part and island: the visibility factor
+        facings = []  # per part and island: how directly it faces the cameras, 0 to 1
         n_isl = 0
         for pi, (md, users, faces) in enumerate(parts):
             isl, bl, bl_isl = part_islands(md, faces)
@@ -486,12 +491,21 @@ class TextureSet:
             if vis_data.get('stale', True):
                 self.stale_meshes.append(md.me.name)
                 vis = np.ones(ni)
+                facing = np.ones(ni)
             else:
                 order = np.argsort(isl, kind='stable')
                 st = np.searchsorted(isl[order], np.arange(ni + 1))
-                vis = np.array([uv_marks.visibility_factor(
-                    visibility_core.score_face_set(users[0], faces[order[st[k]:st[k + 1]]], vis_data=vis_data))
+                partly = uv_marks.partly_seen(scene)
+                vis = np.array([uv_marks.island_visibility(
+                    visibility_core.score_face_set(users[0], faces[order[st[k]:st[k + 1]]], vis_data=vis_data),
+                    visibility_core.seen_share_face_set(vis_data, faces[order[st[k]:st[k + 1]]]), partly)
                     for k in range(ni)])
+                facing = np.array([visibility_core.facing_face_set(vis_data, faces[order[st[k]:st[k + 1]]])
+                                   for k in range(ni)])
+                if vis_data.get('face_facing') is None:
+                    self.no_facing_meshes.append(md.me.name)
+            factors.append(vis)
+            facings.append(facing)
             # per user: 3D area and range; the island follows the user that needs the most texture
             best = first = None
             for u in users:
@@ -500,7 +514,8 @@ class TextureSet:
                     self.no_area_objects += [o.name for o in users]
                 a3 = np.bincount(isl, weights=areas, minlength=ni)
                 (flo, fhi), _source = uv_marks.density(u, scene)
-                lo, hi = target * flo * vis, target * fhi * vis
+                lo = target * flo * vis
+                hi = lo + facing * target * (fhi - flo) * vis
                 need = lo / np.maximum(np.sqrt(uv_a / np.maximum(a3, 1e-30)), 1e-30)
                 row = (need, a3, lo, hi)
                 if best is None:
@@ -523,6 +538,8 @@ class TextureSet:
         self.a3 = np.array([r[2] for r in rows])
         self.lo = np.array([r[3] for r in rows])
         self.hi = np.array([r[4] for r in rows])
+        self.vis = np.concatenate(factors) if factors else np.zeros(0)
+        self.facing = np.concatenate(facings) if facings else np.zeros(0)
         self.dirs = np.array([r[5] for r in rows])
         self.cur = np.sqrt(self.a_uv / np.maximum(self.a3, 1e-30))  # px/cm as the UVs sit on the texture
         self.p_uv = np.array([r[6] for r in rows])
@@ -946,6 +963,49 @@ def write_back(ts, res):
 # Pack and measure
 # ------------------------------------------------------------------------------------------------------------------
 
+def object_islands(obj, scene, view_layer):
+    """The islands of obj's mesh as the packer forms them, one row per island and material: what Pack would use, read
+    from TextureSet, without packing. The mesh alone is read, so a set's other objects cost nothing; the values of an
+    island do not depend on them. Returns (rows, the mesh's users, stale), or None for a mesh the packer does not take
+    (no faces, no active UV map, linked from a library)."""
+    users = _meshes(view_layer).get(obj.data)
+    if users is None:
+        return None
+    md = MeshData(obj.data)
+    slots = [slot.material for slot in users[0].material_slots]
+    materials = []
+    for index in np.unique(md.MI).tolist():
+        material = slots[index] if index < len(slots) else None
+        if material not in materials:
+            materials.append(material)
+    vis_cache = {}
+    rows = []
+    stale = False
+    for material in materials:
+        faces = np.flatnonzero(_face_material_mask(users[0], md, material))
+        ts = TextureSet(material, [(md, users, faces)], scene, vis_cache)
+        stale = stale or bool(ts.stale_meshes)
+        no_facing = bool(ts.stale_meshes or ts.no_facing_meshes)
+        isl = ts.face_isl[0]
+        order, starts = _grouped(isl, ts.n)
+        vis_data = vis_cache.get(md.me.name) or {}
+        seen = None
+        if not vis_data.get('stale', True) and vis_data.get('face_scores') is not None:
+            # the share of the island's surface that any view sees, in the area of the visibility analysis
+            areas = np.asarray(vis_data['orig_areas'], np.float64)
+            shown = np.asarray(vis_data['face_scores']) > 0
+            seen = np.bincount(isl, weights=(areas * shown)[faces], minlength=ts.n) / np.maximum(
+                np.bincount(isl, weights=areas[faces], minlength=ts.n), 1e-30)
+        for k in range(ts.n):
+            status = ('no UV area' if ts.zero_area[k] else 'no 3D area' if ts.degenerate[k]
+                      else 'line in UV' if ts.collapsed[k] else '')
+            rows.append({'material': material, 'faces': faces[order[starts[k]:starts[k + 1]]], 'area': float(ts.a3[k]),
+                         'factor': float(ts.vis[k]), 'low': float(ts.lo[k]), 'high': float(ts.hi[k]),
+                         'now': float(ts.cur[k]), 'seen': None if seen is None else float(seen[k]), 'status': status,
+                         'facing': None if no_facing else float(ts.facing[k])})
+    return rows, users, stale
+
+
 def is_kept(material):
     """Keep UVs (decision 116): the texture set is left out of packing and Check All."""
     return bool(material is not None and getattr(material, 'fss_uv_keep_uvs', False))
@@ -1008,6 +1068,7 @@ def _run(material, write, progress=None, vis_cache=None):
             'collapsed_islands': int(ts.collapsed.sum()), 'degenerate_islands': int(ts.degenerate.sum()),
             'no_area_objects': ts.no_area_objects, 'uv_zero_islands': int(ts.uv_zero.sum()),
             'uv_zero_objects': ts.objects_by_layout_size(ts.uv_zero), 'stale_visibility_meshes': len(ts.stale_meshes),
+            'no_facing_meshes': len(set(ts.no_facing_meshes)),
             'linked_users_range_differs': ts.linked_range_differs, 'quarter': ts.quarter,
             'upright_islands': int(ts.upright.sum()),
         })
@@ -1119,6 +1180,8 @@ def _set_block(r, selected=None):
                      "Unwrap (FSS Tools > Checks > Find Faces Without UV Area selects them)")
     if r['stale_visibility_meshes']:
         lines.append(f"  Visibility x1.00 for {r['stale_visibility_meshes']} mesh(es) without current visibility data")
+    if r.get('no_facing_meshes'):
+        lines.append(f"  Facing not applied to {r['no_facing_meshes']} mesh(es): run Update Visibility once to add it")
     if selected is not None:
         extra = [name for name in r['objects'] if name not in selected]
         if extra:

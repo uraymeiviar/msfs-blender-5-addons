@@ -193,8 +193,70 @@ def cubemap_face_matrices(cam_pos, cam_forward=None, near=0.05, far=30.0):
     return faces
 
 
-def precompute_cubemap_weights(faces, cam_forward, cube_res=1024, floor=0.2, falloff=1.0):
-    """Precompute weighted differential solid angle maps for all 6 cube faces (Decisions 72 & 73)."""
+def look_sweep(cam_obj, yaw_limit, pitch_limit):
+    """A Look Around camera's limits for the functions below, or None when it can look everywhere: (right, up, forward,
+    yaw, pitch), the axes from the camera and the angles in radians either side of straight ahead."""
+    if cam_obj is None or (yaw_limit >= 180.0 and pitch_limit >= 90.0):
+        return None
+    axes = cam_obj.matrix_world.to_3x3().normalized()
+    right, up, back = (np.array(axes.col[i], dtype=np.float32) for i in range(3))
+    return right, up, -back, math.radians(yaw_limit), math.radians(pitch_limit)
+
+
+def directions_in_sweep(dirs, sweep):
+    """True per unit direction (..., 3) inside the limits."""
+    right, up, forward, yaw, pitch = sweep
+    side = np.sum(dirs * right, axis=-1)
+    ahead = np.sum(dirs * forward, axis=-1)
+    height = np.clip(np.sum(dirs * up, axis=-1), -1.0, 1.0)
+    return (np.abs(np.arctan2(side, ahead)) <= yaw) & (np.abs(np.arcsin(height)) <= pitch)
+
+
+def batch_triangles_in_sweep(eye, V0, V1, V2, sweep):
+    """True per triangle with a corner or its centre inside the limits, as batch_triangles_in_frame for a fixed view."""
+    eye_arr = np.array(eye, dtype=np.float32).reshape(1, 3)
+    inside = None
+    for V in (V0, V1, V2, (V0 + V1 + V2) / 3.0):
+        to_point = V - eye_arr
+        dirs = to_point / np.maximum(np.linalg.norm(to_point, axis=-1, keepdims=True), 1e-12)
+        found = directions_in_sweep(dirs, sweep)
+        inside = found if inside is None else inside | found
+    return inside
+
+
+def sphere_lines(yaw_limit, pitch_limit, radius=1.0):
+    """The cut vision sphere in camera space (x right, y up, -z forward), as line pairs: (grid, cut edges and the
+    forward line). A sphere with no cut has only the grid and the forward line."""
+    def point(yaw, pitch):
+        return (radius * math.sin(yaw) * math.cos(pitch), radius * math.sin(pitch), -radius * math.cos(yaw) * math.cos(pitch))
+
+    def polyline(points):
+        return [p for pair in zip(points[:-1], points[1:]) for p in pair]
+
+    yaw, pitch = math.radians(yaw_limit), math.radians(pitch_limit)
+    yaws = [-yaw + 2.0 * yaw * i / 72 for i in range(73)]
+    pitches = [-pitch + 2.0 * pitch * i / 36 for i in range(37)]
+    n_meridians = max(2, int(round(yaw_limit / 15.0)) * 2)
+    n_parallels = max(2, int(round(pitch_limit / 15.0)) * 2)
+    grid, edges = [], [(0.0, 0.0, 0.0), point(0.0, 0.0)]
+    for i in range(n_meridians + 1):
+        at = -yaw + 2.0 * yaw * i / n_meridians
+        grid += polyline([point(at, p) for p in pitches])
+    for i in range(n_parallels + 1):
+        at = -pitch + 2.0 * pitch * i / n_parallels
+        grid += polyline([point(y, at) for y in yaws])
+    if yaw_limit < 180.0:
+        for at in (-yaw, yaw):
+            edges += polyline([point(at, p) for p in pitches])
+    if pitch_limit < 90.0:
+        for at in (-pitch, pitch):
+            edges += polyline([point(y, at) for y in yaws])
+    return np.array(grid, dtype=np.float32), np.array(edges, dtype=np.float32)
+
+
+def precompute_cubemap_weights(faces, cam_forward, cube_res=1024, floor=0.2, falloff=1.0, sweep=None):
+    """Precompute weighted differential solid angle maps for all 6 cube faces (Decisions 72 & 73). Directions outside the
+    camera's limits (sweep) weigh nothing."""
     W = cube_res
     u = (np.arange(W, dtype=np.float32) + 0.5) * (2.0 / W) - 1.0
     v = 1.0 - (np.arange(W, dtype=np.float32) + 0.5) * (2.0 / W)
@@ -219,6 +281,9 @@ def precompute_cubemap_weights(faces, cam_forward, cube_res=1024, floor=0.2, fal
         else:
             pos_term = np.power(np.maximum(cos_ang, 0.0), falloff)
             ang_weight = np.maximum(floor, pos_term)
+
+        if sweep is not None:
+            ang_weight = ang_weight * directions_in_sweep(world_dirs, sweep)
 
         face_weights[face_name] = (d_omega * ang_weight).astype(np.float32)
 
@@ -276,6 +341,36 @@ def batch_triangle_solid_angle(eye, V0, V1, V2):
     omega = 2.0 * np.arctan2(num, den)
     omega = np.where(omega < 0.0, omega + 2.0 * np.pi, omega)
     return np.where(valid, omega, 0.0).astype(np.float32)
+
+
+def batch_triangles_in_frame(mvp, V0, V1, V2):
+    """True per triangle unless all its corners lie outside the same side of the camera's frame. A triangle crossing the
+    frame's edge counts whole, so a triangle that shows a pixel always counts."""
+    M = np.array(mvp, dtype=np.float32)
+    outside = None
+    for V in (V0, V1, V2):
+        clip = V @ M[:3, :3].T + M[:3, 3]
+        w = V @ M[3, :3] + M[3, 3]
+        sides = np.stack([clip[:, 0] > w, clip[:, 0] < -w, clip[:, 1] > w, clip[:, 1] < -w, clip[:, 2] > w, clip[:, 2] < -w], axis=1)
+        outside = sides if outside is None else outside & sides
+    return ~outside.any(axis=1)
+
+
+def batch_face_cosines(eye, V0, V1, V2, tri_ids, n_ids, in_frame=None):
+    """Per evaluated face, how directly it faces the eye: the cosine between each triangle's normal and the direction
+    to the eye, 0 for a triangle turned away or outside the frame, averaged by triangle area. Occlusion plays no part
+    here."""
+    eye_arr = np.array(eye, dtype=np.float32).reshape(1, 3)
+    N = np.cross(V1 - V0, V2 - V0)
+    length = np.linalg.norm(N, axis=-1)
+    to_eye = eye_arr - (V0 + V1 + V2) / 3.0
+    cos = np.sum(N * to_eye, axis=-1) / np.maximum(length * np.linalg.norm(to_eye, axis=-1), 1e-12)
+    area = 0.5 * length
+    cos = np.maximum(cos, 0.0)
+    if in_frame is not None:
+        cos = cos * in_frame
+    weighted = np.bincount(tri_ids, weights=area * cos, minlength=n_ids)
+    return weighted / np.maximum(np.bincount(tri_ids, weights=area, minlength=n_ids), 1e-30)
 
 
 # ---------------------------------------------------------------------------
@@ -878,7 +973,14 @@ def compute_patch_scores_and_groups(mesh_meta, mesh_arrays, min_px_threshold=10.
                 f_unocc = unocc_arr[:, :, f]
                 f_max_u = float(np.max(f_unocc))
 
-                if f_max_u >= omega_threshold:
+                if f_max_u == 0.0:
+                    # No view can show this face (turned away, or outside every frame and limit). Patches are for faces
+                    # too small to measure: this one must not take a score from visible neighbours.
+                    face_scores[f] = 0.0
+                    face_never_seen[f] = True
+                    face_undetermined[f] = False
+                    face_patch_size_px[f] = 0.0
+                elif f_max_u >= omega_threshold:
                     valid = f_unocc > 1e-12
                     f_vis = vis_arr[:, :, f]
                     ratio = np.where(valid, np.clip(f_vis / np.maximum(f_unocc, 1e-12), 0.0, 1.0), 0.0)
@@ -1173,7 +1275,7 @@ def weighted_percentile(values, weights, q):
 # ---------------------------------------------------------------------------
 
 def save_visibility_file(blend_path, results, settings=None):
-    """Save results as compressed `<blend_name>.visibility` (Schema Version 4)."""
+    """Save results as compressed `<blend_name>.visibility` (Schema Version 5: version 4 had no face_facing)."""
     vis_path = Path(blend_path).with_suffix('.visibility')
 
     mesh_face_counts = {
@@ -1181,7 +1283,7 @@ def save_visibility_file(blend_path, results, settings=None):
     }
 
     meta = {
-        'schema_version': 4,
+        'schema_version': 5,
         'blend_file': str(results.get('blend_file', blend_path)),
         'timestamp': time.strftime("%Y-%m-%d %H:%M:%S"),
         'total_time_s': results.get('total_time_s', 0.0),
@@ -1224,6 +1326,8 @@ def save_visibility_file(blend_path, results, settings=None):
         arrays_to_save[f"{safe_name}__face_undetermined"] = m_data['face_undetermined'].astype(bool)
         arrays_to_save[f"{safe_name}__face_never_seen"] = m_data['face_never_seen'].astype(bool)
         arrays_to_save[f"{safe_name}__face_patch_size_px"] = m_data['face_patch_size_px'].astype(np.float32)
+        if 'face_facing' in m_data:
+            arrays_to_save[f"{safe_name}__face_facing"] = m_data['face_facing'].astype(np.float32)
 
     for obj_name, eval_map in results.get('object_eval_face_maps', {}).items():
         safe_obj_name = obj_name.replace('/', '_').replace('\\', '_')
@@ -1434,6 +1538,7 @@ class VisibilityAnalyzer:
             self.mesh_arrays[m_name] = {
                 'vis_omega': np.zeros((N_views, N_inst, N_faces), dtype=np.float32),
                 'unocc_omega': np.zeros((N_views, N_inst, N_faces), dtype=np.float32),
+                'face_best_cos': np.zeros(N_faces, dtype=np.float32),  # the most direct view of any camera and state
                 'area': meta['orig_areas'],
                 'island_ids': meta['island_ids'],
             }
@@ -1509,16 +1614,43 @@ class VisibilityAnalyzer:
         cam_pos = cam['pos']
         cam_fwd = cam.get('forward', Vector((0, -1, 0)))
 
+        # A fixed view shows its frame only, and a Look Around camera what its limits allow. What lies outside cannot be
+        # seen from this view, so it is not counted as visible-if-nothing-were-in-front either: an island partly outside
+        # is not marked down for that part.
+        fixed_mvp = None
+        fixed_cam = bpy.data.objects.get(cam.get('obj_name', cam_name)) if cam_type == 'FIXED_VIEW' else None
+        if fixed_cam:
+            dg = bpy.context.evaluated_depsgraph_get()
+            fixed_mvp = fixed_cam.calc_matrix_camera(dg, x=self.frustum_res[0], y=self.frustum_res[1]) @ fixed_cam.matrix_world.inverted()
+        sweep = None
+        if cam_type == 'LOOK_AROUND':
+            sweep = look_sweep(bpy.data.objects.get(cam.get('obj_name', cam_name)), cam.get('yaw_limit', 180.0), cam.get('pitch_limit', 90.0))
+
         # 1. Unoccluded solid angle from camera position
         if len(self.tri_geom['V0']) > 0:
             tri_omega = batch_triangle_solid_angle(
                 cam_pos, self.tri_geom['V0'], self.tri_geom['V1'], self.tri_geom['V2']
             )
+            in_frame = None
+            if fixed_mvp is not None:
+                in_frame = batch_triangles_in_frame(fixed_mvp, self.tri_geom['V0'], self.tri_geom['V1'], self.tri_geom['V2'])
+            elif sweep is not None:
+                in_frame = batch_triangles_in_sweep(cam_pos, self.tri_geom['V0'], self.tri_geom['V1'], self.tri_geom['V2'], sweep)
+            eval_unocc_all = None
+            if in_frame is not None:
+                eval_unocc_all = np.bincount(self.tri_geom['tri_ids'], weights=tri_omega, minlength=self.max_id + 1)
+                tri_omega = tri_omega * in_frame
             eval_unocc = np.bincount(
                 self.tri_geom['tri_ids'], weights=tri_omega, minlength=self.max_id + 1
             )
+            eval_cos = batch_face_cosines(
+                cam_pos, self.tri_geom['V0'], self.tri_geom['V1'], self.tri_geom['V2'],
+                self.tri_geom['tri_ids'], self.max_id + 1, in_frame
+            )
         else:
             eval_unocc = np.zeros(self.max_id + 1, dtype=np.float32)
+            eval_unocc_all = None
+            eval_cos = np.zeros(self.max_id + 1, dtype=np.float64)
 
         eval_vis = np.zeros(self.max_id + 1, dtype=np.float64)
 
@@ -1529,7 +1661,7 @@ class VisibilityAnalyzer:
         if cam_type == 'LOOK_AROUND':
             faces = cubemap_face_matrices(cam_pos, cam_fwd, near=near_plane, far=far_plane)
             face_weights = precompute_cubemap_weights(
-                faces, cam_fwd, cube_res=self.cube_res, floor=self.floor, falloff=self.falloff
+                faces, cam_fwd, cube_res=self.cube_res, floor=self.floor, falloff=self.falloff, sweep=sweep
             )
             for face_name, v_mat, p_mat in faces:
                 mvp = p_mat @ v_mat
@@ -1540,24 +1672,33 @@ class VisibilityAnalyzer:
                 eval_vis += vis_counts
 
         elif cam_type == 'FIXED_VIEW':
-            cam_obj = bpy.data.objects.get(cam.get('obj_name', cam_name))
-            if cam_obj:
-                dg = bpy.context.evaluated_depsgraph_get()
-                p_mat = cam_obj.calc_matrix_camera(dg, x=self.frustum_res[0], y=self.frustum_res[1])
-                v_mat = cam_obj.matrix_world.inverted()
-                mvp = p_mat @ v_mat
-                w_map = precompute_frustum_weights(cam_obj, self.frustum_res)
+            if fixed_cam:
+                w_map = precompute_frustum_weights(fixed_cam, self.frustum_res)
                 vis_counts = render_camera_view(
-                    self.off_frustum, self.shader, self.batch_op, self.batch_dec, mvp, w_map, self.max_id
+                    self.off_frustum, self.shader, self.batch_op, self.batch_dec, fixed_mvp, w_map, self.max_id
                 )
                 eval_vis += vis_counts
 
+        # A large triangle can show pixels with no corner or centre inside the limits: it still counts
+        if eval_unocc_all is not None:
+            missed = (eval_vis > 0.0) & (eval_unocc <= 0.0)
+            eval_unocc = np.where(missed, eval_unocc_all, eval_unocc)
+
         # 3. Accumulate sums into mesh_arrays
+        # The camera's weight scales what it sees: every score is the visible sum over the unoccluded sum, highest view
+        # first, so a lower-weight camera lifts only what the others miss and never lowers what they see.
+        weight = cam.get('weight', 1.0)
+        measurable = self.min_px_threshold * 4.0 / (self.cube_res * self.cube_res)
         for eid, (m_name, inst_idx, orig_idx) in self.eval_poly_info.items():
             v_vis = eval_vis[eid]
             v_unocc = eval_unocc[eid]
-            self.mesh_arrays[m_name]['vis_omega'][self.current_step, inst_idx, orig_idx] += v_vis
+            self.mesh_arrays[m_name]['vis_omega'][self.current_step, inst_idx, orig_idx] += v_vis * weight
             self.mesh_arrays[m_name]['unocc_omega'][self.current_step, inst_idx, orig_idx] += v_unocc
+            # A face large enough to measure that shows no pixel is hidden in this view: this view says nothing about how
+            # it faces. A smaller face may show no pixel by chance, so it keeps its angle.
+            if v_vis > 0.0 or v_unocc < measurable:
+                best = self.mesh_arrays[m_name]['face_best_cos']
+                best[orig_idx] = max(best[orig_idx], eval_cos[eid] * weight)
 
         step_info = {
             'step': self.current_step + 1,
@@ -1598,6 +1739,9 @@ class VisibilityAnalyzer:
             f_ar = meta['orig_areas']
             f_nv = m_data['face_never_seen']
             f_udet = m_data['face_undetermined']
+            # A hidden or back face has facing 0. Seen comes from the patch scores: a small face may cover no pixel of
+            # its own, and its per-view count would call it hidden.
+            m_data['face_facing'] = m_data['face_best_cos'] * (f_sc > 0.0)
 
             all_face_scores.append(f_sc)
             all_face_areas.append(f_ar)
@@ -1647,7 +1791,9 @@ class VisibilityAnalyzer:
             'patch_expansion_time_s': patch_res['patch_expansion_time_s'],
             'state_timings': self.state_timings,
             'views': [
-                {'camera': v['camera'], 'type': v['cam_dict']['type'], 'state': v['state_val']}
+                {'camera': v['camera'], 'type': v['cam_dict']['type'], 'state': v['state_val'],
+                 'yaw_limit': v['cam_dict'].get('yaw_limit', 180.0), 'pitch_limit': v['cam_dict'].get('pitch_limit', 90.0),
+                 'weight': v['cam_dict'].get('weight', 1.0)}
                 for v in self.view_configs
             ],
             'ref_cube_res': self.cube_res,
@@ -1873,7 +2019,32 @@ def get_object_visibility(obj, uv_name=None, vis_path=None, use_cache=True):
         'unocc_omega': unocc_omega,
         'orig_areas': orig_areas,
         'omega_threshold': omega_threshold,
+        'face_facing': data.get(f"{safe_name}__face_facing"),
     }
+
+
+def seen_share_face_set(vis_data, face_indices):
+    """The share of a face set's area that is seen in any view, 0 to 1 (seen as score_face_set counts it)."""
+    faces = np.asarray(face_indices, dtype=np.int32)
+    areas = vis_data['orig_areas'][faces]
+    total = float(np.sum(areas))
+    if total <= 0.0:
+        return 1.0
+    return float(np.sum(areas[vis_data['face_scores'][faces] > 0.0]) / total)
+
+
+def facing_face_set(vis_data, face_indices):
+    """How directly a face set faces the cameras, 0 to 1: its faces' facing values averaged by area, hidden and back
+    faces counting 0, so an island mostly at the back is low even when one rim of it is seen. 1.0 for a file written
+    before facing existed."""
+    facing = vis_data.get('face_facing')
+    if facing is None:
+        return 1.0
+    faces = np.asarray(face_indices, dtype=np.int32)
+    areas = vis_data['orig_areas'][faces]
+    total = float(np.sum(areas))
+    values = facing[faces]
+    return float(np.sum(values * areas) / total) if total > 0.0 else float(np.mean(values)) if len(faces) else 1.0
 
 
 def score_face_set(obj, face_indices, vis_data=None, vis_path=None, use_cache=True):

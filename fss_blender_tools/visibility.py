@@ -7,10 +7,22 @@ and view inspection reports (Decisions 80, 81, 83, 86).
 import json
 from pathlib import Path
 import bpy
+import gpu
+from gpu_extras.batch import batch_for_shader
 from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty, StringProperty
 from mathutils import Vector
+import numpy as np
 
 from . import visibility_core
+
+
+def _tag_viewports(_self=None, _context=None):
+    """The cut sphere follows the settings: redraw the 3D views, not only the sidebar that changed."""
+    wm = bpy.context.window_manager
+    for window in wm.windows if wm else ():
+        for area in window.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
 
 
 # ---------------------------------------------------------------------------
@@ -25,15 +37,35 @@ class FSS_VisibilityCameraItem(bpy.types.PropertyGroup):
         poll=lambda self, obj: obj.type == 'CAMERA',
         description="Reference camera object"
     )
-    include: BoolProperty(name="Include", default=False, description="Include this camera in visibility analysis")
+    include: BoolProperty(name="Include", default=False, update=_tag_viewports, description="Include this camera in visibility analysis")
     mode: EnumProperty(
         name="Mode",
         items=[
-            ('LOOK_AROUND', 'Look Around', 'Full 360-degree cube map view centered at camera position'),
+            ('LOOK_AROUND', 'Look Around', 'The head turns inside the Left / Right and Up / Down limits, from a fixed position, with no zoom. Full 180 and 90 is everywhere'),
             ('FIXED_VIEW', 'Fixed View', 'Fixed perspective camera frustum matching camera focal length and resolution'),
         ],
         default='LOOK_AROUND',
+        update=_tag_viewports,
         description="Camera viewing mode"
+    )
+    weight: FloatProperty(
+        name="Weight",
+        default=1.0, min=0.05, max=1.0, precision=2, update=_tag_viewports,
+        description="How much this camera counts. An island takes its highest score over the cameras, each multiplied by "
+                    "its weight: a low weight lifts what the other cameras miss and never lowers what they see. "
+                    "Update Visibility uses it"
+    )
+    yaw_limit: IntProperty(
+        name="Left / Right",
+        subtype='NONE', default=180, min=5, max=180, update=_tag_viewports,
+        description="How far the head can turn left and right of the camera's direction, in degrees to each side. "
+                    "180 is all the way round. Update Visibility uses it"
+    )
+    pitch_limit: IntProperty(
+        name="Up / Down",
+        subtype='NONE', default=90, min=5, max=90, update=_tag_viewports,
+        description="How far the head can look up and down from the camera's direction, in degrees to each side. "
+                    "90 is straight up and down. Update Visibility uses it"
     )
 
     @property
@@ -44,7 +76,14 @@ class FSS_VisibilityCameraItem(bpy.types.PropertyGroup):
 class FSS_VisibilitySettings(bpy.types.PropertyGroup):
     """Scene visibility test settings."""
     cameras: CollectionProperty(type=FSS_VisibilityCameraItem)
-    active_camera_index: IntProperty(default=0)
+    active_camera_index: IntProperty(default=0, update=_tag_viewports)
+    show_look_sphere: BoolProperty(
+        name="Show in Viewport",
+        default=True,
+        update=_tag_viewports,
+        description="Draw what each included Look Around camera can look at as a sphere around it, 1 m from the camera; "
+                    "the selected row's is brighter"
+    )
 
     states: IntProperty(
         name="Animation Steps",
@@ -140,7 +179,7 @@ def sync_camera_list(scene):
     existing = {}
     for item in settings.cameras:
         if item.camera and item.camera.name in scene.objects:
-            existing[item.camera] = (item.include, item.mode)
+            existing[item.camera] = (item.include, item.mode, item.yaw_limit, item.pitch_limit, item.weight)
 
     scene_cams = sorted([o for o in scene.objects if o.type == 'CAMERA'], key=lambda o: o.name)
 
@@ -150,7 +189,7 @@ def sync_camera_list(scene):
         item = settings.cameras.add()
         item.camera = cam_obj
         if cam_obj in existing:
-            item.include, item.mode = existing[cam_obj]
+            item.include, item.mode, item.yaw_limit, item.pitch_limit, item.weight = existing[cam_obj]
         else:
             item.include = False
             item.mode = 'LOOK_AROUND'
@@ -181,7 +220,12 @@ def write_visibility_report_text(results, vis_path, elapsed_time):
 
     lines.append("VIEWS ANALYSED:")
     for v in results.get('views', []):
-        lines.append(f"  - Camera: {v['camera']:<24} Mode: {v.get('type', 'LOOK_AROUND'):<14} State: {int(v['state']*100)}%")
+        limits = ''
+        if v.get('type', 'LOOK_AROUND') == 'LOOK_AROUND' and (v.get('yaw_limit', 180) < 180 or v.get('pitch_limit', 90) < 90):
+            limits = f" Limits: {v['yaw_limit']:g} left/right, {v['pitch_limit']:g} up/down"
+        if v.get('weight', 1.0) < 1.0:
+            limits += f" Weight: {v['weight']:.2f}"
+        lines.append(f"  - Camera: {v['camera']:<24} Mode: {v.get('type', 'LOOK_AROUND'):<14} State: {int(v['state']*100)}%{limits}")
     lines.append("")
 
     lines.append("GEOMETRY TOTALS:")
@@ -278,6 +322,9 @@ class FSS_OT_UpdateVisibility(bpy.types.Operator):
                 'pos': cam_obj.matrix_world.translation.copy(),
                 'forward': visibility_core.get_camera_forward(cam_obj),
                 'obj_name': cam_obj.name,
+                'yaw_limit': float(item.yaw_limit),
+                'pitch_limit': float(item.pitch_limit),
+                'weight': float(item.weight),
             })
         return cams
 
@@ -288,7 +335,9 @@ class FSS_OT_UpdateVisibility(bpy.types.Operator):
     def _get_settings_dict(self, context):
         s = context.scene.fss_visibility
         return {
-            'cameras': [{'name': item.camera.name, 'mode': item.mode} for item in s.cameras if item.include and item.camera],
+            'cameras': [{'name': item.camera.name, 'mode': item.mode, 'yaw_limit': item.yaw_limit, 'pitch_limit': item.pitch_limit,
+                         'weight': item.weight}
+                        for item in s.cameras if item.include and item.camera],
             'states': s.states,
             'floor': s.floor,
             'falloff': s.falloff,
@@ -526,6 +575,42 @@ class FSS_OT_VisibilitySelectStale(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class FSS_OT_VisibilitySelectCamera(bpy.types.Operator):
+    """Select a reference camera in the scene."""
+    bl_idname = 'fss.visibility_select_camera'
+    bl_label = 'Select Camera'
+    bl_description = "Select this camera in the scene and make it active"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    camera_name: StringProperty(name='Camera')
+
+    def execute(self, context):
+        cam = bpy.data.objects.get(self.camera_name)
+        if cam is None:
+            self.report({'WARNING'}, f"Camera '{self.camera_name}' no longer exists.")
+            return {'CANCELLED'}
+        view_layer = context.view_layer
+        if cam.name not in view_layer.objects:
+            # Turning the collection on is the artist's call: what it holds would then count in Visibility and Pack
+            names = ', '.join(collection.name for collection in cam.users_collection)
+            self.report({'WARNING'}, f"{cam.name} is in collection {names}, which is off in this view layer. "
+                                     "Turn the collection on to select the camera.")
+            return {'CANCELLED'}
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        if cam.hide_get(view_layer=view_layer):
+            cam.hide_set(False, view_layer=view_layer)
+        if not cam.visible_get(view_layer=view_layer) or cam.hide_select:
+            self.report({'WARNING'}, f"{cam.name} is hidden or not selectable: change that in the Outliner.")
+            return {'CANCELLED'}
+        for obj in list(view_layer.objects.selected):
+            obj.select_set(False, view_layer=view_layer)
+        cam.select_set(True, view_layer=view_layer)
+        view_layer.objects.active = cam
+        self.report({'INFO'}, f"Selected {cam.name}.")
+        return {'FINISHED'}
+
+
 # ---------------------------------------------------------------------------
 # UI List for Cameras
 # ---------------------------------------------------------------------------
@@ -538,6 +623,8 @@ class FSS_UL_VisibilityCameraList(bpy.types.UIList):
             row = layout.row(align=True)
             row.prop(item, 'include', text="")
             row.label(text=cam_name, icon='CAMERA_DATA')
+            if item.camera:
+                row.operator(FSS_OT_VisibilitySelectCamera.bl_idname, text='', icon='RESTRICT_SELECT_OFF').camera_name = cam_name
             sub = row.row(align=True)
             sub.enabled = item.include
             sub.prop(item, 'mode', text="")
@@ -568,6 +655,8 @@ class FSS_PT_Visibility(bpy.types.Panel):
             schedule_camera_sync(scene)
         settings = scene.fss_visibility
 
+        layout.label(text='Whole scene', icon='SCENE_DATA')
+
         # 1. Cameras list
         box = layout.box()
         box.label(text="Reference Cameras:", icon='OUTLINER_OB_CAMERA')
@@ -583,6 +672,20 @@ class FSS_PT_Visibility(bpy.types.Panel):
                 "active_camera_index",
                 rows=min(max(len(settings.cameras), 2), 6),
             )
+            index = settings.active_camera_index
+            item = settings.cameras[index] if 0 <= index < len(settings.cameras) else None
+            if item is not None and item.camera:
+                column = box.column(align=True)
+                column.enabled = item.include
+                column.label(text=f"{item.camera.name}:")
+                column.prop(item, 'weight', slider=True)
+                if item.mode == 'LOOK_AROUND':
+                    column.separator()
+                    column.label(text="Can look, degrees to each side:")
+                    column.prop(item, 'yaw_limit', slider=True)
+                    column.prop(item, 'pitch_limit', slider=True)
+            if any(row.include and row.mode == 'LOOK_AROUND' for row in settings.cameras):
+                box.prop(settings, 'show_look_sphere')
 
         # 2. Main Parameters
         col = layout.column(align=True)
@@ -681,6 +784,53 @@ class FSS_PT_Visibility(bpy.types.Panel):
 
 
 # ---------------------------------------------------------------------------
+# The cut vision sphere in the 3D view
+# ---------------------------------------------------------------------------
+
+LOOK_SPHERE_RADIUS = 1.0  # metres in Blender units; only a drawing: the limits are angles
+_look_batches = {}  # (yaw, pitch) -> (grid vertices, edge vertices) in camera space
+_look_handler = None
+
+
+def look_sphere_cameras(scene):
+    """[(camera, yaw, pitch, whether its row is the selected one)] to draw: every included Look Around camera."""
+    settings = getattr(scene, 'fss_visibility', None)
+    if settings is None or not settings.show_look_sphere:
+        return []
+    return [(item.camera, item.yaw_limit, item.pitch_limit, index == settings.active_camera_index)
+            for index, item in enumerate(settings.cameras) if item.camera and item.include and item.mode == 'LOOK_AROUND']
+
+
+def look_sphere_world_lines(camera, yaw, pitch):
+    """The sphere's line pairs in world space, at the camera's position and direction but never its scale."""
+    key = (yaw, pitch)
+    if key not in _look_batches:
+        _look_batches[key] = visibility_core.sphere_lines(yaw, pitch, LOOK_SPHERE_RADIUS)
+    grid, edges = _look_batches[key]
+    matrix = camera.matrix_world
+    axes = np.array(matrix.to_3x3().normalized(), dtype=np.float32)
+    origin = np.array(matrix.translation, dtype=np.float32)
+    return grid @ axes.T + origin, edges @ axes.T + origin
+
+
+def _draw_look_sphere():
+    found = look_sphere_cameras(bpy.context.scene)
+    if not found:
+        return
+    shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+    gpu.state.blend_set('ALPHA')
+    gpu.state.depth_test_set('NONE')
+    shader.bind()
+    for camera, yaw, pitch, selected in found:
+        grid, edges = look_sphere_world_lines(camera, yaw, pitch)
+        shader.uniform_float('color', (0.4, 0.75, 1.0, 0.18 if selected else 0.07))
+        batch_for_shader(shader, 'LINES', {'pos': grid}).draw(shader)
+        shader.uniform_float('color', (1.0, 0.75, 0.2, 0.95) if selected else (0.75, 0.75, 0.75, 0.45))
+        batch_for_shader(shader, 'LINES', {'pos': edges}).draw(shader)
+    gpu.state.blend_set('NONE')
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
@@ -690,6 +840,7 @@ CLASSES = (
     FSS_OT_UpdateVisibility,
     FSS_OT_VisibilitySelectNeverSeen,
     FSS_OT_VisibilitySelectStale,
+    FSS_OT_VisibilitySelectCamera,
     FSS_UL_VisibilityCameraList,
     FSS_PT_Visibility,
 )
@@ -699,9 +850,17 @@ def register():
     for cls in CLASSES:
         bpy.utils.register_class(cls)
     bpy.types.Scene.fss_visibility = PointerProperty(type=FSS_VisibilitySettings)
+    global _look_handler
+    if not bpy.app.background:
+        _look_handler = bpy.types.SpaceView3D.draw_handler_add(_draw_look_sphere, (), 'WINDOW', 'POST_VIEW')
 
 
 def unregister():
+    global _look_handler
+    if _look_handler is not None:
+        bpy.types.SpaceView3D.draw_handler_remove(_look_handler, 'WINDOW')
+        _look_handler = None
+    _look_batches.clear()
     if hasattr(bpy.types.Scene, 'fss_visibility'):
         delattr(bpy.types.Scene, 'fss_visibility')
     for cls in reversed(CLASSES):

@@ -8,7 +8,7 @@ bl_info = {
     "author": "Flight Sim Studio",
     "description": "Authoring checks and helpers for MSFS aircraft (zones and merge tree, materials, tags, lod, uv tools: seams, packing per texture set with its marks, visibility scoring; in a second tab: general tools, empty bounds, heatmap, checks)",
     "blender": (5, 2, 0),
-    "version": (0, 42, 25),
+    "version": (0, 42, 35),
     "location": "3D View > Sidebar > FSS MSFS Tools, FSS Tools (General, Empty Bounds, Heatmap, Checks); UV Editor > Sidebar > FSS MSFS Tools (Packing)",
     "category": "Object",
 }
@@ -26,6 +26,7 @@ if "name_check" in locals():
     uv_fill = importlib.reload(uv_fill)
     uv_pack = importlib.reload(uv_pack)
     uv_marks = importlib.reload(uv_marks)
+    uv_islands = importlib.reload(uv_islands)
     materials = importlib.reload(materials)
     uv_autoseam = importlib.reload(uv_autoseam)
     uv_heatmap = importlib.reload(uv_heatmap)
@@ -36,10 +37,10 @@ if "name_check" in locals():
     autorefresh = importlib.reload(autorefresh)
 else:
     from . import (autorefresh, checks, empty_bounds, lod_rules, lod_model, lod, materials, merge, name_check, panels, tags, tools,
-                   uv_autoseam, uv_fill, uv_heatmap, uv_marks, uv_pack, visibility, visibility_core)
+                   uv_autoseam, uv_fill, uv_heatmap, uv_islands, uv_marks, uv_pack, visibility, visibility_core)
 
 # panels first: it documents the sidebar layout (it registers no panel since UV Tools was dissolved)
-MODULES = (panels, tools, empty_bounds, lod, tags, merge, uv_marks, materials, uv_autoseam, uv_heatmap, visibility, name_check,
+MODULES = (panels, tools, empty_bounds, lod, tags, merge, uv_marks, uv_islands, materials, uv_autoseam, uv_heatmap, visibility, name_check,
            checks, autorefresh)
 
 # The glTF exporter looks this name up on every enabled add-on: merge groups are merged in its pre-export hook

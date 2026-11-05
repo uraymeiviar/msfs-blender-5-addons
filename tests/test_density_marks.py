@@ -284,9 +284,11 @@ def test_panel():
                  (materials[0], uv_marks.SIZE_PROP, ''), (materials[0], 'fss_uv_margin_px', '')):
         assert prop in props, (prop, props)
     texts = [kwargs.get('text') for name, _args, kwargs in calls if name == 'operator']
-    # the presets, the directions, then Pack of the texture set below the list and Check All (decisions 114, 115, 121)
-    assert texts == ['Lower', 'Higher', 'Clear', 'Free', 'Upright', 'Flip', 'Quarter', 'Clear', 'Pack', 'Check All'], (
+    # Scene: Check All; Object: the presets and directions; Texture set: Pack (decisions 114, 115, 121)
+    assert texts == ['Check All', 'Lower', 'Higher', 'Clear', 'Free', 'Upright', 'Flip', 'Quarter', 'Clear', 'Pack'], (
         texts)
+    headings = [label for label in labels if label == 'Scene' or (label or '').startswith(('Object: ', 'Texture set: '))]
+    assert headings == ['Scene', 'Object: KNOB', 'Texture set: KNOB_MAT_0'], headings
     assert 'Select Marked' not in texts and not hasattr(bpy.types, 'FSS_OT_uv_select_marked')
     sets = [label for label in labels if label and label.startswith('Texture set: ')]
     assert sets == ['Texture set: KNOB_MAT_0'], sets
