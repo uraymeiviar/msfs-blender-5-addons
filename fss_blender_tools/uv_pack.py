@@ -6,7 +6,9 @@ and 114), with the mesh's active UV map; a mesh shared by several objects is pac
 its first user. Every island is scaled to the density lo + t (hi - lo) in px/cm, where lo = target density x the object's
 minimum factor (uv_marks.density) x the island's visibility (decisions 82 and 111), and hi is the same with the maximum
 factor, moved towards lo by the island's facing (hi = lo + facing x (top - lo)): an island facing the cameras can reach
-the top of the object's range, one facing away stays at its minimum. One t holds for the whole set (decision 113): 1
+the top of the object's range, one facing away stays at its minimum. An island the artist set by hand (the face attribute
+uv_marks.OVERRIDE_KEY, the highest value of its faces) has lo = hi = target density x that multiplier: no marks, visibility
+or facing, and t does not move it. One t holds for the whole set (decision 113): 1
 when the set fits at the top of its ranges, else the largest t that fits, else 0, and the layout then spills into
 [0, k] x [0, k] (decision 112). When written, the layout moves as one block to the
 scene's corner (decision 123, aligned_to_corner); k, the gaps and the densities are measured before that and do not
@@ -40,6 +42,7 @@ FLAT_RATIO = 1e-5  # UV area / UV bbox diagonal^2 at or below which an island is
 COLLAPSE_Q = 20.0  # UV bbox diagonal / (3D bbox diagonal x density) at the area-based scale: above it, collapsed
 PROXY_ROUNDS = 3  # rounds of packing offending islands through their bounding box before the AABB fallback
 SEARCH_PACKS = 6  # packs of the search for t after the two at t = 1 and t = 0
+PROGRESS_READ, PROGRESS_MEASURE, PROGRESS_WRITE = 0.05, 0.9, 0.95  # of a set's bar: where these stages begin
 FILL_MIN_GAIN = 1e-3  # the raster's layout counts when its side is smaller by this part (a single island: no reason)
 FACE_AREA_MIN_CM2 = 1e-6  # world-space face area in cm^2 at or below which a face has no area (decision 117)
 # UV area in px^2 of the set's texture at or below which a triangle with 3D area has none in UV (decision 118), the
@@ -468,6 +471,8 @@ class TextureSet:
         uv_zero = []  # per part and island: it has a triangle without UV area (decision 118)
         factors = []  # per part and island: the visibility factor
         facings = []  # per part and island: how directly it faces the cameras, 0 to 1
+        overrides = []  # per part and island: the multiplier set by hand, 0 for none
+        override_mixed = []  # per part and island: its faces do not all have that value
         n_isl = 0
         for pi, (md, users, faces) in enumerate(parts):
             isl, bl, bl_isl = part_islands(md, faces)
@@ -506,6 +511,16 @@ class TextureSet:
                     self.no_facing_meshes.append(md.me.name)
             factors.append(vis)
             facings.append(facing)
+            # set by hand, on the island's faces: the highest value of the island, final (no marks, visibility or t)
+            set_on_faces = uv_marks.face_overrides(md.me)
+            override = np.zeros(ni)
+            mixed = np.zeros(ni, bool)
+            if set_on_faces is not None:
+                values = set_on_faces[faces].astype(np.float64)
+                np.maximum.at(override, isl, values)
+                mixed = np.bincount(isl, weights=np.abs(values - override[isl]) > 1e-6, minlength=ni) > 0
+            overrides.append(override)
+            override_mixed.append(mixed)
             # per user: 3D area and range; the island follows the user that needs the most texture
             best = first = None
             for u in users:
@@ -516,6 +531,8 @@ class TextureSet:
                 (flo, fhi), _source = uv_marks.density(u, scene)
                 lo = target * flo * vis
                 hi = lo + facing * target * (fhi - flo) * vis
+                lo = np.where(override > 0.0, target * override, lo)
+                hi = np.where(override > 0.0, target * override, hi)
                 need = lo / np.maximum(np.sqrt(uv_a / np.maximum(a3, 1e-30)), 1e-30)
                 row = (need, a3, lo, hi)
                 if best is None:
@@ -540,6 +557,8 @@ class TextureSet:
         self.hi = np.array([r[4] for r in rows])
         self.vis = np.concatenate(factors) if factors else np.zeros(0)
         self.facing = np.concatenate(facings) if facings else np.zeros(0)
+        self.override = np.concatenate(overrides) if overrides else np.zeros(0)
+        self.override_mixed = np.concatenate(override_mixed) if override_mixed else np.zeros(0, bool)
         self.dirs = np.array([r[5] for r in rows])
         self.cur = np.sqrt(self.a_uv / np.maximum(self.a3, 1e-30))  # px/cm as the UVs sit on the texture
         self.p_uv = np.array([r[6] for r in rows])
@@ -820,16 +839,21 @@ def search(ts, shape_method, progress=None):
     """Decision 113: t = 1 if it fits, else the largest t that fits (secant steps on k(t) - 1, kept inside the
     bracket), else t = 0 (overflow, k > 1). Returns (the chosen pack, packs, mode)."""
     packs = []
+    most = 2 + SEARCH_PACKS
+
+    def share(done):
+        # of the bar: between reading the islands and measuring; a set that fits at once jumps ahead, as it should
+        return PROGRESS_READ + (PROGRESS_MEASURE - PROGRESS_READ) * done / most
 
     def run(t):
         if progress is not None:
-            progress(f'{shape_method.lower()} pack {len(packs) + 1}, t {t:.2f}')
+            progress(f'Trying layout {len(packs) + 1} of at most {most}, at {t * 100:.0f} % of the density range', share(len(packs)))
         Q, k, ext, P = ts.pack(t, shape_method=shape_method)
         packs.append(t)
         filled = None
         if ts.use_fill:
             if progress is not None:
-                progress(f'placing into free space, pack {len(packs)}, t {t:.2f}')
+                progress(f'Placing islands into free space, layout {len(packs)}', share(len(packs) - 0.5))
             filled = ts.fill(Q)
         if filled is not None and filled[1] < k * (1.0 - FILL_MIN_GAIN):
             return {'t': t, 'Q': filled[0], 'k': filled[1], 'ext': filled[2], 'pre': P, 'filled': True}
@@ -870,7 +894,7 @@ def pack_set(ts, progress=None):
         res, n, mode = search(ts, shape, progress)
         packs += n
         if progress is not None:
-            progress('measuring the layout')
+            progress('Measuring the layout', PROGRESS_MEASURE)
         row, offenders = evaluate(ts, res)
         clean = row['margin_violations'] == 0 and row['overlap_tri_pairs'] == 0
         if clean or (shape == 'AABB' and not res['filled']):
@@ -1002,7 +1026,8 @@ def object_islands(obj, scene, view_layer):
             rows.append({'material': material, 'faces': faces[order[starts[k]:starts[k + 1]]], 'area': float(ts.a3[k]),
                          'factor': float(ts.vis[k]), 'low': float(ts.lo[k]), 'high': float(ts.hi[k]),
                          'now': float(ts.cur[k]), 'seen': None if seen is None else float(seen[k]), 'status': status,
-                         'facing': None if no_facing else float(ts.facing[k])})
+                         'facing': None if no_facing else float(ts.facing[k]),
+                         'override': float(ts.override[k]), 'override_mixed': bool(ts.override_mixed[k])})
     return rows, users, stale
 
 
@@ -1051,7 +1076,7 @@ def _run(material, write, progress=None, vis_cache=None):
     try:
         context.scene.tool_settings.use_uv_select_sync = True  # the temporary mesh's face selection is its UV selection
         if progress is not None:
-            progress('reading the islands')
+            progress('Reading the islands', 0.0)
         parts, conflicts = gather(context.view_layer, material)
         ts = TextureSet(material, parts, context.scene, {} if vis_cache is None else vis_cache) if parts else None
         result.update({'islands': ts.n if ts else 0, 'objects': ts.objects() if ts else [],
@@ -1073,6 +1098,8 @@ def _run(material, write, progress=None, vis_cache=None):
             'upright_islands': int(ts.upright.sum()),
         })
         if write:
+            if progress is not None:
+                progress('Writing the UVs', PROGRESS_WRITE)
             corner = uv_marks.pack_corner(context.scene)
             write_back(ts, dict(res, Q=aligned_to_corner(ts, res['Q'], corner)))
             result.update(written=True, corner=corner)
@@ -1086,7 +1113,7 @@ def _run(material, write, progress=None, vis_cache=None):
 
 def measure(material, progress=None, vis_cache=None):
     """Pack the texture set of `material` on a temporary mesh and return the result, without writing UVs (decision
-    115). progress: optional function(stage text), called before each Blender pack; vis_cache: {mesh name:
+    115). progress: optional function(stage text, fraction of the set done), called before each Blender pack; vis_cache: {mesh name:
     visibility data} kept over several sets."""
     return _run(material, False, progress, vis_cache)
 

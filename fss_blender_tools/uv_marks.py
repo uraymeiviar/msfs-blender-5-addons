@@ -20,6 +20,7 @@ from pathlib import Path
 import time
 
 import bpy
+import numpy as np
 from bpy.app.handlers import persistent
 
 from . import uv_pack, visibility_core  # uv_pack imports this module too (density, direction, sizes)
@@ -33,6 +34,7 @@ DIRECTION_KEY = 'fss_uv_direction'
 SKIP_AUTOSEAM_KEY = 'fss_uv_skip_autoseam'
 KEEP_UVS_PROP = 'fss_uv_keep_uvs'  # on a material: its texture set is not packed (decision 116)
 SIZE_PROP = 'fss_uv_texture_size'  # on a material: the square texture size (decision 120)
+OVERRIDE_KEY = 'fss_uv_island_multiplier'  # a face attribute: the island's multiplier set by hand, 0 for none
 # Before 0.31.0, read only to migrate: the density mark [min, max] (a custom property; the nearest marked ancestor
 # replaced, not multiplied), the zone multiplier (a registered property: its data lies in the object's system
 # properties) and the material margin as a fraction of the UV square (a custom property)
@@ -55,7 +57,7 @@ TEXTURE_SIZES = [(str(1 << n), str(1 << n), f'{1 << n} pixels') for n in range(8
 DENSITY_PRESETS = {'LOWER': 0.75, 'HIGHER': 1.5}
 NEVER_SEEN_FACTOR = 0.1  # decision 74: what never-seen faces get instead of visibility 0
 FULLY_SEEN = 0.9999  # a seen share counted as the whole island (areas are rounded)
-DEFAULT_PARTLY_SEEN = 0.75
+DEFAULT_PARTLY_SEEN = 0.5
 MAX_LISTED = 5  # nested marks shown in the panel
 LIST_ROWS = 5  # rows the texture set list shows before it scrolls (the artist can drag it longer)
 DIRECTIONS = [
@@ -71,7 +73,7 @@ _migration = {}  # what the migration converted in the open file (by file path),
 _vis_cache = {}  # object name -> (key, summary) of the Visibility row; dropped when the key or the geometry changes
 _results = {}  # texture set name -> the last uv_pack result (Pack or Check All) in this session
 # While Pack or Check All runs, the Packing section shows this progress instead of its rows and buttons
-_progress = None  # dict: verb ('Packing' or 'Checking'), index, count, set, stage, steps
+_progress = None  # dict: verb ('Packing' or 'Checking'), index, count, set, stage, fraction (of the set in work)
 _cancel_requested = False
 
 
@@ -119,6 +121,37 @@ def partly_seen_factor(seen_share, value):
 def island_visibility(score, seen_share, value):
     """The density factor of an island: its score x partly_seen_factor, never below the minimum."""
     return visibility_factor(score * partly_seen_factor(seen_share, value))
+
+
+def face_overrides(me):
+    """Per face: the multiplier the artist set by hand, 0 where none; None when the mesh has none at all."""
+    attribute = me.attributes.get(OVERRIDE_KEY)
+    if attribute is None or attribute.domain != 'FACE' or attribute.data_type != 'FLOAT':
+        return None
+    values = np.zeros(len(me.polygons), np.float32)
+    attribute.data.foreach_get('value', values)
+    return values
+
+
+def set_face_overrides(me, faces, value):
+    """Set the multiplier of these faces, 0 to clear it. In Object Mode. A mesh left without any loses the attribute."""
+    values = face_overrides(me)
+    if values is None:
+        if value <= 0.0:
+            return
+        values = np.zeros(len(me.polygons), np.float32)
+    values[faces] = value
+    attribute = me.attributes.get(OVERRIDE_KEY)
+    if not values.any():
+        if attribute is not None:
+            me.attributes.remove(attribute)
+        return
+    if attribute is None or attribute.domain != 'FACE' or attribute.data_type != 'FLOAT':
+        if attribute is not None:
+            me.attributes.remove(attribute)
+        attribute = me.attributes.new(OVERRIDE_KEY, 'FLOAT', 'FACE')
+    attribute.data.foreach_set('value', values)
+    me.update()
 
 
 def corner_label(corner):
@@ -664,9 +697,11 @@ class FSS_UL_TextureSets(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         result = _results.get(item.name)
         warn = bool(result and (result.get('uv_zero_islands') or result.get('no_area_objects')))
-        split = layout.split(factor=0.5)
+        row = layout.row(align=True)
+        split = row.split(factor=0.5)
         split.label(text=item.name, icon='LOCKED' if uv_pack.is_kept(item) else 'ERROR' if warn else 'MATERIAL')
         split.label(text=last_result_text(item, short=True))
+        row.operator('fss.materials_select', text='', icon='RESTRICT_SELECT_OFF', emboss=False).material = item.name
 
     def filter_items(self, context, data, propname):
         items = getattr(data, propname)
@@ -724,13 +759,13 @@ def _draw_progress(layout):
     p = _progress
     box = layout.box()
     if p['verb'] == 'Checking':
-        box.progress(factor=(p['index'] - 1) / max(p['count'], 1), type='BAR',
+        box.progress(factor=(p['index'] - 1 + p['fraction']) / max(p['count'], 1), type='BAR',
                      text=f"Checking {p['index']} of {p['count']}: {p['set']}")
         box.label(text=p['stage'] or 'Starting', icon='TIME')
         box.operator(FSS_OT_UvPackCancel.bl_idname, text='Cancel', icon='CANCEL')
         box.label(text='Cancel and Esc stop after the texture set in work')
     else:
-        box.progress(factor=min(p['steps'] / 10.0, 0.95), type='BAR', text=f"Packing {p['set']}")
+        box.progress(factor=p['fraction'], type='BAR', text=f"Packing {p['set']}: {int(p['fraction'] * 100)} %")
         box.label(text=p['stage'] or 'Starting', icon='TIME')
         box.label(text='Blender waits until each pack is done')
 
@@ -752,13 +787,14 @@ def _status(text):
         pass
 
 
-def _on_stage(stage):
-    """uv_pack progress: the stage in the status bar, and the sidebar drawn at once (Blender blocks in each pack)."""
+def _on_stage(stage, fraction):
+    """uv_pack progress: the stage in the status bar, and the sidebar drawn at once (Blender blocks in each pack). The bar
+    never goes back: a new round of packs after a margin problem keeps it where it is."""
     from .uv_autoseam import _redraw_sidebar_now  # uv_autoseam imports this module
     if _progress is None:
         return
     _progress['stage'] = stage
-    _progress['steps'] += 1
+    _progress['fraction'] = max(_progress['fraction'], fraction)
     count = f" {_progress['index']}/{_progress['count']}" if _progress['verb'] == 'Checking' else ''
     _status(f"FSS {_progress['verb']}{count}: {_progress['set']} ({stage})...")
     _redraw_sidebar_now(SPACES)
@@ -800,7 +836,7 @@ class FSS_OT_UvPackTextureSet(bpy.types.Operator):
         if bpy.app.background:
             return self._run(context)
         # draw the progress first: each pack is one Blender call, Blender waits until it is done
-        _progress = {'verb': 'Packing', 'index': 1, 'count': 1, 'set': material.name, 'stage': '', 'steps': 0}
+        _progress = {'verb': 'Packing', 'index': 1, 'count': 1, 'set': material.name, 'stage': '', 'fraction': 0.0}
         _status(f'FSS Packing: {material.name}...')
         _redraw_panels()
         self._timer = context.window_manager.event_timer_add(0.05, window=context.window)
@@ -859,7 +895,7 @@ class FSS_OT_UvPackCheckAll(bpy.types.Operator):
                 self._step(material)
             return self._finish(context)
         _cancel_requested = False
-        _progress = {'verb': 'Checking', 'index': 1, 'count': len(self._sets), 'set': '', 'stage': '', 'steps': 0}
+        _progress = {'verb': 'Checking', 'index': 1, 'count': len(self._sets), 'set': '', 'stage': '', 'fraction': 0.0}
         self._timer = context.window_manager.event_timer_add(0.01, window=context.window)
         context.window_manager.modal_handler_add(self)
         _redraw_panels()
@@ -902,7 +938,7 @@ class FSS_OT_UvPackCheckAll(bpy.types.Operator):
         material = self._sets[self._index]
         if not self._announced:
             # show which set comes next before Blender blocks on it
-            _progress.update(index=self._index + 1, set=uv_pack.set_name(material), stage='Starting', steps=0)
+            _progress.update(index=self._index + 1, set=uv_pack.set_name(material), stage='Starting', fraction=0.0)
             _status(f"FSS Checking {self._index + 1}/{len(self._sets)}: {uv_pack.set_name(material)}...")
             _redraw_panels()
             self._announced = True

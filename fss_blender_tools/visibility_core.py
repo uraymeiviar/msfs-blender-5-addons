@@ -24,6 +24,38 @@ except ImportError:
     batch_for_shader = None
 
 ORIG_FACE_ATTR_NAME = "_fss_orig_face_idx"
+# 6: Look Around images weighted the right way up, and no direction weight (decision 73 removed). 5 added face_facing.
+VISIBILITY_SCHEMA = 6
+PIECE_SECONDS = 0.2  # a long loop hands back to Blender about this often, so a modal run can draw and read Esc
+# The bar's share of each stage, in units of one view besides reading the scene; from a run on the E2 cockpit
+UNITS_PREPARE, UNITS_READ, UNITS_VIEW, UNITS_FINAL = 12.0, 6.0, 1.0, 8.0
+
+
+def _no_report(_fraction):
+    pass
+
+
+def _drain(pieces):
+    """Run a generator of pieces to its end and return its value: the same work all at once."""
+    try:
+        while True:
+            next(pieces)
+    except StopIteration as done:
+        return done.value
+
+
+class _Pause:
+    """When a long loop should hand back."""
+
+    def __init__(self):
+        self.last = time.perf_counter()
+
+    def due(self):
+        now = time.perf_counter()
+        if now - self.last < PIECE_SECONDS:
+            return False
+        self.last = now
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -254,19 +286,17 @@ def sphere_lines(yaw_limit, pitch_limit, radius=1.0):
     return np.array(grid, dtype=np.float32), np.array(edges, dtype=np.float32)
 
 
-def precompute_cubemap_weights(faces, cam_forward, cube_res=1024, floor=0.2, falloff=1.0, sweep=None):
-    """Precompute weighted differential solid angle maps for all 6 cube faces (Decisions 72 & 73). Directions outside the
-    camera's limits (sweep) weigh nothing."""
+def precompute_cubemap_weights(faces, cube_res=1024, sweep=None):
+    """Per-pixel solid angle for all 6 cube faces (decision 72). Directions outside the camera's limits (sweep) weigh
+    nothing; inside them every direction counts the same. Row 0 is the image's bottom, as read_color returns it."""
     W = cube_res
     u = (np.arange(W, dtype=np.float32) + 0.5) * (2.0 / W) - 1.0
-    v = 1.0 - (np.arange(W, dtype=np.float32) + 0.5) * (2.0 / W)
-    U, V = np.meshgrid(u, v)
+    U, V = np.meshgrid(u, u)
 
-    d_omega = (4.0 / (W * W)) / np.power(U * U + V * V + 1.0, 1.5).astype(np.float32)
+    d_omega = ((4.0 / (W * W)) / np.power(U * U + V * V + 1.0, 1.5)).astype(np.float32)
+    if sweep is None:
+        return {face_name: d_omega for face_name, _v_mat, _proj in faces}
     local_rays = np.stack([U, V, -np.ones_like(U)], axis=-1)
-
-    fwd = np.array(cam_forward, dtype=np.float32)
-    fwd /= np.linalg.norm(fwd)
 
     face_weights = {}
     for face_name, v_mat, _ in faces:
@@ -275,23 +305,14 @@ def precompute_cubemap_weights(faces, cam_forward, cube_res=1024, floor=0.2, fal
         lens = np.linalg.norm(world_rays, axis=-1, keepdims=True)
         world_dirs = world_rays / np.maximum(lens, 1e-12)
 
-        cos_ang = np.sum(world_dirs * fwd, axis=-1)
-        if falloff == 1.0:
-            ang_weight = np.where(cos_ang > 0.0, np.maximum(floor, cos_ang), floor)
-        else:
-            pos_term = np.power(np.maximum(cos_ang, 0.0), falloff)
-            ang_weight = np.maximum(floor, pos_term)
-
-        if sweep is not None:
-            ang_weight = ang_weight * directions_in_sweep(world_dirs, sweep)
-
-        face_weights[face_name] = (d_omega * ang_weight).astype(np.float32)
+        face_weights[face_name] = (d_omega * directions_in_sweep(world_dirs, sweep)).astype(np.float32)
 
     return face_weights
 
 
 def precompute_frustum_weights(cam_obj, frustum_res=(2560, 1440)):
-    """Precompute differential solid angle map for fixed-view camera frustum."""
+    """Precompute differential solid angle map for fixed-view camera frustum. Row 0 is the image's bottom, as read_color
+    returns it."""
     W, H = frustum_res
     dg = bpy.context.evaluated_depsgraph_get()
     proj = cam_obj.calc_matrix_camera(dg, x=W, y=H)
@@ -300,7 +321,7 @@ def precompute_frustum_weights(cam_obj, frustum_res=(2560, 1440)):
     p11 = float(proj[1][1])
 
     u = (np.arange(W, dtype=np.float32) + 0.5) * (2.0 / W) - 1.0
-    v = 1.0 - (np.arange(H, dtype=np.float32) + 0.5) * (2.0 / H)
+    v = (np.arange(H, dtype=np.float32) + 0.5) * (2.0 / H) - 1.0
     U, V = np.meshgrid(u, v)
 
     X = U / p00
@@ -548,6 +569,10 @@ def extract_mesh_face_adjacency(me, mat_slots=None):
 # ---------------------------------------------------------------------------
 
 def discover_mesh_instances(view_layer):
+    return _drain(_discover_pieces(view_layer))
+
+
+def _discover_pieces(view_layer, report=_no_report):
     """Scan scene for visible mesh objects and assign instances per mesh."""
     mesh_meta = {}
 
@@ -556,7 +581,11 @@ def discover_mesh_instances(view_layer):
         if o is not None and o.type == 'MESH' and o.data and not o.hide_viewport and not o.hide_render
     ]
 
-    for o in mesh_objs:
+    pause = _Pause()
+    for index, o in enumerate(mesh_objs):
+        if pause.due():
+            report(index / len(mesh_objs))
+            yield
         if is_invisible_object(o):
             continue
 
@@ -633,6 +662,10 @@ def discover_mesh_instances(view_layer):
 
 
 def extract_scene_geometry(depsgraph, view_layer, mesh_meta):
+    return _drain(_extract_pieces(depsgraph, view_layer, mesh_meta))
+
+
+def _extract_pieces(depsgraph, view_layer, mesh_meta, report=_no_report):
     """Extract evaluated scene geometry split into Opaque and Decal batches."""
     opaque_pos = []
     opaque_ids = []
@@ -654,7 +687,11 @@ def extract_scene_geometry(depsgraph, view_layer, mesh_meta):
         if o is not None and o.type == 'MESH' and o.data and not o.hide_viewport and not o.hide_render
     ]
 
-    for o in mesh_objs:
+    pause = _Pause()
+    for index, o in enumerate(mesh_objs):
+        if pause.due():
+            report(index / len(mesh_objs))
+            yield
         if is_invisible_object(o):
             continue
 
@@ -820,10 +857,15 @@ class AnimationStateController:
                     })
 
     def apply_percentage_state(self, pct):
+        """The scene has one frame for all animations, so the step is a share of the widest range that moves.
+
+        A range without length (one keyframe) holds its pose at every frame, so it neither widens the range nor
+        decides it; the result does not depend on the order of the objects."""
         pct_norm = pct if pct <= 1.0 else pct / 100.0
-        for entry in self.original_states:
-            f_min = entry['frame_start']
-            f_max = entry['frame_end']
+        moving = [s for s in self.original_states if s['frame_end'] > s['frame_start']]
+        if moving:
+            f_min = min(s['frame_start'] for s in moving)
+            f_max = max(s['frame_end'] for s in moving)
             target_frame = f_min + pct_norm * (f_max - f_min)
             self.scene.frame_set(int(round(target_frame)))
 
@@ -899,6 +941,10 @@ def render_camera_view(offscreen, shader, batch_opaque, batch_decal, mvp, weight
 # ---------------------------------------------------------------------------
 
 def compute_patch_scores_and_groups(mesh_meta, mesh_arrays, min_px_threshold=10.0, ref_cube_res=1024, scene=None):
+    return _drain(_patch_pieces(mesh_meta, mesh_arrays, min_px_threshold, ref_cube_res, scene))
+
+
+def _patch_pieces(mesh_meta, mesh_arrays, min_px_threshold=10.0, ref_cube_res=1024, scene=None, report=_no_report):
     """Compute per-face scores from patches, resolve undetermined pieces, and compute island values (Decision 82)."""
     t_start = time.perf_counter()
     d_omega_px = 4.0 / (ref_cube_res * ref_cube_res)
@@ -925,7 +971,11 @@ def compute_patch_scores_and_groups(mesh_meta, mesh_arrays, min_px_threshold=10.
         return res
 
     # 1. Grow patches per face on each mesh
-    for m_name, meta in mesh_meta.items():
+    pause = _Pause()
+    for index, (m_name, meta) in enumerate(mesh_meta.items()):
+        if pause.due():
+            report(0.8 * index / len(mesh_meta))
+            yield
         m_data = mesh_arrays[m_name]
         vis_arr = m_data['vis_omega']      # (V, K, F)
         unocc_arr = m_data['unocc_omega']  # (V, K, F)
@@ -1076,7 +1126,10 @@ def compute_patch_scores_and_groups(mesh_meta, mesh_arrays, min_px_threshold=10.
     object_summaries = {}
     island_summaries = {}
 
-    for m_name, meta in mesh_meta.items():
+    for index, (m_name, meta) in enumerate(mesh_meta.items()):
+        if pause.due():
+            report(0.8 + 0.2 * index / len(mesh_meta))
+            yield
         m_data = mesh_arrays[m_name]
         face_scores = m_data['face_scores']
         face_undetermined = m_data['face_undetermined']
@@ -1275,7 +1328,7 @@ def weighted_percentile(values, weights, q):
 # ---------------------------------------------------------------------------
 
 def save_visibility_file(blend_path, results, settings=None):
-    """Save results as compressed `<blend_name>.visibility` (Schema Version 5: version 4 had no face_facing)."""
+    """Save results as compressed `<blend_name>.visibility` (VISIBILITY_SCHEMA)."""
     vis_path = Path(blend_path).with_suffix('.visibility')
 
     mesh_face_counts = {
@@ -1283,7 +1336,7 @@ def save_visibility_file(blend_path, results, settings=None):
     }
 
     meta = {
-        'schema_version': 5,
+        'schema_version': VISIBILITY_SCHEMA,
         'blend_file': str(results.get('blend_file', blend_path)),
         'timestamp': time.strftime("%Y-%m-%d %H:%M:%S"),
         'total_time_s': results.get('total_time_s', 0.0),
@@ -1358,6 +1411,26 @@ def clear_file_cache():
     _vis_file_cache.clear()
 
 
+def is_old_visibility_file(meta):
+    """True for a file scored by an older version of the rules: its numbers no longer mean what they say."""
+    return meta.get('schema_version', 0) < VISIBILITY_SCHEMA
+
+
+def _stale_mesh_names(meta, scene_meshes):
+    """The meshes whose data cannot be used: changed ones, or all of them in a file with older scoring."""
+    if not scene_meshes:
+        return []
+    saved_counts = meta.get('mesh_face_counts', {})
+    if is_old_visibility_file(meta):
+        return list(saved_counts)
+    stale_meshes = []
+    for m_name, saved_n_faces in saved_counts.items():
+        me = scene_meshes.get(m_name)
+        if me is None or len(me.polygons) != saved_n_faces:
+            stale_meshes.append(m_name)
+    return stale_meshes
+
+
 def load_visibility_file(vis_path, scene_meshes=None, use_cache=True):
     """Load `.visibility` file and verify staleness against scene meshes."""
     global _vis_file_load_count
@@ -1367,28 +1440,12 @@ def load_visibility_file(vis_path, scene_meshes=None, use_cache=True):
     if use_cache and vis_path in _vis_file_cache:
         cached = _vis_file_cache[vis_path]
         if cached['mtime'] == mtime:
-            meta = cached['meta']
-            data = cached['data']
-            stale_meshes = []
-            if scene_meshes:
-                saved_counts = meta.get('mesh_face_counts', {})
-                for m_name, saved_n_faces in saved_counts.items():
-                    me = scene_meshes.get(m_name)
-                    if me is None or len(me.polygons) != saved_n_faces:
-                        stale_meshes.append(m_name)
-            return meta, data, stale_meshes
+            return cached['meta'], cached['data'], _stale_mesh_names(cached['meta'], scene_meshes)
 
     _vis_file_load_count += 1
     data = np.load(vis_path)
     meta = json.loads(str(data['_meta_json'][0]))
-
-    stale_meshes = []
-    if scene_meshes:
-        saved_counts = meta.get('mesh_face_counts', {})
-        for m_name, saved_n_faces in saved_counts.items():
-            me = scene_meshes.get(m_name)
-            if me is None or len(me.polygons) != saved_n_faces:
-                stale_meshes.append(m_name)
+    stale_meshes = _stale_mesh_names(meta, scene_meshes)
 
     if use_cache:
         _vis_file_cache[vis_path] = {
@@ -1463,8 +1520,6 @@ class VisibilityAnalyzer:
         anim_states=(0.0, 0.25, 0.5, 0.75, 1.0),
         cube_res=1024,
         frustum_res=(2560, 1440),
-        floor=0.2,
-        falloff=1.0,
         min_px_threshold=10.0,
         blend_path=None,
     ):
@@ -1477,8 +1532,6 @@ class VisibilityAnalyzer:
         self.anim_states = tuple(float(s) for s in anim_states)
         self.cube_res = cube_res
         self.frustum_res = frustum_res
-        self.floor = floor
-        self.falloff = falloff
         self.min_px_threshold = min_px_threshold
         self.blend_path = blend_path or (scene.fss_visibility.cameras[0].camera_name if hasattr(scene, 'fss_visibility') and len(scene.fss_visibility.cameras) else "")
 
@@ -1505,17 +1558,47 @@ class VisibilityAnalyzer:
         self._state_t0 = 0.0
         self.prepared = False
         self.cleaned_up = False
+        self.activity = ''  # what is in work, for the bar's text
+        self._units_total = (UNITS_PREPARE + UNITS_FINAL + len(self.anim_states) * UNITS_READ
+                             + len(self.anim_states) * len(self.cameras) * UNITS_VIEW)
+        self._units_done = 0.0
+        self._units_now = 0.0
+        self._part_now = 0.0
+
+    def _begin(self, units, activity):
+        self._units_done += self._units_now
+        self._units_now, self._part_now, self.activity = units, 0.0, activity
+
+    def _part(self, fraction):
+        self._part_now = fraction
+
+    def fraction_done(self):
+        """How much of the whole run is done, 0 to 1."""
+        return min((self._units_done + self._units_now * self._part_now) / self._units_total, 1.0)
+
+    def run_pieces(self):
+        """The whole run as a generator: a modal operator takes one piece per timer event, and Blender draws and reads Esc
+        between them. Its value is the results, as finalize's."""
+        yield from self._prepare_pieces()
+        while not self.is_finished():
+            yield from self._pieces_of_view()
+        return (yield from self._finalize_pieces())
 
     def prepare(self):
         """Initialize shaders, attributes, instances and sum arrays."""
+        _drain(self._prepare_pieces())
+
+    def _prepare_pieces(self):
         if gpu is None:
             raise RuntimeError("GPU module not available.")
 
+        self._begin(UNITS_PREPARE, 'Reading the scene: meshes and UV islands')
+        yield
         gpu.init()
         self.shader = get_id_shader()
         add_orig_face_index_attributes()
 
-        self.mesh_meta = discover_mesh_instances(self.view_layer)
+        self.mesh_meta = yield from _discover_pieces(self.view_layer, self._part)
 
         # Build view list: camera x animation state
         self.view_configs = []
@@ -1526,8 +1609,6 @@ class VisibilityAnalyzer:
                     'state_val': state_val,
                     'camera': cam['name'],
                     'cam_dict': cam,
-                    'floor': self.floor,
-                    'falloff': self.falloff,
                 })
 
         N_views = len(self.view_configs)
@@ -1562,10 +1643,12 @@ class VisibilityAnalyzer:
         """Execute one view pass (one camera at one animation state)."""
         if not self.prepared:
             self.prepare()
-
         if self.is_finished():
             return None
+        return _drain(self._pieces_of_view())
 
+    def _pieces_of_view(self):
+        """A generator: one view, yielding between pieces; its value is the view's info."""
         view_cfg = self.view_configs[self.current_step]
         state_idx = view_cfg['state_idx']
         state_val = view_cfg['state_val']
@@ -1579,13 +1662,13 @@ class VisibilityAnalyzer:
 
             self.current_state_idx = state_idx
             self._state_t0 = time.perf_counter()
+            self._begin(UNITS_READ, f'Reading the scene at animation {int(round(state_val * 100))} %')
+            yield
             self.anim_ctrl.apply_percentage_state(state_val)
 
             dg = bpy.context.evaluated_depsgraph_get()
             (self.batches, self.eval_poly_info, self.tri_geom, self.max_id,
-             obj_maps, obj_counts) = extract_scene_geometry(
-                dg, self.view_layer, self.mesh_meta
-            )
+             obj_maps, obj_counts) = yield from _extract_pieces(dg, self.view_layer, self.mesh_meta, self._part)
             if not self.object_eval_face_maps:
                 self.object_eval_face_maps = obj_maps
                 self.object_eval_face_counts = obj_counts
@@ -1608,7 +1691,10 @@ class VisibilityAnalyzer:
                     'face_id': self.batches['decal_ids']
                 })
                 self.batch_dec = BatchWrapper(b, len(self.batches['decal_pos']) // 3)
+            yield
 
+        self._begin(UNITS_VIEW, f"View {self.current_step + 1} of {len(self.view_configs)}: {cam['name']}, "
+                                f"animation {int(round(state_val * 100))} %")
         cam_name = cam['name']
         cam_type = cam['type']
         cam_pos = cam['pos']
@@ -1654,22 +1740,25 @@ class VisibilityAnalyzer:
 
         eval_vis = np.zeros(self.max_id + 1, dtype=np.float64)
 
+        self._part(0.1)
+        yield
+
         # Near and far clipping planes from scene extent (Requirement 4)
         near_plane, far_plane = compute_scene_extent(self.view_layer, cam_pos)
 
         # 2. Render view
         if cam_type == 'LOOK_AROUND':
             faces = cubemap_face_matrices(cam_pos, cam_fwd, near=near_plane, far=far_plane)
-            face_weights = precompute_cubemap_weights(
-                faces, cam_fwd, cube_res=self.cube_res, floor=self.floor, falloff=self.falloff, sweep=sweep
-            )
-            for face_name, v_mat, p_mat in faces:
+            face_weights = precompute_cubemap_weights(faces, cube_res=self.cube_res, sweep=sweep)
+            for side, (face_name, v_mat, p_mat) in enumerate(faces, 1):
                 mvp = p_mat @ v_mat
                 w_map = face_weights[face_name]
                 vis_counts = render_camera_view(
                     self.off_cube, self.shader, self.batch_op, self.batch_dec, mvp, w_map, self.max_id
                 )
                 eval_vis += vis_counts
+                self._part(0.1 + 0.85 * side / len(faces))
+                yield
 
         elif cam_type == 'FIXED_VIEW':
             if fixed_cam:
@@ -1713,18 +1802,19 @@ class VisibilityAnalyzer:
 
     def finalize(self):
         """Compute patch expansion, undetermined resolution, and build results dict."""
+        return _drain(self._finalize_pieces())
+
+    def _finalize_pieces(self):
+        self._begin(UNITS_FINAL, 'Scoring the faces')
+        yield
         if self.current_state_idx >= 0:
             pct_last = f"{int(self.anim_states[self.current_state_idx] * 100)}%"
             self.state_timings[pct_last] = time.perf_counter() - self._state_t0
 
         total_time = time.perf_counter() - self.t_start
 
-        patch_res = compute_patch_scores_and_groups(
-            self.mesh_meta, self.mesh_arrays,
-            min_px_threshold=self.min_px_threshold,
-            ref_cube_res=self.cube_res,
-            scene=self.scene,
-        )
+        patch_res = yield from _patch_pieces(self.mesh_meta, self.mesh_arrays, min_px_threshold=self.min_px_threshold,
+                                             ref_cube_res=self.cube_res, scene=self.scene, report=self._part)
 
         all_face_scores = []
         all_face_areas = []
@@ -1861,8 +1951,6 @@ def analyze_visibility(
     anim_states=(0.0, 0.25, 0.5, 0.75, 1.0),
     cube_res=1024,
     frustum_res=(2560, 1440),
-    floor=0.2,
-    falloff=1.0,
     min_px_threshold=10.0,
     scene=None,
     view_layer=None,
@@ -1878,8 +1966,6 @@ def analyze_visibility(
         anim_states=anim_states,
         cube_res=cube_res,
         frustum_res=frustum_res,
-        floor=floor,
-        falloff=falloff,
         min_px_threshold=min_px_threshold,
         blend_path=blend_path,
     )

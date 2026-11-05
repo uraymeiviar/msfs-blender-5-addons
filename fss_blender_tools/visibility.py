@@ -93,24 +93,6 @@ class FSS_VisibilitySettings(bpy.types.PropertyGroup):
         description="Animation steps evenly spaced over each animation's length: 2 gives 0 and 100 %, 5 gives 0, 25, 50, 75 and 100 % (Decision 86)"
     )
 
-    floor: FloatProperty(
-        name="Direction Floor",
-        default=0.2,
-        min=0.0,
-        max=1.0,
-        precision=2,
-        description="Minimum weight for side/rear views during look-around (Decision 73)"
-    )
-
-    falloff: FloatProperty(
-        name="Direction Falloff",
-        default=1.0,
-        min=0.1,
-        max=10.0,
-        precision=1,
-        description="Direction falloff power from forward view (Decision 73)"
-    )
-
     cube_res: IntProperty(
         name="Cube Resolution",
         default=1024,
@@ -136,6 +118,12 @@ class FSS_VisibilitySettings(bpy.types.PropertyGroup):
 
 
 _camera_sync_pending = False
+# While Update Visibility runs, its section shows this instead of the button: fraction 0 to 1, text
+_progress = None
+# What reaches Blender during a run: moving around the viewport and scrolling. Clicks and keys could change the scene under
+# the work (an Undo would leave it holding removed data), and Esc is handled first.
+EVENTS_DURING_RUN = {'MOUSEMOVE', 'INBETWEEN_MOUSEMOVE', 'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE', 'TRACKPADPAN',
+                     'TRACKPADZOOM', 'NDOF_MOTION'}
 
 
 def camera_list_in_sync(scene):
@@ -288,6 +276,62 @@ def write_visibility_report_text(results, vis_path, elapsed_time):
 # Operators (Update Visibility, Select Never-Seen, Select Stale)
 # ---------------------------------------------------------------------------
 
+def _redraw_sidebars():
+    """Only the sidebars: redrawing the viewport of a large scene after every piece would slow the work down."""
+    for window in bpy.context.window_manager.windows:
+        for area in window.screen.areas:
+            if area.type == 'VIEW_3D':
+                for region in area.regions:
+                    if region.type == 'UI':
+                        region.tag_redraw()
+
+
+def _set_status(text):
+    try:
+        bpy.context.workspace.status_text_set(text)
+    except AttributeError:  # no workspace (background)
+        pass
+
+
+def _show_progress(fraction, text):
+    global _progress
+    _progress = {'fraction': max(0.0, min(fraction, 1.0)), 'text': text}
+    _set_status(f'FSS Visibility: {text}')
+    _redraw_sidebars()
+
+
+def _stop_run(op, context):
+    """The end of a run, however it ended: nothing stays behind."""
+    global _progress
+    if op._timer:
+        context.window_manager.event_timer_remove(op._timer)
+        op._timer = None
+    if op._analyzer:
+        op._analyzer.cleanup()
+        op._analyzer = None
+    _progress = None
+    _set_status(None)
+    for area in context.screen.areas if context.screen else []:
+        area.tag_redraw()
+
+
+def _run_piece(op, context):
+    """One timer event of a run: a small piece of work, then back to Blender, which draws and reads Esc."""
+    try:
+        next(op._pieces)
+    except StopIteration as done:
+        results = done.value
+    else:
+        _show_progress(op._analyzer.fraction_done(), op._analyzer.activity)
+        return {'RUNNING_MODAL'}
+    vis_path = visibility_core.save_visibility_file(bpy.data.filepath, results, settings=op._get_settings_dict(context))
+    write_visibility_report_text(results, vis_path, results['total_time_s'])
+    _stop_run(op, context)
+    op.report({'INFO'}, f"Visibility updated in {results['total_time_s']:.2f}s. Saved '{vis_path.name}'. "
+                        f"See '{REPORT_TEXT_NAME}'.")
+    return {'FINISHED'}
+
+
 class FSS_OT_UpdateVisibility(bpy.types.Operator):
     """Analyse scene visibility from artist-defined cameras across animation states."""
     bl_idname = 'fss.update_visibility'
@@ -297,10 +341,11 @@ class FSS_OT_UpdateVisibility(bpy.types.Operator):
 
     _timer = None
     _analyzer = None
+    _pieces = None
 
     @classmethod
     def poll(cls, context):
-        if not bpy.data.is_saved or not bpy.data.filepath:
+        if _progress is not None or not bpy.data.is_saved or not bpy.data.filepath:
             return False
         settings = getattr(context.scene, 'fss_visibility', None)
         if not settings or not any(item.include for item in settings.cameras):
@@ -339,8 +384,6 @@ class FSS_OT_UpdateVisibility(bpy.types.Operator):
                          'weight': item.weight}
                         for item in s.cameras if item.include and item.camera],
             'states': s.states,
-            'floor': s.floor,
-            'falloff': s.falloff,
             'cube_res': s.cube_res,
             'min_px_threshold': s.min_px_threshold,
         }
@@ -364,90 +407,41 @@ class FSS_OT_UpdateVisibility(bpy.types.Operator):
             cameras=cameras,
             anim_states=anim_states,
             cube_res=s.cube_res,
-            floor=s.floor,
-            falloff=s.falloff,
             min_px_threshold=s.min_px_threshold,
             blend_path=bpy.data.filepath,
         )
 
+        # Modal execution in interactive Blender: the bar first, then the work, a piece per timer event
+        if not bpy.app.background:
+            wm = context.window_manager
+            self._pieces = self._analyzer.run_pieces()
+            self._timer = wm.event_timer_add(0.01, window=context.window)
+            wm.modal_handler_add(self)
+            _show_progress(0.0, 'Reading the scene')
+            return {'RUNNING_MODAL'}
+
         try:
             self._analyzer.prepare()
         except Exception as e:
-            if self._analyzer:
-                self._analyzer.cleanup()
-                self._analyzer = None
+            self._analyzer.cleanup()
+            self._analyzer = None
             self.report({'ERROR'}, f"Failed to prepare visibility analysis: {e}")
             return {'CANCELLED'}
-
-        # Modal execution in interactive Blender
-        if not bpy.app.background:
-            wm = context.window_manager
-            self._timer = wm.event_timer_add(0.01, window=context.window)
-            wm.modal_handler_add(self)
-            context.workspace.status_text_set("FSS Visibility: Starting analysis...")
-            return {'RUNNING_MODAL'}
-
         return self.execute(context)
 
     def modal(self, context, event):
         if event.type == 'ESC':
-            if self._timer:
-                context.window_manager.event_timer_remove(self._timer)
-                self._timer = None
-            context.workspace.status_text_set(None)
-            if self._analyzer:
-                self._analyzer.cleanup()
-                self._analyzer = None
+            _stop_run(self, context)
             self.report({'INFO'}, "Visibility analysis cancelled by Esc. Nothing was written.")
             return {'CANCELLED'}
-
-        if event.type == 'TIMER':
-            if self._analyzer and not self._analyzer.is_finished():
-                try:
-                    step_info = self._analyzer.execute_next_step()
-                    if step_info:
-                        pct = int(round(step_info['state_pct'] * 100))
-                        msg = (f"FSS Visibility: State {pct}%, Camera '{step_info['camera']}' "
-                               f"({step_info['step']}/{step_info['total_steps']})...")
-                        context.workspace.status_text_set(msg)
-                except Exception as e:
-                    if self._timer:
-                        context.window_manager.event_timer_remove(self._timer)
-                        self._timer = None
-                    context.workspace.status_text_set(None)
-                    if self._analyzer:
-                        self._analyzer.cleanup()
-                        self._analyzer = None
-                    self.report({'ERROR'}, f"Error during visibility step: {e}")
-                    return {'CANCELLED'}
-                return {'RUNNING_MODAL'}
-
-            # Completed!
-            if self._timer:
-                context.window_manager.event_timer_remove(self._timer)
-                self._timer = None
-            context.workspace.status_text_set(None)
-
-            try:
-                results = self._analyzer.finalize()
-                settings = self._get_settings_dict(context)
-                vis_path = visibility_core.save_visibility_file(bpy.data.filepath, results, settings=settings)
-                write_visibility_report_text(results, vis_path, results['total_time_s'])
-                self.report(
-                    {'INFO'},
-                    f"Visibility updated in {results['total_time_s']:.2f}s. Saved '{vis_path.name}'. "
-                    f"See '{REPORT_TEXT_NAME}'."
-                )
-            finally:
-                if self._analyzer:
-                    self._analyzer.cleanup()
-                    self._analyzer = None
-
-            for area in context.screen.areas if context.screen else []:
-                area.tag_redraw()
-            return {'FINISHED'}
-
-        return {'PASS_THROUGH'}
+        if event.type != 'TIMER':
+            return {'PASS_THROUGH'} if event.type in EVENTS_DURING_RUN else {'RUNNING_MODAL'}
+        try:
+            return _run_piece(self, context)
+        except Exception as e:
+            _stop_run(self, context)
+            self.report({'ERROR'}, f"Visibility analysis stopped: {e}. Nothing was written.")
+            return {'CANCELLED'}
 
     def execute(self, context):
         if self._analyzer is None:
@@ -463,8 +457,6 @@ class FSS_OT_UpdateVisibility(bpy.types.Operator):
                 cameras=cameras,
                 anim_states=anim_states,
                 cube_res=s.cube_res,
-                floor=s.floor,
-                falloff=s.falloff,
                 min_px_threshold=s.min_px_threshold,
                 blend_path=bpy.data.filepath,
             )
@@ -696,19 +688,20 @@ class FSS_PT_Visibility(bpy.types.Panel):
         adv_box.prop(settings, 'show_advanced', toggle=True, icon='PREFERENCES')
         if settings.show_advanced:
             adv_col = adv_box.column(align=True)
-            adv_col.prop(settings, 'floor', slider=True)
-            adv_col.prop(settings, 'falloff', slider=True)
-            adv_col.separator()
             adv_col.label(text="Resolution & Threshold (alters scores):", icon='ERROR')
             adv_col.prop(settings, 'cube_res')
             adv_col.prop(settings, 'min_px_threshold')
 
         layout.separator()
 
-        # 4. Update Visibility Action Button
-        can_run = bpy.data.is_saved and bool(bpy.data.filepath) and any(item.include for item in settings.cameras)
+        # 4. Update Visibility Action Button, or the run in progress
         btn_col = layout.column(align=True)
-        if not bpy.data.is_saved or not bpy.data.filepath:
+        if _progress is not None:
+            box = layout.box()
+            box.progress(factor=_progress['fraction'], type='BAR', text=f"Update Visibility: {int(_progress['fraction'] * 100)} %")
+            box.label(text=_progress['text'], icon='TIME')
+            box.label(text='Esc cancels: nothing is written')
+        elif not bpy.data.is_saved or not bpy.data.filepath:
             btn_col.enabled = False
             btn_col.operator(FSS_OT_UpdateVisibility.bl_idname, text="Update Visibility", icon='FILE_REFRESH')
             layout.label(text="Save .blend file first to enable analysis", icon='ERROR')
@@ -753,8 +746,6 @@ class FSS_PT_Visibility(bpy.types.Panel):
             diff = False
             if saved_settings.get('states') != settings.states:
                 diff = True
-            elif abs(saved_settings.get('floor', 0.2) - settings.floor) > 1e-4:
-                diff = True
             elif saved_settings.get('cube_res', 1024) != settings.cube_res:
                 diff = True
             if diff:
@@ -774,7 +765,10 @@ class FSS_PT_Visibility(bpy.types.Panel):
         rep_box.label(text=f"Undetermined: {ud_objs} objs ({ud_faces} faces)")
 
         # Staleness detection & button
-        if stale_meshes:
+        if visibility_core.is_old_visibility_file(meta):
+            rep_box.label(text="Scored by an older version: not used", icon='ERROR')
+            rep_box.label(text="Click 'Update Visibility' to score it again", icon='INFO')
+        elif stale_meshes:
             stale_row = rep_box.row(align=True)
             stale_row.label(text=f"Stale: {len(stale_meshes)} mesh(es) changed", icon='ERROR')
             stale_row.operator(FSS_OT_VisibilitySelectStale.bl_idname, text="Select Stale", icon='RESTRICT_SELECT_OFF')

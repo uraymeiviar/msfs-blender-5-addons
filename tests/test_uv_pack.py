@@ -37,7 +37,7 @@ while repo_root_str in sys.path:
 sys.path.insert(0, repo_root_str)
 
 import fss_blender_tools  # noqa: E402
-from fss_blender_tools import checks, uv_fill, uv_islands, uv_marks, uv_pack, visibility_core  # noqa: E402
+from fss_blender_tools import checks, uv_autoseam, uv_fill, uv_islands, uv_marks, uv_pack, visibility_core  # noqa: E402
 
 fss_blender_tools.register()
 assert Path(uv_pack.__file__).resolve().is_relative_to(REPO_ROOT), uv_pack.__file__
@@ -466,8 +466,8 @@ def test_panel_rows():
     assert not [1 for name, _a, _kw in calls if name == 'template_list']
     assert 'Select objects to list their texture sets' in labels, labels
     # while running, only the progress
-    uv_marks._progress = {'verb': 'Checking', 'index': 2, 'count': 3, 'set': 'PRIVATE', 'stage': 'concave pack 1',
-                          'steps': 1}
+    uv_marks._progress = {'verb': 'Checking', 'index': 2, 'count': 3, 'set': 'PRIVATE', 'stage': 'Trying layout 1',
+                          'fraction': 0.5}
     try:
         calls, _labels = draw_panel()
     finally:
@@ -475,6 +475,8 @@ def test_panel_rows():
     names = [name for name, _a, _kw in calls]
     ops = [kw.get('text') for name, _a, kw in calls if name == 'operator']
     assert 'progress' in names and ops == ['Cancel'], (names, ops)
+    # half of the second of three sets
+    assert [abs(kw['factor'] - 0.5) < 1e-9 for name, _a, kw in calls if name == 'progress'] == [True], calls
     print(f"PASS: test_panel_rows (list of 3 texture sets, active object's first; rows with the last result; details "
           f"of the active row: size, margin, Keep UVs, Pack, Last run '{last}'; FUR when active; progress only while "
           "running)")
@@ -518,6 +520,16 @@ def test_texture_set_list():
     mat('AAA_FIRST')  # sorts before every other material
     assert wm.fss_uv_pack_active != index_before and uv_marks.active_texture_set(bpy.context).name == 'MANY_3'
     bpy.data.materials['MANY_3'].name = 'MANY_3_RENAMED'  # a renamed material falls back to the first row
+    assert uv_marks.active_texture_set(bpy.context).name == 'EXTRA_B'
+    # A button on each row selects the objects using that row's material; the panel below the list has none
+    calls = []
+    uv_marks.FSS_UL_TextureSets.draw_item(None, bpy.context, _Layout(calls), bpy.data, bpy.data.materials['EXTRA_B'], 0, None, '', 0)
+    buttons = [args[1] for name, args, _kw in calls if name == '_op' and args[0] == 'fss.materials_select']
+    assert [button.material for button in buttons] == ['EXTRA_B'], calls
+    calls, _labels = draw_panel()
+    assert not any(name in ('operator', '_op') and args[0] == 'fss.materials_select' for name, args, _kw in calls), calls
+    assert bpy.ops.fss.materials_select(material='EXTRA_B') == {'FINISHED'}
+    assert [obj.name for obj in bpy.context.selected_objects] == ['MANY_B'] and bpy.context.view_layer.objects.active.name == 'MANY_B'
     assert uv_marks.active_texture_set(bpy.context).name == 'EXTRA_B'
     print(f"PASS: test_texture_set_list ({len(expected)} texture sets of 2 selected objects listed, the active "
           "object's first; NOT_SELECTED filtered out; the name filter works; drawing writes nothing; the active row "
@@ -915,7 +927,7 @@ class _Recorder:
     def __getattr__(self, name):
         def call(*args, **kwargs):
             self.calls.append((name, args, kwargs))
-            return self if name in ('row', 'column', 'box', 'split') else None
+            return self if name in ('row', 'column', 'box', 'split', 'operator') else None
         return call
 
 
@@ -1005,11 +1017,15 @@ def test_island_list():
 
         # Drawing writes nothing and asks for no refill while the key holds
         calls, labels = draw_islands(obj)
-        assert not uv_islands._pending and not any(name == 'operator' and args[0] != 'fss.uv_island_select'
-                                                   for name, args, _kw in calls)
-        assert labels[:4] == ['#', 'Area', 'Multiplier', 'Density px/cm'], labels
+        assert not uv_islands._pending and not any(
+            name == 'operator' and args[0] not in ('fss.uv_island_select', 'fss.uv_island_sort', 'fss.uv_island_override_set',
+                                                   'fss.uv_island_override_clear', 'fss.uv_island_untick')
+            for name, args, _kw in calls)
+        assert labels[0] == '#', labels
+        titles = [kw['text'] for name, args, kw in calls if name == 'operator' and args[0] == 'fss.uv_island_sort']
+        assert titles == ['Area', 'Multiplier', 'Density px/cm'], titles
         assert [name for name, _args, _kw in calls].count('template_list') == 1
-        assert ['Material', 'ISL_A'] == labels[4:6] and '100 % of its surface' in labels, labels
+        assert ['Material', 'ISL_A'] == labels[1:3] and '100 % of its surface' in labels, labels
         assert labels[labels.index('Facing') + 1] == '1.00', labels
         assert labels[labels.index('Visibility') + 1] == 'x1.00', labels
         # Multiplier is the final number: the scene's 1.1 at full facing, and the floor x0.10 with no range left at facing 0
@@ -1017,6 +1033,54 @@ def test_island_list():
             by_number[1].multiplier, by_number[3].multiplier)
         # facing moves the top of the range: the never-seen island, facing 0, has no range left
         assert by_number[3].high == by_number[3].low and abs(by_number[2].high - by_number[2].low - target * 0.2 * 0.5 * 0.5) < 1e-4
+        # Sorting: a click on a title sorts by that column, highest first, and a second click reverses. The rows keep their
+        # indices, so the list's active row and its faces stay right
+        rows = wm.fss_uv_island_rows
+        assert wm.fss_uv_island_sort == 'DENSITY' and not wm.fss_uv_island_sort_reverse
+
+        def shown(value):
+            order = uv_islands.island_order(rows, wm.fss_uv_island_sort, wm.fss_uv_island_sort_reverse)
+            assert sorted(order) == list(range(len(rows))), order
+            return [value(rows[i]) for i in sorted(range(len(rows)), key=order.__getitem__)]
+
+        numbers_before = [row.number for row in rows]
+        for key, value in (('AREA', lambda r: r.area), ('MULTIPLIER', lambda r: r.multiplier), ('DENSITY', uv_islands.density_value)):
+            bpy.ops.fss.uv_island_sort(sort_by=key)
+            assert wm.fss_uv_island_sort == key and not wm.fss_uv_island_sort_reverse
+            values = shown(value)
+            assert values == sorted(values, reverse=True) and values[0] > values[-1], (key, values)
+        bpy.ops.fss.uv_island_sort(sort_by='DENSITY')
+        assert wm.fss_uv_island_sort_reverse
+        values = shown(uv_islands.density_value)
+        assert values == sorted(values), values
+        bpy.ops.fss.uv_island_sort(sort_by='DENSITY')
+        assert not wm.fss_uv_island_sort_reverse and [row.number for row in rows] == numbers_before
+        # An island without an area stays last either way
+        fake = [SimpleNamespace(area=9.0, multiplier=0.0, high=0.0, low=0.0, kept=False, material='', status='no UV area', number=9),
+                SimpleNamespace(area=1.0, multiplier=1.0, high=1.0, low=1.0, kept=False, material='', status='', number=1),
+                SimpleNamespace(area=2.0, multiplier=1.0, high=1.0, low=1.0, kept=False, material='', status='', number=2)]
+        assert uv_islands.island_order(fake, 'AREA', False) == [2, 1, 0] and uv_islands.island_order(fake, 'AREA', True) == [2, 0, 1]
+        # What the list asks: the order, and the filter field still works
+        ask = uv_islands.FSS_UL_UvIslands.filter_items
+        plain = SimpleNamespace(filter_name='', bitflag_filter_item=1 << 30, use_filter_invert=False)
+        flags, order = ask(plain, bpy.context, wm, 'fss_uv_island_rows')
+        assert flags == [] and order == uv_islands.island_order(rows, 'DENSITY', False), (flags, order)
+        plain.filter_name = f'{rows[0].number} *'
+        flags, _order = ask(plain, bpy.context, wm, 'fss_uv_island_rows')
+        assert flags[0] and sum(1 for flag in flags if flag) == 1, flags
+        # A bar under each number, against the list's largest; the largest row fills it
+        fills = {'AREA': [], 'MULTIPLIER': [], 'DENSITY': []}
+        for index, row in enumerate(rows):
+            calls = []
+            uv_islands.FSS_UL_UvIslands.draw_item(None, bpy.context, _Recorder(calls), wm, row, 0, wm, 'fss_uv_island_active', index)
+            bars = [kw['factor'] for name, _a, kw in calls if name == 'progress']
+            assert len(bars) == 3 and all(0.0 <= bar <= 1.0 for bar in bars), bars
+            assert all(kw['text'] == ' ' for name, _a, kw in calls if name == 'progress')
+            for key, bar in zip(fills, bars):
+                fills[key].append(bar)
+        assert all(abs(max(values) - 1.0) < 1e-6 for values in fills.values()), fills
+        assert abs(fills['AREA'][[row.number for row in rows].index(3)] - 1.0) < 1e-6, fills  # the 2 x 1 m island
+
         # visibility data from before facing: the list says so
         facing_before = dict(facing)
         facing.update(ISL=None)
@@ -1091,6 +1155,149 @@ def test_island_list():
           "range or value at t, refill after the draw, Select Faces and a click in Edit Mode, shared mesh, no UV map)")
 
 
+def test_island_override():
+    """Set by hand: a multiplier or a density on ticked islands, stored on the faces, final for Pack."""
+    reset(0.9, 1.1)
+    wm = bpy.context.window_manager
+    scene = bpy.context.scene
+    view_layer = bpy.context.view_layer
+    target = uv_marks.target_density(scene)
+    m = mat('OVR')
+    obj = quad_obj('OVR', [(0, 0, 0.2, 0.2), (1, 0, 0.2, 0.2), (2, 0, 0.2, 0.2), (3, 0, 0.2, 0.2)], mats=[m, m, m, m])
+    view_layer.objects.active = obj
+    obj.select_set(True)
+    uv_islands.sync(obj, scene, view_layer, wm)
+    rows = wm.fss_uv_island_rows
+    assert uv_marks.face_overrides(obj.data) is None and all(row.override == 0.0 for row in rows)
+
+    # Nothing ticked: Set and Clear cannot run
+    assert not bpy.ops.fss.uv_island_override_set.poll() and not bpy.ops.fss.uv_island_override_clear.poll()
+
+    def by_number():
+        return {row.number: row for row in wm.fss_uv_island_rows}
+
+    # A multiplier on two islands: final, whatever the marks say (no range left)
+    by_number()[1].ticked = by_number()[2].ticked = True
+    wm.fss_uv_override_kind, wm.fss_uv_override_multiplier = 'MULTIPLIER', 0.5
+    assert bpy.ops.fss.uv_island_override_set() == {'FINISHED'}
+    rows = by_number()
+    for number in (1, 2):
+        assert abs(rows[number].low - target * 0.5) < 1e-4 and abs(rows[number].high - target * 0.5) < 1e-4
+        assert abs(rows[number].multiplier - 0.5) < 1e-4 and abs(rows[number].override - 0.5) < 1e-6
+        assert rows[number].ticked and not rows[number].override_mixed
+    assert rows[3].override == 0.0 and abs(rows[3].high - target * 1.1) < 1e-4  # the others keep theirs
+
+    # A density is stored as a multiplier of the target density: only the multiplier is on the faces
+    for number in (1, 2):
+        rows[number].ticked = False
+    rows[3].ticked = True
+    wm.fss_uv_override_kind, wm.fss_uv_override_density = 'DENSITY', 40.96
+    assert bpy.ops.fss.uv_island_override_set() == {'FINISHED'}
+    rows = by_number()
+    assert abs(rows[3].override - 2.0) < 1e-5 and abs(rows[3].low - 40.96) < 1e-3, rows[3].override
+    values = uv_marks.face_overrides(obj.data)
+    assert sorted(np.round(values, 4).tolist()) == [0.0, 0.5, 0.5, 2.0], values
+
+    # Pack gives exactly that, the other island at the top of its range (the set fits)
+    r = uv_pack.pack(m)
+    assert r['written'] and r['t'] == 1.0, r
+    q = uvs(obj).reshape(-1, 4, 2) * uv_marks.texture_size(m)
+    got = [quad_density(q[i], 20, 20) for i in range(4)]
+    wanted = sorted([target * 0.5, target * 0.5, target * 2.0, target * 1.1])
+    assert np.allclose(sorted(got), wanted, atol=0.05), (got, wanted)
+
+    # Saved with the file, and a new sync reads it back
+    folder = Path(tempfile.mkdtemp(prefix='fss_override_'))
+    bpy.ops.wm.save_as_mainfile(filepath=str(folder / 'override.blend'))
+    bpy.ops.wm.open_mainfile(filepath=str(folder / 'override.blend'))
+    obj = bpy.data.objects['OVR']
+    scene, view_layer, wm = bpy.context.scene, bpy.context.view_layer, bpy.context.window_manager
+    assert sorted(np.round(uv_marks.face_overrides(obj.data), 4).tolist()) == [0.0, 0.5, 0.5, 2.0]
+    view_layer.objects.active = obj
+    uv_islands.sync(obj, scene, view_layer, wm)
+
+    # From Edit Mode (a click on a row goes there): it stays there, and the value is on the mesh after leaving
+    rows = by_number()
+    three = next(row for row in rows.values() if abs(row.override - 2.0) < 1e-5)
+    three.ticked = True
+    wm.fss_uv_override_kind, wm.fss_uv_override_multiplier = 'MULTIPLIER', 1.5
+    bpy.ops.object.mode_set(mode='EDIT')
+    assert bpy.ops.fss.uv_island_override_set() == {'FINISHED'} and obj.mode == 'EDIT'
+    bpy.ops.object.mode_set(mode='OBJECT')
+    assert sorted(np.round(uv_marks.face_overrides(obj.data), 4).tolist()) == [0.0, 0.5, 0.5, 1.5]
+
+    # The highest value of an island counts, and the list warns (faces joined, or seams removed, after setting)
+    me = obj.data
+    uv_marks.set_face_overrides(me, np.array([0]), 3.0)
+    md = uv_pack.MeshData(me)
+    faces = np.arange(len(me.polygons))
+    isl, _bl, _bl_isl = uv_pack.part_islands(md, faces)
+    joined = uv_pack.TextureSet(bpy.data.materials['OVR'], [(md, [obj], faces)], scene, {})
+    assert joined.override[isl[0]] == 3.0 and not joined.override_mixed[isl[0]], joined.override
+    obj2 = quad_obj('OVR2', [(0, 3, 2, 1)], mats=[bpy.data.materials['OVR']], uv_rects=None)
+    bm = bmesh.new()
+    bm.from_mesh(obj2.data)
+    bmesh.ops.subdivide_edges(bm, edges=[e for e in bm.edges if abs(e.verts[0].co.x - e.verts[1].co.x) > 0.5], cuts=1, use_grid_fill=True)
+    bm.to_mesh(obj2.data)
+    bm.free()
+    uv_marks.set_face_overrides(obj2.data, np.array([0]), 0.7)
+    md2 = uv_pack.MeshData(obj2.data)
+    faces2 = np.arange(len(obj2.data.polygons))
+    mix = uv_pack.TextureSet(bpy.data.materials['OVR'], [(md2, [obj2], faces2)], scene, {})
+    assert mix.n == 1 and abs(mix.override[0] - 0.7) < 1e-6 and mix.override_mixed[0] and abs(mix.lo[0] - target * 0.7) < 1e-4, (
+        mix.n, mix.override, mix.override_mixed)
+
+    # Clear: back to the marks; the mesh loses the attribute when none is left
+    view_layer.objects.active = obj
+    uv_islands.sync(obj, scene, view_layer, wm)
+    for row in wm.fss_uv_island_rows:
+        row.ticked = True
+    assert bpy.ops.fss.uv_island_untick() == {'FINISHED'} and not any(row.ticked for row in wm.fss_uv_island_rows)
+    for row in wm.fss_uv_island_rows:
+        row.ticked = True
+    assert bpy.ops.fss.uv_island_override_clear() == {'FINISHED'}
+    assert uv_marks.face_overrides(obj.data) is None and uv_marks.OVERRIDE_KEY not in obj.data.attributes
+    assert all(row.override == 0.0 and abs(row.high - target * uv_marks.scene_freedom(scene)[1]) < 1e-4 for row in wm.fss_uv_island_rows)
+
+    # A row Pack leaves alone has no tick box; a tick does not reach it
+    row = wm.fss_uv_island_rows[0]
+    row.status = 'no UV area'
+    assert not uv_islands.can_override(row)
+    calls = []
+    uv_islands.FSS_UL_UvIslands.draw_item(None, bpy.context, _Recorder(calls), wm, row, 0, wm, 'fss_uv_island_active', 0)
+    assert not any(name == 'prop' for name, _a, _k in calls), calls
+    print('PASS: test_island_override (multiplier and density final for Pack, saved with the file, from Edit Mode, highest wins with a warning, Clear)')
+
+
+def test_pack_progress():
+    """The bar of a Pack: real stages in order, between 0 and 1; it never goes back."""
+    reset(0.5, 1.5)
+    m = mat('PROGRESS')
+    quad_obj('PROGRESS', [(0, 0, 1, 1), (2, 0, 1, 1)], mats=[m, m])
+    bpy.context.view_layer.update()
+    stages = []
+    assert uv_pack.pack(m, progress=lambda text, fraction: stages.append((text, fraction)))['written']
+    texts = [text for text, _f in stages]
+    assert texts[0] == 'Reading the islands' and texts[-1] == 'Writing the UVs' and texts[-2] == 'Measuring the layout', texts
+    assert any(text.startswith('Trying layout 1 of at most') for text in texts), texts
+    fractions = [fraction for _t, fraction in stages]
+    assert fractions == sorted(fractions) and all(0.0 <= f <= 1.0 for f in fractions), stages
+    stages.clear()
+    assert not uv_pack.measure(m, progress=lambda text, fraction: stages.append(text))['written'] and 'Writing the UVs' not in stages, stages
+    # A later round of packs does not take the bar back
+    real = uv_autoseam._redraw_sidebar_now
+    uv_autoseam._redraw_sidebar_now = lambda spaces: None
+    uv_marks._progress = {'verb': 'Packing', 'index': 1, 'count': 1, 'set': 'X', 'stage': '', 'fraction': 0.0}
+    try:
+        uv_marks._on_stage('one', 0.9)
+        uv_marks._on_stage('two', 0.2)
+        assert uv_marks._progress['fraction'] == 0.9 and uv_marks._progress['stage'] == 'two', uv_marks._progress
+    finally:
+        uv_marks._progress = None
+        uv_autoseam._redraw_sidebar_now = real
+    print("PASS: test_pack_progress (stages in order, the bar only goes forward)")
+
+
 def test_partly_seen():
     """The scene's Partly Seen Islands: 1 any seen part counts for the whole island, 0.5 the seen share, 0 only an island
     seen whole; 0.75 and 0.25 biased either way; the minimum holds, the list follows."""
@@ -1133,7 +1340,7 @@ def test_partly_seen():
     try:
         # the first island is 25 % seen, the second 0.1 m of 9.9 m, both with score 0.8; the minimum is 0.1
         expected = {1.0: (0.8, 0.8), 0.75: (0.8 * 0.25 ** (1 / 3), 0.8 * (0.1 / 9.9) ** (1 / 3)), 0.5: (0.2, 0.1), 0.25: (0.1, 0.1), 0.0: (0.1, 0.1)}
-        assert scene.fss_uv_partly_seen_value == 0.75  # the default
+        assert scene.fss_uv_partly_seen_value == 0.5  # the default
         for value, (want_first, want_second) in expected.items():
             scene.fss_uv_partly_seen_value = value
             first, second, ts = factors()
@@ -1157,7 +1364,7 @@ def test_partly_seen():
         assert result['margin_violations'] == 0 and result['overlap_tri_pairs'] == 0, result
     finally:
         visibility_core.get_object_visibility = real
-        scene.fss_uv_partly_seen_value = 0.75
+        scene.fss_uv_partly_seen_value = uv_marks.DEFAULT_PARTLY_SEEN
     # The panel draws it in Advanced
     calls = []
     bpy.types.FSS_PT_uv_marks_advanced.draw(SimpleNamespace(layout=_Recorder(calls)), bpy.context)
@@ -1166,8 +1373,10 @@ def test_partly_seen():
 
 
 def main():
+    test_pack_progress()
     test_partly_seen()
     test_island_list()
+    test_island_override()
     test_layout_corner()
     test_fill_footprints()
     test_fill_ring()

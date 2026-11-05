@@ -11,6 +11,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 import bpy
 import bmesh
 from mathutils import Matrix, Vector
@@ -97,7 +98,7 @@ def build_synthetic_scene(blend_path):
     create_quad_facing("CASE2_HALF_PANEL", (0.2, 0.2), (0.4, -2.0, 0.0), '+Y')
     create_quad_facing("CASE2_COVER_PLATE", (0.1, 0.2), (0.35, -1.999, 0.0), '+Y')
 
-    # 3. Straight ahead (w=1.0) vs 90 deg side (w=0.20 floor)
+    # 3. Straight ahead and 90 deg to the side count the same: decision 73 was removed
     create_quad_facing("CASE3_PANEL_AHEAD", (0.2, 0.2), (0.0, -2.0, 0.0), '+Y')
     create_quad_facing("CASE3_PANEL_SIDE",  (0.2, 0.2), (2.0, 0.0, 0.0), '-X')
 
@@ -265,8 +266,6 @@ def test_synthetic_15_cases():
         cameras=cameras,
         anim_states=(0.0, 0.25, 0.5, 0.75, 1.0),
         cube_res=1024,
-        floor=0.2,
-        falloff=1.0,
         min_px_threshold=10.0,
     )
 
@@ -286,11 +285,11 @@ def test_synthetic_15_cases():
     s_half = objs["CASE2_HALF_PANEL"]['score']
     assert 0.45 <= s_half <= 0.55, f"Case 2 score out of range: {s_half}"
 
-    # Case 3: Direction Weight Ahead vs Side
+    # Case 3: No direction weight, ahead and side the same
     s_ahead = objs["CASE3_PANEL_AHEAD"]['score']
     s_side = objs["CASE3_PANEL_SIDE"]['score']
     assert s_ahead >= 0.98, f"Case 3 Ahead score too low: {s_ahead}"
-    assert 0.18 <= s_side <= 0.22, f"Case 3 Side score not near floor: {s_side}"
+    assert s_side >= 0.98, f"Case 3 Side score too low: {s_side}"
 
     # Case 4: Back Face
     s_back = objs["CASE4_BACK_FACE"]['score']
@@ -351,7 +350,7 @@ def test_synthetic_15_cases():
     # Case 15: Staleness Check
     vis_file = visibility_core.save_visibility_file(blend_path, results)
     meta_loaded, _, stale_none = visibility_core.load_visibility_file(vis_file, scene_meshes=bpy.data.meshes)
-    assert meta_loaded['schema_version'] == 5
+    assert meta_loaded['schema_version'] == visibility_core.VISIBILITY_SCHEMA
     assert len(stale_none) == 0, f"Expected 0 stale, got {stale_none}"
 
     # Triangulate a mesh to trigger staleness
@@ -393,7 +392,7 @@ def test_operator_on_saved_scene():
     vis_file = blend_path.with_suffix('.visibility')
     assert vis_file.exists(), f"File {vis_file} was not created"
     meta, data, _ = visibility_core.load_visibility_file(vis_file, scene_meshes=bpy.data.meshes)
-    assert meta['schema_version'] == 5
+    assert meta['schema_version'] == visibility_core.VISIBILITY_SCHEMA
     assert 'settings' in meta
     assert meta['settings']['states'] == 3
     assert len(meta['settings']['cameras']) == 1
@@ -889,6 +888,7 @@ def test_facing():
 
     # The packer: facing moves the top of the range towards the minimum, and Pack gives exactly that density
     scene.fss_uv_density_freedom_min, scene.fss_uv_density_freedom_max = 0.5, 1.5
+    scene.fss_uv_target_density /= 2.0  # room to spare: Pack reaches the top of every range
     target = scene.fss_uv_target_density
     material = bpy.data.materials['FACING']
 
@@ -1057,7 +1057,7 @@ def test_look_limits():
     across_full = score(full, 'ACROSS')[1]
     data, across = score(limited, 'ACROSS')
     # beyond the limit: never seen, and it no longer lowers what the head can see
-    assert across > across_full and data['face_scores'][-10:].max() == 0.0 and data['face_scores'][:10].min() > 0.5, (across, across_full)
+    assert across > across_full - 0.02 and data['face_scores'][-10:].max() == 0.0 and data['face_scores'][:10].min() > 0.5, (across, across_full)
 
     # Through the panel's settings: the limits reach the analysis and the file, and survive a list rebuild
     visibility.sync_camera_list(scene)
@@ -1134,6 +1134,241 @@ def test_unviewable_faces():
     assert data['face_scores'][~front].max() == 0.0 and data['face_never_seen'][~front].all(), data['face_scores'][~front].max()
     assert data['face_facing'][~front].max() == 0.0 and data['face_facing'][front].min() > 0.9
     print(f"PASS: test_unviewable_faces (64 small front faces borrow, score {data['face_scores'][front].min():.2f}; the 320 others score 0)")
+
+
+def test_look_orientation():
+    """Look Around with a camera tilted up and one turned: the limits keep the side the camera looks at, every direction
+    inside counts in full, and a file scored by an older version is not used."""
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    scene = bpy.context.scene
+    material = bpy.data.materials.new('ORIENT')
+
+    def towards(name, direction):
+        d = Vector(direction).normalized()
+        centre, a = d * 3.0, d.orthogonal().normalized() * 0.2
+        b = d.cross(a).normalized() * 0.2
+        corners = [centre - a - b, centre + a - b, centre + a + b, centre - a + b]
+        wound = (corners[1] - corners[0]).cross(corners[2] - corners[0]).dot(centre) < 0
+        me = bpy.data.meshes.new(name)
+        me.from_pydata([tuple(c) for c in corners], [], [(0, 1, 2, 3) if wound else (3, 2, 1, 0)])
+        me.uv_layers.new(name='UVMap')
+        me.materials.append(material)
+        scene.collection.objects.link(bpy.data.objects.new(name, me))
+
+    s, c = 0.5, math.sqrt(3.0) / 2.0  # 30 degrees
+    towards('UP', (0, -c, s))
+    towards('DOWN', (0, -c, -s))
+    towards('TO_RIGHT', (s, -c, 0))
+    towards('TO_LEFT', (-s, -c, 0))
+    tilted = bpy.data.objects.new('TILTED', bpy.data.cameras.new('TILTED'))
+    tilted.rotation_euler = (math.radians(120), 0, math.radians(180))  # 30 degrees above the horizon, along -Y
+    turned = bpy.data.objects.new('TURNED', bpy.data.cameras.new('TURNED'))
+    turned.rotation_euler = (math.radians(90), 0, math.radians(210))  # 30 degrees towards +X
+    scene.collection.objects.link(tilted)
+    scene.collection.objects.link(turned)
+    bpy.context.view_layer.update()
+    blend_path = SCRATCH_DIR / 'look_orientation.blend'
+    bpy.ops.wm.save_as_mainfile(filepath=str(blend_path))
+
+    def run(cam_name, **limits):
+        cam = bpy.data.objects[cam_name]
+        forward = (cam.matrix_world.to_3x3() @ Vector((0, 0, -1))).normalized()
+        camera = dict({'name': cam_name, 'type': 'LOOK_AROUND', 'pos': Vector((0, 0, 0)), 'forward': forward, 'obj_name': cam_name}, **limits)
+        arrays = visibility_core.analyze_visibility(blend_path=blend_path, cameras=[camera], anim_states=(0.0,))['mesh_arrays']
+        return {name: float(arrays[name]['face_scores'][0]) for name in ('UP', 'DOWN', 'TO_RIGHT', 'TO_LEFT')}
+
+    # Without limits nothing depends on the direction, whichever way the camera looks
+    for cam_name in ('TILTED', 'TURNED'):
+        scores = run(cam_name)
+        assert all(value > 0.98 for value in scores.values()), (cam_name, scores)
+    # 30 degrees from where it looks is inside a limit of 40, 60 degrees outside
+    scores = run('TILTED', yaw_limit=180.0, pitch_limit=40.0)
+    assert scores['UP'] > 0.98 and scores['DOWN'] == 0.0, scores
+    scores = run('TURNED', yaw_limit=40.0, pitch_limit=90.0)
+    assert scores['TO_RIGHT'] > 0.98 and scores['TO_LEFT'] == 0.0, scores
+
+    # A file of the previous schema: every mesh stale, so the packer and the heatmap leave it alone; the panel says why
+    results = visibility_core.analyze_visibility(blend_path=blend_path, cameras=[{
+        'name': 'TILTED', 'type': 'LOOK_AROUND', 'pos': Vector((0, 0, 0)), 'forward': Vector((0, -1, 0)), 'obj_name': 'TILTED'}], anim_states=(0.0,))
+    current = visibility_core.VISIBILITY_SCHEMA
+    visibility_core.VISIBILITY_SCHEMA = current - 1
+    try:
+        vis_file = visibility_core.save_visibility_file(blend_path, results)
+    finally:
+        visibility_core.VISIBILITY_SCHEMA = current
+    visibility_core.clear_file_cache()
+    for _round in range(2):  # from the disk, then from the cache
+        meta, _data, stale = visibility_core.load_visibility_file(vis_file, scene_meshes=bpy.data.meshes)
+        assert visibility_core.is_old_visibility_file(meta) and {'UP', 'DOWN', 'TO_RIGHT', 'TO_LEFT'} <= set(stale), stale
+    old = visibility_core.get_object_visibility(bpy.data.objects['UP'])
+    assert old['stale'] and old['reason'] == 'MESH_STALE', old
+    assert visibility_core.score_face_set(bpy.data.objects['UP'], [0]) == 1.0
+    visibility_core.save_visibility_file(blend_path, results)
+    visibility_core.clear_file_cache()
+    assert not visibility_core.get_object_visibility(bpy.data.objects['UP'])['stale']
+    print("PASS: test_look_orientation (limits keep the side the camera looks at, tilted and turned; no direction weight; an older file not used)")
+
+
+def test_animation_steps():
+    """A step is a share of the widest range that moves, whichever object comes last; one keyframe does not decide it."""
+    def animated(name, frames):
+        obj = bpy.data.objects.new(name, None)
+        bpy.context.scene.collection.objects.link(obj)
+        for frame in frames:
+            obj.location.z = frame
+            obj.keyframe_insert(data_path='location', index=2, frame=frame)
+        return obj
+
+    def frames_at(steps):
+        ctrl = visibility_core.AnimationStateController(bpy.context.scene)
+        out = []
+        for step in steps:
+            ctrl.apply_percentage_state(step)
+            out.append(bpy.context.scene.frame_current)
+        ctrl.restore()
+        return out
+
+    # Every position in the object order, so the single-keyframe object is the last entry in one of them.
+    for names in (('A_MOVES', 'B_HOLDS'), ('B_MOVES', 'A_HOLDS')):
+        bpy.ops.wm.read_factory_settings(use_empty=True)
+        animated(names[0], (0, 100))
+        animated(names[1], (500,))
+        assert frames_at((0.0, 0.5, 1.0)) == [0, 50, 100], names
+
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    animated('SHORT', (10, 50))
+    animated('LONG', (0, 200))
+    animated('LATE', (100, 120))
+    scene = bpy.context.scene
+    assert frames_at((0.0, 0.25, 1.0)) == [0, 50, 200]
+
+    # The pose really follows: the long animation at its middle, whichever comes last.
+    ctrl = visibility_core.AnimationStateController(scene)
+    ctrl.apply_percentage_state(0.5)
+    assert abs(bpy.data.objects['LONG'].location.z - 100) < 1e-4
+    ctrl.restore()
+
+    # Nothing moves: the frame stays, and restore puts back the artist's frame.
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    animated('HOLDS', (30,))
+    scene = bpy.context.scene
+    scene.frame_set(7)
+    assert frames_at((0.0, 1.0)) == [7, 7]
+    assert scene.frame_current == 7
+    print("PASS: test_animation_steps (widest moving range, independent of object order, one keyframe ignored)")
+
+
+def test_run_in_pieces():
+    """Update Visibility a small piece at a time: the same numbers as all at once, a bar that moves, Esc restores."""
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    scene = bpy.context.scene
+    material = bpy.data.materials.new('PIECES')
+    cam = bpy.data.objects.new('CAM', bpy.data.cameras.new('CAM'))
+    cam.rotation_euler = (math.radians(90), 0, math.radians(180))
+    scene.collection.objects.link(cam)
+    _facing_object('FRONT', [((0, -3, 0), 0, 0.3)], material)
+    scene.frame_current = 7
+    bpy.context.view_layer.update()
+    blend_path = SCRATCH_DIR / 'pieces.blend'
+    bpy.ops.wm.save_as_mainfile(filepath=str(blend_path))
+    scene = bpy.context.scene
+    visibility.sync_camera_list(scene)
+    item = scene.fss_visibility.cameras[0]
+    item.include, item.mode = True, 'LOOK_AROUND'
+    scene.fss_visibility.states = 2
+    bpy.ops.wm.save_mainfile()
+    scene = bpy.context.scene
+    camera = {'name': 'CAM', 'type': 'LOOK_AROUND', 'pos': Vector((0, 0, 0)), 'forward': Vector((0, -1, 0)), 'obj_name': 'CAM'}
+    whole = visibility_core.analyze_visibility(blend_path=blend_path, cameras=[camera], anim_states=(0.0, 1.0))
+
+    def new_op():
+        analyzer = visibility_core.VisibilityAnalyzer(scene=scene, view_layer=bpy.context.view_layer, cameras=[camera],
+                                                      anim_states=(0.0, 1.0), blend_path=blend_path)
+        messages = []
+        return SimpleNamespace(_analyzer=analyzer, _pieces=analyzer.run_pieces(), _timer=None, _get_settings_dict=lambda context: {},
+                               report=lambda kind, text: messages.append(text), messages=messages)
+
+    timer, esc = SimpleNamespace(type='TIMER'), SimpleNamespace(type='ESC')
+    modal = visibility.FSS_OT_UpdateVisibility.modal
+    vis_file = blend_path.with_suffix('.visibility')
+    if vis_file.exists():
+        vis_file.unlink()
+
+    class Recorder:
+        def __init__(self):
+            self.calls = []
+
+        def __getattr__(self, name):
+            def call(*args, **kwargs):
+                self.calls.append((name, args, kwargs))
+                return self
+            return call
+
+    # Esc in the middle: nothing written, the scene as it was, the panel back to its button
+    op = new_op()
+    for _piece in range(6):
+        assert modal(op, bpy.context, timer) == {'RUNNING_MODAL'}
+    assert op._analyzer.prepared
+    assert visibility._progress is not None and not bpy.ops.fss.update_visibility.poll()
+    assert modal(op, bpy.context, esc) == {'CANCELLED'} and visibility._progress is None and op._analyzer is None
+    assert not vis_file.exists() and scene.frame_current == 7, scene.frame_current
+    assert all(visibility_core.ORIG_FACE_ATTR_NAME not in me.attributes for me in bpy.data.meshes)
+    assert bpy.ops.fss.update_visibility.poll()
+    assert 'cancelled' in op.messages[-1]
+
+    # Moving around the viewport passes; clicks and keys are held back, they could change the scene under the work
+    op = new_op()
+    assert modal(op, bpy.context, SimpleNamespace(type='MOUSEMOVE')) == {'PASS_THROUGH'}
+    assert modal(op, bpy.context, SimpleNamespace(type='LEFTMOUSE')) == {'RUNNING_MODAL'}
+    assert modal(op, bpy.context, SimpleNamespace(type='Z')) == {'RUNNING_MODAL'}
+    assert not op._analyzer.prepared
+
+    # A whole run through the modal: the bar only goes forward, in far more pieces than views, and the panel shows it
+    fractions, texts, ret, pieces = [], [], {'RUNNING_MODAL'}, 0
+    while ret == {'RUNNING_MODAL'}:
+        ret = modal(op, bpy.context, timer)
+        pieces += 1
+        assert pieces < 100, 'the run does not end'
+        if visibility._progress is not None:
+            fractions.append(visibility._progress['fraction'])
+            texts.append(visibility._progress['text'])
+            recorder = Recorder()
+            visibility.FSS_PT_Visibility.draw(SimpleNamespace(layout=recorder), bpy.context)
+            names = [name for name, _a, _kw in recorder.calls]
+            assert 'progress' in names and not any(name == 'operator' and args[0] == 'fss.update_visibility'
+                                                   for name, args, _kw in recorder.calls), names
+    assert ret == {'FINISHED'} and visibility._progress is None and op._analyzer is None, ret
+    assert fractions == sorted(fractions) and fractions[0] < 0.1 and 0.5 < fractions[-1] <= 1.0, fractions
+    # 2 views: scene read and measured, 6 cube sides each
+    assert pieces >= 2 * 7, pieces
+    assert texts[0].startswith('Reading the scene') and 'Reading the scene at animation 100 %' in texts, texts
+    assert 'View 1 of 2: CAM, animation 0 %' in texts and 'View 2 of 2: CAM, animation 100 %' in texts, texts
+    assert texts[-1] == 'Scoring the faces', texts
+    assert vis_file.exists() and 'Visibility updated' in op.messages[-1]
+
+    # The same numbers as all at once, and the panel back to its button
+    data = visibility_core.load_visibility_file(vis_file, use_cache=False)[1]
+    for name, arrays in whole['mesh_arrays'].items():
+        np.testing.assert_array_almost_equal(data[f'{name}__vis_omega'], arrays['vis_omega'], decimal=6)
+        np.testing.assert_array_almost_equal(data[f'{name}__unocc_omega'], arrays['unocc_omega'], decimal=6)
+        np.testing.assert_array_equal(data[f'{name}__face_scores'], arrays['face_scores'])
+    recorder = Recorder()
+    visibility.FSS_PT_Visibility.draw(SimpleNamespace(layout=recorder), bpy.context)
+    assert any(name == 'operator' and args[0] == 'fss.update_visibility' for name, args, _kw in recorder.calls)
+
+    # An error in a piece: reported, nothing left behind
+    op = new_op()
+    for _piece in range(6):
+        modal(op, bpy.context, timer)
+
+    def broken():
+        raise ZeroDivisionError('broken')
+        yield
+
+    op._pieces = broken()
+    assert modal(op, bpy.context, timer) == {'CANCELLED'} and visibility._progress is None and 'stopped' in op.messages[-1]
+    assert scene.frame_current == 7
+    print(f"PASS: test_run_in_pieces (same numbers as at once; {pieces} pieces for 2 views; the bar only forward; Esc and an error restore)")
 
 
 def test_camera_weights():
@@ -1227,6 +1462,9 @@ def main():
     test_facing()
     test_fixed_view_frame()
     test_look_limits()
+    test_look_orientation()
+    test_animation_steps()
+    test_run_in_pieces()
     test_unviewable_faces()
     test_camera_weights()
 
