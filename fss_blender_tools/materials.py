@@ -26,6 +26,7 @@ estimate (decision 13), read from the material when drawing, so it shows without
   (uv_marks._object_visibility: never below 0.1, never seen 0.1), 1.0 when the .blend is unsaved, its .visibility
   file is missing or the mesh is stale; a shared mesh uses its first user, as for the area. The file is read once per
   Refresh (visibility_core's cache). Check All (uv_pack.measure) gives the packed truth.
+- Refresh also fills the Texture Sets sub-panel (texture_sets.py) for the used materials.
 """
 
 import math
@@ -35,7 +36,7 @@ from pathlib import Path
 import bpy
 import numpy as np
 
-from . import merge, tags, uv_marks, uv_pack, visibility_core
+from . import merge, tags, texture_sets, uv_marks, uv_pack, visibility_core
 
 NO_ZONE = '(no zone)'
 NO_ZONE_SHORT = '–'  # an en dash: a list row's zone column for objects outside every zone
@@ -348,6 +349,9 @@ class FSS_OT_MaterialsRefresh(bpy.types.Operator):
                 zone.zone = key
                 zone.objects = objects
                 zone.area = area
+        # the Texture Sets sub-panel's rows: the used materials' slots, from the files' headers (journal Session 33)
+        texture_sets.refresh(context.scene, [bpy.data.materials[row.name] for row in settings.rows
+                                             if not row.never_used])
         settings.scanned = True
         if settings.active < 0 and settings.rows:
             settings.active = 0

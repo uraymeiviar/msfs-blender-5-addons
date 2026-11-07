@@ -41,6 +41,7 @@ EXPECTED = {
     'FSS_PT_merge': ("Zones & Merge Tree", '', 0, MSFS),
     'FSS_PT_materials': ("Materials", '', 1, MSFS),
     'FSS_PT_materials_by_need': ("By Texture Need", 'FSS_PT_materials', 0, MSFS),
+    'FSS_PT_texture_sets': ("Texture Sets", 'FSS_PT_materials', 1, MSFS),
     'FSS_PT_tags': ("Tags", '', 2, MSFS),
     'FSS_PT_lod': ("Object LOD", '', 3, MSFS),
     'FSS_PT_lod_viewport': ("Viewport LOD", '', 4, MSFS),
