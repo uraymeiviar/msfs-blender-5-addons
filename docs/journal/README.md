@@ -19,6 +19,7 @@ Task journals of this repository: design, decisions, progress and hand-offs, one
 | [20261103.anisotropic-preview.md](20261103.anisotropic-preview.md) | Anisotropic and Hair textures in Material Preview and Rendered views, exports unchanged | Implemented, review open |
 | [20261103.weighted-normal-instancing.md](20261103.weighted-normal-instancing.md) | Shared meshes with Weighted Normal exported once, for batched draw calls | Reviewed, MSFS check open |
 | [20261105.uv-seam-mismatch-substance.md](20261105.uv-seam-mismatch-substance.md) | Artists' seam mismatch in Substance Painter (triplanar), and 16-bit UVs | Paused, waiting for a session with Substance |
+| [20261110.wiper-mask-16bit.md](20261110.wiper-mask-16bit.md) | Wiper Mask Generator saves 16 bits per channel | Done, MSFS check open |
 
 The first five were started in the FSS aircraft repository (`codes/wasm/doc/journal/`) and moved here; their copies
 there end with a session pointing here.

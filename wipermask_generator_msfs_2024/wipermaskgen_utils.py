@@ -251,13 +251,17 @@ def prepare_output_texture(
     if name in bpy.data.images:
         bpy.data.images.remove(bpy.data.images[name])
 
+    # FSS: a float image saved as PNG with 16 bits per channel (the SDK recommends 16-bit lossless input); the sweep
+    # time (R) and blade position (B) come from float vertex colors and lose their in-between values in 8 bits
     bpy.ops.image.new(
         name=name,
         color=(0, 0, 0, 0),
         width=output_texture_size,
-        height=output_texture_size
+        height=output_texture_size,
+        float=True
     )
     img = bpy.data.images[name]
+    img.file_format = "PNG"
 
     bpy.context.area.spaces.active.image = img
     bpy.ops.image.save_as(filepath=output_path)

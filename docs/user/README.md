@@ -270,7 +270,7 @@ The portable Blender in `tools/blender` of the aircraft repository enables these
 | `fss_blender_tools` | FSS Blender Tools | The **FSS MSFS Tools** sidebar tab (in the 3D Viewport and the UV Editor) and the **FSS Tools** sidebar tab (in the 3D Viewport) |
 | `io_scene_gltf2_msfs_fss` | Microsoft Flight Simulator 2020 + 2024: glTF Extension (FSS) | glTF export for MSFS 2024 and MSFS 2020 from one `.blend`; replaces the separate MSFS 2024 and MSFS 2020 exporters |
 | `lod_tools_msfs_2024` | LOD Tools | Asobo LOD utilities; its panel is hidden by default (see [exporter.md](exporter.md#asobo-export-workflow-hidden)) |
-| `wipermask_generator_msfs_2024` | Wiper Mask Generator | Asobo windshield wiper mask generator |
+| `wipermask_generator_msfs_2024` | Wiper Mask Generator | Asobo windshield wiper mask generator; saves the mask as PNG with 16 bits per channel |
 | `_addons_common` | (shared code) | Required by the Asobo add-ons; not an add-on itself |
 
 Do not enable the original `io_scene_gltf2_msfs_2024` or `io_scene_gltf2_msfs_2020` add-ons next to the FSS exporter.
