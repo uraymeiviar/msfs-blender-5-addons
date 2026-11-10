@@ -36,6 +36,9 @@ NO_MERGE_PREFIX = "@NOMERGE_"
 MARKERS = (PREFIX, NO_MERGE_PREFIX)
 # Zone empties keep their name at export, without the "@" (@ZONE_FWD exports as ZONE_FWD)
 ZONE_PREFIX = "@ZONE_"
+# Never written: its children go to the glTF root, in place (Asobo wants collision meshes at the root; the empty lets
+# the artist move them together in Blender)
+ROOT_PREFIX = "@ROOT_"
 # Set by the MSFS 2024 multi-exporter on its duplicates; the exporter writes it as the glTF node name
 ORIGINAL_NAME_KEY = "msfs_original_name"
 # Set by the multi-exporter on its export copies of materials: the material the artist assigned
@@ -88,6 +91,10 @@ def is_zone(obj) -> bool:
     return logical_name(obj).startswith(ZONE_PREFIX)
 
 
+def is_root_marker(obj) -> bool:
+    return logical_name(obj).startswith(ROOT_PREFIX)
+
+
 def nearest_zone(obj):
     """The nearest @ZONE_ empty at or above obj, or None outside every zone."""
     while obj is not None:
@@ -108,6 +115,8 @@ def skip_reason(obj, skip_tags) -> str:
         return f"own {PREFIX} group"
     if logical_name(obj).startswith(NO_MERGE_PREFIX):
         return f"{NO_MERGE_PREFIX} node"
+    if is_root_marker(obj):
+        return f"{ROOT_PREFIX} node"
     return _unmergeable(obj, skip_tags)
 
 
@@ -588,20 +597,21 @@ class glTF2ExportUserExtension:
         _strip_fss_extras(gltf2_scene)
 
     def gather_tree_filter_tag_hook(self, vtree, export_settings):
-        # No Export (UV journal decision 130): after the exporter decides what to keep and before it removes the rest.
-        # A removed node's kept children would move up to the nearest kept parent, so the whole subtree goes.
+        # After the exporter decides what to keep and before it removes the rest
         scene = bpy.context.scene
-        if not tags.get_mark_tags(scene, tags.NO_EXPORT_PROP):
-            return
-        stack = [uuid for uuid, node in vtree.nodes.items()
-                 if node.blender_object is not None and tags.is_no_export(node.blender_object, scene)]
-        while stack:
-            uuid = stack.pop()
-            node = vtree.nodes.get(uuid)
-            if node is None or node.keep_tag is False:
-                continue
-            node.keep_tag = False
-            stack.extend(node.children)
+        if tags.get_mark_tags(scene, tags.NO_EXPORT_PROP):
+            # No Export (UV journal decision 130): a removed node's kept children would move up to the nearest kept
+            # parent, so the whole subtree goes
+            stack = [uuid for uuid, node in vtree.nodes.items()
+                     if node.blender_object is not None and tags.is_no_export(node.blender_object, scene)]
+            while stack:
+                uuid = stack.pop()
+                node = vtree.nodes.get(uuid)
+                if node is None or node.keep_tag is False:
+                    continue
+                node.keep_tag = False
+                stack.extend(node.children)
+        _lift_root_markers(vtree, export_settings)
 
     def pre_export_hook(self, export_settings):
         self._marked_nodes, self._marked_keep = {}, []
@@ -646,6 +656,36 @@ class glTF2ExportUserExtension:
         merged, created = run(context, exported, selected_export, log)
         lod_model.record_merge(created)
         log(f"{merged} merge group(s) merged, {len(created)} object(s) created for the export", warning=False)
+
+
+def _lift_root_markers(vtree, export_settings):
+    """Every @ROOT_ node becomes a root that is not written, so the exporter moves its kept children to the glTF root;
+    grandchildren keep their parents. The exporter computes local transforms afterwards from world transforms (static
+    and sampled), so the children stay in place."""
+    from io_scene_gltf2.blender.exp.tree import VExportNode
+    for uuid, node in list(vtree.nodes.items()):
+        obj = node.blender_object
+        # A bone node carries its armature object
+        if obj is None or node.blender_type == VExportNode.BONE or not is_root_marker(obj):
+            continue
+        if node.parent_uuid is not None:
+            parent = vtree.nodes[node.parent_uuid]
+            parent.children.remove(uuid)
+            parent.children_type.pop(uuid, None)
+            node.parent_uuid = None
+            node.parent_bone_uuid = None
+            vtree.roots.append(uuid)
+        node.keep_tag = False
+        name = logical_name(obj)
+        _log(export_settings, f"{name}: {len(node.children)} child node(s) moved to the glTF root", warning=False,
+             detail=True)
+        # A child that is not animated itself is written once, in place: motion from above it is lost
+        moving = obj
+        while moving is not None and not _is_animated(moving) and moving.parent_type != 'BONE':
+            moving = moving.parent
+        if moving is not None:
+            _log(export_settings, f"{name}: {logical_name(moving)} is animated or follows a bone; its children at the "
+                 "glTF root do not follow that motion", warning=True)
 
 
 def _group_summary(group):

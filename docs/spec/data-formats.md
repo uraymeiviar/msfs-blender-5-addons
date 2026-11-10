@@ -283,6 +283,7 @@ requirements that use it. Properties that are registered (`bpy.props`) are saved
   | `@ZONE_<NAME>` | zone empty (ZON-001) | `ZONE_<NAME>` |
   | `@MERGE_<name>` | merge group root (MRG-001) | `<name>` |
   | `@NOMERGE_<name>` | kept out of its group (MRG-004) | `<name>` |
+  | `@ROOT_<name>` | not written; its children go to the glTF root (MRG-015) | not exported |
   | `@<other>` | any other leading `@` | `<other>` |
 
   `@` has no meaning in Blender, glTF, the model XML or `.cfg` files. A name that is only `@` characters is

@@ -36,7 +36,7 @@ with a `@NOMERGE_Button`) in seven LOD exports for both simulators, and cannot b
 
 - **Status:** implemented
 - **Requirement:** Inside a group, these objects stay their own nodes, with their subtrees: a nested `@MERGE_` group;
-  a `@NOMERGE_` object (MRG-004); an animated object (an action or NLA tracks); a skinned object (an armature, or an
+  a `@NOMERGE_` object (MRG-004); a `@ROOT_` object (MRG-015); an animated object (an action or NLA tracks); a skinned object (an armature, or an
   object with an Armature modifier); an object parented to a bone (except the root); a mesh with shape keys; an
   object with a Don't Merge tag (TAG-005); an object that is not a mesh, curve, surface, text, metaball or empty. If
   the root itself is animated or skinned, the whole group stays unmerged, with a warning. A bone-parented root
@@ -178,6 +178,22 @@ with a `@NOMERGE_Button`) in seven LOD exports for both simulators, and cannot b
 - **Decision:** TM S15.1
 - **Test:** `tests/test_zone_tree.py::test_stray`
 - **Code:** `merge.py` (`stray_objects`, `is_animated_object`, `FSS_OT_MergeSelectStray`)
+
+### MRG-015: `@ROOT_`
+
+- **Status:** implemented
+- **Requirement:** An object named `@ROOT_<name>` is never written. Each of its direct children goes to the glTF root
+  and keeps its world position, rotation and scale; their own children stay below them. This holds anywhere in the
+  tree (below a zone, below another node) and in every export (File > Export and the MSFS 2024 multi-exporter, for
+  both simulators). Inside a merge group it stays out of the merge with its subtree (MRG-003), so its children still
+  reach the root. When the `@ROOT_` object or a node above it is animated or follows a bone, the export warns: a child
+  that is not animated itself is written once, in place, without that motion. No Export (UV journal decision 130) still removes a
+  tagged subtree. Scan Names accepts the name and never reports it as a clash, as it is never exported.
+- **Data:** DAT-033
+- **Decision:** tags-and-merge journal S17.1
+- **Test:** `tests/test_root_marker.py`
+- **Code:** `merge.py` (`ROOT_PREFIX`, `_lift_root_markers`, `gather_tree_filter_tag_hook`, `skip_reason`);
+  `name_check.py` (`check_names`)
 
 ## Wishes
 

@@ -36,6 +36,7 @@ Merge groups join many small objects into one mesh at export, while every part s
 - **`@ZONE_<NAME>`:** a zone empty (see [step 2 of the Artist Guide](README.md#2-zones-and-materials-in-development)). Every merge group belongs below one zone; a zone never lies inside a merge group or inside another zone.
 - **`@MERGE_<name>`:** an object (empty or mesh) with this name prefix starts a merge group. At export, it and its subtree become one mesh named `<name>`. A mesh root merges its own geometry too.
 - **`@NOMERGE_<name>`:** an object inside a group with this prefix stays out of the merge, with its subtree, and is exported as `<name>`.
+- **`@ROOT_<name>`:** an object (usually an empty) with this prefix is not exported. Its children go to the root of the glTF and keep their position, rotation and scale; their own children stay below them. Use it for objects MSFS wants at the root, such as collision meshes, while keeping a pivot empty to move them together in Blender. Inside a merge group it stays out of the merge with its subtree. Don't animate the `@ROOT_` empty or anything above it: its children at the root would not follow, and the export warns.
 - The prefixes never reach the glTF: exported names are always without them.
 - Any other name starting with `@` loses only the `@` at export: a zone empty `@ZONE_FWD` exports as `ZONE_FWD`. Make sure no other object exports under the same name; **Scan Names** reports it (`CLS`).
 
@@ -45,6 +46,7 @@ Inside a group, these objects stay their own nodes, together with everything bel
 
 - a nested `@MERGE_` group (it merges on its own and becomes a child of the outer merged mesh);
 - a `@NOMERGE_` object;
+- a `@ROOT_` object (its children go to the glTF root);
 - an animated object (an action or NLA tracks);
 - a skinned object (an armature, or a mesh with an Armature modifier);
 - an object parented to a bone (the group root itself may be bone-parented: the merged mesh keeps that bone parent);

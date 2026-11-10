@@ -10,7 +10,7 @@ import re
 
 import bpy
 
-from .merge import MARKERS, strip_markers
+from .merge import MARKERS, ROOT_PREFIX, strip_markers
 
 SUFFIX = re.compile(r"^(.*)\.(\d{3,})$")
 # Asobo LOD prefix (x0_, x1_ ...), matched case-insensitively by the multi-exporter; kept as written
@@ -97,11 +97,13 @@ def check_names(names, taken):
             findings[name] = (rules, proposal)
 
     # Two names that export the same once the export strips their '@' marker (@ABCD next to ABCD)
+    # A @ROOT_ node is never written, so it cannot clash
     exported = {}
     for name in taken:
-        exported.setdefault(strip_markers(name), []).append(name)
+        if not name.startswith(ROOT_PREFIX):
+            exported.setdefault(strip_markers(name), []).append(name)
     for name in names:
-        if len(exported.get(strip_markers(name), ())) > 1:
+        if not name.startswith(ROOT_PREFIX) and len(exported.get(strip_markers(name), ())) > 1:
             rules, proposal = findings.get(name, (set(), name))
             findings[name] = (rules | {"CLASH"}, proposal)
     return findings
