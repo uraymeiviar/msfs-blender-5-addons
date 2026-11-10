@@ -557,7 +557,7 @@ class TreeManager:
 
         More infos here: https://docs.blender.org/api/current/bpy.msgbus.html#module-bpy.msgbus
         """
-        if not (self.MULTISELECTION_SUPPORT and self.MULTI_EDIT_PROPERTIES) or not self.TRIGGER_GEN_TREE_PROPERTIES:
+        if not (self.MULTISELECTION_SUPPORT and self.MULTI_EDIT_PROPERTIES) :
             return
         owner = type(self)
 

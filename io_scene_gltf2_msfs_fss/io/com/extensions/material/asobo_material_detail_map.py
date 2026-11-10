@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import bpy
+from itertools import chain
 
 from io_scene_gltf2.io.com.gltf2_io_extensions import Extension
 
@@ -33,10 +34,10 @@ class AsoboMaterialDetailExtension:
     extension_textures = [
         MSFS2024_MaterialProperties.DETAILCOLORTEXTURE,
         MSFS2024_MaterialProperties.DETAILOMRTEXTURE,
-        MSFS2024_MaterialProperties.DETAILNORMALTEXTURE,
         MSFS2024_MaterialProperties.BLENDMASKTEXTURE
     ]
 
+    extension_normal_textures = [MSFS2024_MaterialProperties.DETAILNORMALTEXTURE,]
     @staticmethod
     def from_dict(blender_material, gltf2_material, import_settings):
         extensions = gltf2_material.extensions
@@ -55,7 +56,7 @@ class AsoboMaterialDetailExtension:
                 attribute=extension_parameter
             )
         
-        for extension_texture in AsoboMaterialDetailExtension.extension_textures:
+        for extension_texture in chain(AsoboMaterialDetailExtension.extension_textures, AsoboMaterialDetailExtension.extension_normal_textures):
 
             MSFS2024_MaterialUtils.get_extension_texture(
                 extension=extension,
@@ -89,6 +90,14 @@ class AsoboMaterialDetailExtension:
                 settings=export_settings,
             )
 
+        for extension_texture in AsoboMaterialDetailExtension.extension_normal_textures:
+            MSFS2024_MaterialUtils.set_extension_texture(
+                extension=result,
+                material=blender_material,
+                attribute=extension_texture,
+                settings=export_settings,
+                is_normal=True
+            )
         
         if not result:
             return

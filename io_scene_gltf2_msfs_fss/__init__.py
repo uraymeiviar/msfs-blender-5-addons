@@ -23,7 +23,7 @@ bl_info = {
     "description": "Toolkit to export/import GLTF Models for Microsoft Flight Simulator 2024 and 2020 (per scene export target)",
     "location": "View 3d Tools and Menus, Objects properties, Material properties and Light properties",
     "blender": (3, 3, 0),
-    "version": (8, 4, 1),
+    "version": (8, 4, 2),
     "category": "Import-Export",
     "doc_url": "https://docs.flightsimulator.com/msfs2024/html/3_Models_And_Textures/Plugins/Blender_Plugin/Blender_Plugin_Properties.htm"
 }

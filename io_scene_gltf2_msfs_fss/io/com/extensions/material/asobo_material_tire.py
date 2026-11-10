@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import bpy
+from itertools import chain
 
 from io_scene_gltf2.io.com.gltf2_io_extensions import Extension
 
@@ -25,19 +26,19 @@ from .....io.com.msfs_material_utils import MSFS2024_MaterialUtils
 class AsoboMaterialTireExtension:
 
     extension_name = "ASOBO_material_tire"
-    
+
     extension_parameters = [
         MSFS2024_MaterialProperties.TIREMUDNORMALTILING,
         MSFS2024_MaterialProperties.TIREDUSTANIMSTATE,
         MSFS2024_MaterialProperties.TIREMUDANIMSTATE
     ]
-    
+
     extension_textures = [
         MSFS2024_MaterialProperties.TIREMUDCUTOUTTEXTURE,
-        MSFS2024_MaterialProperties.TIREDETAILSTEXTURE,
-        MSFS2024_MaterialProperties.TIREMUDNORMALTEXTURE
+        MSFS2024_MaterialProperties.TIREDETAILSTEXTURE
+        
     ]
-    
+    extension_normal_textures = [MSFS2024_MaterialProperties.TIREMUDNORMALTEXTURE]
     @staticmethod
     def from_dict(blender_material, gltf2_material, import_settings):
         extensions = gltf2_material.extensions
@@ -62,10 +63,11 @@ class AsoboMaterialTireExtension:
                 material=blender_material,
                 attribute=extension_parameter
             )
-            
-        for extension_texture in AsoboMaterialTireExtension.extension_textures:
-            if isinstance(extension_texture, tuple) and len(extension_texture) > 1:
-                extension_texture = extension_texture[0]
+
+        for extension_texture in chain(
+            AsoboMaterialTireExtension.extension_textures,
+            AsoboMaterialTireExtension.extension_normal_textures,
+        ):
 
             MSFS2024_MaterialUtils.get_extension_texture(
                 extension=extension,
@@ -73,12 +75,11 @@ class AsoboMaterialTireExtension:
                 attribute=extension_texture,
                 settings=import_settings
             )
-        
 
     @staticmethod
     def to_extension(blender_material, gltf2_material, export_settings):
         result = {}
-        
+
         for extension_parameter in AsoboMaterialTireExtension.extension_parameters:
             MSFS2024_MaterialUtils.set_extension_parameter(
                 extension=result,
@@ -94,10 +95,19 @@ class AsoboMaterialTireExtension:
                 attribute=extension_texture,
                 settings=export_settings
             )
-            
+        for extension_texture in AsoboMaterialTireExtension.extension_normal_textures:
+        
+            MSFS2024_MaterialUtils.set_extension_texture(
+                extension=result,
+                material=blender_material,
+                attribute=extension_texture,
+                settings=export_settings,
+                is_normal=True
+            )
+        
         if not result:
             return
-        
+
         gltf2_material.extensions[AsoboMaterialTireExtension.extension_name] = Extension(
             name=AsoboMaterialTireExtension.extension_name,
             extension=result,

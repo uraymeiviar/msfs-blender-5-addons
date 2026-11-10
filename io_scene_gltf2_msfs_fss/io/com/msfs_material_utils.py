@@ -42,6 +42,11 @@ else:
             gather_texture_info
         )
 
+from io_scene_gltf2.io.com.gltf2_io import (
+    TextureInfo,
+    MaterialOcclusionTextureInfoClass,
+    MaterialNormalTextureInfoClass
+)
 
 from ...blender.utils.msfs_material_nodes_utils import (
     add_node,
@@ -75,6 +80,7 @@ class MSFS2024_MaterialUtils:
         blender_material: bpy.types.Material,
         attribute: str,
         export_settings: dict,
+        is_normal: bool = False
     ):
         image = getattr(
             blender_material,
@@ -89,7 +95,8 @@ class MSFS2024_MaterialUtils:
         if texture_info is None:
             texture_info = MSFS2024_MaterialUtils.export_image(
                 blender_image=image,
-                export_settings=export_settings
+                export_settings=export_settings,
+                is_normal=is_normal
             )
 
             # Add texture in exported_textures map
@@ -110,7 +117,9 @@ class MSFS2024_MaterialUtils:
         return bpy.data.images[pyimg.blender_image_name]
 
     @staticmethod
-    def export_image(blender_image: bpy.types.Image, export_settings):
+    def export_image(
+        blender_image: bpy.types.Image, export_settings, is_normal: bool = False
+    ) -> TextureInfo | MaterialNormalTextureInfoClass | None:
         # Make sure image is editable or gather_texture_info will return None
         # It happens when image is linked
         if not data_utils.is_editable(blender_image):
@@ -157,12 +166,12 @@ class MSFS2024_MaterialUtils:
         texture_info = None
 
         # region Gather texture info
-  
+
         link(
             links,
             texture_node.outputs[0],
             principled_bsdf_node.inputs[MSFS2024_PrincipledBSDFInputs.BASECOLOR.value]
-        )
+            )
 
         if bpy.app.version >= (4, 2, 0):
             node_socket = NodeSocket(
@@ -182,8 +191,6 @@ class MSFS2024_MaterialUtils:
                 export_settings
             )
 
-        
-
         # endregion
 
         # Restore saved image file path
@@ -196,10 +203,54 @@ class MSFS2024_MaterialUtils:
         if isinstance(texture_info, tuple):
             texture_info = texture_info[0]
 
+        if texture_info is None:
+            return None
+        
         if hasattr(texture_info, "tex_coord"):
             texture_info.tex_coord = None
 
+        
+        if is_normal:
+            texture_info = MSFS2024_MaterialUtils.cast_to_normal_texture_info(texture_info)
+
         return texture_info
+
+    @staticmethod
+    def create_new_occlusion_texture_info() -> MaterialOcclusionTextureInfoClass:
+        fields = {
+            "extensions": None,
+            "extras": None,
+            "index": None,
+            "strength": None,
+            "tex_coord": None,  # This will be set later, as some data are dependant of mesh or object
+        }
+        return  MaterialOcclusionTextureInfoClass(**fields)
+    
+    @staticmethod
+    def cast_to_occlusion_texture_info(
+        texture_info: TextureInfo,
+    ) -> MaterialOcclusionTextureInfoClass:
+        fields = {
+            "extensions": texture_info.extensions,
+            "extras": texture_info.extras,
+            "index": texture_info.index,
+            "strength": None,
+            "tex_coord": texture_info.tex_coord,  # This will be set later, as some data are dependant of mesh or object
+        }
+        return  MaterialOcclusionTextureInfoClass(**fields)
+
+    @staticmethod
+    def cast_to_normal_texture_info(
+        texture_info: TextureInfo,
+    ) -> MaterialNormalTextureInfoClass:
+        fields = {
+            "extensions": texture_info.extensions,
+            "extras": texture_info.extras,
+            "index": texture_info.index,
+            "scale": None,
+            "tex_coord": texture_info.tex_coord,  # This will be set later, as some data are dependant of mesh or object
+        }
+        return MaterialNormalTextureInfoClass(**fields)
 
     @staticmethod
     def _set_material_for_export(material: bpy.types.Material):
@@ -388,10 +439,7 @@ class MSFS2024_MaterialUtils:
 
     @staticmethod
     def set_extension_texture(
-        extension,
-        material,
-        attribute,
-        settings
+        extension, material, attribute, settings, is_normal: bool = False
     ):
         material_value = getattr(material, attribute.attribute_name())
         if material_value is None:
@@ -401,7 +449,7 @@ class MSFS2024_MaterialUtils:
             attribute.extension_name()
             and material_value != attribute.default_value()
         ):
-            texture_info = MSFS2024_MaterialUtils.get_texture_info(material, attribute.attribute_name(), settings)
+            texture_info = MSFS2024_MaterialUtils.get_texture_info(material, attribute.attribute_name(), settings, is_normal)
 
             if not texture_info:
                 return

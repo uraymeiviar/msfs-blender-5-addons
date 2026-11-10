@@ -54,7 +54,7 @@ def is_process_success(process: subprocess.CompletedProcess ) -> bool:
 
     return True
 
-def run_p4_cmd(cmd: list[str], env: dict | None = None) -> subprocess.CompletedProcess:
+def _run_cmd(cmd: list[str], env: dict | None = None) -> subprocess.CompletedProcess:
 
     return subprocess.run(
         cmd,
@@ -75,7 +75,7 @@ def _use_p4():
     Subprocess creation is slow, and p4 can be slow to respond. 
     """
     try:
-        process = run_p4_cmd(["p4", "info"])
+        process = _run_cmd(["p4", "info"])
         if is_process_success(process):
             return True
     except Exception as e:  # in case p4 is not installed
@@ -87,11 +87,9 @@ def _use_p4():
 USE_P4 = _use_p4()
 
 
-def get_client_workspaces()->list[WorkspaceInfo]:
-    # Fork: p4 may not be installed (push_p4_session calls this after every export)
+def get_client_workspaces() -> list[WorkspaceInfo]:
     if not USE_P4:
         return []
-
     cmd = ["p4", "clients", "--me"]
     process = subprocess.run(
         cmd, 
@@ -117,7 +115,12 @@ def get_client_workspaces()->list[WorkspaceInfo]:
 
     return workspaces
 
-def get_file_workspace(filepath: str| Path, workspaces: list[WorkspaceInfo] | None = None) ->None|WorkspaceInfo:
+
+def get_file_workspace(
+    filepath: str | Path, workspaces: list[WorkspaceInfo] | None = None
+) -> None | WorkspaceInfo:
+    if not USE_P4:
+        return None
     if workspaces is None:
         workspaces = get_client_workspaces()
     filepath = Path(filepath)
@@ -128,17 +131,23 @@ def get_file_workspace(filepath: str| Path, workspaces: list[WorkspaceInfo] | No
         return wp
     return None
 
-def create_p4_client_env(workspace_name:str)->dict:
+
+def create_p4_client_env(workspace_name: str) -> dict:
     environ = os.environ.copy()
     environ["P4CLIENT"] = workspace_name
     return environ
 
-def p4_edit(filepath: str | Path, 
-            changelist_name:str="default", 
-            p4_output: P4LogOutput | None = None)->bool:
+
+def p4_edit(
+    filepath: str | Path,
+    changelist_name: str = "default",
+    p4_output: P4LogOutput | None = None,
+) -> bool:
     """This function can be quite slow. 
     Consider using a p4_session_edit to group your p4 commands into one.
     """
+    if not USE_P4:
+        return True
     filepath = Path(filepath).as_posix()
     file_workspace = get_file_workspace(filepath)
 
@@ -150,7 +159,7 @@ def p4_edit(filepath: str | Path,
         return True
 
     # Check if file is synced to latest revision
-    check_synced = run_p4_cmd(["p4", "sync", "-n", filepath], environ)
+    check_synced = _run_cmd(["p4", "sync", "-n", filepath], environ)
 
     if check_synced.stdout: 
         if p4_output is not None:
@@ -159,13 +168,13 @@ def p4_edit(filepath: str | Path,
 
     process = None
     # Check file status first
-    fstat_process = run_p4_cmd(["p4", "fstat", filepath], environ)
+    fstat_process = _run_cmd(["p4", "fstat", filepath], environ)
     if fstat_process.stdout:
-        process = run_p4_cmd(["p4", "edit", "-c", changelist_name, filepath], environ)
+        process = _run_cmd(["p4", "edit", "-c", changelist_name, filepath], environ)
 
     else:
         # stdout is an empty string if not in depot
-        process = run_p4_cmd(["p4", "add", "-c", changelist_name, filepath], environ)
+        process = _run_cmd(["p4", "add", "-c", changelist_name, filepath], environ)
 
     if process and not is_process_success(process):
         if p4_output is not None:
@@ -181,6 +190,8 @@ def p4_add(filepath: str | Path,
     """This function can be quite slow. 
         Consider using a p4_session_edit to group your p4 commands into one.
     """
+    if not USE_P4:
+        return True
     filepath = Path(filepath).as_posix()
     file_workspace = get_file_workspace(filepath)
 
@@ -191,7 +202,7 @@ def p4_add(filepath: str | Path,
         # Ignore if file is not in a workspace
         return True
 
-    process = run_p4_cmd(["p4", "add", "-c", changelist_name, "-v", filepath], environ)
+    process = _run_cmd(["p4", "add", "-c", changelist_name, "-v", filepath], environ)
     if p4_output is not None:
         p4_output.add_process_result(process)
 
@@ -211,6 +222,8 @@ def p4_session_edit(filepath: str | Path, remove_read_only: bool = True) -> bool
     Returns:
         True if the file is not read only. True if remove_read_only is not enabled.
     """
+    if not USE_P4:
+        return True
     filepath = Path(filepath)
     remove_read_only_result = True
 
@@ -235,7 +248,7 @@ def __format_path(filepath: str) -> str:
     return Path(filepath).resolve().as_posix()
 
 @contextmanager
-def filepaths_to_temp_file(filepaths: Iterable[str]):
+def _filepaths_to_temp_file(filepaths: Iterable[str]):
     """
     Create a temporary text file containing the given filepaths.
 
@@ -256,18 +269,20 @@ def filepaths_to_temp_file(filepaths: Iterable[str]):
         yield path
     finally:
         path.unlink(missing_ok=True)
-    
+
 def files_in_depot(filepaths: Iterable[str], environ: dict = {}) -> set[str]:
     """
     Return files that are in depot.
     """
+    if not USE_P4:
+        return set()
     filepaths = list(filepaths)
 
     if not filepaths:
         return set()
     
-    with filepaths_to_temp_file(filepaths) as txt_file: 
-        fstat_process = run_p4_cmd(["p4", "-x", txt_file.as_posix(), "fstat"], environ)
+    with _filepaths_to_temp_file(filepaths) as txt_file: 
+        fstat_process = _run_cmd(["p4", "-x", txt_file.as_posix(), "fstat"], environ)
 
     tracked = set()
     client_file_tag = "... clientFile "
@@ -294,6 +309,8 @@ def push_p4_session(
     Returns:
         True if all files were successfully opened for edit; otherwise False.
     """
+    if not USE_P4:
+        return True
     global _p4_session_cache
     # Split files in workspaces
     workspace_files: dict[WorkspaceInfo, set[str]] = {}
@@ -318,8 +335,8 @@ def push_p4_session(
         to_edit = files_in_depot(files, environ)
         to_add = files.difference(to_edit)
         if to_edit:
-            with filepaths_to_temp_file(to_edit) as txt_file:
-                edit_process = run_p4_cmd(
+            with _filepaths_to_temp_file(to_edit) as txt_file:
+                edit_process = _run_cmd(
                     ["p4", "-x", txt_file.as_posix(), "edit", "-c", changelist_name, "-v", ], environ
                 )
             if not is_process_success(edit_process):
@@ -328,8 +345,8 @@ def push_p4_session(
                     p4_output.add_process_result(edit_process)
 
         if to_add:
-            with filepaths_to_temp_file(to_add) as txt_file:
-                add_process = run_p4_cmd(
+            with _filepaths_to_temp_file(to_add) as txt_file:
+                add_process = _run_cmd(
                     ["p4", "-x", txt_file.as_posix(), "add", "-c", changelist_name, "-v"], environ
                 )
 

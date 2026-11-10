@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import bpy
+from itertools import chain
 
 from io_scene_gltf2.io.com.gltf2_io_extensions import Extension
 
@@ -46,10 +47,12 @@ class AsoboMaterialWindshieldExtension:
 
     extension_textures = [
         MSFS2024_MaterialProperties.WINDSHIELDWIPERMASKTEXTURE,
-        MSFS2024_MaterialProperties.WINDSHILEDDETAILNORMALTEXTURE,
-        MSFS2024_MaterialProperties.WINDSHIELDSCRACHESNORMALTEXTURE,
         MSFS2024_MaterialProperties.WINDSHIELDINSECTSALBEDOTEXTURE,
         MSFS2024_MaterialProperties.WINDSHIELDINSECTSMASKTEXTURE
+    ]
+    extension_normal_textures = [
+        MSFS2024_MaterialProperties.WINDSHILEDDETAILNORMALTEXTURE,
+        MSFS2024_MaterialProperties.WINDSHIELDSCRACHESNORMALTEXTURE,
     ]
 
     @staticmethod
@@ -77,9 +80,10 @@ class AsoboMaterialWindshieldExtension:
                 attribute=extension_parameter
             )
 
-        for extension_texture in AsoboMaterialWindshieldExtension.extension_textures:
-            if isinstance(extension_texture, tuple) and len(extension_texture) > 1:
-                extension_texture = extension_texture[0]
+        for extension_texture in chain(
+            AsoboMaterialWindshieldExtension.extension_textures,
+            AsoboMaterialWindshieldExtension.extension_normal_textures,
+        ):
 
             MSFS2024_MaterialUtils.get_extension_texture(
                 extension=extension,
@@ -119,12 +123,20 @@ class AsoboMaterialWindshieldExtension:
 
         for extension_texture in AsoboMaterialWindshieldExtension.extension_textures:
 
-
             MSFS2024_MaterialUtils.set_extension_texture(
                 extension=result,
                 material=blender_material,
                 attribute=extension_texture,
                 settings=export_settings
+            )
+        for extension_texture in AsoboMaterialWindshieldExtension.extension_normal_textures:
+        
+            MSFS2024_MaterialUtils.set_extension_texture(
+                extension=result,
+                material=blender_material,
+                attribute=extension_texture,
+                settings=export_settings,
+                is_normal=True
             )
 
         # Set detail

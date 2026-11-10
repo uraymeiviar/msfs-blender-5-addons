@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import bpy
+from itertools import chain
 
 from io_scene_gltf2.io.com.gltf2_io_extensions import Extension
 
@@ -38,9 +39,10 @@ class AsoboClearcoatExtension:
     ]
 
     extension_textures = [
+    ]
+    extension_normal_textures = [
         MSFS2024_MaterialProperties.CLEARCOATNORMALTEXTURE
     ]
-
     @staticmethod
     def from_dict(blender_material, gltf2_material, import_settings):
         extensions = gltf2_material.extensions
@@ -61,17 +63,15 @@ class AsoboClearcoatExtension:
                 attribute=extension_parameter
             )
 
-        for extension_texture in AsoboClearcoatExtension.extension_textures:
-            if isinstance(extension_texture, tuple) and len(extension_texture) > 1:
-                extension_texture = extension_texture[0]
-
+        for extension_texture in chain(AsoboClearcoatExtension.extension_textures, AsoboClearcoatExtension.extension_normal_textures):
+            
             MSFS2024_MaterialUtils.get_extension_texture(
                 extension=extension,
                 material=blender_material,
                 attribute=extension_texture,
                 settings=import_settings
             )
-
+        
         inverse_clearcoat_roughness = getattr(
             blender_material,
             MSFS2024_MaterialProperties.CLEARCOATINVERSEROUGHNESS.attribute_name()
@@ -108,14 +108,22 @@ class AsoboClearcoatExtension:
 
         for extension_texture in AsoboClearcoatExtension.extension_textures:
 
-
+            
             MSFS2024_MaterialUtils.set_extension_texture(
                 extension=result,
                 material=blender_material,
                 attribute=extension_texture,
                 settings=export_settings
             )
-
+        for extension_texture in AsoboClearcoatExtension.extension_normal_textures:
+                            
+            MSFS2024_MaterialUtils.set_extension_texture(
+                extension=result,
+                material=blender_material,
+                attribute=extension_texture,
+                settings=export_settings,
+                is_normal=True
+            )
         inverse_clearcoat_roughness = getattr(
             blender_material,
             MSFS2024_MaterialProperties.CLEARCOATINVERSEROUGHNESS.attribute_name()

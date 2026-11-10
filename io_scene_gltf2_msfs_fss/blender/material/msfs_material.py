@@ -58,12 +58,14 @@ class MSFS2024_Material:
         build_tree=False,
         revert_to_pbr=False
     ):
-        # make sure use_nodes is enabled, or material.nodes will not be available
-        material.use_nodes = True 
+        # material.use_nodes = True  # DO NOT ENABLE USE_NODES here; it significantly increases export times
 
         self.material = material
         self.node_tree = self.material.node_tree
+        self.nodes = None
+        self.links = None
         if self.node_tree is not None:
+
             self.nodes=self.node_tree.nodes
             self.links = self.node_tree.links
 
@@ -83,11 +85,12 @@ class MSFS2024_Material:
             self.material.use_backface_culling_shadow = True
 
     def _build_tree(self):
+        
         self._clean_node_tree()
         self._create_tree()
 
     def _clean_node_tree(self):
-        nodes=self.node_tree.nodes
+        nodes = self.node_tree.nodes
         for _, node in enumerate(nodes):
             # print("Deleting: %s | %s" % (node.name, node.type))
             nodes.remove(node)
@@ -259,7 +262,6 @@ class MSFS2024_Material:
 
         unlink_node_input(self.links, apply_ao_group_node, 1)
         unlink_node_input(self.links, apply_ao_group_node, 2)
-
 
         if occlusion_uv2_tex_node.image :
             link(self.links, occlusion_uv2_tex_node.outputs[0], apply_ao_group_node.inputs[2])
@@ -890,7 +892,8 @@ class MSFS2024_Material:
     def set_default_properties(self, attributes=None):
         if attributes is None:
             attributes = []
-
+        if self.node_tree is None:
+            return
         attribute_names = [x.attribute_name() for x in attributes]
         material_properties = list(MSFS2024_MaterialProperties)
 
@@ -905,6 +908,8 @@ class MSFS2024_Material:
                 setattr(self.material, material_property.attribute_name(), material_property.default_value())
 
     def force_update_nodes(self):
+        if self.node_tree is None:
+            return
         self.set_blend_mode(getattr(self.material, MSFS2024_MaterialProperties.ALPHAMODE.attribute_name()))
 
         self.set_base_color(getattr(self.material, MSFS2024_MaterialProperties.BASECOLOR.attribute_name()))

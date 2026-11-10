@@ -291,7 +291,7 @@ class MSFS2024_GroupTypes(Enum):
 # TODO - Move these utility functions to addon utils file
 # region Utils
 def add_node(
-        nodes: list, 
+        nodes: list | None, 
         name: str = "", 
         type_node: str = "", 
         location: tuple[float, float] = (0.0, 0.0), 

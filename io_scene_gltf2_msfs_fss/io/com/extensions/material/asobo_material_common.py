@@ -21,11 +21,6 @@ from .....blender.utils.msfs_material_utils import (
 
 from ....com.msfs_material_utils import MSFS2024_MaterialUtils
 
-from io_scene_gltf2.io.com.gltf2_io import (
-    TextureInfo,
-    MaterialOcclusionTextureInfoClass,
-    MaterialNormalTextureInfoClass
-)
 
 class AsoboMaterialCommon:
 
@@ -80,7 +75,7 @@ class AsoboMaterialCommon:
         return MSFS2024_MaterialUtils.get_texture_info(
             blender_material=blender_material,
             attribute=MSFS2024_MaterialProperties.OMRTEXTURE.attribute_name(),
-            export_settings=export_settings
+            export_settings=export_settings,
         )
     
     @staticmethod
@@ -97,6 +92,7 @@ class AsoboMaterialCommon:
             blender_material=blender_material,
             attribute=MSFS2024_MaterialProperties.NORMALTEXTURE.attribute_name(),
             export_settings=export_settings,
+            is_normal=True
         )
     
     @staticmethod
@@ -227,59 +223,41 @@ class AsoboMaterialCommon:
         # endregion
 
         # region OMR Texture
-        omrfields = {
-            'extensions': None,
-            'extras': None,
-            'index': None,
-            'strength': None,
-            'tex_coord': None
-        }
         omr_texture_info = AsoboMaterialCommon.get_pbr_omr_texture_info(
             blender_material,
             export_settings,
         )
         gltf2_material.pbr_metallic_roughness.metallic_roughness_texture = omr_texture_info
         if omr_texture_info is not None:
-            if gltf2_material.occlusion_texture is None:
-                gltf2_material.occlusion_texture = MaterialOcclusionTextureInfoClass(**omrfields)
+            
+            gltf2_material.occlusion_texture = MSFS2024_MaterialUtils.create_new_occlusion_texture_info()
             gltf2_material.occlusion_texture.index = omr_texture_info.index
         # endregion
 
         # region Emissive Texture
-        fields = {
-            'extensions': None,
-            'extras': None,
-            'index': None,
-            'tex_coord': None
-        }
+
         emissive_texture_info = AsoboMaterialCommon.get_emissive_texture_info(
             blender_material,
             export_settings,
         )
         
         if emissive_texture_info is not None:
-            if gltf2_material.emissive_texture is None:
-                gltf2_material.emissive_texture = TextureInfo(**fields)
-            gltf2_material.emissive_texture.index = emissive_texture_info.index
+            
+            gltf2_material.emissive_texture = emissive_texture_info
+
         # endregion
 
         # region Normal Texture
-        normalfields = {
-            'extensions': None,
-            'extras': None,
-            'index': None,
-            'scale': None,
-            'tex_coord': None
-        }
+
         normal_texture_info = AsoboMaterialCommon.get_normal_texture_info(
             blender_material,
             export_settings,
         )
         
         if normal_texture_info is not None:
-            if gltf2_material.normal_texture is None:
-                gltf2_material.normal_texture = MaterialNormalTextureInfoClass(**normalfields)
-            gltf2_material.normal_texture.index = normal_texture_info.index
+            
+            gltf2_material.normal_texture = normal_texture_info
+
 
         # endregion
 
