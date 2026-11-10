@@ -130,6 +130,19 @@ forks do, not that a single FSS feature works.
 - **Test:** `tests/test_texture_xml.py::test_force_no_alpha_kept`
 - **Code:** `io/exp/gltf_exporter_patches.py` (`msfs_update_xml_tree`)
 
+### EXP-019: Detail normal BitmapSlot
+
+- **Status:** implemented
+- **Requirement:** The texture XML of a detail normal gets `MTL_BITMAP_DETAILNORMAL` when the material has no detail
+  blend mask (this is also the Windshield's Icing Normal) and `MTL_BITMAP_ADD_NORMAL` with one. Asobo's
+  `GltfMaterial.get_detail_normal_tex_config` had the two swapped against its own comments, the detail colour slots and
+  the SDK (texture XML slot table; `SharedAssets/texture/DetailMap/Frost_Detail_norm.png.xml`), for every material with
+  a detail normal.
+- **Decision:** maintainer's approval of the E2 bug report (material-management journal Session 36)
+- **Test:** `tests/test_texture_xml.py::test_detail_normal_slot`
+- **Code:** `io/exp/gltf_exporter_patches.py` (`msfs_get_detail_normal_tex_config`); the panel's table follows
+  (`fss_blender_tools/texture_sets.py`, `BITMAP_SLOTS`)
+
 ## One File for Both Simulators
 
 ### EXP-005: Export For

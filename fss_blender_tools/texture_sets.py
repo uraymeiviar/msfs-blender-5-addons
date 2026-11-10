@@ -180,7 +180,8 @@ def needs_16(role, kind):
 # Blender slot property: (BitmapSlot, base user flags, ForceNoAlpha) of the XML the MSFS 2024 export writes for its
 # image, in the order texture_lib/__init__.py (_get_gltf_material_config) reads the glTF slots. Mirrors
 # io_scene_gltf2_msfs_fss/io/exp/texture_lib/gltf_material.py (glTF slot to BitmapSlot; the BitmapSlot is its index in
-# bitmap_config.py, not the name in its comments) and the material extensions that put the image in that glTF slot
+# bitmap_config.py, not the name in its comments; the detail normal as corrected by the exporter's
+# gltf_exporter_patches.msfs_get_detail_normal_tex_config) and the material extensions that put the image in that glTF slot
 # (io/com/extensions/material/*.py). gltf_material.py's only base flag, FL_BITMAP_SDF, belongs to the distance field
 # layer, which no Blender property exports. The ORM image is also the glTF occlusion texture, which TextureLib skips
 # then. BitmapSlot '': the glTF slot TextureLib does not read, so no XML is written for it.
@@ -191,7 +192,7 @@ BITMAP_SLOTS = {
     P_EMIS: ('MTL_BITMAP_EMISSIVE', '', False),
     P_MASK: ('MTL_BITMAP_BLENDMASK', '', False),
     P_DCOL: ('MTL_BITMAP_DETAILDIFFUSE', '', False),
-    P_DNML: ('MTL_BITMAP_ADD_NORMAL', '', False),
+    P_DNML: ('MTL_BITMAP_DETAILNORMAL', '', False),
     P_DORM: ('MTL_BITMAP_DETAIL_METAL_ROUGH_AO', '', False),
     P_DIR: ('MTL_BITMAP_ANISO_DIR_ROUGH', '', True),
     P_BEHIND: ('MTL_BITMAP_ADD_DECAL0', '', False),
@@ -214,7 +215,7 @@ BITMAP_SLOTS = {
     P_MUD_MSK: ('', '', False),
 }
 # the detail maps when the detail blend mask (msfs_blend_mask_texture, not the decal's) is set
-BITMAP_SLOTS_MASKED = {P_DCOL: 'MTL_BITMAP_ADD_DECAL0', P_DNML: 'MTL_BITMAP_DETAILNORMAL',
+BITMAP_SLOTS_MASKED = {P_DCOL: 'MTL_BITMAP_ADD_DECAL0', P_DNML: 'MTL_BITMAP_ADD_NORMAL',
                        P_DORM: 'MTL_BITMAP_ADD_METAL_ROUGH_AO'}
 WINDSHIELD_ONLY = {P_WIPE, P_WS_DNML, P_SCR, P_BUG_ALB, P_BUG_MSK}
 

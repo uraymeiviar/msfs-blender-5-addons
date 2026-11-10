@@ -41,6 +41,7 @@ assert Path(sys.modules[ADDON].__file__).resolve().is_relative_to(REPO_ROOT), sy
 from io_scene_gltf2_msfs_fss import texture_folder  # noqa: E402
 from io_scene_gltf2_msfs_fss.io.exp import export_settings, gltf_exporter_patches  # noqa: E402
 from io_scene_gltf2_msfs_fss.io.exp.texture_lib.texture_xml import XmlSerializer  # noqa: E402
+from io_scene_gltf2_msfs_fss.io.exp.texture_lib.gltf_material import GltfMaterial  # noqa: E402
 
 WORK = REPO_ROOT / 'tests' / '_work' / 'texture_xml_scratch'
 SOURCE = WORK / 'source'      # where the .blend's images live
@@ -55,6 +56,10 @@ TEXTURES = {
     'dcol': ((0.5, 0.5, 0.5, 1), 'sRGB', False, True),
     'gone': ((1, 0.3, 0, 1), 'Non-Color', False, False),
     'comp': ((1, 0.5, 0, 1), 'Non-Color', False, True),
+    'dnml': ((0.5, 0.5, 1, 1), 'Non-Color', False, True),
+    'mnml': ((0.5, 0.5, 1, 1), 'Non-Color', False, True),
+    'mask': ((1, 1, 1, 1), 'Non-Color', False, True),
+    'inml': ((0.5, 0.5, 1, 1), 'Non-Color', False, True),
 }
 
 
@@ -274,6 +279,50 @@ def test_force_no_alpha_kept():
           "without the patch Asobo's rewrite drops ForceNoAlpha (the bug the patch fixes)")
 
 
+def test_detail_normal_slot():
+    make_files()
+    bpy.ops.wm.read_homefile(use_empty=True)
+    objects = []
+    # name, type, detail normal, blend mask: no mask -> DETAILNORMAL (also the Windshield's Icing Normal), mask -> ADD_NORMAL
+    for i, (name, kind, normal, mask) in enumerate((('Plain', 'msfs_standard', 'dnml', None),
+                                                    ('Masked', 'msfs_standard', 'mnml', 'mask'),
+                                                    ('Wind', 'msfs_windshield', 'inml', None))):
+        bpy.ops.mesh.primitive_grid_add(x_subdivisions=2, y_subdivisions=2, size=1, location=(i * 2, 0, 0))
+        obj = bpy.context.active_object
+        obj.name = name.upper()
+        material = bpy.data.materials.new(name)
+        material.msfs_material_type = kind
+        material.msfs_base_color_texture = image('albd')
+        material.msfs_detail_color_texture = image('dcol')
+        material.msfs_detail_normal_texture = image(normal)
+        if mask:
+            material.msfs_blend_mask_texture = image(mask)
+        obj.data.materials.append(material)
+        objects.append(obj)
+    bpy.ops.wm.save_as_mainfile(filepath=str(BLEND))
+    bpy.context.scene.msfs_fss_texture_folder = '//texture'
+
+    def export_slots():
+        shutil.rmtree(MODEL, ignore_errors=True)
+        MODEL.mkdir()
+        for stem in ('dnml', 'mnml', 'inml'):
+            (TEXTURE / f'{stem}.png.xml').unlink(missing_ok=True)
+        export_multi(objects, MODEL)
+        return {stem: (xml(stem) or (None,))[0] for stem in ('dnml', 'mnml', 'inml')}
+
+    want = {'dnml': 'MTL_BITMAP_DETAILNORMAL', 'mnml': 'MTL_BITMAP_ADD_NORMAL', 'inml': 'MTL_BITMAP_DETAILNORMAL'}
+    check(export_slots() == want, f'detail normal: DETAILNORMAL without a blend mask (and the windshield icing '
+                                  f'normal), ADD_NORMAL with one {want}')
+    patched = GltfMaterial.get_detail_normal_tex_config
+    GltfMaterial.get_detail_normal_tex_config = gltf_exporter_patches._original_get_detail_normal_tex_config
+    try:
+        found = export_slots()
+    finally:
+        GltfMaterial.get_detail_normal_tex_config = patched
+    check(found == {'dnml': 'MTL_BITMAP_ADD_NORMAL', 'mnml': 'MTL_BITMAP_DETAILNORMAL', 'inml': 'MTL_BITMAP_ADD_NORMAL'},
+          f"without the patch Asobo's slots are swapped (the bug the patch fixes) {found}")
+
+
 def test_parse_user_flags():
     values = texture_folder.parse_user_flags('FL_BITMAP_SDF+QUALITYHIGH+ANISOTROPIC=16')
     check(values['msfs_image_quality_high'] and values['msfs_image_anisotropic'] == '16'
@@ -288,6 +337,7 @@ def main():
     test_msfs2020_untouched()
     test_missing_folder()
     test_force_no_alpha_kept()
+    test_detail_normal_slot()
     print('ALL TEXTURE XML TESTS PASSED')
 
 

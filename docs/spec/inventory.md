@@ -37,6 +37,7 @@ Based on Asobo's MSFS 2024 exporter 8.4.2 for Blender 5.2; FSS changes live in F
 | Materials sharing a normal image keep their own Normal Scale (over Asobo 8.4.2) | implemented (added 20261110) | `io/exp/gltf_exporter_patches.py`, `tests/test_normal_scale.py` | EXP-016 |
 | MSFS 2024 texture folder: image URIs to the package PNGs and texture XMLs at every export | implemented (added 20261110) | material management journal, Sessions 34, 35; `texture_folder.py` | EXP-017 |
 | ForceNoAlpha kept when a texture XML is rewritten (over Asobo's TextureLib) | implemented (added 20261110) | material management journal, Session 35 | EXP-018 |
+| Detail normal BitmapSlot corrected (DETAILNORMAL without blend mask, ADD_NORMAL with one; over Asobo's TextureLib) | implemented (added 20261111) | material management journal, Session 36 | EXP-019 |
 | Asobo's export workflow hidden (Multi-Export Hierarchy tab, LOD Tools panel) in favour of the FSS deploy, merge groups and LOD marks | implemented | `fss_workflow_ui.py` | EXP-010 |
 | Export speed of the LOD deploy (E2 cockpit 973 s to 67 s) | implemented | `20261017.export-performance.md` | — (a measurement, not a requirement) |
 | Hooks used by fss_blender_tools: merge groups, leading `@` stripped, `fss_` keys out of glTF extras | implemented | `fss_blender_tools/merge.py` (runs inside the exporter) | EXP-013, DAT-040, DAT-042 |

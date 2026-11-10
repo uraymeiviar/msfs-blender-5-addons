@@ -626,6 +626,21 @@ def msfs_update_xml_tree(self):
 # endregion
 
 
+# region FSS: detail normal BitmapSlot
+# Asobo's GltfMaterial.get_detail_normal_tex_config swaps the two slots. Its own comments, the detail colour slots and
+# the SDK say: no blend mask -> MTL_BITMAP_DETAILNORMAL (9; also the Windshield's Icing Normal, the SDK's
+# Frost_Detail_norm.png.xml), blend mask -> MTL_BITMAP_ADD_NORMAL (6). Every material with a detail normal is affected.
+_original_get_detail_normal_tex_config = None
+
+
+def msfs_get_detail_normal_tex_config(self, blend_mask_texture_index=-1):
+    config = _original_get_detail_normal_tex_config(self, blend_mask_texture_index)
+    if config is not None:
+        config.bitmap_config.material_bitmap = 9 if blend_mask_texture_index == -1 else 6
+    return config
+# endregion
+
+
 def register():
     global _original_get_texture_info
     from io_scene_gltf2_msfs_fss.io.com.msfs_material_utils import MSFS2024_MaterialUtils
@@ -637,6 +652,11 @@ def register():
     if _original_update_xml_tree is None:
         _original_update_xml_tree = XmlSerializer.update_xml_tree
         XmlSerializer.update_xml_tree = msfs_update_xml_tree
+    global _original_get_detail_normal_tex_config
+    from io_scene_gltf2_msfs_fss.io.exp.texture_lib.gltf_material import GltfMaterial
+    if _original_get_detail_normal_tex_config is None:
+        _original_get_detail_normal_tex_config = GltfMaterial.get_detail_normal_tex_config
+        GltfMaterial.get_detail_normal_tex_config = msfs_get_detail_normal_tex_config
 
     # Not following pep8 but import must be done in register in order to correctly patch exporter in background mode.
     global _original_gather_sample_object_channel
@@ -726,6 +746,11 @@ def unregister():
     if _original_update_xml_tree is not None:
         XmlSerializer.update_xml_tree = _original_update_xml_tree
         _original_update_xml_tree = None
+    global _original_get_detail_normal_tex_config
+    from io_scene_gltf2_msfs_fss.io.exp.texture_lib.gltf_material import GltfMaterial
+    if _original_get_detail_normal_tex_config is not None:
+        GltfMaterial.get_detail_normal_tex_config = _original_get_detail_normal_tex_config
+        _original_get_detail_normal_tex_config = None
 
     # Reload patched modules to undo patch - Force Keep Animation
     to_reload = []
