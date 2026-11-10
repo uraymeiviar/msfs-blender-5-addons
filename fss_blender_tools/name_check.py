@@ -30,7 +30,8 @@ RULES = (
     ("CHARS", "Characters", "Contains characters other than A-Z, 0-9 and _: replaced with _"),
     ("DEFAULT", "Default", "Blender default name: report only, rename by hand"),
     ("TAKEN", "Taken", "The proposed name is already used: edit the proposal or rename the other item first"),
-    ("CLASH", "Clash", "Exports under the same name as another item once the '@' marker is stripped: rename by hand"),
+    ("CLASH", "Clash", "Exports under the same name as another item once the '@' marker is stripped: the export "
+     "adds _GROUP to the marked one"),
 )
 RULE_TAGS = {"SUFFIX": "SFX", "COLLISION": "COL", "CASE": "CASE", "CHARS": "CHR", "DEFAULT": "DEF", "TAKEN": "TKN",
              "CLASH": "CLS"}

@@ -81,7 +81,7 @@ Transparent materials (MSFS alpha mode Blend) never share a mesh with opaque one
 - **Transparent parts share one mesh per group** (`<name>_TRANSPARENT`), and MSFS sorts transparent surfaces by the centre of each mesh: two glasses that overlap on screen can flicker, and a decal on a surface far behind others can show on a surface in front. Keep such glass or decals out of the group with a **Don't Merge** tag; see [step 4 of the Artist Guide](README.md#4-merge-tree).
 - **Several materials in one group** stay several materials; the panel and the console warn so you can check that this is intended.
 - **More than two UV maps** in a group: only two are exported. UV maps are matched by name; if members name them differently, they are matched by position, with a warning.
-- **A merged name equal to a kept object's name** gives a warning; rename one of them.
+- **A name taken by another node:** a merged mesh, or any node named with a leading `@`, whose exported name another node already has (for example `@MERGE_BTN` holding the button `BTN`) is exported with `_GROUP` added (`BTN_GROUP`, then `_GROUP_2` if that is taken too), and the console says so. The node without the `@` keeps its name, because the model XML refers to it; rename the group in the `.blend` if you want a name of your choice.
 
 ## Tags
 
@@ -266,7 +266,7 @@ The object or bone name becomes the glTF node name, and the model XML, `.cfg` fi
 | `CHR` | **Characters** | Characters other than `A-Z`, `0-9` and `_` (a leading `@`, as in `@MERGE_` or `@ZONE_`, is allowed: the export strips it) | Replace with `_` |
 | `DEF` | **Default** | A Blender default name such as `Cube`, `Empty`, `Plane`, `Bone` | None: rename by hand |
 | `TKN` | **Taken** | The proposed name is already used | Unticked; edit the proposal or rename the other item first |
-| `CLS` | **Clash** | Exports under the same name as another item once the export strips the `@` (for example `@ABCD` next to `ABCD`) | None: rename by hand |
+| `CLS` | **Clash** | Exports under the same name as another item once the export strips the `@` (for example `@ABCD` next to `ABCD`) | None: the export adds `_GROUP` to the `@` one; rename by hand for another name |
 
 How to use it:
 

@@ -6,7 +6,10 @@ stays a child node of the merged mesh around it, so merged meshes can form a hie
 (animated, skinned, with shape keys, not a mesh or an empty, or carrying one of the "don't merge" tags) is skipped with
 its subtree, and the rest of the group still merges; skipped nodes keep their exact transforms because every node
 above them that the merge removes is replaced by an object with the same world matrix. The prefix never reaches the
-glTF: merged meshes are named without it, and node names are stripped of it as the glTF is written.
+glTF: merged meshes are named without it, and node names are stripped of it as the glTF is written. A node that comes
+from a marker (a merged mesh, or any node whose name starts with "@") and whose exported name or unique id is taken by
+another node gets the suffix _GROUP (then _GROUP_2, ...) at the end of the export, with a log line: the node without a
+marker keeps its name, as the model XML refers to it.
 A node named @NOMERGE_<name> inside a group is the opposite marker: it and its subtree are not merged and stay child
 nodes of the merged mesh, exported as <name>.
 Zone empties (@ZONE_<NAME>) hold the merge groups: a group's topmost marked ancestor must be a zone (UV journal
@@ -39,6 +42,23 @@ ORIGINAL_NAME_KEY = "msfs_original_name"
 ORIGINAL_DATA_KEY = "msfs_original_data"
 MESH_LIKE = {'MESH', 'CURVE', 'SURFACE', 'FONT', 'META'}
 LOG_PREFIX = "[FSS merge]"
+# Added to a marker node whose exported name another node already has (@MERGE_X holding a button named X)
+CLASH_SUFFIX = "_GROUP"
+# On the merged objects of an export: the @MERGE_ root they replace. fss_ keys never reach the glTF extras
+MERGED_FROM_KEY = "fss_merged_from"
+UNIQUE_ID_EXTENSION = "ASOBO_unique_id"
+
+
+def _log(export_settings, message, warning, detail=False):
+    line = f"{LOG_PREFIX} {'WARNING ' if warning else ''}{message}"
+    print(line)
+    # Deploys run in background with stdout going to the export log: summaries and warnings also go to stderr, which
+    # stays on the console; per-node details stay in the log
+    if bpy.app.background and not detail:
+        print(line, file=sys.stderr, flush=True)
+    logger = export_settings.get("log") if export_settings else None
+    if warning and logger is not None:
+        logger.warning(f"{LOG_PREFIX} {message}")
 
 
 def logical_name(obj) -> str:
@@ -361,12 +381,7 @@ def merge_group(group, context, log, depsgraph):
 def _build_group(group, log, root, root_name, target, collections, materials, material_users, kinds, uv_slots,
                  buffers):
 
-    kept_names = {logical_name(node) for node in group.kept} | {logical_name(obj) for obj, _ in group.skipped}
-    names = [target] + ([f"{target}_TRANSPARENT"] if len(buffers) > 1 else [])
-    for name in names:
-        if name in kept_names:
-            log(f"{root_name}: the merged mesh {name} has the same name as a node that stays in the group; "
-                "rename one of them", warning=True)
+    # A merged mesh named like another node is renamed at the end of the export (_resolve_name_clashes)
     # Replaced originals (plain export without duplicates) give up their names so the merged objects get them
     kept_names_by_node = {node: logical_name(node) for node in group.kept}
     for obj in dict.fromkeys([root] + group.members + group.kept):
@@ -381,6 +396,7 @@ def _build_group(group, log, root, root_name, target, collections, materials, ma
         name = target if main is None else f"{target}_{kind}"
         obj = _new_object(name, buffers[kind].build(name, materials), root, collections)
         obj[ORIGINAL_NAME_KEY] = name
+        obj[MERGED_FROM_KEY] = root_name
         new_objects.append(obj)
         if main is None:
             main = obj
@@ -474,14 +490,90 @@ def _strip_fss_extras(gltf2_element):
             gltf2_element.extras = None
 
 
+def _unique_id_data(gltf2_node):
+    """The dictionary holding the node's ASOBO_unique_id "id" (the exporter wraps it in an Extension), or None."""
+    extension = (gltf2_node.extensions or {}).get(UNIQUE_ID_EXTENSION)
+    data = getattr(extension, "extension", extension)
+    return data if isinstance(data, dict) else None
+
+
+def _unique_id(gltf2_node):
+    data = _unique_id_data(gltf2_node)
+    return data.get("id") if data else None
+
+
+def _resolve_name_clashes(nodes, marked, export_settings):
+    """Gives every marker node (marked: id(node) -> its marked source name) whose exported name or unique id another
+    node already has the suffix _GROUP, then _GROUP_2 and so on, and logs it; its unique id follows when it was the
+    name. Nodes without a marker keep their names. Then warns about unique ids that are still shared. Returns the
+    renames as (source, old name, new name)."""
+    taken = set()
+    for node in nodes:
+        if id(node) not in marked:
+            taken.update(value for value in (node.name, _unique_id(node)) if value)
+    renames = []
+    for node in nodes:
+        if id(node) not in marked or not node.name:
+            continue
+        old_name, old_id = node.name, _unique_id(node)
+        if old_name in taken or (old_id and old_id in taken):
+            new_name, number = f"{old_name}{CLASH_SUFFIX}", 2
+            while new_name in taken:
+                new_name, number = f"{old_name}{CLASH_SUFFIX}_{number}", number + 1
+            node.name = new_name
+            if old_id == old_name:
+                _unique_id_data(node)["id"] = new_name
+            renames.append((marked[id(node)], old_name, new_name))
+            _log(export_settings, f"{marked[id(node)]}: exported as {new_name}, as another node is already named "
+                 f"{old_name}", warning=False)
+        taken.update(value for value in (node.name, _unique_id(node)) if value)
+
+    # What is left comes from names without a marker; the MSFS package compile fails on a shared unique id
+    users = {}
+    for node in nodes:
+        value = _unique_id(node)
+        if value:
+            users.setdefault(value, []).append(node.name)
+    for value, names in users.items():
+        if len(names) > 1:
+            _log(export_settings, f"{len(names)} nodes share the unique id {value} ({', '.join(names)}); the MSFS "
+                 "package compile fails on it: rename one", warning=True)
+    if renames:
+        _log(export_settings, f"{len(renames)} marker node(s) renamed with {CLASH_SUFFIX}: their names were taken",
+             warning=True)
+    return renames
+
+
 class glTF2ExportUserExtension:
     """Found by the glTF exporter on every enabled add-on; pre_export_hook runs before it collects the objects."""
 
     def gather_node_hook(self, gltf2_node, blender_object, export_settings):
         # Unmerged roots and @NOMERGE_ nodes still export: the markers never reach the glTF. Runs after the MSFS
         # exporter's node hook (enabled first), which writes msfs_original_name into the node name.
-        gltf2_node.name = strip_markers(gltf2_node.name)
+        source = gltf2_node.name
+        gltf2_node.name = strip_markers(source)
+        merged_from = blender_object.get(MERGED_FROM_KEY) if blender_object is not None else None
+        original = blender_object.get(ORIGINAL_NAME_KEY) if isinstance(merged_from, str) else None
+        if isinstance(original, str) and original != gltf2_node.name:
+            # A plain export names nodes after the objects: a merged mesh whose name was taken in the scene is X.001
+            data = _unique_id_data(gltf2_node)
+            if data and data.get("id") == source:
+                data["id"] = original
+            gltf2_node.name = original
+        if isinstance(merged_from, str) or (isinstance(source, str) and source != gltf2_node.name):
+            # Remembered for the clash check at the end of the export; the list keeps the node alive, so its id stays
+            if not hasattr(self, "_marked_nodes"):
+                self._marked_nodes, self._marked_keep = {}, []
+            self._marked_nodes[id(gltf2_node)] = merged_from if isinstance(merged_from, str) else source
+            self._marked_keep.append(gltf2_node)
         _strip_fss_extras(gltf2_node)
+
+    def gather_gltf_extensions_hook(self, gltf2_plan, export_settings):
+        # After the MSFS exporter's own hook (enabled first), which may still rename nodes (LOD prefixes)
+        marked = getattr(self, "_marked_nodes", None)
+        if marked and gltf2_plan.nodes:
+            _resolve_name_clashes(gltf2_plan.nodes, marked, export_settings)
+        self._marked_nodes, self._marked_keep = {}, []
 
     def gather_mesh_hook(self, gltf2_mesh, blender_mesh, blender_object, vertex_groups, modifiers, materials,
                          export_settings):
@@ -512,21 +604,14 @@ class glTF2ExportUserExtension:
             stack.extend(node.children)
 
     def pre_export_hook(self, export_settings):
+        self._marked_nodes, self._marked_keep = {}, []
         context = bpy.context
         settings = getattr(context.scene, "fss_merge", None)
         if settings is None:
             return
 
         def log(message, warning, detail=False):
-            line = f"{LOG_PREFIX} {'WARNING ' if warning else ''}{message}"
-            print(line)
-            # Deploys run in background with stdout going to the export log: summaries and warnings also go to stderr,
-            # which stays on the console; per-node details stay in the log
-            if bpy.app.background and not detail:
-                print(line, file=sys.stderr, flush=True)
-            logger = export_settings.get("log")
-            if warning and logger is not None:
-                logger.warning(f"{LOG_PREFIX} {message}")
+            _log(export_settings, message, warning, detail)
 
         if export_settings.get("gltf_active_collection"):
             log("export limited to the active collection: merge groups are not merged", warning=True)
@@ -1137,7 +1222,8 @@ class FSS_PT_Merge(bpy.types.Panel):
                 for pick in picks['UV']:
                     _draw_pick(column, item, pick, f"UV map {pick.index + 1}: {pick.value}", 'ERROR')
                 if item.name_clash:
-                    column.label(text=f"{item.name_clash}: named like a node that stays; rename one", icon='ERROR')
+                    column.label(text=f"{item.name_clash}: named like a node that stays; exports with {CLASH_SUFFIX}",
+                                 icon='ERROR')
                 column.label(text=f"Kept separate: {item.kept}", icon='OUTLINER_OB_GROUP_INSTANCE')
                 for pick in picks['KEPT']:
                     _draw_pick(column, item, pick, pick.value, 'RESTRICT_SELECT_OFF')

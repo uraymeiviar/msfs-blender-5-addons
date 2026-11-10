@@ -92,6 +92,7 @@ $B = "G:\e-jets-e2\tools\blender\blender.exe"
 | `tests/test_no_export.py` | the No Export tag mark: the tagged objects and everything below them, a renamed tag, a glTF export without them (lights included) and a merge group that leaves a tagged member out |
 | `tests/test_animation_ranges.py` | Find Animations Not 0 to 100: what it reports and selects, and that it changes nothing |
 | `tests/test_markers.py` | leading `@` stripped at export, Scan Names markers and the Clash rule |
+| `tests/test_name_clash.py` | a marker node whose exported name or unique id is taken gets `_GROUP` (`_GROUP_2`, ...) with a log line, the unmarked node keeps its name: the E2 cockpit button case, a group named like an object elsewhere, a `@NOMERGE_` node, through the multi-exporter and plain exports for both simulators; shared unique ids of unmarked nodes are reported |
 | `tests/test_lod_preview.py` | LOD viewport preview (hidden and bounds), save and load handlers |
 | `tests/uv_prototype/test_visibility.py` | Visibility Scoring with probe lights: brightness against EEVEE (point, spot, area, distance, cone edge, light threshold), synthetic cases, shadows and soft shadows, an animated light, Island Value and Step Limit, the light list (sync, select), operator, scene unchanged, heatmap mode, glTF leak, packer interface |
 | `tests/uv_prototype/test_autoseam_operators.py` | Auto Seam operators: propose, accept, Accept + Unwrap, discard, clear, progress, buttons |
