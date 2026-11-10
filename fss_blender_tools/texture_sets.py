@@ -10,11 +10,20 @@ texture of each MSFS 2024 slot with its role, channels and bit depth, and warnin
   holds 8-bit data. Results are kept in Scene.fss_texture_sets.checks with the file's size and modification time and
   reused until the file changes. It runs one texture per timer step, so Blender stays usable between textures.
 
+Texture XMLs (journal Session 34, part 2; decisions S34.1 to S34.3, S35.1): one row per image file of the materials the
+MSFS 2024 export would write (the objects of the enabled multi-exporter presets' enabled layers, else the visible objects),
+with the BitmapSlot its XML gets, its six image flags (edited on the row: image.msfs_flags of the image Asobo's TextureLib
+reads, the first one named like the file), and its XML in the scene's MSFS Texture Folder: missing, matches or differs
+from what the export would write, or no PNG there. Refresh first reads each XML that was never read into its images
+(texture_folder.read_xml_once), so an XML on disk is not lost; from then on Blender's flags win. Write XMLs writes them
+with Asobo's TextureLib (create_xml), as the export does, without exporting.
+
 Material properties are read with getattr, so nothing breaks without the exporter add-on (no MSFS slots then).
 """
 
 import os
 import time
+from pathlib import Path
 
 import bpy
 import numpy as np
@@ -164,6 +173,189 @@ def slot_roles(material):
 
 def needs_16(role, kind):
     return role in NEEDS_16 or kind in NEEDS_16_ON.get(role, ())
+
+
+# --- BitmapSlots ---------------------------------------------------------------------------------------------------
+
+# Blender slot property: (BitmapSlot, base user flags, ForceNoAlpha) of the XML the MSFS 2024 export writes for its
+# image, in the order texture_lib/__init__.py (_get_gltf_material_config) reads the glTF slots. Mirrors
+# io_scene_gltf2_msfs_fss/io/exp/texture_lib/gltf_material.py (glTF slot to BitmapSlot; the BitmapSlot is its index in
+# bitmap_config.py, not the name in its comments) and the material extensions that put the image in that glTF slot
+# (io/com/extensions/material/*.py). gltf_material.py's only base flag, FL_BITMAP_SDF, belongs to the distance field
+# layer, which no Blender property exports. The ORM image is also the glTF occlusion texture, which TextureLib skips
+# then. BitmapSlot '': the glTF slot TextureLib does not read, so no XML is written for it.
+BITMAP_SLOTS = {
+    P_BASE: ('MTL_BITMAP_DECAL0', '', False),
+    P_ORM: ('MTL_BITMAP_METAL_ROUGH_AO', '', True),
+    P_NML: ('MTL_BITMAP_NORMAL', '', False),
+    P_EMIS: ('MTL_BITMAP_EMISSIVE', '', False),
+    P_MASK: ('MTL_BITMAP_BLENDMASK', '', False),
+    P_DCOL: ('MTL_BITMAP_DETAILDIFFUSE', '', False),
+    P_DNML: ('MTL_BITMAP_ADD_NORMAL', '', False),
+    P_DORM: ('MTL_BITMAP_DETAIL_METAL_ROUGH_AO', '', False),
+    P_DIR: ('MTL_BITMAP_ANISO_DIR_ROUGH', '', True),
+    P_BEHIND: ('MTL_BITMAP_ADD_DECAL0', '', False),
+    P_WIPE: ('MTL_BITMAP_WIPERMASK', '', False),
+    P_WS_DNML: ('MTL_BITMAP_WINDSHIELDDETAILNORMAL', '', False),
+    P_SCR: ('MTL_BITMAP_SCRATCHESNORMAL', '', False),
+    P_BUG_ALB: ('MTL_BITMAP_WINDSHIELDINSECTS', '', False),
+    P_BUG_MSK: ('MTL_BITMAP_WINDSHIELDINSECTSMASK', '', False),
+    P_FOL: ('MTL_BITMAP_ALPHABLENDMASK', '', False),
+    P_AO2: ('MTL_BITMAP_OCCLUSION', '', False),
+    P_COAT: ('MTL_BITMAP_CLEARCOATCOLORROUGHNESS', '', False),
+    P_COAT_NML: ('MTL_BITMAP_CLEARCOATNORMAL', '', False),
+    P_DMASK: ('MTL_BITMAP_BLENDMASK', '', False),
+    P_IRID: ('MTL_BITMAP_IRIDESCENTTHICKNESS', '', False),
+    P_WEAR_ALB: ('MTL_BITMAP_DIRTOVERLAY', '', False),
+    P_WEAR_ORM: ('MTL_BITMAP_DIRTOVERLAY_METAL_ROUGH_AO', '', False),
+    P_TIRE: ('MTL_BITMAP_TIREDETAILS', '', False),
+    P_MUD_NML: ('MTL_BITMAP_TIREMUDNORMAL', '', False),
+    P_OPAC: ('', '', False),
+    P_MUD_MSK: ('', '', False),
+}
+# the detail maps when the detail blend mask (msfs_blend_mask_texture, not the decal's) is set
+BITMAP_SLOTS_MASKED = {P_DCOL: 'MTL_BITMAP_ADD_DECAL0', P_DNML: 'MTL_BITMAP_DETAILNORMAL',
+                       P_DORM: 'MTL_BITMAP_ADD_METAL_ROUGH_AO'}
+WINDSHIELD_ONLY = {P_WIPE, P_WS_DNML, P_SCR, P_BUG_ALB, P_BUG_MSK}
+
+
+def _exported(material, kind, prop):
+    """True when the MSFS 2024 export writes the slot's image into the glTF (the extensions' own conditions)."""
+    if prop in WINDSHIELD_ONLY:
+        return kind == 'msfs_windshield'
+    if prop == P_BEHIND:
+        return kind == 'msfs_parallax_window'
+    if prop == P_COAT:
+        return kind == 'msfs_clearcoat' and not getattr(material, 'msfs_clearcoat_inverse_roughness', False)
+    if prop == P_COAT_NML:
+        return kind == 'msfs_clearcoat'
+    if prop == P_DMASK:
+        return bool(getattr(material, 'msfs_decal_mode', ''))
+    if prop == P_IRID:
+        return getattr(material, 'msfs_use_iridescent', False)
+    if prop == P_OPAC:
+        return kind in ('msfs_sss', 'msfs_hair')
+    return True
+
+
+def bitmap_slots(material):
+    """[(slot property, BitmapSlot, base user flags, ForceNoAlpha)] of the material's images the export writes."""
+    kind = material_type(material)
+    masked = _image(material, P_MASK) is not None
+    result = []
+    for prop, (slot, base, no_alpha) in BITMAP_SLOTS.items():
+        if _image(material, prop) is None or not _exported(material, kind, prop):
+            continue
+        result.append((prop, BITMAP_SLOTS_MASKED.get(prop, slot) if masked else slot, base, no_alpha))
+    return result
+
+
+def short_slot(slot):
+    return slot.removeprefix('MTL_BITMAP_') if slot else 'no XML'
+
+
+# --- what the export writes ----------------------------------------------------------------------------------------
+
+def exporter():
+    """The exporter's texture_folder module (part 1), or None when the exporter is not enabled."""
+    if not hasattr(bpy.types.Scene, 'msfs_fss_texture_folder'):
+        return None
+    from io_scene_gltf2_msfs_fss import texture_folder
+    return texture_folder
+
+
+def exported_objects(scene, view_layer):
+    """The objects the MSFS 2024 export writes (S34.3): those of the enabled layers of the enabled multi-exporter
+    presets, as the multi-exporter takes them (MultiExporterPreset.get_preset_objects: each layer's own collection
+    objects; every collection has its own layer) and only those in the view layer; without an enabled preset, the
+    visible objects of the view layer (what the FSS deploy exports)."""
+    in_view = set(view_layer.objects)
+    presets = [preset for preset in getattr(scene, 'msfs_multi_exporter_presets', ()) if preset.enabled]
+    if not presets:
+        return {obj for obj in in_view if obj.visible_get(view_layer=view_layer)}
+    found = set()
+    for preset in presets:
+        for layer in preset.layers:
+            collection = layer.collection if layer.enabled else None
+            if collection is not None:
+                found.update(obj for obj in collection.objects if obj in in_view)
+    return found
+
+
+def exported_materials(objects):
+    """The materials of the objects' faces (every slot of an object without faces of its own), by name."""
+    found = set()
+    for obj in objects:
+        slots = [slot.material for slot in obj.material_slots]
+        if obj.type == 'MESH' and obj.data is not None:
+            mi = np.zeros(len(obj.data.polygons), np.int64)
+            obj.data.polygons.foreach_get('material_index', mi)
+            found.update(slots[index] for index in np.unique(mi).tolist() if index < len(slots))
+        else:
+            found.update(slots)
+    found.discard(None)
+    return sorted(found, key=lambda material: material.name)
+
+
+def export_file(image):
+    """The file name the glTF gives the image: its file's name, else the image name (Khronos exporter, image.py
+    __gather_name), as a PNG."""
+    stem, extension = os.path.splitext(os.path.basename(image.filepath))
+    if not stem or extension.lower() not in ('.png', '.jpg', '.jpeg'):
+        stem = os.path.splitext(image.name)[0]
+    return stem + '.png'
+
+
+def _compatible(slot, other):
+    """Asobo's BitmapConfig.is_compatible_id: two BitmapSlots one image may have in one export."""
+    from io_scene_gltf2_msfs_fss.io.exp.texture_lib.bitmap_config import BitmapConfig, BitmapSlots
+    return BitmapConfig(BitmapSlots.get_index_from_flag(slot)).is_compatible_id(
+        BitmapConfig(BitmapSlots.get_index_from_flag(other)))
+
+
+def flag_text(texture):
+    """The image flags the export writes into the texture's XML (empty without the image Asobo reads)."""
+    flags = getattr(bpy.data.images.get(texture.image), 'msfs_flags', None) if texture.image else None
+    return flags.to_string() if flags is not None else ''
+
+
+def read_xml(texture, folder):
+    """Fill the texture's PNG and XML fields from the folder, the XML as Asobo's XmlSerializer reads it."""
+    from io_scene_gltf2_msfs_fss.io.exp.texture_lib.bitmap_config import BitmapSlots
+    from io_scene_gltf2_msfs_fss.io.exp.texture_lib.texture_xml import XmlSerializer
+    png = folder / texture.name
+    xml = Path(str(png) + '.xml')
+    texture.png = png.is_file()
+    texture.xml = xml.is_file()
+    serializer = XmlSerializer(str(xml))
+    try:
+        texture.xml_valid = texture.xml and serializer.open()
+    except OSError:
+        texture.xml_valid = False
+    config = serializer.xml_bmp_config
+    texture.xml_slot = (BitmapSlots.get_flag_from_index(config.material_bitmap) or '') if texture.xml_valid else ''
+    texture.xml_flags = (config.user_flags or '') if texture.xml_valid else ''
+    texture.xml_no_alpha = bool(config.force_no_alpha) if texture.xml_valid else False
+
+
+def xml_state(settings, texture):
+    """'' (no folder, or no XML for the slot), 'no PNG', 'missing', 'matches' or 'differs' (what the export would
+    rewrite: Asobo's BitmapConfig.compare of slot, user flags and ForceNoAlpha)."""
+    if not settings.xml_folder or not texture.slot:
+        return ''
+    if not texture.png:
+        return 'no PNG'
+    if not texture.xml:
+        return 'missing'
+    if texture.xml_valid and (texture.xml_slot, texture.xml_flags, texture.xml_no_alpha) == (
+            texture.slot, texture.base_flags + flag_text(texture), texture.no_alpha):
+        return 'matches'
+    return 'differs'
+
+
+def texture_warn(settings, texture):
+    return (texture.conflict or not texture.slot or not texture.image
+            or xml_state(settings, texture) in ('no PNG', 'missing', 'differs'))
 
 
 # --- files ---------------------------------------------------------------------------------------------------------
@@ -341,9 +533,27 @@ class FSS_TextureCheck(bpy.types.PropertyGroup):
     depths: bpy.props.StringProperty()  # per channel in file order: 16, 8 or flat
 
 
+class FSS_TextureFile(bpy.types.PropertyGroup):
+    # name (built in) is the file name in the glTF and the texture folder
+    image: bpy.props.StringProperty()  # the image whose flags the export writes ('' none is named like the file)
+    slot: bpy.props.StringProperty()  # the BitmapSlot of its XML: of its first slot, as TextureLib ('' no XML)
+    slots: bpy.props.StringProperty()  # every BitmapSlot it gets, comma-separated
+    base_flags: bpy.props.StringProperty()
+    no_alpha: bpy.props.BoolProperty()
+    conflict: bpy.props.BoolProperty()  # a slot needs a BitmapSlot that is not compatible with the first
+    png: bpy.props.BoolProperty()  # the PNG is in the texture folder
+    xml: bpy.props.BoolProperty()  # its XML is there
+    xml_valid: bpy.props.BoolProperty()  # and Asobo's XmlSerializer reads it
+    xml_slot: bpy.props.StringProperty()
+    xml_flags: bpy.props.StringProperty()
+    xml_no_alpha: bpy.props.BoolProperty()
+
+
 class FSS_TextureSetsSettings(bpy.types.PropertyGroup):
     rows: bpy.props.CollectionProperty(type=FSS_TextureSetRow)
     checks: bpy.props.CollectionProperty(type=FSS_TextureCheck)
+    textures: bpy.props.CollectionProperty(type=FSS_TextureFile)
+    xml_folder: bpy.props.StringProperty()  # the texture folder the XML states were read from ('' none)
     show: bpy.props.EnumProperty(
         name='Show', items=(('ALL', 'All', 'List every used material'),
                             ('WARNINGS', 'Warnings', 'List only materials with a warning')))
@@ -379,6 +589,104 @@ def refresh(scene, used_materials):
             slot.need16 = needs_16(role, kind)
             slot.alpha_warn = role == 'ALB' and opaque
             slot.unused_slot = unused
+
+
+def refresh_textures(context):
+    """Fill Scene.fss_texture_sets.textures from what the export writes, after reading each XML that was never read
+    into its images (S34.2; called by the Materials Refresh, so also when a file opens)."""
+    scene = context.scene
+    settings = scene.fss_texture_sets
+    settings.textures.clear()
+    texture_folder = exporter()
+    folder = texture_folder.texture_folder(scene) if texture_folder is not None else None
+    if folder is not None and not folder.is_dir():
+        folder = None
+    settings.xml_folder = str(folder) if folder is not None else ''
+    if texture_folder is None:
+        return
+    found = {}  # file name: [(BitmapSlot, base flags, ForceNoAlpha)] in the order TextureLib reads them
+    for material in exported_materials(exported_objects(scene, context.view_layer)):
+        for prop, slot, base, no_alpha in bitmap_slots(material):
+            found.setdefault(export_file(_image(material, prop)), []).append((slot, base, no_alpha))
+    for name in sorted(found, key=str.lower):
+        configs = found[name]
+        texture = settings.textures.add()
+        texture.name = name
+        stem = Path(name).stem
+        images = texture_folder.images_named(stem)
+        texture.image = images[0].name if images else ''
+        with_xml = [config for config in configs if config[0]]
+        texture.slots = ', '.join(dict.fromkeys(short_slot(slot) for slot, _b, _n in configs))
+        if not with_xml:
+            continue
+        texture.slot, texture.base_flags, texture.no_alpha = with_xml[0]
+        texture.conflict = any(not _compatible(texture.slot, slot) for slot, _b, _n in with_xml[1:])
+        if folder is not None:
+            texture_folder.read_xml_once(stem, folder / (name + '.xml'))
+            read_xml(texture, folder)
+
+
+# --- Write XMLs ----------------------------------------------------------------------------------------------------
+
+class FSS_OT_TextureXmlWrite(bpy.types.Operator):
+    bl_idname = 'fss.texture_xml_write'
+    bl_label = 'Write XMLs'
+    bl_description = ('Write the texture XML of each listed texture whose PNG is in the MSFS Texture Folder, as the '
+                      'MSFS 2024 export does, without exporting. An XML never read is first read into its images')
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        settings = context.scene.fss_texture_sets
+        return bool(settings.xml_folder) and len(settings.textures) > 0 and exporter() is not None
+
+    def execute(self, context):
+        settings = context.scene.fss_texture_sets
+        texture_folder = exporter()
+        folder = texture_folder.texture_folder(context.scene)
+        if folder is None or not folder.is_dir() or str(folder) != settings.xml_folder:
+            self.report({'ERROR'}, 'The MSFS Texture Folder changed or does not exist: press Refresh')
+            return {'CANCELLED'}
+        from io_scene_gltf2_msfs_fss.io.com import msfs_logs
+        from io_scene_gltf2_msfs_fss.io.exp import texture_lib
+        from io_scene_gltf2_msfs_fss.io.exp.texture_lib.bitmap_config import BitmapConfig, BitmapSlots
+        texture_lib.MSFS2024_LOGGER = msfs_logs.get_logger()  # create_xml logs there; the export sets it the same way
+        written, matched, missing, spaces, failed = 0, 0, [], [], []
+        for texture in settings.textures:
+            if not texture.slot:
+                continue
+            stem = Path(texture.name).stem
+            png = folder / texture.name
+            if not png.is_file():
+                missing.append(texture.name)
+                continue
+            if ' ' in stem:  # the export writes no XML for it either (texture_lib.export_gltfs_texture_lib)
+                spaces.append(texture.name)
+                continue
+            texture_folder.read_xml_once(stem, Path(str(png) + '.xml'))
+            read_xml(texture, folder)
+            if xml_state(settings, texture) == 'matches':
+                texture_folder.mark_written(stem)  # the file says what Blender says: it counts as read
+                matched += 1
+                continue
+            config = BitmapConfig(BitmapSlots.get_index_from_flag(texture.slot),
+                                  texture.base_flags + flag_text(texture), texture.no_alpha)
+            texture_lib.create_xml((config, png.resolve().as_posix()))
+            read_xml(texture, folder)
+            if xml_state(settings, texture) == 'matches':
+                texture_folder.mark_written(stem)  # written from Blender's flags: a later read never takes it back
+                written += 1
+            else:
+                failed.append(texture.name)
+        text = f'Wrote {written} XML(s), {matched} already matched'
+        if missing:
+            text += '; PNG not in the folder: ' + ', '.join(missing)
+        if spaces:
+            text += '; not written (a space in the name): ' + ', '.join(spaces)
+        if failed:
+            text += '; could not write: ' + ', '.join(failed)
+        self.report({'WARNING'} if missing or spaces or failed else {'INFO'}, text)
+        return {'FINISHED'}
 
 
 # --- Check Data Depth ----------------------------------------------------------------------------------------------
@@ -520,6 +828,76 @@ def _row_warn(settings, row):
     return any(slot_warn(settings, slot) for slot in row.slots)
 
 
+# image.msfs_flags: (property, text on the row); the anisotropic level is the menu after them
+FLAG_CELLS = (('msfs_image_quality_high', 'HQ'), ('msfs_image_alpha_preserv', 'Alpha'),
+              ('msfs_image_no_reduction', 'NoRed'), ('msfs_image_no_mipmap', 'NoMip'),
+              ('msfs_image_prec_inv_avg', 'InvAvg'))
+
+
+def _folder_note(scene, settings, texture_folder):
+    folder = texture_folder.texture_folder(scene)
+    if folder is None:
+        return 'Set the folder to compare and write the XMLs'
+    if not folder.is_dir():
+        return 'The folder does not exist'
+    if str(folder) != settings.xml_folder:
+        return 'The folder changed: press Refresh'
+    return ''
+
+
+def _draw_texture(layout, settings, texture):
+    state = xml_state(settings, texture)
+    column = layout.column(align=True)
+    line = column.row(align=True)
+    line.label(text=texture.name, icon='ERROR' if texture_warn(settings, texture) else 'IMAGE_DATA')
+    cell = line.row(align=True)
+    cell.alert = texture.conflict or not texture.slot
+    cell.label(text=texture.slots)
+    cell = line.row(align=True)
+    cell.ui_units_x = 4.0
+    cell.alert = state in ('no PNG', 'missing', 'differs')
+    cell.label(text=state)
+    flags = getattr(bpy.data.images.get(texture.image), 'msfs_flags', None) if texture.image else None
+    if flags is not None:
+        cells = column.row(align=True)
+        for prop, text in FLAG_CELLS:
+            cells.prop(flags, prop, text=text, toggle=True)
+        cells.prop(flags, 'msfs_image_anisotropic', text='')
+    else:
+        column.label(text=f'No image named {Path(texture.name).stem}: the export writes no flags', icon='ERROR')
+    if texture.conflict:
+        column.label(text='Used in slots that need different BitmapSlots', icon='ERROR')
+    if not texture.slot:
+        column.label(text='TextureLib writes no XML for this slot', icon='ERROR')
+    if state == 'differs':
+        xml = (f"{short_slot(texture.xml_slot)} {texture.xml_flags or 'no flags'}"
+               + (' ForceNoAlpha' if texture.xml_no_alpha else '')) if texture.xml_valid else 'not readable'
+        column.label(text=f'XML: {xml}')
+
+
+def _draw_xmls(layout, context, settings):
+    """The texture XMLs of what the MSFS 2024 export writes (journal Session 34, part 2)."""
+    box = layout.box()
+    box.label(text='Texture XMLs (MSFS 2024 export)', icon='FILE')
+    texture_folder = exporter()
+    if texture_folder is None:
+        box.label(text='The MSFS exporter add-on is not enabled', icon='INFO')
+        return
+    box.prop(context.scene, 'msfs_fss_texture_folder', text='Folder')
+    note = _folder_note(context.scene, settings, texture_folder)
+    if note:
+        box.label(text=note, icon='INFO')
+    box.operator(FSS_OT_TextureXmlWrite.bl_idname, icon='FILE_TICK')
+    shown = 0
+    for texture in settings.textures:
+        if settings.show == 'WARNINGS' and not texture_warn(settings, texture):
+            continue
+        shown += 1
+        _draw_texture(box, settings, texture)
+    if not shown:
+        box.label(text='No texture with a warning' if settings.show == 'WARNINGS' else 'No exported texture')
+
+
 class FSS_PT_TextureSets(bpy.types.Panel):
     bl_idname = 'FSS_PT_texture_sets'
     bl_label = 'Texture Sets'
@@ -546,6 +924,7 @@ class FSS_PT_TextureSets(bpy.types.Panel):
             text = f'Check Data Depth ({pending} not checked)' if pending else 'Check Data Depth'
             layout.operator(FSS_OT_TextureDepthCheck.bl_idname, text=text, icon='VIEWZOOM')
         layout.row().prop(settings, 'show', expand=True)
+        _draw_xmls(layout, context, settings)
         shown = 0
         for row in settings.rows:
             warn = _row_warn(settings, row)
@@ -564,8 +943,8 @@ class FSS_PT_TextureSets(bpy.types.Panel):
             layout.label(text='No material with a warning' if settings.show == 'WARNINGS' else 'No used material')
 
 
-CLASSES = (FSS_TextureSlot, FSS_TextureSetRow, FSS_TextureCheck, FSS_TextureSetsSettings, FSS_OT_TextureDepthCheck,
-           FSS_OT_TextureDepthCancel, FSS_PT_TextureSets)
+CLASSES = (FSS_TextureSlot, FSS_TextureSetRow, FSS_TextureCheck, FSS_TextureFile, FSS_TextureSetsSettings,
+           FSS_OT_TextureDepthCheck, FSS_OT_TextureDepthCancel, FSS_OT_TextureXmlWrite, FSS_PT_TextureSets)
 
 
 def register():

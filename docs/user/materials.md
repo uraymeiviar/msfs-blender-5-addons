@@ -5,7 +5,7 @@
 
 The **Materials** panel (sidebar `N` > **FSS MSFS Tools** > **Materials**, below **Zones & Merge Tree**) lists the materials of the `.blend` with the objects that use them, their zones, and how much surface each material covers. It shows what Blender's own material lists scatter over many places: which materials are never used, which are used in more than one zone, which are transparent or emissive, and roughly which texture size a material needs.
 
-The panel only reads, with one exception: the **Keep UVs** checkbox of the active material, the same setting as in [UV Auto Packing](fss-tools.md#uv-auto-packing). It changes no other material setting, no object and no tag; **Select Objects** only changes the selection.
+The panel only reads, with these exceptions: the **Keep UVs** checkbox of the active material, the same setting as in [UV Auto Packing](fss-tools.md#uv-auto-packing), and the texture flags and **Write XMLs** of [Texture Sets and Texture XMLs](#texture-sets-and-texture-xmls). It changes no other material setting, no object and no tag; **Select Objects** only changes the selection.
 
 ## Refresh
 
@@ -93,3 +93,15 @@ The **By Texture Need** subpanel (closed by default) compares the materials: whi
 | **kept** | **Keep UVs** is on; these materials come last, by name |
 
 Left out: materials never used, the MSFS material types **Invisible**, **Environment Occluder** and **Collision** (by type, not by name), and materials whose objects all have a tag with [No Texture](fss-tools.md#tags). It shows the same Refresh as the list. **Check All** writes no UVs, so nothing here changes the model.
+
+## Texture Sets and Texture XMLs
+
+The **Texture Sets** subpanel lists the textures of the used materials: for each material its slots with the slot's role (such as `ALB`, `ORM`, `NML`), the file's channels and bit depth, and warnings where the file does not suit the role (for example an 8-bit normal map). **Check Data Depth** reads the pixels of 16-bit files and marks 8-bit data saved as 16-bit.
+
+Above the materials, the texture XML list shows what an MSFS 2024 export writes for the package (see [exporter.md](exporter.md#texture-folder-and-texture-xmls-msfs-2024)): the textures of the objects the export takes (the enabled multi-exporter presets, or the visible objects when there are none). The **Texture Folder** is shown at the top. Each texture has one row:
+
+- its **slot** in the package (read from the material, not editable); a warning when one texture is used in slots that do not go together;
+- its six **flags**: Quality High, Alpha Preservation, No Reduction, No Mipmap, Precomputed Inverse Average and the Anisotropic level. They are saved with the image and written into its XML;
+- the state of its XML in the folder: **missing**, **matches**, **differs** (what the file says is shown), or **no PNG** when the PNG is not in the folder.
+
+**Write XMLs** writes the XMLs of the listed textures without exporting, the same files an export writes. **Refresh** (also when the file opens) reads an XML already in the folder into Blender once, so flags set in it are kept; after that, Blender's flags win.

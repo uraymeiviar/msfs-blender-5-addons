@@ -26,6 +26,8 @@ def draw_export_target(layout, scene):
         else:
             from .._msfs2020.compat import msfs2020_emissive_reference
             layout.label(text=f"Emissive 1.0: {msfs2020_emissive_reference(scene):g} cd/m² (add-on preference)")
+    elif hasattr(scene, "msfs_fss_texture_folder"):
+        layout.prop(scene, "msfs_fss_texture_folder", text="Texture Folder")
 
 
 class MSFS_FSS_PT_export_target(bpy.types.Panel):

@@ -123,6 +123,19 @@ The MSFS 2024 multi-exporter (used by MSFS 2024 deploys) does this for you:
 - **NLA tweak mode:** objects left in NLA tweak mode are exported as if tweak mode were off; tweak mode is restored afterwards.
 - **Edit Mode and Pose Mode:** objects in these modes are switched to Object Mode for the export.
 
+## Texture Folder and Texture XMLs (MSFS 2024)
+
+MSFS 2024 compiles a texture into the package only when two things hold: the glTF points at the PNG where it really is (a path from the glTF's folder, such as `../texture/panel_albd.png`), and a texture XML (`panel_albd.png.xml`) sits beside that PNG. The XML tells the package tool the texture's slot (base color, normal, ...) and its flags. Without both, the texture is left out of the package and does not load in the simulator.
+
+Set **Texture Folder** under **Export Target** (shown when the target is MSFS 2024) to the package's texture folder, for example `//../../../msfs24-projects/<package>/SimObjects/Airplanes/<aircraft>/texture`. The path is relative to the `.blend` (`//`). Every MSFS 2024 export then:
+
+1. points each texture in the glTF at the PNG of the same file name in that folder;
+2. writes each of those textures' XML beside its PNG, with the slot from the material and the flags you set in **Materials > Texture Sets** (see [materials.md](materials.md#texture-sets-and-texture-xmls)).
+
+The export copies no PNG. A texture whose PNG is not in the folder keeps its old reference and is listed as a warning in the export log; copy the PNG there and export again. A folder that does not exist is an error, and nothing is changed. With **Texture Folder** empty the export works as before. MSFS 2020 exports are not affected.
+
+An XML that is already in the folder (made by hand or by another tool) is read into Blender once, the first time Blender meets it, so its flags are not lost. From then on Blender's flags are written.
+
 ## Asobo Export Workflow Hidden
 
 In the FSS workflow the deploy scripts, merge groups and LOD marks replace Asobo's export workflow, so parts of the Asobo UI are hidden by default:

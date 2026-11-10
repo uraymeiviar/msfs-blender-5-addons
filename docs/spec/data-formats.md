@@ -436,3 +436,20 @@ requirements that use it. Properties that are registered (`bpy.props`) are saved
 - **Decision:** CONV S4 (design 1, 2, 5); CONV S6.4; LOD 20
 - **Test:** harness: `tests/run_tests.py --sim 2024` and `--sim 2020` (the target is set per run)
 - **Code:** `io_scene_gltf2_msfs_fss/msfs2020_target.py`, `legacy_normals.py`, `fss_workflow_ui.py`
+
+### DAT-047: Texture folder and texture XMLs
+
+- **Status:** implemented
+- **Requirement:**
+
+  | Data | Type, default | Used by |
+  | :--- | :--- | :--- |
+  | `Scene.msfs_fss_texture_folder` | string, Blender path relative to the `.blend`, default empty | EXP-017, MTL-011 |
+  | `Image.fss_texture_xml_read` | bool, default off: the image's flags were read from its XML, or its XML was written from them | EXP-017, MTL-011 |
+  | `<name>.png.xml` beside each PNG in the texture folder | Asobo's texture XML: `<BitmapSlot>`, `<UserFlags>`, `<ForceNoAlpha>` | EXP-017, EXP-018 |
+  | glTF image `uri` | a path from the glTF's folder to the PNG in the texture folder, such as `../texture/name.png` | EXP-017 |
+
+  `Image.msfs_flags` (the six flags) is Asobo's.
+- **Decision:** MAT S34.1, S34.2, S35.1
+- **Test:** `tests/test_texture_xml.py`, `tests/test_texture_xml_panel.py`
+- **Code:** `io_scene_gltf2_msfs_fss/texture_folder.py`, `fss_blender_tools/texture_sets.py`

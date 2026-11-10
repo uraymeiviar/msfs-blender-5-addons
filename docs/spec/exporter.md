@@ -106,6 +106,30 @@ forks do, not that a single FSS feature works.
 - **Test:** `tests/test_normal_scale.py`
 - **Code:** `io/exp/gltf_exporter_patches.py` (`msfs_get_texture_info`)
 
+### EXP-017: Texture folder and texture XMLs
+
+- **Status:** implemented
+- **Requirement:** With the scene's MSFS Texture Folder set (a Blender path relative to the `.blend`), every MSFS 2024
+  export, after each glTF is written: points each image URI at the PNG of the same file name in that folder (a path
+  from the glTF's folder); reads an XML already beside a PNG into its images' flags once (`Image.fss_texture_xml_read`);
+  writes the XMLs of those PNGs with Asobo's TextureLib (slot from the material, flags from `image.msfs_flags`) and
+  counts them as read. A PNG not in the folder keeps its URI and is a warning in the export log; a folder that does not
+  exist is an error and changes nothing; the export copies no PNG. Apart from the URIs the glTF is unchanged. An empty
+  folder and the MSFS 2020 target keep the export as before.
+- **Decision:** MAT S34.1, S34.2, S35.1, S35.2
+- **Test:** `tests/test_texture_xml.py`
+- **Code:** `texture_folder.py`; `__init__.py` (`glTF2ExportUserExtension.post_export_hook`); `ui/target_panels.py`
+
+### EXP-018: ForceNoAlpha kept when a texture XML is rewritten
+
+- **Status:** implemented
+- **Requirement:** Rewriting a texture XML keeps `<ForceNoAlpha>` when the slot needs it and removes it otherwise.
+  Asobo's `XmlSerializer.update_xml_tree` removed an existing tag even when it was needed, so an ORM or direction XML
+  rewritten after a flag change lost it until the next write.
+- **Decision:** maintainer's choice at the texture XML review (material-management journal Session 35)
+- **Test:** `tests/test_texture_xml.py::test_force_no_alpha_kept`
+- **Code:** `io/exp/gltf_exporter_patches.py` (`msfs_update_xml_tree`)
+
 ## One File for Both Simulators
 
 ### EXP-005: Export For

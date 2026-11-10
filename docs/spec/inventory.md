@@ -35,6 +35,8 @@ Based on Asobo's MSFS 2024 exporter 8.4.2 for Blender 5.2; FSS changes live in F
 | Clean-up on export: NLA tweak mode, Edit and Pose Mode | implemented | exporter guide | EXP-009 |
 | No crash on a plain MSFS 2024 export after a multi-export and a new or opened file | implemented (added 20261104) | `msfs2020_target.py`, `tests/test_export_settings_reference.py` | EXP-015 |
 | Materials sharing a normal image keep their own Normal Scale (over Asobo 8.4.2) | implemented (added 20261110) | `io/exp/gltf_exporter_patches.py`, `tests/test_normal_scale.py` | EXP-016 |
+| MSFS 2024 texture folder: image URIs to the package PNGs and texture XMLs at every export | implemented (added 20261110) | material management journal, Sessions 34, 35; `texture_folder.py` | EXP-017 |
+| ForceNoAlpha kept when a texture XML is rewritten (over Asobo's TextureLib) | implemented (added 20261110) | material management journal, Session 35 | EXP-018 |
 | Asobo's export workflow hidden (Multi-Export Hierarchy tab, LOD Tools panel) in favour of the FSS deploy, merge groups and LOD marks | implemented | `fss_workflow_ui.py` | EXP-010 |
 | Export speed of the LOD deploy (E2 cockpit 973 s to 67 s) | implemented | `20261017.export-performance.md` | — (a measurement, not a requirement) |
 | Hooks used by fss_blender_tools: merge groups, leading `@` stripped, `fss_` keys out of glTF extras | implemented | `fss_blender_tools/merge.py` (runs inside the exporter) | EXP-013, DAT-040, DAT-042 |
@@ -74,6 +76,8 @@ Based on Asobo's MSFS 2024 exporter 8.4.2 for Blender 5.2; FSS changes live in F
 | Two sidebar tabs: FSS MSFS Tools (Zones & Merge Tree, Materials, Tags, Object LOD, Viewport LOD, LOD Settings, UV Auto Seam, UV Auto Packing; UV Auto Packing also in the UV Editor) and FSS Tools (General, Empty Bounds, Heatmap, Checks); no group panels | implemented (added 20261029) | material management journal, decisions 7, 15 (Utilities group dissolved), 16 (replaces 15's one tab), 22, 26 (UV Tools group dissolved) | GEN-040 |
 | Refresh on opening a file: Zones & Merge Tree, Materials and Scan Names refresh by themselves (not in a background Blender); LOD Counts and Check All stay manual | implemented (added 20261029) | material management journal, decision 21 | GEN-041 |
 | Materials panel: list with never used, shared across zones, transparent and emissive marks; per zone objects and area; size estimate with visibility; Keep UVs and kept sets; Select Objects; Check All; By Texture Need | implemented (added 20261028) | material management journal, decisions 1, 3, 8, 9, 11 to 14 | MTL-001 to MTL-009 |
+| Texture Sets: slot roles, channels, bit depth, Check Data Depth | implemented (added 20261106) | material management journal, Session 33 | MTL-010 |
+| Texture XML list: slot, flags, XML state per exported texture; Write XMLs; XMLs read once | implemented (added 20261110) | material management journal, Sessions 34, 35 | MTL-011 |
 | MSFS material checks (no MSFS material, texture needed, parameters): the 20 rules R1 to R20 | planned (rules decided, not built; on hold while the UI is reworked) | material management journal, Session 1 objectives; Session 17 (rules); decisions 17 to 20 | MTL-020 |
 | Split helpers for sets too large for 8192 | planned | material management journal, Session 1 objectives | MTL-021 |
 | Emissive texture imbalance, measured after painting | planned | material management journal, decisions 3, 10 | MTL-022 |

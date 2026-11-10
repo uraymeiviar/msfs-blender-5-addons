@@ -26,7 +26,9 @@ estimate (decision 13), read from the material when drawing, so it shows without
   (uv_marks._object_visibility: never below 0.1, never seen 0.1), 1.0 when the .blend is unsaved, its .visibility
   file is missing or the mesh is stale; a shared mesh uses its first user, as for the area. The file is read once per
   Refresh (visibility_core's cache). Check All (uv_pack.measure) gives the packed truth.
-- Refresh also fills the Texture Sets sub-panel (texture_sets.py) for the used materials.
+- Refresh also fills the Texture Sets sub-panel (texture_sets.py) for the used materials, and its texture XML list for
+  what the MSFS 2024 export writes; that list reads each texture XML never read into its images' flags (S34.2), the
+  one change Refresh makes outside Scene.fss_materials and Scene.fss_texture_sets.
 """
 
 import math
@@ -350,6 +352,8 @@ class FSS_OT_MaterialsRefresh(bpy.types.Operator):
         # the Texture Sets sub-panel's rows: the used materials' slots, from the files' headers (journal Session 33)
         texture_sets.refresh(context.scene, [bpy.data.materials[row.name] for row in settings.rows
                                              if not row.never_used])
+        # and its texture XMLs: what the MSFS 2024 export writes, XMLs never read taken into Blender (Session 34)
+        texture_sets.refresh_textures(context)
         settings.scanned = True
         if settings.active < 0 and settings.rows:
             settings.active = 0

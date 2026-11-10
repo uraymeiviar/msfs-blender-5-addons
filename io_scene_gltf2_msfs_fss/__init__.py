@@ -237,6 +237,10 @@ class glTF2ExportUserExtension:
             hook = getattr(self._impl, "post_export_hook", None)
             if hook:
                 hook(export_settings)
+            # MSFS 2024: image URIs to the package texture folder and texture XMLs (texture_folder.py)
+            if isinstance(self._impl, _ExportMSFS2024):
+                from . import texture_folder
+                texture_folder.process_export(export_settings["gltf_filepath"], bpy.context.scene)
         finally:
             instancing.restore(self._instancing)
             self._instancing = []

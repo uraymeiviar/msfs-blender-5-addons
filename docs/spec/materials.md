@@ -124,6 +124,34 @@ Tools. Artist guide: [../user/materials.md](../user/materials.md). Decisions: ma
 - **Test:** `tests/test_materials.py::test_draw`
 - **Code:** `materials.py` (`FSS_PT_MaterialsByNeed`, `need_table`, `texture_verdict`, `is_not_rendered`)
 
+### MTL-010: Texture Sets
+
+- **Status:** implemented
+- **Requirement:** A subpanel, closed by default, lists per used material of the last Refresh its slots that hold a
+  texture, with the slot's role (from the MSFS 2024 material type and the slot, never the file name) and the file's
+  channels and bit depth from the PNG header; it warns about channels the role does not use, 8-bit files where the role
+  needs 16-bit, alpha in the albedo of an Opaque material, and textures in slots the type does not use. **Check Data
+  Depth** reads the pixels of 16-bit files, one at a time with a progress bar, and marks 8-bit data saved as 16-bit;
+  its results are kept per file until the file changes.
+- **Decision:** MAT S33.1 to S33.6
+- **Test:** `tests/test_texture_sets.py`
+- **Code:** `texture_sets.py`
+
+### MTL-011: Texture XML list
+
+- **Status:** implemented
+- **Requirement:** Texture Sets shows the MSFS Texture Folder (EXP-017) and one row per texture file that the MSFS
+  2024 export writes: the textures of the objects in the enabled layers of the enabled multi-exporter presets, or the
+  visible objects when no preset is enabled. Each row shows the BitmapSlot from the material type and slot (mirroring
+  Asobo's `texture_lib/gltf_material.py`), a warning when one image is in slots that are not compatible, the six image
+  flags (editable, `image.msfs_flags`), and the XML state: missing, matches, differs (with what the file says), or no
+  PNG. **Write XMLs** writes the listed XMLs as the export does, after reading never-read XMLs, and counts them as read.
+  Refresh, also on opening a file, reads never-read XMLs into the images' flags. Drawing writes nothing; without the
+  exporter the subpanel says so.
+- **Decision:** MAT S34.1 to S34.3, S35.1
+- **Test:** `tests/test_texture_xml_panel.py`
+- **Code:** `texture_sets.py` (`refresh_textures`, `FSS_OT_TextureXmlWrite`, `BITMAP_SLOTS`); `materials.py` (Refresh)
+
 ## Planned and Wishes
 
 ### MTL-020: MSFS material checks

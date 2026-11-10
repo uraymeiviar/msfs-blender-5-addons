@@ -605,12 +605,38 @@ def msfs_get_texture_info(blender_material, attribute, export_settings, is_norma
 # endregion
 
 
+# region FSS: ForceNoAlpha kept when a texture XML is rewritten
+# Asobo's XmlSerializer.update_xml_tree removes an existing <ForceNoAlpha> even when the config needs it, so rewriting
+# an ORM or direction XML (a flag changed) dropped it and the next write added it back. After Asobo's update the tag
+# follows the config: present when force_no_alpha is true, absent otherwise.
+_original_update_xml_tree = None
+
+
+def msfs_update_xml_tree(self):
+    from xml.etree import ElementTree
+    _original_update_xml_tree(self)
+    root = self.xml_data.getroot()
+    node = root.find("ForceNoAlpha")
+    if self.bmp_config.force_no_alpha:
+        if node is None:
+            node = ElementTree.SubElement(root, "ForceNoAlpha")
+        node.text = "true"
+    elif node is not None:
+        root.remove(node)
+# endregion
+
+
 def register():
     global _original_get_texture_info
     from io_scene_gltf2_msfs_fss.io.com.msfs_material_utils import MSFS2024_MaterialUtils
     if _original_get_texture_info is None:
         _original_get_texture_info = MSFS2024_MaterialUtils.get_texture_info
         MSFS2024_MaterialUtils.get_texture_info = staticmethod(msfs_get_texture_info)
+    global _original_update_xml_tree
+    from io_scene_gltf2_msfs_fss.io.exp.texture_lib.texture_xml import XmlSerializer
+    if _original_update_xml_tree is None:
+        _original_update_xml_tree = XmlSerializer.update_xml_tree
+        XmlSerializer.update_xml_tree = msfs_update_xml_tree
 
     # Not following pep8 but import must be done in register in order to correctly patch exporter in background mode.
     global _original_gather_sample_object_channel
@@ -695,6 +721,11 @@ def unregister():
     if _original_get_texture_info is not None:
         MSFS2024_MaterialUtils.get_texture_info = staticmethod(_original_get_texture_info)
         _original_get_texture_info = None
+    global _original_update_xml_tree
+    from io_scene_gltf2_msfs_fss.io.exp.texture_lib.texture_xml import XmlSerializer
+    if _original_update_xml_tree is not None:
+        XmlSerializer.update_xml_tree = _original_update_xml_tree
+        _original_update_xml_tree = None
 
     # Reload patched modules to undo patch - Force Keep Animation
     to_reload = []
