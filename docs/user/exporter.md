@@ -76,6 +76,15 @@ Do not change the reference of a scene with converted materials unless you mean 
 - **MSFS has the final word.** Use the preview to check the direction and placement of the effect, and check the final look in the simulator.
 - A Blender with an older add-on shows these materials without the effect. Their export is the same.
 
+### Material Animations
+
+Some material values can be animated for MSFS 2024, for example a windshield's **Wiper 1 State**, which tells the simulator how far the wiper has moved across its wiper mask. MSFS plays them as part of a model animation, so a material animation belongs to the animation that moves the part, for example the wiper armature's `ANIM_WIPER_L`:
+
+1. Key the value on the material, over the same frames as that animation.
+2. Name the material's action like the animation, and push it down into an NLA track of the same name (here `ANIM_WIPER_L`).
+
+The export then writes one animation with both the part's movement and the material value. The material's values are exported for every frame, as Blender shows them. Each wiper needs its own material, because the value is per material.
+
 ## Instancing
 
 When several objects share one mesh, the export writes the mesh once and every object refers to it (an instance). This keeps files small, for example for hundreds of identical screws, and MSFS draws instances of one mesh with one material in one draw call (not for skinned meshes).

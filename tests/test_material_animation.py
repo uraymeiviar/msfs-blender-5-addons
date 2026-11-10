@@ -157,7 +157,7 @@ def to_nla(id_data, track_name, start, scale=1.0, repeat=1.0, reverse=False):
 
 # --- Export ---
 
-def export(scene, name, mode='ACTIONS', sampling=False, frame_range=False):
+def export(scene, name, mode='ACTIONS', sampling=False, frame_range=False, merge=None):
     folder = SCRATCH_DIR / name
     folder.mkdir(parents=True, exist_ok=True)
     scene.msfs_export_mode = 'OBJECTS'
@@ -170,6 +170,8 @@ def export(scene, name, mode='ACTIONS', sampling=False, frame_range=False):
     settings.export_animation_mode = mode
     settings.export_force_sampling = sampling
     settings.export_frame_range = frame_range
+    if merge:
+        settings.export_merge_animation = merge
     lod_groups.reload_lod_groups(scene, reset=True)
     for group in lod_groups.get_scene_lod_groups(scene):
         group.folder_path = str(folder)
@@ -472,6 +474,65 @@ def test_nla_strip_repeat_reverse():
         )
 
 
+def test_track_of_another_object():
+    """The deploy settings (Actions mode, merged by NLA track, no sampling): a material animation named like an NLA
+    track of another object (a wiper armature driving the windshield's Wiper 1 State) joins that animation once."""
+    scene, root = new_scene()
+    driver = bpy.data.objects.new('WiperDriver', None)
+    scene.collection.objects.link(driver)
+    driver.parent = root
+    driver.keyframe_insert('rotation_euler', frame=1)
+    driver.rotation_euler = (0.0, 0.0, 1.2)
+    driver.keyframe_insert('rotation_euler', frame=11)
+    to_nla(driver, 'ANIM_SWEEP', 1)
+    material = new_material('MatWiped')
+    for index in range(4):
+        key(material, BASE, index, 1, 0.0, 'LINEAR')
+        key(material, BASE, index, 11, 1.0, 'LINEAR')
+    material.animation_data.action.name = 'ANIM_SWEEP'
+    to_nla(material, 'ANIM_SWEEP', 1)
+    new_object(scene, root, 'Glass', material)
+    shown = preview(scene, material, BASE, range(1, 12))
+    gltf = export(scene, 'track_of_another_object', merge='NLA_TRACK')
+    named = [a for a in gltf.data.get('animations', []) if a['name'] == 'ANIM_SWEEP']
+    check(len(named) == 1, f'track of another object: one animation ANIM_SWEEP (got {len(named)})')
+    if named:
+        nodes = {gltf.data['nodes'][c['target']['node']]['name'] for c in named[0]['channels']}
+        check('WiperDriver' in nodes, f'track of another object: ANIM_SWEEP moves the driver (nodes {sorted(nodes)})')
+    check_valid_samplers(gltf, 'track of another object')
+    check_channel(
+        gltf, 'track of another object', 'MatWiped', TARGET_BASE, 'VEC4', range(1, 12), shown,
+        animation_name='ANIM_SWEEP',
+    )
+
+
+def test_one_action_object_and_material():
+    """The deploy settings: one active action animating an object and its material exports one animation."""
+    scene, root = new_scene()
+    material = new_material('MatBoth')
+    obj = new_object(scene, root, 'Lever', material)
+    obj.keyframe_insert('location', frame=1)
+    obj.location = (0.0, 0.0, 1.0)
+    obj.keyframe_insert('location', frame=11)
+    action = obj.animation_data.action
+    action.name = 'ANIM_BOTH'
+    material.animation_data_create()
+    material.animation_data.action = action
+    for index in range(4):
+        key(material, BASE, index, 1, 0.0, 'LINEAR')
+        key(material, BASE, index, 11, 1.0, 'LINEAR')
+    shown = preview(scene, material, BASE, range(1, 12))
+    gltf = export(scene, 'one_action_object_and_material', merge='NLA_TRACK')
+    named = [a for a in gltf.data.get('animations', []) if a['name'] == 'ANIM_BOTH']
+    check(len(named) == 1, f'one action: one animation ANIM_BOTH (got {len(named)})')
+    if named:
+        nodes = {gltf.data['nodes'][c['target']['node']]['name'] for c in named[0]['channels']}
+        check('Lever' in nodes, f'one action: ANIM_BOTH moves the object (nodes {sorted(nodes)})')
+    check_channel(
+        gltf, 'one action', 'MatBoth', TARGET_BASE, 'VEC4', range(1, 12), shown, animation_name='ANIM_BOTH',
+    )
+
+
 def test_keys_outside_range_only():
     """No key inside the exported range: nothing to export, and the rest of the file is intact."""
     scene, root = new_scene(frame_start=100, frame_end=110)
@@ -499,6 +560,8 @@ def main():
         test_shared_action_two_animations,
         test_nla_strip_placement,
         test_nla_strip_repeat_reverse,
+        test_track_of_another_object,
+        test_one_action_object_and_material,
         test_keys_outside_range_only,
     ]
     for case in cases:

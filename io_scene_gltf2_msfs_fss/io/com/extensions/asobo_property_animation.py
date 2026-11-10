@@ -198,6 +198,8 @@ class ExportCache:
         self.force_keep_obj_anim_original_value: bool = khronos_export_settings.get("gltf_optimize_animation_keep_object", False)
         self.force_keep_bone_anim_original_value: bool = khronos_export_settings.get("gltf_optimize_animation_keep_armature", False)
         self.export_nla : bool = _is_export_nla_enabled(khronos_export_settings)
+        # Unified add-on: Actions mode merged by NLA track (the FSS deploy); Khronos merges only NLA-track animations
+        self.merge_nla_track : bool = khronos_export_settings.get("gltf_merge_animation", None) == "NLA_TRACK"
         self.force_sampling : bool = khronos_export_settings.get("gltf_force_sampling", True)
         self.disable_material_animation : bool = False
         self.treated_materials: set[str] = set()
@@ -736,6 +738,15 @@ def _prepare_obj_material_animation(
     (see `msfs_gather_sampled_object_channel` in `gltf_exporter_patches`).
     """
     export_nla = export_cache.export_nla
+    # Unified add-on: in Actions mode merged by NLA track, an active placeholder action is exported as an animation of
+    # its own (Khronos merges only animations from NLA tracks), so a material animation named like another object's
+    # track (a windshield's Wiper 1 State in a wiper armature's track) gave two animations of that name, one with only
+    # the material channel. The placeholder goes on a track named like the animation, as in NLA Tracks mode, unless
+    # the object's active action already has the animation name (one action animating object and material).
+    active_action = obj.animation_data.action if obj.animation_data else None
+    use_track = export_nla or (
+        export_cache.merge_nla_track and not (active_action and active_action.name == anim_name)
+    )
     track = None
     action = None
     slot = None
@@ -743,7 +754,7 @@ def _prepare_obj_material_animation(
 
     if obj.animation_data is None:
         obj.animation_data_create()
-        if export_nla:
+        if use_track:
             action, slot = _get_placeholder_action(anim_name)
             track = _add_new_NLA_track_with_action(obj, anim_name, action, slot)
 
@@ -754,7 +765,7 @@ def _prepare_obj_material_animation(
             if slot:
                 obj.animation_data.action_slot = slot
 
-    elif export_nla:
+    elif use_track:
         # Check if a valid track with same name exists
         for _track in obj.animation_data.nla_tracks:
 
