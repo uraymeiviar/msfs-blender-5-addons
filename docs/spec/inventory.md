@@ -20,7 +20,7 @@ Sources: **W***n* = item *n* of the wish-list journal (`20261010.fss-blender-too
 
 ## 1. Exporter (`io_scene_gltf2_msfs_fss`)
 
-Based on Asobo's MSFS 2024 exporter 8.4.1 for Blender 5.2; FSS changes live in FSS-owned modules (`instancing.py`, `migration.py`, `legacy_normals.py`, `msfs2020_target.py`, `fss_workflow_ui.py`, `anisotropic_preview.py`, `io/exp/gltf_exporter_patches.py`, marked spots in `io/exp/multi_export.py`). Guide: [../user/exporter.md](../user/exporter.md); journal: `20261002.msfs2024-blender5-exporter-conversion.md`.
+Based on Asobo's MSFS 2024 exporter 8.4.2 for Blender 5.2; FSS changes live in FSS-owned modules (`instancing.py`, `migration.py`, `legacy_normals.py`, `msfs2020_target.py`, `fss_workflow_ui.py`, `anisotropic_preview.py`, `io/exp/gltf_exporter_patches.py`, marked spots in `io/exp/multi_export.py`). Guide: [../user/exporter.md](../user/exporter.md); journal: `20261002.msfs2024-blender5-exporter-conversion.md`.
 
 | Feature | Status | Source | Spec |
 | :--- | :--- | :--- | :--- |
@@ -34,6 +34,7 @@ Based on Asobo's MSFS 2024 exporter 8.4.1 for Blender 5.2; FSS changes live in F
 | Instancing: a shared mesh exported once, also when its users have only Auto Smooth with the same angle, and on throwaway objects when users with only Weighted Normal or Auto Smooth evaluate identically | implemented | `instancing.py`, `tests/test_instancing.py` | EXP-008 |
 | Clean-up on export: NLA tweak mode, Edit and Pose Mode | implemented | exporter guide | EXP-009 |
 | No crash on a plain MSFS 2024 export after a multi-export and a new or opened file | implemented (added 20261104) | `msfs2020_target.py`, `tests/test_export_settings_reference.py` | EXP-015 |
+| Materials sharing a normal image keep their own Normal Scale (over Asobo 8.4.2) | implemented (added 20261110) | `io/exp/gltf_exporter_patches.py`, `tests/test_normal_scale.py` | EXP-016 |
 | Asobo's export workflow hidden (Multi-Export Hierarchy tab, LOD Tools panel) in favour of the FSS deploy, merge groups and LOD marks | implemented | `fss_workflow_ui.py` | EXP-010 |
 | Export speed of the LOD deploy (E2 cockpit 973 s to 67 s) | implemented | `20261017.export-performance.md` | — (a measurement, not a requirement) |
 | Hooks used by fss_blender_tools: merge groups, leading `@` stripped, `fss_` keys out of glTF extras | implemented | `fss_blender_tools/merge.py` (runs inside the exporter) | EXP-013, DAT-040, DAT-042 |

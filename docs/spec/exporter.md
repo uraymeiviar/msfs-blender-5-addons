@@ -2,7 +2,7 @@
 
 [Specification](README.md) / **exporter.md**
 
-The add-on `io_scene_gltf2_msfs_fss`: Asobo's MSFS 2024 exporter 8.4.1 for Blender 5.2 with the FSS MSFS 2020
+The add-on `io_scene_gltf2_msfs_fss`: Asobo's MSFS 2024 exporter 8.4.2 for Blender 5.2 with the FSS MSFS 2020
 exporter built in. Asobo's behaviour is not specified here; these requirements cover what FSS adds or changes.
 FSS changes live in FSS-owned modules so Asobo releases stay mergeable (AGENTS.md, Upstream Policy). Artist guide:
 [../user/exporter.md](../user/exporter.md).
@@ -95,6 +95,16 @@ forks do, not that a single FSS feature works.
 - **Test:** `tests/test_anisotropic_preview.py`
 - **Code:** `anisotropic_preview.py`; marked lines in `blender/material/msfs_material_anisotropic.py`,
   `blender/material/msfs_material_hair.py`, `io/com/extensions/material/asobo_material_anisotropic.py`
+
+### EXP-016: Normal Scale per material with a shared image
+
+- **Status:** implemented
+- **Requirement:** In an MSFS 2024 export, materials that use the same normal image keep their own Normal Scale and
+  Detail Normal Scale (and a UV2 occlusion keeps its own UV set). Asobo 8.4.2 hands every material the one texture
+  entry it caches per image, so the last material exported set the scale for all.
+- **Decision:** maintainer's choice at the 8.4.2 merge (exporter journal Session 18)
+- **Test:** `tests/test_normal_scale.py`
+- **Code:** `io/exp/gltf_exporter_patches.py` (`msfs_get_texture_info`)
 
 ## One File for Both Simulators
 

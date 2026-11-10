@@ -10,6 +10,7 @@ only as a last resort.
 Be carrefull, these wrappers are not correctly reloaded at runtime. It's safer to restart
 blender after updating them.
 """
+import copy
 import os
 from pathlib import Path
 
@@ -591,7 +592,26 @@ def assign_linked_materials(objects):
 # endregion
 
 
+# region FSS: own texture info per material
+# Asobo 8.4.2 assigns the texture info cached per image (MSFS2024_MaterialUtils._tex_infos_cache) to each material
+# itself, so materials that share an image overwrote each other's Normal Scale and Detail Normal Scale (and the UV2
+# occlusion's tex_coord). Each caller gets its own copy; the cache keeps the original.
+_original_get_texture_info = None
+
+
+def msfs_get_texture_info(blender_material, attribute, export_settings, is_normal=False):
+    texture_info = _original_get_texture_info(blender_material, attribute, export_settings, is_normal)
+    return copy.copy(texture_info) if texture_info is not None else None
+# endregion
+
+
 def register():
+    global _original_get_texture_info
+    from io_scene_gltf2_msfs_fss.io.com.msfs_material_utils import MSFS2024_MaterialUtils
+    if _original_get_texture_info is None:
+        _original_get_texture_info = MSFS2024_MaterialUtils.get_texture_info
+        MSFS2024_MaterialUtils.get_texture_info = staticmethod(msfs_get_texture_info)
+
     # Not following pep8 but import must be done in register in order to correctly patch exporter in background mode.
     global _original_gather_sample_object_channel
     global _original_gather_sample_bone_channel
@@ -670,6 +690,12 @@ def register():
     GlTF2Exporter.finalize_images = msfs_finalize_images
 
 def unregister():
+    global _original_get_texture_info
+    from io_scene_gltf2_msfs_fss.io.com.msfs_material_utils import MSFS2024_MaterialUtils
+    if _original_get_texture_info is not None:
+        MSFS2024_MaterialUtils.get_texture_info = staticmethod(_original_get_texture_info)
+        _original_get_texture_info = None
+
     # Reload patched modules to undo patch - Force Keep Animation
     to_reload = []
 
