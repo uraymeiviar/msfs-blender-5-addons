@@ -172,10 +172,8 @@ def visibility_reader():
         saved = counts.get(me.name)
         if (saved if saved is not None else len(data[key])) != len(me.polygons):
             return None
-        summary = summaries.get(obj.name, {})
-        if summary.get('never_seen', False):
-            return uv_marks.NEVER_SEEN_FACTOR
-        return uv_marks.visibility_factor(summary.get('score', 1.0))
+        # a never-lit object scores the file's Ambient (UV decision 133)
+        return uv_marks.visibility_factor(summaries.get(obj.name, {}).get('score', 1.0))
 
     return factor
 
@@ -230,13 +228,13 @@ def scan(context):
                     # faces whose index lies past the last slot use no material (as uv_pack counts them)
                     areas = np.bincount(np.minimum(mi, len(slots)), weights=face_cm2, minlength=len(slots) + 1)
                     if obj not in densities:
-                        vis = visibility(obj)
+                        vis = visibility(obj) if uv_marks.uses_visibility(obj) else None
                         densities[obj] = (uv_marks.density(obj, scene)[0][1], vis)
                 high, vis = densities[obj]
                 cm2 = sum(areas[index] for index, slot in enumerate(slots) if slot == material)
                 entry.area += cm2 * 1e-4
                 zone[2] += cm2 * 1e-4
-                entry.estimate_sq += cm2 * (target * high * (1.0 if vis is None else vis)) ** 2
+                entry.estimate_sq += cm2 * (target * high * uv_marks.material_density(material) * (1.0 if vis is None else vis)) ** 2
                 entry.with_visibility |= vis is not None
         for material, material_users in mesh_users.items():
             if len(material_users) > 1:

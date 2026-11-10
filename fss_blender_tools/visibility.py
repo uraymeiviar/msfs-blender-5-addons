@@ -1,96 +1,81 @@
 """FSS Blender Tools: Visibility Scoring panel (inside UV Auto Packing), settings and operators.
 
-Enables artists to select cameras, configure animation states, run visibility analysis,
-and view inspection reports (Decisions 80, 81, 83, 86).
+The artist includes probe lights from the scene's lights, sets animation steps and the island rules, runs the
+analysis, and reads the report (UV journal decisions 124 to 130; earlier 80, 81, 83, 86).
 """
 
-import json
 from pathlib import Path
+import math
 import bpy
-import gpu
-from gpu_extras.batch import batch_for_shader
-from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty, StringProperty
-from mathutils import Vector
-import numpy as np
+from bpy.props import BoolProperty, CollectionProperty, FloatProperty, IntProperty, PointerProperty, StringProperty
 
 from . import visibility_core
 
 
-def _tag_viewports(_self=None, _context=None):
-    """The cut sphere follows the settings: redraw the 3D views, not only the sidebar that changed."""
-    wm = bpy.context.window_manager
-    for window in wm.windows if wm else ():
-        for area in window.screen.areas:
-            if area.type == 'VIEW_3D':
-                area.tag_redraw()
-
-
 # ---------------------------------------------------------------------------
-# Camera List Item & Settings PropertyGroup (Decision 83 & 86)
+# Light List Item & Settings PropertyGroup (decision 129)
 # ---------------------------------------------------------------------------
 
-class FSS_VisibilityCameraItem(bpy.types.PropertyGroup):
-    """Camera entry in the visibility test list."""
-    camera: PointerProperty(
-        name="Camera",
+class FSS_VisibilityLightItem(bpy.types.PropertyGroup):
+    """A light of the scene in the probe light list."""
+    light: PointerProperty(
+        name="Light",
         type=bpy.types.Object,
-        poll=lambda self, obj: obj.type == 'CAMERA',
-        description="Reference camera object"
+        poll=lambda self, obj: obj.type == 'LIGHT',
+        description="Probe light object"
     )
-    include: BoolProperty(name="Include", default=False, update=_tag_viewports, description="Include this camera in visibility analysis")
-    mode: EnumProperty(
-        name="Mode",
-        items=[
-            ('LOOK_AROUND', 'Look Around', 'The head turns inside the Left / Right and Up / Down limits, from a fixed position, with no zoom. Full 180 and 90 is everywhere'),
-            ('FIXED_VIEW', 'Fixed View', 'Fixed perspective camera frustum matching camera focal length and resolution'),
-        ],
-        default='LOOK_AROUND',
-        update=_tag_viewports,
-        description="Camera viewing mode"
-    )
-    weight: FloatProperty(
-        name="Weight",
-        default=1.0, min=0.05, max=1.0, precision=2, update=_tag_viewports,
-        description="How much this camera counts. An island takes its highest score over the cameras, each multiplied by "
-                    "its weight: a low weight lifts what the other cameras miss and never lowers what they see. "
-                    "Update Visibility uses it"
-    )
-    yaw_limit: IntProperty(
-        name="Left / Right",
-        subtype='NONE', default=180, min=5, max=180, update=_tag_viewports,
-        description="How far the head can turn left and right of the camera's direction, in degrees to each side. "
-                    "180 is all the way round. Update Visibility uses it"
-    )
-    pitch_limit: IntProperty(
-        name="Up / Down",
-        subtype='NONE', default=90, min=5, max=90, update=_tag_viewports,
-        description="How far the head can look up and down from the camera's direction, in degrees to each side. "
-                    "90 is straight up and down. Update Visibility uses it"
-    )
+    include: BoolProperty(name="Include", default=False,
+                          description="Use this light as a probe light: the surfaces it lights count as seen, as "
+                                      "bright as it makes them in the viewport (Rendered, View Transform Standard)")
 
     @property
-    def camera_name(self):
-        return self.camera.name if self.camera else ""
+    def light_name(self):
+        return self.light.name if self.light else ""
 
 
 class FSS_VisibilitySettings(bpy.types.PropertyGroup):
     """Scene visibility test settings."""
-    cameras: CollectionProperty(type=FSS_VisibilityCameraItem)
-    active_camera_index: IntProperty(default=0, update=_tag_viewports)
-    show_look_sphere: BoolProperty(
-        name="Show in Viewport",
-        default=True,
-        update=_tag_viewports,
-        description="Draw what each included Look Around camera can look at as a sphere around it, 1 m from the camera; "
-                    "the selected row's is brighter"
-    )
+    lights: CollectionProperty(type=FSS_VisibilityLightItem)
+    active_light_index: IntProperty(default=0)
 
     states: IntProperty(
         name="Animation Steps",
         default=5,
         min=2,
         max=10,
-        description="Animation steps evenly spaced over each animation's length: 2 gives 0 and 100 %, 5 gives 0, 25, 50, 75 and 100 % (Decision 86)"
+        description="Animation steps evenly spaced over each animation's length: 2 gives 0 and 100 %, 5 gives 0, 25, 50, "
+                    "75 and 100 %. A face takes its brightest step. Animated probe lights move with the steps"
+    )
+
+    island_percentile: FloatProperty(
+        name="Island Value",
+        default=90.0, min=50.0, max=100.0, precision=0, subtype='PERCENTAGE',
+        description="What an island takes from its faces: the brightness that this share of its surface (by area) stays "
+                    "below. 90 % follows the island's well-lit part, so a partly shadowed island is not marked down; "
+                    "50 % is the median; 100 % the brightest face. Update Visibility uses it"
+    )
+
+    step_limit: FloatProperty(
+        name="Step Limit",
+        default=1.5, min=1.0, max=4.0, precision=2,
+        description="How much two islands that touch on the model may differ: a darker island rises to its brighter "
+                    "neighbour divided by this; no island is lowered. 1 makes touching islands equal. Update "
+                    "Visibility uses it"
+    )
+
+    ambient: FloatProperty(
+        name="Ambient",
+        default=0.1, min=0.0, max=0.5, precision=2,
+        description="Light every surface gets, lit or not: the lowest visibility any island can have (0.1 keeps a "
+                    "tenth of the density for what no probe light reaches). Every score is lifted by the same share "
+                    "of the way to 1. Update Visibility uses it"
+    )
+
+    shadow_samples: IntProperty(
+        name="Shadow Samples",
+        default=4, min=1, max=16,
+        description="Points spread over each light's Radius that the shadows are measured from: soft shadows, as the "
+                    "viewport draws them. A light with Radius 0 uses one. Each sample is one more view"
     )
 
     cube_res: IntProperty(
@@ -113,42 +98,46 @@ class FSS_VisibilitySettings(bpy.types.PropertyGroup):
     show_advanced: BoolProperty(
         name="Advanced Settings",
         default=False,
-        description="Display advanced parameters (cube resolution, thresholds)"
+        description="Display advanced parameters (shadow samples, cube resolution, thresholds)"
     )
 
 
-_camera_sync_pending = False
+_light_sync_pending = False
 # While Update Visibility runs, its section shows this instead of the button: fraction 0 to 1, text
 _progress = None
 # What reaches Blender during a run: moving around the viewport and scrolling. Clicks and keys could change the scene under
 # the work (an Undo would leave it holding removed data), and Esc is handled first.
 EVENTS_DURING_RUN = {'MOUSEMOVE', 'INBETWEEN_MOUSEMOVE', 'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE', 'TRACKPADPAN',
                      'TRACKPADZOOM', 'NDOF_MOTION'}
+LIGHT_ICONS = {'POINT': 'LIGHT_POINT', 'SPOT': 'LIGHT_SPOT', 'AREA': 'LIGHT_AREA', 'SUN': 'LIGHT_SUN'}
 
 
-def camera_list_in_sync(scene):
-    """True when the camera list holds exactly the scene's cameras, in name order (read only)."""
+def _scene_lights(scene):
+    return sorted([o for o in scene.objects if o.type == 'LIGHT'], key=lambda o: o.name)
+
+
+def light_list_in_sync(scene):
+    """True when the light list holds exactly the scene's lights, in name order (read only)."""
     settings = getattr(scene, 'fss_visibility', None)
     if settings is None:
         return True
-    scene_cams = sorted([o for o in scene.objects if o.type == 'CAMERA'], key=lambda o: o.name)
-    return [item.camera for item in settings.cameras] == scene_cams
+    return [item.light for item in settings.lights] == _scene_lights(scene)
 
 
-def schedule_camera_sync(scene):
+def schedule_light_sync(scene):
     """Panels may not write to the scene while drawing; sync once, right after the draw."""
-    global _camera_sync_pending
-    if _camera_sync_pending:
+    global _light_sync_pending
+    if _light_sync_pending:
         return
-    _camera_sync_pending = True
+    _light_sync_pending = True
     name = scene.name
 
     def run():
-        global _camera_sync_pending
-        _camera_sync_pending = False
+        global _light_sync_pending
+        _light_sync_pending = False
         target = bpy.data.scenes.get(name)
         if target is not None:
-            sync_camera_list(target)
+            sync_light_list(target)
             for window in bpy.context.window_manager.windows:
                 for area in window.screen.areas:
                     if area.type == 'VIEW_3D':
@@ -158,29 +147,35 @@ def schedule_camera_sync(scene):
     bpy.app.timers.register(run, first_interval=0.0)
 
 
-def sync_camera_list(scene):
-    """Synchronize camera collection with scene cameras (follow added, renamed or deleted)."""
+def sync_light_list(scene):
+    """Follow the scene's lights (added, renamed or deleted), keeping each light's Include."""
     settings = getattr(scene, 'fss_visibility', None)
     if settings is None:
         return
+    included = {item.light for item in settings.lights if item.light and item.include}
+    settings.lights.clear()
+    for light_obj in _scene_lights(scene):
+        item = settings.lights.add()
+        item.light = light_obj
+        item.include = light_obj in included
 
-    existing = {}
-    for item in settings.cameras:
-        if item.camera and item.camera.name in scene.objects:
-            existing[item.camera] = (item.include, item.mode, item.yaw_limit, item.pitch_limit, item.weight)
 
-    scene_cams = sorted([o for o in scene.objects if o.type == 'CAMERA'], key=lambda o: o.name)
+def included_lights(scene):
+    """The included probe lights that light anything: point, spot and area lights (a sun has no position)."""
+    settings = getattr(scene, 'fss_visibility', None)
+    if settings is None:
+        return []
+    return [item.light for item in settings.lights
+            if item.include and item.light and item.light.type == 'LIGHT' and item.light.data.type != 'SUN']
 
-    # Rebuild collection preserving settings by camera object
-    settings.cameras.clear()
-    for cam_obj in scene_cams:
-        item = settings.cameras.add()
-        item.camera = cam_obj
-        if cam_obj in existing:
-            item.include, item.mode, item.yaw_limit, item.pitch_limit, item.weight = existing[cam_obj]
-        else:
-            item.include = False
-            item.mode = 'LOOK_AROUND'
+
+def light_summary(light_obj):
+    """A short line about a light for the list: type, power and cone."""
+    data = light_obj.data
+    text = f"{data.type.title()} {data.energy:g} W"
+    if data.type == 'SPOT':
+        text += f" {math.degrees(data.spot_size):.0f}°"
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -206,14 +201,28 @@ def write_visibility_report_text(results, vis_path, elapsed_time):
     lines.append(f"Elapsed Time:  {elapsed_time:.2f} s (Patch Expansion: {results.get('patch_expansion_time_s', 0):.2f} s)")
     lines.append("")
 
-    lines.append("VIEWS ANALYSED:")
-    for v in results.get('views', []):
-        limits = ''
-        if v.get('type', 'LOOK_AROUND') == 'LOOK_AROUND' and (v.get('yaw_limit', 180) < 180 or v.get('pitch_limit', 90) < 90):
-            limits = f" Limits: {v['yaw_limit']:g} left/right, {v['pitch_limit']:g} up/down"
-        if v.get('weight', 1.0) < 1.0:
-            limits += f" Weight: {v['weight']:.2f}"
-        lines.append(f"  - Camera: {v['camera']:<24} Mode: {v.get('type', 'LOOK_AROUND'):<14} State: {int(v['state']*100)}%{limits}")
+    lines.append("PROBE LIGHTS:")
+    states = results.get('light_states', [])
+    for entry in results.get('lights', []):
+        first = states[0].get(entry['name']) if states else None
+        if first is None:
+            lines.append(f"  - {entry['name']:<32} lights nothing (a sun, or no power)")
+            continue
+        lines.append(f"  - {entry['name']:<32} {first['type'].title()} {first['power']:g} W | radius {first['radius']:.3f} m"
+                     f" | reach {first['reach']:.2f} m | {entry['samples']} shadow sample(s)")
+    lines.append(f"  Views: {len(results.get('views', []))} | Animation steps: "
+                 f"{', '.join(str(int(round(v * 100))) + ' %' for v in sorted({v['state'] for v in results.get('views', [])}))}")
+    lines.append("")
+
+    step = results.get('step_limit_result', {})
+    lines.append("ISLANDS:")
+    lines.append(f"  Island value: the {results.get('island_percentile', 0.9) * 100:.0f} % brightness of its faces by area")
+    lines.append(f"  Most visible island before scaling to 1.0: {results.get('scale', 0.0):.4f} "
+                 f"(brightest face {results.get('brightest_face', 0.0):.4f}; 1.0 is white in the viewport)")
+    lines.append(f"  Ambient {results.get('ambient', 0.1):.2f}: the lowest island value")
+    lines.append(f"  Step limit {results.get('step_limit', 1.5):.2f}: {step.get('raised', 0)} island(s) raised "
+                 f"({step.get('raised_area_m2', 0.0):.2f} m², at most x{step.get('largest_raising', 1.0):.3f}), "
+                 "none lowered")
     lines.append("")
 
     lines.append("GEOMETRY TOTALS:")
@@ -333,10 +342,11 @@ def _run_piece(op, context):
 
 
 class FSS_OT_UpdateVisibility(bpy.types.Operator):
-    """Analyse scene visibility from artist-defined cameras across animation states."""
+    """Score the scene's visibility from the included probe lights across animation states."""
     bl_idname = 'fss.update_visibility'
     bl_label = 'Update Visibility'
-    bl_description = "Measure visibility from included cameras and write <blend_name>.visibility beside the file"
+    bl_description = ("Score every surface by the light the included probe lights cast on it, and write "
+                      "<blend_name>.visibility beside the file")
     bl_options = {'REGISTER'}
 
     _timer = None
@@ -347,31 +357,7 @@ class FSS_OT_UpdateVisibility(bpy.types.Operator):
     def poll(cls, context):
         if _progress is not None or not bpy.data.is_saved or not bpy.data.filepath:
             return False
-        settings = getattr(context.scene, 'fss_visibility', None)
-        if not settings or not any(item.include for item in settings.cameras):
-            return False
-        return True
-
-    def _get_included_cameras(self, context):
-        settings = context.scene.fss_visibility
-        cams = []
-        for item in settings.cameras:
-            if not item.include or not item.camera:
-                continue
-            cam_obj = item.camera
-            if cam_obj.type != 'CAMERA':
-                continue
-            cams.append({
-                'name': cam_obj.name,
-                'type': item.mode,
-                'pos': cam_obj.matrix_world.translation.copy(),
-                'forward': visibility_core.get_camera_forward(cam_obj),
-                'obj_name': cam_obj.name,
-                'yaw_limit': float(item.yaw_limit),
-                'pitch_limit': float(item.pitch_limit),
-                'weight': float(item.weight),
-            })
-        return cams
+        return bool(included_lights(context.scene))
 
     def _get_anim_states(self, context):
         n_states = max(2, min(10, context.scene.fss_visibility.states))
@@ -380,36 +366,38 @@ class FSS_OT_UpdateVisibility(bpy.types.Operator):
     def _get_settings_dict(self, context):
         s = context.scene.fss_visibility
         return {
-            'cameras': [{'name': item.camera.name, 'mode': item.mode, 'yaw_limit': item.yaw_limit, 'pitch_limit': item.pitch_limit,
-                         'weight': item.weight}
-                        for item in s.cameras if item.include and item.camera],
+            'lights': [light.name for light in included_lights(context.scene)],
             'states': s.states,
+            'island_percentile': s.island_percentile,
+            'step_limit': s.step_limit,
+            'ambient': s.ambient,
+            'shadow_samples': s.shadow_samples,
             'cube_res': s.cube_res,
             'min_px_threshold': s.min_px_threshold,
         }
 
-    def invoke(self, context, event):
-        if not self.poll(context):
-            self.report({'WARNING'}, "Cannot run: .blend must be saved and at least one camera included.")
-            return {'CANCELLED'}
-
-        cameras = self._get_included_cameras(context)
-        if not cameras:
-            self.report({'WARNING'}, "No included cameras found in the scene.")
-            return {'CANCELLED'}
-
-        anim_states = self._get_anim_states(context)
+    def _make_analyzer(self, context):
         s = context.scene.fss_visibility
-
-        self._analyzer = visibility_core.VisibilityAnalyzer(
+        return visibility_core.VisibilityAnalyzer(
             scene=context.scene,
             view_layer=context.view_layer,
-            cameras=cameras,
-            anim_states=anim_states,
+            lights=[light.name for light in included_lights(context.scene)],
+            anim_states=self._get_anim_states(context),
             cube_res=s.cube_res,
             min_px_threshold=s.min_px_threshold,
             blend_path=bpy.data.filepath,
+            shadow_samples=s.shadow_samples,
+            island_percentile=s.island_percentile / 100.0,
+            step_limit=s.step_limit,
+            ambient=s.ambient,
         )
+
+    def invoke(self, context, event):
+        if not self.poll(context):
+            self.report({'WARNING'}, "Cannot run: .blend must be saved and at least one point, spot or area light "
+                                     "included.")
+            return {'CANCELLED'}
+        self._analyzer = self._make_analyzer(context)
 
         # Modal execution in interactive Blender: the bar first, then the work, a piece per timer event
         if not bpy.app.background:
@@ -445,21 +433,10 @@ class FSS_OT_UpdateVisibility(bpy.types.Operator):
 
     def execute(self, context):
         if self._analyzer is None:
-            cameras = self._get_included_cameras(context)
-            if not cameras:
-                self.report({'WARNING'}, "No included cameras found.")
+            if not included_lights(context.scene):
+                self.report({'WARNING'}, "No point, spot or area light included.")
                 return {'CANCELLED'}
-            anim_states = self._get_anim_states(context)
-            s = context.scene.fss_visibility
-            self._analyzer = visibility_core.VisibilityAnalyzer(
-                scene=context.scene,
-                view_layer=context.view_layer,
-                cameras=cameras,
-                anim_states=anim_states,
-                cube_res=s.cube_res,
-                min_px_threshold=s.min_px_threshold,
-                blend_path=bpy.data.filepath,
-            )
+            self._analyzer = self._make_analyzer(context)
             self._analyzer.prepare()
 
         try:
@@ -567,62 +544,64 @@ class FSS_OT_VisibilitySelectStale(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class FSS_OT_VisibilitySelectCamera(bpy.types.Operator):
-    """Select a reference camera in the scene."""
-    bl_idname = 'fss.visibility_select_camera'
-    bl_label = 'Select Camera'
-    bl_description = "Select this camera in the scene and make it active"
+class FSS_OT_VisibilitySelectLight(bpy.types.Operator):
+    """Select a probe light in the scene."""
+    bl_idname = 'fss.visibility_select_light'
+    bl_label = 'Select Light'
+    bl_description = "Select this light in the scene and make it active"
     bl_options = {'REGISTER', 'UNDO'}
 
-    camera_name: StringProperty(name='Camera')
+    light_name: StringProperty(name='Light')
 
     def execute(self, context):
-        cam = bpy.data.objects.get(self.camera_name)
-        if cam is None:
-            self.report({'WARNING'}, f"Camera '{self.camera_name}' no longer exists.")
+        light = bpy.data.objects.get(self.light_name)
+        if light is None:
+            self.report({'WARNING'}, f"Light '{self.light_name}' no longer exists.")
             return {'CANCELLED'}
         view_layer = context.view_layer
-        if cam.name not in view_layer.objects:
+        if light.name not in view_layer.objects:
             # Turning the collection on is the artist's call: what it holds would then count in Visibility and Pack
-            names = ', '.join(collection.name for collection in cam.users_collection)
-            self.report({'WARNING'}, f"{cam.name} is in collection {names}, which is off in this view layer. "
-                                     "Turn the collection on to select the camera.")
+            names = ', '.join(collection.name for collection in light.users_collection)
+            self.report({'WARNING'}, f"{light.name} is in collection {names}, which is off in this view layer. "
+                                     "Turn the collection on to select the light.")
             return {'CANCELLED'}
         if context.mode != 'OBJECT':
             bpy.ops.object.mode_set(mode='OBJECT')
-        if cam.hide_get(view_layer=view_layer):
-            cam.hide_set(False, view_layer=view_layer)
-        if not cam.visible_get(view_layer=view_layer) or cam.hide_select:
-            self.report({'WARNING'}, f"{cam.name} is hidden or not selectable: change that in the Outliner.")
+        if light.hide_get(view_layer=view_layer):
+            light.hide_set(False, view_layer=view_layer)
+        if not light.visible_get(view_layer=view_layer) or light.hide_select:
+            self.report({'WARNING'}, f"{light.name} is hidden or not selectable: change that in the Outliner.")
             return {'CANCELLED'}
         for obj in list(view_layer.objects.selected):
             obj.select_set(False, view_layer=view_layer)
-        cam.select_set(True, view_layer=view_layer)
-        view_layer.objects.active = cam
-        self.report({'INFO'}, f"Selected {cam.name}.")
+        light.select_set(True, view_layer=view_layer)
+        view_layer.objects.active = light
+        self.report({'INFO'}, f"Selected {light.name}.")
         return {'FINISHED'}
 
 
 # ---------------------------------------------------------------------------
-# UI List for Cameras
+# UI List for Lights
 # ---------------------------------------------------------------------------
 
-class FSS_UL_VisibilityCameraList(bpy.types.UIList):
-    """Camera item row rendering."""
+class FSS_UL_VisibilityLightList(bpy.types.UIList):
+    """Light item row: Include, name, select, and the light's type, power and cone."""
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
-        cam_name = item.camera.name if item.camera else "(deleted)"
+        light = item.light
+        name = light.name if light else "(deleted)"
+        icon_name = LIGHT_ICONS.get(light.data.type, 'LIGHT') if light else 'LIGHT'
         if self.layout_type in {'DEFAULT', 'COMPACT'}:
             row = layout.row(align=True)
             row.prop(item, 'include', text="")
-            row.label(text=cam_name, icon='CAMERA_DATA')
-            if item.camera:
-                row.operator(FSS_OT_VisibilitySelectCamera.bl_idname, text='', icon='RESTRICT_SELECT_OFF').camera_name = cam_name
-            sub = row.row(align=True)
-            sub.enabled = item.include
-            sub.prop(item, 'mode', text="")
+            row.label(text=name, icon=icon_name)
+            if light:
+                row.operator(FSS_OT_VisibilitySelectLight.bl_idname, text='', icon='RESTRICT_SELECT_OFF').light_name = name
+                sub = row.row(align=True)
+                sub.enabled = item.include
+                sub.label(text=light_summary(light))
         elif self.layout_type == 'GRID':
             layout.alignment = 'CENTER'
-            layout.label(text=cam_name, icon='CAMERA_DATA')
+            layout.label(text=name, icon=icon_name)
 
 
 # ---------------------------------------------------------------------------
@@ -642,52 +621,47 @@ class FSS_PT_Visibility(bpy.types.Panel):
         layout = self.layout
         scene = context.scene
 
-        # Keep camera list in sync with scene cameras (written after the draw: panels may not write while drawing)
-        if not camera_list_in_sync(scene):
-            schedule_camera_sync(scene)
+        # Keep the light list in sync with the scene's lights (written after the draw: panels may not write while drawing)
+        if not light_list_in_sync(scene):
+            schedule_light_sync(scene)
         settings = scene.fss_visibility
 
         layout.label(text='Whole scene', icon='SCENE_DATA')
 
-        # 1. Cameras list
+        # 1. Probe lights
         box = layout.box()
-        box.label(text="Reference Cameras:", icon='OUTLINER_OB_CAMERA')
-        if len(settings.cameras) == 0:
-            box.label(text="No cameras in scene. Add a camera first.", icon='INFO')
+        box.label(text="Probe Lights:", icon='OUTLINER_OB_LIGHT')
+        if len(settings.lights) == 0:
+            box.label(text="No lights in the scene. Add a spot or point light.", icon='INFO')
         else:
             box.template_list(
-                "FSS_UL_VisibilityCameraList",
+                "FSS_UL_VisibilityLightList",
                 "",
                 settings,
-                "cameras",
+                "lights",
                 settings,
-                "active_camera_index",
-                rows=min(max(len(settings.cameras), 2), 6),
+                "active_light_index",
+                rows=min(max(len(settings.lights), 2), 6),
             )
-            index = settings.active_camera_index
-            item = settings.cameras[index] if 0 <= index < len(settings.cameras) else None
-            if item is not None and item.camera:
-                column = box.column(align=True)
-                column.enabled = item.include
-                column.label(text=f"{item.camera.name}:")
-                column.prop(item, 'weight', slider=True)
-                if item.mode == 'LOOK_AROUND':
-                    column.separator()
-                    column.label(text="Can look, degrees to each side:")
-                    column.prop(item, 'yaw_limit', slider=True)
-                    column.prop(item, 'pitch_limit', slider=True)
-            if any(row.include and row.mode == 'LOOK_AROUND' for row in settings.cameras):
-                box.prop(settings, 'show_look_sphere')
+            if any(item.include and item.light and item.light.data.type == 'SUN' for item in settings.lights):
+                box.label(text="Sun lights have no position: they do not count", icon='ERROR')
+            box.label(text="Preview: Rendered, world off, white material,", icon='SHADING_RENDERED')
+            box.label(text="View Transform Standard: white is 1.0")
 
         # 2. Main Parameters
         col = layout.column(align=True)
         col.prop(settings, 'states', slider=True)
+        col.prop(settings, 'island_percentile', slider=True)
+        col.prop(settings, 'step_limit', slider=True)
+        col.prop(settings, 'ambient', slider=True)
 
         # 3. Advanced Parameters Subpanel
         adv_box = layout.box()
         adv_box.prop(settings, 'show_advanced', toggle=True, icon='PREFERENCES')
         if settings.show_advanced:
             adv_col = adv_box.column(align=True)
+            adv_col.prop(settings, 'shadow_samples')
+            adv_col.separator()
             adv_col.label(text="Resolution & Threshold (alters scores):", icon='ERROR')
             adv_col.prop(settings, 'cube_res')
             adv_col.prop(settings, 'min_px_threshold')
@@ -705,10 +679,10 @@ class FSS_PT_Visibility(bpy.types.Panel):
             btn_col.enabled = False
             btn_col.operator(FSS_OT_UpdateVisibility.bl_idname, text="Update Visibility", icon='FILE_REFRESH')
             layout.label(text="Save .blend file first to enable analysis", icon='ERROR')
-        elif not any(item.include for item in settings.cameras):
+        elif not included_lights(scene):
             btn_col.enabled = False
             btn_col.operator(FSS_OT_UpdateVisibility.bl_idname, text="Update Visibility", icon='FILE_REFRESH')
-            layout.label(text="Include at least one camera above", icon='INFO')
+            layout.label(text="Include at least one light above", icon='INFO')
         else:
             btn_col.operator(FSS_OT_UpdateVisibility.bl_idname, text="Update Visibility", icon='FILE_REFRESH')
 
@@ -737,17 +711,21 @@ class FSS_PT_Visibility(bpy.types.Panel):
         # Display file summary
         rep_box.label(text=f"File: {meta.get('timestamp', 'Unknown')}", icon='TIME')
         views = meta.get('views', [])
-        cams_used = sorted({v['camera'] for v in views})
-        rep_box.label(text=f"Cameras: {', '.join(cams_used)} ({len(views)} views)")
+        lights_used = [entry['name'] for entry in meta.get('lights', [])]
+        rep_box.label(text=f"Lights: {', '.join(lights_used)} ({len(views)} views)")
 
         # Settings mismatch check
         saved_settings = meta.get('settings', {})
         if saved_settings:
             diff = False
-            if saved_settings.get('states') != settings.states:
-                diff = True
-            elif saved_settings.get('cube_res', 1024) != settings.cube_res:
-                diff = True
+            now = {'states': settings.states, 'cube_res': settings.cube_res,
+                   'island_percentile': round(settings.island_percentile, 3), 'step_limit': round(settings.step_limit, 3),
+                   'ambient': round(settings.ambient, 3),
+                   'shadow_samples': settings.shadow_samples,
+                   'lights': [light.name for light in included_lights(scene)]}
+            saved = {key: round(value, 3) if isinstance(value, float) else value
+                     for key, value in saved_settings.items() if key in now}
+            diff = any(saved.get(key) != value for key, value in now.items() if key in saved)
             if diff:
                 rep_box.label(text="File was made with different settings", icon='QUESTION')
 
@@ -778,64 +756,17 @@ class FSS_PT_Visibility(bpy.types.Panel):
 
 
 # ---------------------------------------------------------------------------
-# The cut vision sphere in the 3D view
-# ---------------------------------------------------------------------------
-
-LOOK_SPHERE_RADIUS = 1.0  # metres in Blender units; only a drawing: the limits are angles
-_look_batches = {}  # (yaw, pitch) -> (grid vertices, edge vertices) in camera space
-_look_handler = None
-
-
-def look_sphere_cameras(scene):
-    """[(camera, yaw, pitch, whether its row is the selected one)] to draw: every included Look Around camera."""
-    settings = getattr(scene, 'fss_visibility', None)
-    if settings is None or not settings.show_look_sphere:
-        return []
-    return [(item.camera, item.yaw_limit, item.pitch_limit, index == settings.active_camera_index)
-            for index, item in enumerate(settings.cameras) if item.camera and item.include and item.mode == 'LOOK_AROUND']
-
-
-def look_sphere_world_lines(camera, yaw, pitch):
-    """The sphere's line pairs in world space, at the camera's position and direction but never its scale."""
-    key = (yaw, pitch)
-    if key not in _look_batches:
-        _look_batches[key] = visibility_core.sphere_lines(yaw, pitch, LOOK_SPHERE_RADIUS)
-    grid, edges = _look_batches[key]
-    matrix = camera.matrix_world
-    axes = np.array(matrix.to_3x3().normalized(), dtype=np.float32)
-    origin = np.array(matrix.translation, dtype=np.float32)
-    return grid @ axes.T + origin, edges @ axes.T + origin
-
-
-def _draw_look_sphere():
-    found = look_sphere_cameras(bpy.context.scene)
-    if not found:
-        return
-    shader = gpu.shader.from_builtin('UNIFORM_COLOR')
-    gpu.state.blend_set('ALPHA')
-    gpu.state.depth_test_set('NONE')
-    shader.bind()
-    for camera, yaw, pitch, selected in found:
-        grid, edges = look_sphere_world_lines(camera, yaw, pitch)
-        shader.uniform_float('color', (0.4, 0.75, 1.0, 0.18 if selected else 0.07))
-        batch_for_shader(shader, 'LINES', {'pos': grid}).draw(shader)
-        shader.uniform_float('color', (1.0, 0.75, 0.2, 0.95) if selected else (0.75, 0.75, 0.75, 0.45))
-        batch_for_shader(shader, 'LINES', {'pos': edges}).draw(shader)
-    gpu.state.blend_set('NONE')
-
-
-# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
 CLASSES = (
-    FSS_VisibilityCameraItem,
+    FSS_VisibilityLightItem,
     FSS_VisibilitySettings,
     FSS_OT_UpdateVisibility,
     FSS_OT_VisibilitySelectNeverSeen,
     FSS_OT_VisibilitySelectStale,
-    FSS_OT_VisibilitySelectCamera,
-    FSS_UL_VisibilityCameraList,
+    FSS_OT_VisibilitySelectLight,
+    FSS_UL_VisibilityLightList,
     FSS_PT_Visibility,
 )
 
@@ -844,17 +775,9 @@ def register():
     for cls in CLASSES:
         bpy.utils.register_class(cls)
     bpy.types.Scene.fss_visibility = PointerProperty(type=FSS_VisibilitySettings)
-    global _look_handler
-    if not bpy.app.background:
-        _look_handler = bpy.types.SpaceView3D.draw_handler_add(_draw_look_sphere, (), 'WINDOW', 'POST_VIEW')
 
 
 def unregister():
-    global _look_handler
-    if _look_handler is not None:
-        bpy.types.SpaceView3D.draw_handler_remove(_look_handler, 'WINDOW')
-        _look_handler = None
-    _look_batches.clear()
     if hasattr(bpy.types.Scene, 'fss_visibility'):
         delattr(bpy.types.Scene, 'fss_visibility')
     for cls in reversed(CLASSES):

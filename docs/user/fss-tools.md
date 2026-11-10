@@ -101,6 +101,7 @@ A tag is a free label you put on objects, for example `SCREEN` or `KEEP_LOD`. An
   - **Animated** (action icon, blue when on): marks parts Blender has no animation for, because the model XML animates them. They no longer count as **Stray**, nor do the direct children of a marked empty. Only a mark: the merge does not read it, so such a part inside a group needs **Don't Merge** as well.
   - **Whole** (cube icon, blue when on): the LOD export does not drop the small loose pieces of these objects one by one. The object still leaves by the size rule or a mark, all at once (see [How Nesting Affects the Size Rule](lod.md#how-nesting-affects-the-size-rule)).
   - **No Texture** (texture icon, blue when on): for objects that need no texture, for example gauge screens. A material leaves [By Texture Need](materials.md#by-texture-need) at the next **Refresh** in **Materials** once every object using it, hidden ones too, has such a tag. The AO auto-bake skips these objects, but they can still darken others. **Pack** does not read it yet.
+  - **No Export** (export icon, blue when on): objects with this tag, and everything below them, are left out of every glTF export and out of merge groups, for example the probe lights of [Visibility Scoring](#visibility-scoring) and the empty above them. They stay in the `.blend` and in the viewport.
   - **Delete** (bin): asks for confirmation, then removes the tag from every object in the file. The objects stay.
 
 The two AO toggles only record your choice for now: there is no AO auto-bake tool yet, so they change nothing in the model or the export. They apply to the objects that carry the tag, not to their children. With both on, the bake is meant to ignore the object completely, which suits collision meshes, clickspots, helpers and decals.
@@ -126,7 +127,7 @@ The same panel is also in the **UV Editor**'s sidebar (**N**), tab **FSS MSFS To
 - **Active object box:** for the active object, how its density comes together:
   - **Parent:** the factor range of everything above it, for example `x1.35 - x1.82 from DOOR_L` (the nearest marked parent is named), or `x0.90 - x1.10 (scene freedom)` when nothing above it is marked.
   - **Zone:** the zone the object lies in and the zone empty's own factor. It is already part of **Parent**; the row only shows where the zone stands.
-  - **Visibility:** the object's score from [Visibility Scoring](#visibility-scoring) and the range of its islands' scores. **no data: x1.00** when the `.visibility` file is missing or the mesh changed since; **never seen: x0.10** when no analysed view sees it. No score counts below x0.10, so an island seen a little never gets less than one never seen. Shown in Object Mode. The **Heatmap**'s Density mode follows a change of a mark (on the object or above it) shortly after you stop dragging.
+  - **Visibility:** the object's score from [Visibility Scoring](#visibility-scoring) and the range of its islands' scores. **no data: x1.00** when the `.visibility` file is missing or the mesh changed since; **never lit: x0.10** when no probe light reaches it in any step: it scores the **Ambient** of Visibility Scoring (0.1 by default), the lowest score there is. Shown in Object Mode. The **Heatmap**'s Density mode follows a change of a mark (on the object or above it) shortly after you stop dragging.
   - **Density:** the object's own mark. Tick **own mark** to give it a factor, then set **Min** and **Max** (the same value in both for one factor); the fields are greyed while the tick is off. An object without its own mark counts as x1.0.
   - **Lower** (x0.75, for parts that are hardly seen), **Higher** (x1.5, for prominent parts such as the glareshield) and **Clear** (remove the own mark) act on all selected objects.
   - **Result:** the density range in pixels per centimetre that the packer may give the object's islands: target × parent × own mark × visibility, and in brackets the range over its islands' visibility.
@@ -185,7 +186,7 @@ To set a field on several objects at once, select them, make one of them active,
 
 ### Visibility Scoring
 
-A section inside **UV Auto Packing**. Measures, from the cameras you include and over the animation steps, how much of each face is visible, as a factor from 0 to 1 that does not depend on distance or size. Writes `<blend_name>.visibility` for the packer and the Heatmap's Visibility mode. See [visibility.md](visibility.md) for the settings and the workflow.
+A section inside **UV Auto Packing**. Measures how brightly the probe lights you include light each face over the animation steps, as the viewport shows it, as a factor from 0 to 1 (the most visible island is 1). Writes `<blend_name>.visibility` for the packer and the Heatmap's Visibility mode. See [visibility.md](visibility.md) for the settings and the workflow.
 
 ## General
 
@@ -245,7 +246,7 @@ In the tab **FSS Tools**. Colours the selected objects directly in the 3D viewpo
 
 - **Distortion:** Does each face keep its shape? (Conformal singular-value ratio)
 - **Density:** Does each face get the right amount of texture relative to the texture set median and object marks?
-- **Visibility:** How well is each face seen from the reference cameras (from `<blend_name>.visibility`)?
+- **Visibility:** How brightly do the probe lights of Visibility Scoring light each face (from `<blend_name>.visibility`)?
 
 Includes a distribution chart in the panel and an optional UV grid with cell labels. See [uv.md](uv.md#heatmap-distortion-texel-density-and-visibility) for how to read it.
 

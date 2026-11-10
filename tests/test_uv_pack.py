@@ -125,6 +125,52 @@ def test_exact_density():
     print(f"PASS: test_exact_density (non-uniform scale, px/cm error {max(errs):.1e}, {r['mode']})")
 
 
+def test_material_factor():
+    reset()
+    scene = bpy.context.scene
+    target = uv_marks.target_density(scene)
+    half, full = mat('HALF'), mat('FULL')
+    # Two faces joined in UV with different materials: the packer makes them two islands, one per material
+    me = bpy.data.meshes.new('JOINED')
+    verts = [(0, 0, 0), (0.5, 0, 0), (1, 0, 0), (0, 0.5, 0), (0.5, 0.5, 0), (1, 0.5, 0)]
+    me.from_pydata(verts, [], [(0, 1, 4, 3), (1, 2, 5, 4)])
+    uvl = me.uv_layers.new(name='UVMap')
+    lv = np.zeros(len(me.loops), np.int64)
+    me.loops.foreach_get('vertex_index', lv)
+    uvl.data.foreach_set('uv', (np.array(verts)[:, :2] * 0.1)[lv].ravel())
+    me.materials.append(half)
+    me.materials.append(full)
+    me.polygons.foreach_set('material_index', [0, 1])
+    obj = quad_obj('JOINED', [], mesh=me)
+    view_layer = bpy.context.view_layer
+
+    def rows():
+        return {row['material'].name: row for row in uv_pack.object_islands(obj, scene, view_layer)[0]}
+
+    assert len(uv_pack.object_islands(obj, scene, view_layer)[0]) == 2 and abs(rows()['HALF']['high'] - target) < 1e-6
+    key = uv_islands._key(obj, scene)
+    setattr(half, uv_marks.MATERIAL_FACTOR_PROP, 0.5)
+    assert uv_islands._key(obj, scene) != key, "the island list must follow the material's factor"
+    got = rows()
+    assert abs(got['HALF']['low'] - target * 0.5) < 1e-6 and abs(got['HALF']['high'] - target * 0.5) < 1e-6, got['HALF']
+    assert abs(got['FULL']['high'] - target) < 1e-6, got['FULL']
+    # The real pack: the density on the texture, each set by its own factor
+    r = uv_pack.pack(half)
+    q = uvs(obj).reshape(-1, 4, 2)[0] * 4096
+    assert ok(r) and abs(quad_density(q, 50.0, 50.0) - target * 0.5) / (target * 0.5) < 1e-4, (quad_density(q, 50.0, 50.0), r)
+    r = uv_pack.pack(full)
+    q = uvs(obj).reshape(-1, 4, 2)[1] * 4096
+    assert ok(r) and abs(quad_density(q, 50.0, 50.0) - target) / target < 1e-4, (quad_density(q, 50.0, 50.0), r)
+    # Unticked: ignored, the number stays
+    setattr(half, uv_marks.MATERIAL_TICK_PROP, False)
+    assert abs(rows()['HALF']['high'] - target) < 1e-6 and getattr(half, uv_marks.MATERIAL_FACTOR_PROP) == 0.5
+    setattr(half, uv_marks.MATERIAL_TICK_PROP, True)
+    # A multiplier set by hand on an island stays final
+    uv_marks.set_face_overrides(me, np.array([0]), 2.0)
+    assert abs(rows()['HALF']['high'] - target * 2.0) < 1e-5, rows()['HALF']
+    print("PASS: test_material_factor (x0.5 on the texture, per material, tick, an island's own multiplier stays final)")
+
+
 def test_underflow_and_sizes():
     reset(0.9, 1.1)
     m = mat('UNDER')
@@ -423,7 +469,7 @@ def draw_row(material):
     """The texture set list's row of a material, through FSS_UL_TextureSets.draw_item."""
     calls = []
     uv_marks.FSS_UL_TextureSets.draw_item(None, bpy.context, _Layout(calls), bpy.data, material, 0, None, '', 0)
-    return [(kw.get('text'), kw.get('icon')) for name, _a, kw in calls if name == 'label']
+    return calls
 
 
 def test_panel_rows():
@@ -436,28 +482,37 @@ def test_panel_rows():
     calls, labels = draw_panel()
     lists = [(args, kw) for name, args, kw in calls if name == 'template_list']
     assert lists == [(('FSS_UL_texture_sets', '', bpy.data, 'materials', bpy.context.window_manager,
-                       'fss_uv_pack_active'), {'rows': 5})], lists
-    # the list's rows: the selection's texture sets, the active object's first; name and last result
+                       'fss_uv_pack_active'), {'rows': 3})], lists  # as many rows as sets, up to 5
+    # the list's rows: the selection's texture sets, the active object's first
     assert [m_.name for m_ in uv_marks.texture_set_materials(bpy.context)] == ['SHARED', 'PRIVATE', 'FUR']
-    rows = [draw_row(m_) for m_ in (shared, private, fur)]
-    assert rows == [[('SHARED', 'MATERIAL'), (uv_pack.result_text(r) + ' (checked)', None)],
-                    [('PRIVATE', 'MATERIAL'), ('', None)], [('FUR', 'LOCKED'), ('kept', None)]], rows
-    # below the list, the active row's details; no active row yet: the first (the active object's first material)
-    sets = [label for label in labels if label and label.startswith('Texture set: ')]
-    packs = [args[1].material for name, args, _kw in calls if name == '_op' and args[0] == 'fss.uv_pack_texture_set']
-    props = [(args[0].name, args[1]) for name, args, _kw in calls
-             if name == 'prop' and isinstance(args[0], bpy.types.Material)]
-    assert sets == ['Texture set: SHARED'] and packs == ['SHARED'], (sets, packs)
-    assert props == [('SHARED', 'fss_uv_texture_size'), ('SHARED', 'fss_uv_margin_px'), ('SHARED', 'fss_uv_keep_uvs')]
-    last = labels[labels.index('Last run') + 1]
-    assert last == uv_pack.result_text(r) + ' (checked)', last
-    ops = [kw.get('text') for name, _a, kw in calls if name == 'operator']
-    assert ops == ['Check All', 'Lower', 'Higher', 'Clear', 'Free', 'Upright', 'Flip', 'Quarter', 'Clear', 'Pack'], ops
-    # the active row: FUR
-    bpy.context.window_manager.fss_uv_pack_active = list(bpy.data.materials).index(fur)
-    calls, labels = draw_panel()
-    assert [label for label in labels if label and label.startswith('Texture set: ')] == ['Texture set: FUR']
-    assert labels[labels.index('Last run') + 1] == 'kept'
+    assert not [label for label in labels if label and label.startswith('Texture set: ')] and 'Last run' not in labels
+    material_props = {uv_marks.MATERIAL_TICK_PROP, uv_marks.MATERIAL_FACTOR_PROP}  # the Material rows of the table
+    assert not [1 for name, args, _kw in calls if name == 'prop' and isinstance(args[0], bpy.types.Material) and args[1] not in material_props]
+    ops = [kw.get('text') for name, _a, kw in calls if name == 'operator' and kw.get('text')]
+    assert ops == ['Check', 'SHARED', 'PRIVATE', 'SEL_A', 'Pack All (2)'], ops  # SHARED and PRIVATE; FUR is Keep UVs
+    for material, kept in ((shared, False), (private, False), (fur, True)):
+        row = draw_row(material)
+        props = [(args[1], kw) for name, args, kw in row if name == 'prop']
+        assert props == [('fss_uv_keep_uvs', {'text': '', 'invert_checkbox': True}), ('fss_uv_texture_size', {'text': ''}),
+                         ('fss_uv_margin_px', {'text': ''})], props
+        texts = [kw.get('text') for name, _a, kw in row if name == 'operator']
+        assert texts == ['', material.name, 'Pack'], texts
+        packs = [args[1].material for name, args, _kw in row if name == '_op' and args[0] == 'fss.uv_pack_texture_set']
+        assert packs == [material.name], packs
+    # the name's tooltip: the last run and what is wrong; the warning icon
+    tip = uv_marks.FSS_OT_UvTextureSetInfo.description(bpy.context, SimpleNamespace(material='SHARED'))
+    assert uv_pack.result_text(r) + ' (checked)' in tip and tip.startswith('SHARED'), tip
+    icons = [kw['icon'] for name, _a, kw in draw_row(shared) if name == 'operator' and kw.get('text') == 'SHARED']
+    assert icons == ['NONE'], icons
+    shared.fss_uv_margin_px = 2
+    icons = [kw['icon'] for name, _a, kw in draw_row(shared) if name == 'operator' and kw.get('text') == 'SHARED']
+    assert icons == ['ERROR'] and 'Margin under' in uv_marks.FSS_OT_UvTextureSetInfo.description(
+        bpy.context, SimpleNamespace(material='SHARED')), icons
+    shared.fss_uv_margin_px = 8
+    uv_marks._results['SHARED'] = dict(r, mode='overflow', fits_8192=True)
+    assert uv_marks.set_problems(shared) == ['Does not fit this texture size'], uv_marks.set_problems(shared)
+    uv_marks._results['SHARED'] = r
+    assert 'kept' in uv_marks.FSS_OT_UvTextureSetInfo.description(bpy.context, SimpleNamespace(material='FUR'))
     # nothing selected: no list, a hint
     for obj in bpy.context.selected_objects:
         obj.select_set(False)
@@ -475,11 +530,133 @@ def test_panel_rows():
     names = [name for name, _a, _kw in calls]
     ops = [kw.get('text') for name, _a, kw in calls if name == 'operator']
     assert 'progress' in names and ops == ['Cancel'], (names, ops)
+    # Pack All with several sets can be cancelled too; one set packing cannot
+    uv_marks._progress = {'verb': 'Packing', 'index': 2, 'count': 3, 'set': 'PRIVATE', 'stage': '', 'fraction': 0.5}
+    try:
+        cancel, _labels = draw_panel()
+        assert [kw.get('text') for name, _a, kw in cancel if name == 'operator'] == ['Cancel']
+        uv_marks._progress['count'] = 1
+        single, _labels = draw_panel()
+        assert not [1 for name, _a, _kw in single if name == 'operator']
+    finally:
+        uv_marks._progress = None
     # half of the second of three sets
     assert [abs(kw['factor'] - 0.5) < 1e-9 for name, _a, kw in calls if name == 'progress'] == [True], calls
-    print(f"PASS: test_panel_rows (list of 3 texture sets, active object's first; rows with the last result; details "
-          f"of the active row: size, margin, Keep UVs, Pack, Last run '{last}'; FUR when active; progress only while "
-          "running)")
+    print("PASS: test_panel_rows (a table of 3 texture sets with tick, select, size, margin and Pack; the last run in "
+          "the tooltip; Pack All (2); progress only while running)")
+
+
+def test_check_results():
+    reset(fmin=0.8, fmax=1.2)
+    uv_marks._results.clear()
+    panel = bpy.types.FSS_PT_uv_marks_results
+    assert not panel.poll(bpy.context), "no results yet: no sub-panel"
+    assert bpy.types.FSS_PT_uv_marks_image_results.draw is panel.draw
+    sets = {'ROOM': (4096, 1.0), 'SQUEEZED': (2048, 1.0), 'OVER': (2048, 2.0)}
+    objects = {}
+    for name, (size, side) in sets.items():
+        objects[name] = quad_obj('OBJ_' + name, [(0, 0, side, side)], mats=[mat(name, size=size)])
+    kept = mat('KEPT')
+    kept.fss_uv_keep_uvs = True
+    quad_obj('OBJ_KEPT', [(0, 0, 0.5, 0.5)], mats=[kept])
+    before = {name: uvs(obj).copy() for name, obj in objects.items()}
+    assert bpy.ops.fss.uv_pack_check_all() == {'FINISHED'}
+    for name, obj in objects.items():
+        assert np.array_equal(uvs(obj), before[name]), f'{name}: Check wrote UVs'
+    results = uv_marks._results
+    assert {name: results[name]['mode'] for name in sets} == {'ROOM': 'underflow', 'SQUEEZED': 'fit', 'OVER': 'overflow'}, results
+    assert panel.poll(bpy.context) and len(uv_marks.measured_results()) == 3, "the kept set has no row"
+    # Room: 1 / k with room left, none for a set lowered inside its range, below 1 for an overflow
+    assert abs(uv_marks.result_room(results['ROOM']) - 1.0 / results['ROOM']['k']) < 1e-9 and uv_marks.result_room(results['ROOM']) > 1.5
+    assert uv_marks.result_room(results['SQUEEZED']) == 1.0 and uv_marks.result_room(results['OVER']) < 1.0
+    width, height = results['ROOM']['extent_px']
+    assert abs(uv_marks.result_used(results['ROOM']) - width * height / 4096 ** 2) < 1e-9 and uv_marks.result_used(results['OVER']) == 1.0
+    # Tightest first, and only the measured sets
+    ui_list = SimpleNamespace(filter_name='', bitflag_filter_item=1 << 30)
+    flags, order = uv_marks.FSS_UL_CheckResults.filter_items(ui_list, bpy.context, bpy.data, 'materials')
+    shown = sorted((position, m.name) for m, flag, position in zip(bpy.data.materials, flags, order) if flag)
+    assert [name for _position, name in shown] == ['OVER', 'SQUEEZED', 'ROOM'], shown
+    assert sorted(order) == list(range(len(bpy.data.materials))), order
+
+    def row_of(material):
+        layout = _Layout([])
+        uv_marks.FSS_UL_CheckResults.draw_item(None, bpy.context, layout, bpy.data, bpy.data.materials[material], 0, None, '', 0)
+        return layout, layout.calls
+
+    layout, calls = row_of('ROOM')
+    bars = [kw for name, _a, kw in calls if name == 'progress']
+    assert bars == [{'factor': uv_marks.result_used(results['ROOM']), 'type': 'BAR', 'text': f'{width:.0f} x {height:.0f} / 4096'}], bars
+    params = {p.identifier for p in bpy.types.UILayout.bl_rna.functions['progress'].parameters}
+    assert set(bars[0]) <= params, params
+    assert layout.active is True
+    assert f"x{uv_marks.result_room(results['ROOM']):.2f}" in [kw.get('text') for name, _a, kw in calls if name == 'label']
+    assert [kw['icon'] for name, _a, kw in calls if name == 'operator'] == ['RESTRICT_SELECT_OFF']
+    _layout, calls = row_of('OVER')
+    assert [kw['icon'] for name, _a, kw in calls if name == 'operator'] == ['ERROR']
+    _layout, calls = row_of('SQUEEZED')
+    assert 'full' in [kw.get('text') for name, _a, kw in calls if name == 'label']
+    tip = uv_marks.FSS_OT_UvCheckSelect.description(bpy.context, SimpleNamespace(material='ROOM'))
+    assert uv_pack.result_text(results['ROOM']) + ' (checked)' in tip and 'select the objects' in tip, tip
+    # A click selects every object with the material
+    assert bpy.ops.fss.uv_check_select(material='OVER') == {'FINISHED'}
+    assert bpy.context.selected_objects == [objects['OVER']], bpy.context.selected_objects
+    # The summary: the overflow first, the target it would take
+    target = uv_marks.target_density(bpy.context.scene)
+    calls, labels = draw_panel('FSS_PT_uv_marks_results')
+    drop = uv_marks.result_room(results['OVER'])
+    assert '1 of 3 sets overflow' in labels and f'Target {target * drop:.2f} px/cm (x{drop:.2f}), or larger textures' in labels, labels
+    assert not [label for label in labels if label and label.startswith('Numbers changed')], labels
+    lists = [args[0] for name, args, _kw in calls if name == 'template_list']
+    assert lists == ['FSS_UL_check_results'], lists
+    # A setting changes: the result is out of date until it is measured again
+    for change in (lambda: setattr(bpy.context.scene, 'fss_uv_target_density', 25.0),
+                   lambda: setattr(bpy.data.materials['ROOM'], 'fss_uv_margin_px', 4),
+                   lambda: setattr(bpy.data.materials['ROOM'], 'fss_uv_texture_size', '2048'),
+                   lambda: setattr(bpy.data.materials['ROOM'], uv_marks.MATERIAL_FACTOR_PROP, 0.5),
+                   lambda: setattr(objects['ROOM'], 'fss_uv_direction_mark', 'UPRIGHT')):
+        for name in results:
+            results[name]['generation'] = uv_marks._settings_generation
+        change()
+        assert uv_marks.is_stale(results['ROOM']), "a change did not mark the results"
+    _calls, labels = draw_panel('FSS_PT_uv_marks_results')
+    assert 'Numbers changed: press Check again' in labels, labels
+    assert row_of('ROOM')[0].active is False
+    # Everything fits, one set full; then all have room: how far the target can rise
+    bpy.context.scene.fss_uv_target_density = target
+    bpy.data.materials['ROOM'].fss_uv_texture_size = '4096'
+    setattr(bpy.data.materials['ROOM'], uv_marks.MATERIAL_FACTOR_PROP, 1.0)
+    bpy.data.materials['OVER'].fss_uv_texture_size = '8192'
+    assert bpy.ops.fss.uv_pack_check_all() == {'FINISHED'}
+    assert not any(uv_marks.is_stale(result) for result in uv_marks.measured_results())
+    icon, headline, detail = uv_marks.results_summary(target)
+    assert (icon, headline) == ('CHECKMARK', 'All 3 sets fit') and detail.startswith('1 full, typical room x'), (headline, detail)
+    bpy.data.materials['SQUEEZED'].fss_uv_texture_size = '4096'
+    assert bpy.ops.fss.uv_pack_check_all() == {'FINISHED'}
+    rooms = [uv_marks.result_room(result) for result in uv_marks.measured_results()]
+    assert uv_marks.results_summary(target)[2] == f'Target can rise x{min(rooms):.2f}, to {target * min(rooms):.2f} px/cm', uv_marks.results_summary(target)
+    print(f"PASS: test_check_results (no UVs written, tightest first, room x{min(rooms):.2f}, bar, tooltip, select, out of date)")
+
+
+def test_pack_all():
+    a, b, c, shared, private, fur = build_shared()
+    uv_marks._results.clear()
+    c.select_set(True)  # FUR is listed too, but is Keep UVs
+    before = all_uvs()
+    assert bpy.ops.fss.uv_pack_all() == {'FINISHED'}
+    assert set(uv_marks._results) == {'SHARED', 'PRIVATE'} and all(
+        result['written'] for result in uv_marks._results.values()), uv_marks._results
+    after_uvs = all_uvs()
+    assert not np.array_equal(before['SEL_A'], after_uvs['SEL_A']) and not np.array_equal(before['OTHER'], after_uvs['OTHER'])
+    assert np.array_equal(before['HAIR'], after_uvs['HAIR'])  # the unticked set stays
+    assert {obj.name for obj in bpy.context.selected_objects} == {'SEL_A', 'HAIR'}
+    report = bpy.data.texts[uv_pack.REPORT_TEXT_NAME].as_string()
+    assert '# Pack: 2 texture set(s)' in report and 'no UVs written' not in report, report
+    # An untick leaves it out, and the button counts what is ticked
+    private.fss_uv_keep_uvs = True
+    _calls, _labels = draw_panel()
+    assert 'Pack All (1)' in [kw.get('text') for name, _a, kw in _calls if name == 'operator']
+    private.fss_uv_keep_uvs = False
+    print("PASS: test_pack_all (the ticked sets packed in turn, the unticked one left alone, selection kept, reported)")
 
 
 def test_texture_set_list():
@@ -518,19 +695,19 @@ def test_texture_set_list():
     wm.fss_uv_pack_active = list(bpy.data.materials).index(bpy.data.materials['MANY_3'])
     index_before = wm.fss_uv_pack_active
     mat('AAA_FIRST')  # sorts before every other material
-    assert wm.fss_uv_pack_active != index_before and uv_marks.active_texture_set(bpy.context).name == 'MANY_3'
-    bpy.data.materials['MANY_3'].name = 'MANY_3_RENAMED'  # a renamed material falls back to the first row
-    assert uv_marks.active_texture_set(bpy.context).name == 'EXTRA_B'
+    assert wm.fss_uv_pack_active != index_before and bpy.data.materials[wm.fss_uv_pack_active].name == 'MANY_3'
+    bpy.data.materials['MANY_3'].name = 'MANY_3_RENAMED'  # a renamed material has no highlighted row any more
+    assert wm.fss_uv_pack_active == -1
     # A button on each row selects the objects using that row's material; the panel below the list has none
     calls = []
     uv_marks.FSS_UL_TextureSets.draw_item(None, bpy.context, _Layout(calls), bpy.data, bpy.data.materials['EXTRA_B'], 0, None, '', 0)
     buttons = [args[1] for name, args, _kw in calls if name == '_op' and args[0] == 'fss.materials_select']
     assert [button.material for button in buttons] == ['EXTRA_B'], calls
     calls, _labels = draw_panel()
-    assert not any(name in ('operator', '_op') and args[0] == 'fss.materials_select' for name, args, _kw in calls), calls
+    below_list = calls[[name for name, _args, _kw in calls].index('template_list'):]  # the table's Material rows are above it
+    assert not any(name in ('operator', '_op') and args[0] == 'fss.materials_select' for name, args, _kw in below_list), below_list
     assert bpy.ops.fss.materials_select(material='EXTRA_B') == {'FINISHED'}
     assert [obj.name for obj in bpy.context.selected_objects] == ['MANY_B'] and bpy.context.view_layer.objects.active.name == 'MANY_B'
-    assert uv_marks.active_texture_set(bpy.context).name == 'EXTRA_B'
     print(f"PASS: test_texture_set_list ({len(expected)} texture sets of 2 selected objects listed, the active "
           "object's first; NOT_SELECTED filtered out; the name filter works; drawing writes nothing; the active row "
           "follows its material when indices move)")
@@ -549,9 +726,9 @@ def test_uv_editor_panel():
     calls_3d, _labels = draw_panel('FSS_PT_uv_marks')
     calls_uv, labels = draw_panel('FSS_PT_uv_marks_image')
     strip = [[(name, kw.get('text')) for name, _a, kw in calls] for calls in (calls_3d, calls_uv)]
-    assert strip[0] == strip[1] and 'Texture set: SHARED' in labels, strip[1]
+    assert strip[0] == strip[1], strip[1]
     texts = [kw.get('text') for name, _a, kw in calls_uv if name == 'operator']
-    assert 'Pack' in texts and 'Check All' in texts and 'Lower' in texts, texts
+    assert 'Pack All (2)' in texts and 'Check' in texts, texts
     # Visibility Scoring stays in the 3D viewport
     assert bpy.types.FSS_PT_visibility.bl_parent_id == 'FSS_PT_uv_marks'
     # the redraw helper tags the UV editor too
@@ -632,9 +809,9 @@ def test_faces_without_uv_area():
         report = bpy.data.texts[uv_pack.REPORT_TEXT_NAME].as_string()
         block = report[report.index('## NEEDLE: '):]
         assert f'# {kind}: 1 texture set(s)' in report and warning in block and 'Accept + Unwrap' in block, report
-    assert draw_row(m)[0] == ('NEEDLE', 'ERROR')
-    _calls, labels = draw_panel()
-    assert '1 island(s) with triangles without UV area: re-unwrap them' in labels, labels
+    assert [kw['icon'] for name, _a, kw in draw_row(m) if name == 'operator' and kw.get('text') == 'NEEDLE'] == ['ERROR']
+    tip = uv_marks.FSS_OT_UvTextureSetInfo.description(bpy.context, SimpleNamespace(material='NEEDLE'))
+    assert '1 island(s) with triangles without UV area: re-unwrap them' in tip, tip
     print(f"PASS: test_faces_without_uv_area (threshold {uv_pack.UV_TRI_AREA_MIN_PX2:g} px2: NEEDLE found and its face "
           "1 selected, the line island not counted; Pack and Check All reports warn per texture set; the row and "
           "the details flag it)")
@@ -971,14 +1148,16 @@ def test_island_list():
     def stand_in(user, uv_name=None, vis_path=None, use_cache=True):
         areas = np.array([p.area for p in user.data.polygons], np.float32)
         return {'stale': False, 'face_scores': scores[user.data.name], 'orig_areas': areas, 'vis_omega': None,
-                'unocc_omega': None, 'object_score': 0.5, 'island_values': {}, 'face_facing': facing[user.data.name]}
+                'unocc_omega': None, 'object_score': 0.5, 'island_values': {}, 'face_facing': facing[user.data.name],
+                # a file with Ambient 0.1 (decision 133): never-lit faces are flagged, islands floored at 0.1
+                'ambient': 0.1, 'face_never_seen': scores[user.data.name] <= 0.0}
 
     real = visibility_core.get_object_visibility
     visibility_core.get_object_visibility = stand_in
     try:
         uv_islands.sync(obj, scene, view_layer, wm)
         rows = wm.fss_uv_island_rows
-        # highest density first; a never-seen island takes the floor x0.10; the numbers stay with the islands
+        # highest density first; a never-lit island takes the file's Ambient x0.10; the numbers stay with the islands
         got = [(row.number, row.material, round(row.factor, 3)) for row in rows]
         assert got == [(1, 'ISL_A', 1.0), (2, 'ISL_A', 0.5), (4, 'ISL_B', 0.25), (3, 'ISL_A', 0.1)], got
         assert [row.high for row in rows] == sorted((row.high for row in rows), reverse=True)
@@ -998,6 +1177,15 @@ def test_island_list():
         assert abs(by_number[1].high - target * 1.1) < 1e-4 and abs(by_number[3].low - target * 0.9 * 0.1) < 1e-4
         assert (by_number[1].seen, by_number[3].seen) == (1.0, 0.0) and by_number[3].faces == 1
         assert abs(by_number[3].area - 20000.0) < 1e-1, by_number[3].area
+
+        # The Islands tick off: every island of this object counts as fully visible and faces the cameras (decision 139)
+        obj.fss_uv_use_visibility = False
+        uv_islands.sync(obj, scene, view_layer, wm)
+        assert all(abs(row.high - target * 1.1) < 1e-4 and abs(row.low - target * 0.9) < 1e-4 for row in rows)
+        obj.fss_uv_use_visibility = True
+        uv_islands.sync(obj, scene, view_layer, wm)
+        by_number = {row.number: row for row in rows}
+        assert abs(by_number[3].low - target * 0.9 * 0.1) < 1e-4
 
         # Density: the range; after Pack or Check All, the value at that set's t; a kept set says so
         row = by_number[1]
@@ -1328,7 +1516,10 @@ def test_partly_seen():
 
     def stand_in(user, uv_name=None, vis_path=None, use_cache=True):
         return {'stale': False, 'face_scores': scores, 'orig_areas': np.array([p.area for p in user.data.polygons], np.float32),
-                'vis_omega': None, 'unocc_omega': None, 'object_score': 0.5, 'island_values': {}, 'face_facing': None}
+                'vis_omega': None, 'unocc_omega': None, 'object_score': 0.5, 'island_values': {}, 'face_facing': None,
+                # the brightest face (Island Value 100 %), so only Partly Seen decides how the seen share counts;
+                # Partly Seen never takes an island below the file's Ambient
+                'island_percentile': 1.0, 'ambient': 0.1}
 
     def factors():
         parts, _conflicts = uv_pack.gather(view_layer, m)
@@ -1340,7 +1531,7 @@ def test_partly_seen():
     try:
         # the first island is 25 % seen, the second 0.1 m of 9.9 m, both with score 0.8; the minimum is 0.1
         expected = {1.0: (0.8, 0.8), 0.75: (0.8 * 0.25 ** (1 / 3), 0.8 * (0.1 / 9.9) ** (1 / 3)), 0.5: (0.2, 0.1), 0.25: (0.1, 0.1), 0.0: (0.1, 0.1)}
-        assert scene.fss_uv_partly_seen_value == 0.5  # the default
+        assert scene.fss_uv_partly_seen_value == 1.0  # the default (decision 132)
         for value, (want_first, want_second) in expected.items():
             scene.fss_uv_partly_seen_value = value
             first, second, ts = factors()
@@ -1383,6 +1574,7 @@ def main():
     test_fill_directions()
     test_fill_fallbacks()
     test_exact_density()
+    test_material_factor()
     test_underflow_and_sizes()
     test_fit()
     test_overflow_and_clamp()
@@ -1396,6 +1588,8 @@ def main():
     test_faces_without_uv_area()
     test_square_size_migration()
     test_panel_rows()
+    test_pack_all()
+    test_check_results()
     test_texture_set_list()
     test_uv_editor_panel()
     test_report_order()

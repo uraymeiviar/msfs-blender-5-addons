@@ -52,6 +52,7 @@ EXPECTED = {
     'FSS_PT_uv_autoseam': ("UV Auto Seam", '', 6, MSFS),
     'FSS_PT_uv_marks': ("UV Auto Packing", '', 7, MSFS),
     'FSS_PT_visibility': ("Visibility Scoring", 'FSS_PT_uv_marks', 0, MSFS),
+    'FSS_PT_uv_marks_results': ("Check Results", 'FSS_PT_uv_marks', 0, MSFS),
     'FSS_PT_uv_marks_advanced': ("Advanced", 'FSS_PT_uv_marks', 1, MSFS),
     'FSS_PT_tools': ("General", '', 0, TOOLS),
     'FSS_PT_empty_bounds': ("Empty Bounds", '', 1, TOOLS),
@@ -63,6 +64,7 @@ DEFAULT_CLOSED = ('FSS_PT_tools', 'FSS_PT_empty_bounds', 'FSS_PT_uv_heatmap', 'F
 # The UV editor's sidebar: Packing again (UV journal decision 119), drawn by the same code
 EXPECTED_IMAGE_EDITOR = {
     'FSS_PT_uv_marks_image': ("UV Auto Packing", '', 0, MSFS),
+    'FSS_PT_uv_marks_image_results': ("Check Results", 'FSS_PT_uv_marks_image', 0, MSFS),
     'FSS_PT_uv_marks_image_advanced': ("Advanced", 'FSS_PT_uv_marks_image', 1, MSFS),
 }
 
@@ -161,9 +163,9 @@ def test_draw_all():
     bpy.types.FSS_PT_uv_marks.draw(SimpleNamespace(layout=_Layout(packing)), bpy.context)
     texts = [kwargs.get('text') for name, _args, kwargs in packing if name == 'operator']
     assert 'Skip Auto Seam' not in texts, texts
-    # Density marks are live fields with factor presets: no Apply, no Select Marked (decision 109)
-    assert 'Apply' not in texts and 'Select Marked' not in texts and {'Lower', 'Higher'} <= set(texts), texts
-    assert 'Check All' in texts, texts  # the packer (decision 115); Pack needs a material
+    # Density marks are live fields: no Apply, no Select Marked (decision 109), no presets (decision 134)
+    assert 'Apply' not in texts and 'Select Marked' not in texts and not {'Lower', 'Higher'} & set(texts), texts
+    assert 'Check' in texts, texts  # the packer (decision 115); Pack needs a material
     uv_editor = []
     bpy.types.FSS_PT_uv_marks_image.draw(SimpleNamespace(layout=_Layout(uv_editor)), bpy.context)
     assert [(name, kwargs.get('text')) for name, _args, kwargs in uv_editor] == [

@@ -217,8 +217,8 @@ def test_tags_panel():
     known = bpy.types.UILayout.bl_rna.functions['operator'].parameters['icon'].enum_items
     assert 'PINNED' in known and 'UNPINNED' in known
 
-    # Per row: rename before the name; merge, Keep, the two AO toggles, Invisible, Animated, Whole, No Texture, a gap,
-    # delete
+    # Per row: rename before the name; merge, Keep, the two AO toggles, Invisible, Animated, Whole, No Texture, No
+    # Export, a gap, delete
     order = [args[0] if name == 'operator' else name for name, args, _kwargs in calls
              if name in ('operator', 'separator', 'split')]
     row = order[len(order) - order[::-1].index('split'):]
@@ -227,7 +227,8 @@ def test_tags_panel():
                    tags.FSS_OT_TagToggleKeep.bl_idname, tags.FSS_OT_TagToggleAONoOccluder.bl_idname,
                    tags.FSS_OT_TagToggleAOSkipBake.bl_idname, tags.FSS_OT_TagToggleInvisible.bl_idname,
                    tags.FSS_OT_TagToggleAnimated.bl_idname, tags.FSS_OT_TagToggleWhole.bl_idname,
-                   tags.FSS_OT_TagToggleNoTexture.bl_idname, 'separator', tags.FSS_OT_TagDelete.bl_idname], row
+                   tags.FSS_OT_TagToggleNoTexture.bl_idname,
+                   tags.FSS_OT_TagToggleNoExport.bl_idname, 'separator', tags.FSS_OT_TagDelete.bl_idname], row
 
     # The AO toggles start off and answer per object: each setting alone, and only for objects carrying the tag
     scene = bpy.context.scene

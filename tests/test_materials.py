@@ -209,6 +209,16 @@ def test_rows():
     ul.filter_name = '*INST*'
     flags, _order = materials.FSS_UL_Materials.filter_items(ul, bpy.context, settings, 'rows')
     assert [row.name for row, flag in zip(settings.rows, flags) if flag] == ['MAT_INST']
+    # The material's factor multiplies the estimate; unticked it is ignored
+    est_material = bpy.data.materials['MAT_EST']
+    est_material.fss_uv_material_density = 0.5
+    bpy.ops.fss.materials_refresh()
+    assert abs(next(row for row in settings.rows if row.name == 'MAT_EST').estimate - expected * 0.5) < 1e-3
+    est_material.fss_uv_material_density_use = False
+    bpy.ops.fss.materials_refresh()
+    assert abs(next(row for row in settings.rows if row.name == 'MAT_EST').estimate - expected) < 1e-3
+    est_material.fss_uv_material_density_use = True
+    est_material.fss_uv_material_density = 1.0
     print(f"PASS: test_rows ({len(settings.rows)} rows; shared across zones, never used (empty slot, no slot), no row "
           f"for faces only outside the view layer, hidden user, shared mesh, area per zone, estimate {est_px:.1f} px)")
 
@@ -224,14 +234,15 @@ def write_visibility(blend_path, objects, stale=()):
         mesh_arrays[me.name] = {key: np.zeros(n, np.float32) for key in (
             'vis_omega', 'unocc_omega', 'face_scores', 'face_undetermined', 'face_never_seen', 'face_patch_size_px')}
         never = score == 'NEVER'
-        summaries[obj.name] = {'score': 0.0 if never else score, 'never_seen': never, 'undetermined': False}
+        # a never-lit object scores the file's Ambient, 0.1 here (UV decision 133)
+        summaries[obj.name] = {'score': 0.1 if never else score, 'never_seen': never, 'undetermined': False}
     return visibility_core.save_visibility_file(blend_path, {'mesh_meta': mesh_meta, 'mesh_arrays': mesh_arrays,
                                                              'object_summaries': summaries})
 
 
 def test_visibility():
     """Decision 12: the estimate multiplies each object's density by its visibility (the Packing section's object
-    score, floor 0.1, never seen 0.1, 1.0 without data); a shared mesh uses its first user."""
+    score, a never-lit one at the file's Ambient, 1.0 without data); a shared mesh uses its first user."""
     o = build_scene()
     folder = SCRATCH_DIR / 'visibility'
     if folder.exists():
@@ -248,9 +259,9 @@ def test_visibility():
     assert abs(r['MAT_EST'].estimate - math.sqrt(2500.0) * TARGET * high * EST_MARK) < 1e-3, r['MAT_EST'].estimate
     plain = {name: row.estimate for name, row in r.items()}
 
-    # FWD_A seen (0.4), AFT_A seen a little (0.05, floor 0.1), EST_PLANE never seen, INST_1 0.5 and INST_2 0.9 (the
+    # FWD_A seen (0.4), AFT_A at the Ambient (0.1), EST_PLANE never lit, INST_1 0.5 and INST_2 0.9 (the
     # shared mesh counts on INST_1), OUTSIDE's mesh stale, AFT_HIDDEN not in the file
-    write_visibility(blend_path, {o['fwd_a']: 0.4, o['aft_a']: 0.05, o['est']: 'NEVER', o['inst1']: 0.5,
+    write_visibility(blend_path, {o['fwd_a']: 0.4, o['aft_a']: 0.1, o['est']: 'NEVER', o['inst1']: 0.5,
                                   o['inst2']: 0.9, o['outside']: 1.0}, stale={o['outside'].data.name})
     loads = visibility_core.get_file_load_count()
     assert bpy.ops.fss.materials_refresh() == {'FINISHED'}
@@ -258,7 +269,7 @@ def test_visibility():
     r = rows()
     expected = {
         'MAT_SHARED': TARGET * high * math.sqrt(10000.0 * 0.4 ** 2 + 20000.0 * 0.1 ** 2),
-        'MAT_EST': math.sqrt(2500.0) * TARGET * high * EST_MARK * uv_marks.NEVER_SEEN_FACTOR,
+        'MAT_EST': math.sqrt(2500.0) * TARGET * high * EST_MARK * 0.1,
         'MAT_INST': math.sqrt(5000.0) * TARGET * high * 0.5,
     }
     for name, value in expected.items():
@@ -587,13 +598,11 @@ def test_keep_uvs():
 
     def packing():
         """What the Packing section draws for the same material (selected and active)."""
-        context = SimpleNamespace(selected_objects=[o['est']], active_object=o['est'],
-                                  window_manager=bpy.context.window_manager)
         calls = []
-        uv_marks._draw_texture_sets(_Layout(calls), context)
-        labels = [kwargs.get('text') or '' for name, _args, kwargs in calls if name == 'label']
+        uv_marks.FSS_UL_TextureSets.draw_item(None, bpy.context, _Layout(calls), bpy.data, material, 0, None, '', 0)
+        tip = uv_marks.FSS_OT_UvTextureSetInfo.description(bpy.context, SimpleNamespace(material=material.name))
         props = [args for name, args, kwargs in calls if name == 'prop' and args[1] == uv_marks.KEEP_UVS_PROP]
-        return labels, props
+        return tip.split(chr(10)), props
 
     # Not kept: the estimate, the checkbox on the material's Keep UVs property
     assert not getattr(material, uv_marks.KEEP_UVS_PROP)
@@ -604,7 +613,7 @@ def test_keep_uvs():
     assert not list_text().endswith('kept'), list_text()
     pack_labels, pack_props = packing()
     assert pack_props == [(material, uv_marks.KEEP_UVS_PROP)], pack_props
-    assert 'kept' not in pack_labels, pack_labels
+    assert 'Last run: kept' not in pack_labels, pack_labels
 
     # Ticked (set as the click does), no Refresh: kept, no estimate, in the box, the list row and Packing alike
     before = snapshot(settings)
@@ -618,7 +627,7 @@ def test_keep_uvs():
     assert props == [((material, uv_marks.KEEP_UVS_PROP), 'Keep UVs')], props
     assert list_text().endswith('  kept'), list_text()
     pack_labels, _pack_props = packing()
-    assert 'kept' in pack_labels, pack_labels
+    assert 'Last run: kept' in pack_labels, pack_labels
     assert uv_marks.last_result_text(material) == 'kept'
 
     # Unticked again: the estimate comes back, still without Refresh
@@ -652,6 +661,9 @@ def test_gltf_leak():
     bpy.ops.fss.materials_refresh()
     assert len(bpy.context.scene.fss_materials.rows) > 0
     bpy.context.scene['artist_scene_note'] = 1  # a plain custom property: shows that extras were written at all
+    for material in bpy.data.materials:  # set away from their defaults, so that they would be written
+        material.fss_uv_material_density = 0.5
+        material.fss_uv_material_density_use = False
     path = SCRATCH_DIR / 'materials_extras.gltf'
     bpy.ops.export_scene.gltf(filepath=str(path), export_format='GLTF_SEPARATE', use_visible=True, export_extras=True)
     text = path.read_text(encoding='utf-8')

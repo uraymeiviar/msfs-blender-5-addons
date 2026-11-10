@@ -3,14 +3,17 @@
 Authoring data for the packing phase (journal 20261019.automated-uv-unwrap.md, decisions 105 to 110). Density marks
 multiply down the hierarchy: an object's final range is the scene's density freedom x every own mark from the root
 down to the object itself (zone empties included); an unmarked object counts as x1.0. An island's density range is
-the target density (scene, px/cm) x that range x the island's visibility. Direction and Skip Auto Seam are inherited
+the target density (scene, px/cm) x that range x its material's factor x the island's visibility. Direction and Skip Auto Seam are inherited
 from the nearest marked ancestor. Density marks, texture sizes and margins are registered properties; the export
 hooks keep every fss_ key out of the glTF extras (merge._strip_fss_extras).
 
-The Packing section has three boxes, by what their settings apply to. Scene: target density, density freedom and Check
-All (uv_pack.measure on every texture set, decision 115). Object: the marks of the active object. Texture set: a list of
-the texture sets of the selected objects (decision 121), the active row's size (square, decision 120), margin, Keep UVs
-(decision 116) and Pack (uv_pack.pack, decision 114). The section is drawn in the 3D viewport's and the UV editor's
+The Packing section has two boxes. The table has a row for the scene (target density, density freedom, Check All:
+uv_pack.measure on every texture set, decision 115), the zone, the direct parent and the marked parents up to the zone, the
+materials the active object's faces use (decision 146), the active object, and its islands, then the resulting density and direction (decisions 134 to 143). Texture sets: a table of
+the texture sets of the selected objects (decisions 121, 144): the tick (off is Keep UVs, decision 116), a select button,
+the name, size (square, decision 120), margin and Pack (uv_pack.pack, decision 114), then Pack All (decision 145). Check
+Results, a sub-panel (decision 148): every texture set measured so far, tightest first, with its layout and the room for a
+higher density. The section is drawn in the 3D viewport's and the UV editor's
 sidebar (decision 119). The results stay in memory for the session (not in the file) and are cleared when a file is
 loaded.
 """
@@ -19,6 +22,7 @@ from pathlib import Path
 
 import time
 
+import blf
 import bpy
 import numpy as np
 from bpy.app.handlers import persistent
@@ -27,12 +31,17 @@ from . import uv_pack, visibility_core  # uv_pack imports this module too (densi
 from .tags import _editable
 
 # On an object: the own density mark, a factor range [min, max] (one factor when min == max)
-OWN_PROP = 'fss_uv_density_own'
+OWN_PROP = 'fss_uv_density_own'  # the row's tick: unticked, the factor stays but is ignored (decision 139)
+FACTOR_PROP = 'fss_uv_density_factor'  # the table's field: one factor, read from and written to Min and Max
+USE_VISIBILITY_PROP = 'fss_uv_use_visibility'  # the Islands row's tick: unticked, the object's islands ignore visibility
 MIN_PROP = 'fss_uv_density_min'
 MAX_PROP = 'fss_uv_density_max'
 DIRECTION_KEY = 'fss_uv_direction'
+DIRECTION_MARK_PROP = 'fss_uv_direction_mark'  # the table's pulldown, read from and written to DIRECTION_KEY
 SKIP_AUTOSEAM_KEY = 'fss_uv_skip_autoseam'
 KEEP_UVS_PROP = 'fss_uv_keep_uvs'  # on a material: its texture set is not packed (decision 116)
+MATERIAL_FACTOR_PROP = 'fss_uv_material_density'  # on a material: the density factor of all its islands (decision 146)
+MATERIAL_TICK_PROP = 'fss_uv_material_density_use'  # the Material row's tick: unticked, the factor stays but is ignored
 SIZE_PROP = 'fss_uv_texture_size'  # on a material: the square texture size (decision 120)
 OVERRIDE_KEY = 'fss_uv_island_multiplier'  # a face attribute: the island's multiplier set by hand, 0 for none
 # Before 0.31.0, read only to migrate: the density mark [min, max] (a custom property; the nearest marked ancestor
@@ -54,24 +63,49 @@ PACK_CORNERS = (('BOTTOM_LEFT', 'Bottom-Left', 'The UV origin, as the layout com
 DEFAULT_MARGIN = 8  # px: islands stay apart to the second mip level after 4x4 block compression
 DEFAULT_TEXTURE = '4096'
 TEXTURE_SIZES = [(str(1 << n), str(1 << n), f'{1 << n} pixels') for n in range(8, 14)]  # 256 to 8192
-DENSITY_PRESETS = {'LOWER': 0.75, 'HIGHER': 1.5}
-NEVER_SEEN_FACTOR = 0.1  # decision 74: what never-seen faces get instead of visibility 0
+# The visibility score carries its own floor, the Ambient of Visibility Scoring (UV decision 133, replacing the x0.10 of
+# decisions 74 and 111); this only keeps a density above 0 when Ambient is 0 or Partly Seen scales an island down
+MIN_VISIBILITY = 0.01
 FULLY_SEEN = 0.9999  # a seen share counted as the whole island (areas are rounded)
-DEFAULT_PARTLY_SEEN = 0.5
+DEFAULT_PARTLY_SEEN = 1.0  # Island Value already follows the lit part (UV decision 132)
 MAX_LISTED = 5  # nested marks shown in the panel
 LIST_ROWS = 5  # rows the texture set list shows before it scrolls (the artist can drag it longer)
 DIRECTIONS = [
-    ('FREE', 'Free', 'Islands may rotate to any angle'),
+    ('FREE', 'Free', 'No mark: as the nearest marked parent, any angle when none is marked'),
     ('UPRIGHT', 'Upright', 'Islands keep their orientation (brushed metal, grain, text)'),
     ('FLIP', 'Flip', 'Islands may only turn by 180 degrees'),
     ('QUARTER', 'Quarter', 'Islands may only turn in 90-degree steps'),
 ]
 DIRECTION_IDS = {item[0] for item in DIRECTIONS}
+TICK_COLUMN = 0.13  # the table's columns: the tick and icon, then shares of the rest
+VALUE_COLUMN, DIRECTION_COLUMN, NAME_COLUMN = 0.25, 0.25, 0.5
+CHECK_COLUMN = 0.16
+SET_NAME_COLUMN, SET_SIZE_COLUMN, SET_MARGIN_COLUMN, SET_PACK_COLUMN = 0.42, 0.21, 0.16, 0.21  # the texture set rows
+TABLE_ICONS = {'SCENE': 'SCENE_DATA', 'ZONE': 'OUTLINER_OB_EMPTY', 'PARENT': 'ORIENTATION_PARENT', 'MATERIAL': 'MATERIAL',
+               'OBJECT': 'OBJECT_DATA', 'ISLANDS': 'UV_ISLANDSEL'}
+TABLE_HINTS = {
+    'SCENE': 'Scene: the target density and the freedom the packer has around it, for everything',
+    'ZONE': 'Zone: its factor and direction apply to everything in the zone',
+    'PARENT': 'Parent: the direct parent, or a parent with a density mark. Its factor and direction apply to everything below it',
+    'MATERIAL': 'Material: its factor applies to every island with this material, on all objects',
+    'OBJECT': 'Object: the active object',
+    'ISLANDS': "Islands: the range of the visibility multipliers of this object's islands",
+}
+PANEL_PADDING, LIST_PADDING, BUTTON_PADDING = 56, 30, 14  # pixels at UI scale 1: what the panel, a list and a button take
+BAR_SPAN = 2.0  # the density bar runs from 0 to this x the target density, so the target mark stays in the middle
+BAR_MARK = 0.008  # the width of the target mark, as a share of the bar
+BAR_MIN_RANGE = 0.012  # a narrower range is still drawn this wide
+BAR_SCALE = 0.5
+BAR_COLORS = {'TRACK': ('fss_uv_bar_track', (0.16, 0.16, 0.16)), 'RANGE': ('fss_uv_bar_range', (0.3, 0.6, 1.0)),
+              'MARK': ('fss_uv_bar_mark', (1.0, 1.0, 1.0))}
 BLOCK_PIXELS = 4  # texture compression works in 4x4 blocks; a margin below this bleeds
+RESULT_NAME_COLUMN, RESULT_BAR_COLUMN = 0.34, 0.50  # the Check Results table; the room takes the rest
+FULL_ROOM = 1.005  # less room than this counts as a full texture
 
 _migration = {}  # what the migration converted in the open file (by file path), shown in the Packing panel
 _vis_cache = {}  # object name -> (key, summary) of the Visibility row; dropped when the key or the geometry changes
 _results = {}  # texture set name -> the last uv_pack result (Pack or Check All) in this session
+_settings_generation = 0  # raised by every setting a result depends on: a result of an older one is out of date
 # While Pack or Check All runs, the Packing section shows this progress instead of its rows and buttons
 _progress = None  # dict: verb ('Packing' or 'Checking'), index, count, set, stage, fraction (of the set in work)
 _cancel_requested = False
@@ -82,7 +116,7 @@ def own_density(obj):
     if obj is None or not getattr(obj, OWN_PROP, False):
         return None
     low, high = sorted((getattr(obj, MIN_PROP), getattr(obj, MAX_PROP)))
-    return (low, high) if low > 0 else None
+    return (low, high) if low > 0 and (low, high) != (1.0, 1.0) else None  # x1.00 is no mark (decision 141)
 
 
 def scene_freedom(scene=None):
@@ -118,9 +152,10 @@ def partly_seen_factor(seen_share, value):
     return seen_share ** ((1.0 - value) / value)
 
 
-def island_visibility(score, seen_share, value):
-    """The density factor of an island: its score x partly_seen_factor, never below the minimum."""
-    return visibility_factor(score * partly_seen_factor(seen_share, value))
+def island_visibility(score, seen_share, value, floor=MIN_VISIBILITY):
+    """The density factor of an island: its score x partly_seen_factor, never below floor (the file's Ambient,
+    decision 133)."""
+    return max(score * partly_seen_factor(seen_share, value), floor, MIN_VISIBILITY)
 
 
 def face_overrides(me):
@@ -183,9 +218,31 @@ def density(obj, scene=None):
     return (low * own[0], high * own[1]), obj
 
 
+def material_density(material):
+    """The density factor of a material: 1.0 without a material or with its row unticked (decision 146)."""
+    if material is None or not getattr(material, MATERIAL_TICK_PROP, True):
+        return 1.0
+    return getattr(material, MATERIAL_FACTOR_PROP, 1.0)
+
+
+def object_materials(obj):
+    """The materials the object's faces use, in slot order, each once. A slot no face uses has no row."""
+    if obj is None or obj.type != 'MESH' or obj.data is None or not len(obj.data.polygons):
+        return []
+    indices = np.zeros(len(obj.data.polygons), np.int32)
+    obj.data.polygons.foreach_get('material_index', indices)
+    used = set(np.unique(indices).tolist())
+    materials = []
+    for index, slot in enumerate(obj.material_slots):
+        if index in used and slot.material is not None and slot.material not in materials:
+            materials.append(slot.material)
+    return materials
+
+
 def _own_direction(obj):
+    # Free is no mark (decision 137): an object left Free, also one marked Free before, takes the mark above it
     value = obj.get(DIRECTION_KEY)
-    return value if value in DIRECTION_IDS else None
+    return value if value in DIRECTION_IDS and value != 'FREE' else None
 
 
 def _effective(obj, own, default):
@@ -222,14 +279,15 @@ def texture_size(material):
     return int(getattr(material, SIZE_PROP, DEFAULT_TEXTURE))
 
 
+def uses_visibility(obj):
+    """False when the artist unticked the Islands row of this object: its islands count as fully visible."""
+    return getattr(obj, USE_VISIBILITY_PROP, True)
+
+
 def visibility_factor(score):
-    """The density factor of a visibility score, never below the minimum of decision 74 (decision 111): a face
-    seen a little never gets less texture than a face never seen."""
-    return max(score, NEVER_SEEN_FACTOR)
-
-
-def _factor_text(low, high):
-    return f'x{low:.2f}' if abs(high - low) < 5e-3 else f'x{low:.2f} - x{high:.2f}'
+    """The density factor of a visibility score. The score is at least the file's Ambient (decision 133); the small
+    minimum here only keeps a density above 0."""
+    return max(score, MIN_VISIBILITY)
 
 
 def _source_text(obj, source):
@@ -264,11 +322,11 @@ def _object_visibility(obj):
     if data.get('stale', True):
         summary = {'status': 'NO_DATA'}
     elif data.get('never_seen'):
-        summary = {'status': 'NEVER_SEEN', 'object': NEVER_SEEN_FACTOR, 'islands': None}
+        summary = {'status': 'NEVER_SEEN', 'object': visibility_factor(data.get('object_score', 0.0)), 'islands': None}
     else:
         values = [visibility_factor(value) for value in data.get('island_values', {}).values()]
         summary = {'status': 'OK', 'object': visibility_factor(data.get('object_score', 1.0)),
-                   'islands': (min(values), max(values)) if values else None}
+                   'islands': (min(values), max(values)) if values else None, 'count': len(values)}
     _vis_cache[obj.name] = (key, summary)
     return summary
 
@@ -438,63 +496,113 @@ def _keep_order(low_name, high_name, moved):
     return update
 
 
+def _settings_changed():
+    """A setting Pack depends on changed: the results measured so far are out of date."""
+    global _settings_generation
+    _settings_generation += 1
+
+
 def _marks_changed(_self, _context):
     """Update function: a mark or the scene freedom changes the density of everything below it, so the heatmap's
     Density mode recomputes its objects (imported here: uv_heatmap imports this module)."""
     from . import uv_heatmap
+    _settings_changed()
     uv_heatmap.marks_changed()
 
 
-class FSS_OT_UvSetDensity(bpy.types.Operator):
-    bl_idname = 'fss.uv_set_density'
-    bl_label = 'Set Texel Density Factor'
-    bl_description = ('Mark the selected objects with a texel density factor; marks multiply down the hierarchy, '
-                      'so everything below takes it too')
+def _pack_result_changed():
+    """A Pack or Check All gave a set its final densities: the heatmap's Calculated density follows."""
+    from . import uv_heatmap
+    uv_heatmap.pack_result_changed()
+
+
+def _stored_range(obj):
+    """(min, max) as stored, also while the row is unticked."""
+    return tuple(sorted((getattr(obj, MIN_PROP), getattr(obj, MAX_PROP))))
+
+
+def _get_factor(obj):
+    return _stored_range(obj)[0]
+
+
+def _set_factor(obj, value):
+    """One factor for the row (decision 135); the row's tick decides whether it counts."""
+    setattr(obj, MAX_PROP, value)
+    setattr(obj, MIN_PROP, value)
+
+
+def _get_direction_mark(obj):
+    return next(index for index, item in enumerate(DIRECTIONS) if item[0] == (_own_direction(obj) or 'FREE'))
+
+
+def _set_direction_mark(obj, index):
+    _settings_changed()
+    if DIRECTIONS[index][0] == 'FREE':
+        obj.pop(DIRECTION_KEY, None)
+    else:
+        obj[DIRECTION_KEY] = DIRECTIONS[index][0]
+
+
+class FSS_OT_UvTableHint(bpy.types.Operator):
+    """A table icon: Blender has tooltips on buttons only, so the icon is a flat button that does nothing (decision 140)."""
+    bl_idname = 'fss.uv_table_hint'
+    bl_label = 'Table Row'
+    bl_options = {'INTERNAL'}
+
+    kind: bpy.props.StringProperty(options={'HIDDEN'})
+
+    @classmethod
+    def description(cls, context, properties):
+        return TABLE_HINTS.get(properties.kind, '')
+
+    def execute(self, context):
+        return {'CANCELLED'}
+
+
+class FSS_OT_UvTextureSetInfo(bpy.types.Operator):
+    """The name in a texture set row: a flat button, for the tooltip with the last run (decision 144)."""
+    bl_idname = 'fss.uv_texture_set_info'
+    bl_label = 'Texture Set'
+    bl_options = {'INTERNAL'}
+
+    material: bpy.props.StringProperty(options={'HIDDEN'})
+
+    @classmethod
+    def description(cls, context, properties):
+        material = bpy.data.materials.get(properties.material)
+        if material is None:
+            return properties.material
+        return chr(10).join([material.name, f'Last run: {last_result_text(material)}'] + set_problems(material))
+
+    def execute(self, context):
+        return {'CANCELLED'}
+
+
+class FSS_OT_UvSelectObject(bpy.types.Operator):
+    bl_idname = 'fss.uv_select_object'
+    bl_label = 'Select Object'
     bl_options = {'REGISTER', 'UNDO'}
 
-    preset: bpy.props.EnumProperty(items=[
-        ('LOWER', 'Lower', 'Less visible parts: x0.75'),
-        ('HIGHER', 'Higher', 'Prominent parts such as the glareshield: x1.5'),
-        ('CLEAR', 'Clear', 'Remove the own mark (x1.0): only the marks above apply'),
-    ])
+    target: bpy.props.StringProperty(name='Object', description='Name of the object to select')
+
+    @classmethod
+    def description(cls, context, properties):
+        return f'{properties.target}: select only this object and make it active'
 
     @classmethod
     def poll(cls, context):
-        return bool(_selected(context))
+        return context.mode == 'OBJECT'
 
     def execute(self, context):
-        factor = DENSITY_PRESETS.get(self.preset)
-        objects = _selected(context)
-        for obj in objects:
-            setattr(obj, OWN_PROP, factor is not None)
-            setattr(obj, MAX_PROP, factor or 1.0)
-            setattr(obj, MIN_PROP, factor or 1.0)
-        text = 'Cleared density mark' if factor is None else f'Density x{factor:g}'
-        self.report({'INFO'}, f'{text} on {len(objects)} object(s)')
-        return {'FINISHED'}
-
-
-class FSS_OT_UvSetDirection(bpy.types.Operator):
-    bl_idname = 'fss.uv_set_direction'
-    bl_label = 'Set Island Direction'
-    bl_description = ('Mark how the islands of the selected objects may rotate when packed; their children '
-                      'inherit it unless marked themselves')
-    bl_options = {'REGISTER', 'UNDO'}
-
-    direction: bpy.props.EnumProperty(items=DIRECTIONS + [('CLEAR', 'Clear', 'Remove the mark')])
-
-    @classmethod
-    def poll(cls, context):
-        return bool(_selected(context))
-
-    def execute(self, context):
-        objects = _selected(context)
-        for obj in objects:
-            if self.direction == 'CLEAR':
-                obj.pop(DIRECTION_KEY, None)
-            else:
-                obj[DIRECTION_KEY] = self.direction
-        self.report({'INFO'}, f'Direction {self.direction.lower()} on {len(objects)} object(s)')
+        view_layer = context.view_layer
+        obj = view_layer.objects.get(self.target)
+        if obj is None or not obj.visible_get(view_layer=view_layer):
+            self.report({'WARNING'}, f"'{self.target}' is hidden or not in this view layer")
+            return {'CANCELLED'}
+        for other in context.selected_objects:
+            other.select_set(False)
+        obj.select_set(True)
+        view_layer.objects.active = obj
         return {'FINISHED'}
 
 
@@ -547,28 +655,26 @@ def _labelled(layout, text):
     return split.row(align=True)
 
 
-def _visibility_text(summary):
+def _island_text(summary):
+    """The value column of the Islands row."""
     status = summary['status']
-    if status == 'NOT_MESH':
-        return 'not a mesh: x1.00'
-    if status == 'EDIT':
-        return 'shown in Object Mode'
-    if status == 'NO_DATA':
-        return 'no data: x1.00'
-    if status == 'NEVER_SEEN':
-        return f'never seen: x{NEVER_SEEN_FACTOR:.2f}'
+    if status in ('NOT_MESH', 'EDIT', 'NO_DATA', 'NEVER_SEEN'):
+        return {'NOT_MESH': 'not a mesh', 'EDIT': 'Object Mode', 'NO_DATA': 'no data', 'NEVER_SEEN': 'never lit'}[status]
     islands = summary['islands']
-    text = f"x{summary['object']:.2f}"
-    return text + (f'  islands {islands[0]:.2f}-{islands[1]:.2f}' if islands else '')
+    return f'{islands[0]:.2f} - {islands[1]:.2f}' if islands else f"{summary['object']:.2f}"
 
 
 def result_range(obj, scene, summary):
     """((a, b), (c, d) or None): the object's density range in px/cm with its visibility score, and the range over
-    its islands' visibility (target x parent x own x visibility)."""
+    its islands' visibility (target x parent x material x own x visibility). With the Islands row unticked, visibility
+    is 1. With several materials: from the lowest factor to the highest."""
     (low, high), _source = density(obj, scene)
+    factors = [material_density(material) for material in object_materials(obj)] or [1.0]
+    low, high = low * min(factors), high * max(factors)
     target = target_density(scene)
-    vis = summary.get('object', 1.0)
-    islands = summary.get('islands')
+    use = uses_visibility(obj)
+    vis = summary.get('object', 1.0) if use else 1.0
+    islands = summary.get('islands') if use else None
     return ((target * low * vis, target * high * vis),
             (target * low * islands[0], target * high * islands[1]) if islands else None)
 
@@ -586,48 +692,196 @@ def _draw_migration(layout):
             box.label(text=f'... {len(nested) - MAX_LISTED} more (in the system console)')
 
 
-def _draw_object(layout, scene, obj):
-    from . import merge  # merge imports this module for the zone row
+def _cells(layout, *widths):
+    """A table row: the tick and icon cell and one cell per width (shares of the rest; the last takes what is left)."""
+    split = layout.split(factor=TICK_COLUMN)
+    cells = [split.row(align=True)]
+    left = 1.0
+    for width in widths[:-1]:
+        split = split.split(factor=width / left)
+        cells.append(split.row(align=True))
+        left -= width
+    cells.append(split.row(align=True))
+    return cells
+
+
+def trim_start(text, width, measure):
+    """The text with its start replaced by '...' so that measure(text) fits width; the end stays (decision 142)."""
+    if width <= 0 or measure(text) <= width:
+        return text
+    for count in range(len(text) - 1, 0, -1):
+        trimmed = '...' + text[-count:]
+        if measure(trimmed) <= width:
+            return trimmed
+    return text[-1:]
+
+
+def _fitted(context, text, share, padding=0):
+    """The text as trim_start fits it into a column of this share of the panel. Blender cuts long text by itself, in a
+    way it decides, so a name that would not fit is trimmed before it is drawn. Without a region (background): as it is."""
+    region = context.region
+    if region is None or region.width <= 1:
+        return text
+    scale = context.preferences.system.ui_scale
+    blf.size(0, context.preferences.ui_styles[0].widget.points * scale)
+    width = (region.width - (PANEL_PADDING + padding) * scale) * share - BUTTON_PADDING * scale
+    return trim_start(text, width, lambda value: blf.dimensions(0, value)[0])
+
+
+def _hint_icon(cell, kind):
+    cell.operator(FSS_OT_UvTableHint.bl_idname, text='', icon=TABLE_ICONS[kind], emboss=False).kind = kind
+
+
+def _no_tick(cell, kind):
+    """The tick and icon cell of a row without a tick: the icon stays in its column."""
+    cell.label(text='', icon='BLANK1')
+    _hint_icon(cell, kind)
+
+
+def _draw_mark_row(context, layout, kind, obj, title=None):
+    """A row of the table: the tick, the object's factor, its direction and a button that selects it."""
+    tick, value, turn, name = _cells(layout, VALUE_COLUMN, DIRECTION_COLUMN, NAME_COLUMN)
+    tick.prop(obj, OWN_PROP, text='')
+    _hint_icon(tick, kind)
+    value.enabled = getattr(obj, OWN_PROP)
+    low, high = _stored_range(obj)
+    if high - low >= 5e-3:  # a range set in an earlier version stays visible and editable
+        value.prop(obj, MIN_PROP, text='')
+        value.prop(obj, MAX_PROP, text='')
+    else:
+        value.prop(obj, FACTOR_PROP, text='')
+    turn.prop(obj, DIRECTION_MARK_PROP, text='')
+    text = _fitted(context, title or obj.name, (1.0 - TICK_COLUMN) * NAME_COLUMN)
+    name.operator(FSS_OT_UvSelectObject.bl_idname, text=text).target = obj.name
+
+
+def _draw_material_row(context, layout, material):
+    """A Material row: as _draw_mark_row without a direction; the name selects the objects that use the material."""
+    tick, value, _turn, name = _cells(layout, VALUE_COLUMN, DIRECTION_COLUMN, NAME_COLUMN)
+    tick.prop(material, MATERIAL_TICK_PROP, text='')
+    _hint_icon(tick, 'MATERIAL')
+    value.enabled = getattr(material, MATERIAL_TICK_PROP)
+    value.prop(material, MATERIAL_FACTOR_PROP, text='')
+    text = _fitted(context, material.name, (1.0 - TICK_COLUMN) * NAME_COLUMN)
+    name.operator('fss.materials_select', text=text).material = material.name
+
+
+def _draw_absent_row(layout, kind, text):
+    """A dimmed row where the table has no object to show."""
+    row = layout.row(align=True)
+    row.active = False
+    tick, rest = _cells(row, 1.0)
+    _no_tick(tick, kind)
+    rest.label(text=text)
+
+
+def parent_rows(obj, zone):
+    """The parents the table shows, topmost first: the direct parent and every one with a density mark up to the zone
+    (without it). A mark is a number other than 1.00, ticked or not: an unticked one needs its row to be ticked again."""
+    rows = []
+    parent = obj.parent
+    while parent is not None and parent != zone:
+        if parent == obj.parent or _stored_range(parent) != (1.0, 1.0):
+            rows.append(parent)
+        parent = parent.parent
+    return rows[::-1]
+
+
+def bar_segments(low, high, mark=BAR_MARK):
+    """[(width, kind)] of the density bar from left to right (shares of the bar; kind TRACK, RANGE or MARK). low and high
+    are shares of the bar; the target is its middle, and the mark lies over everything else."""
+    low, high = max(min(low, 1.0), 0.0), max(min(high, 1.0), 0.0)
+    if high - low < BAR_MIN_RANGE:
+        low = max(min(low, 1.0 - BAR_MIN_RANGE), 0.0)
+        high = low + BAR_MIN_RANGE
+    mark_low, mark_high = 0.5 - mark / 2.0, 0.5 + mark / 2.0
+    points = sorted({0.0, 1.0, low, high, mark_low, mark_high})
+    segments = []
+    for left, right in zip(points, points[1:]):
+        if right - left < 1e-6:
+            continue
+        middle = (left + right) / 2.0
+        kind = 'MARK' if mark_low <= middle <= mark_high else 'RANGE' if low <= middle <= high else 'TRACK'
+        segments.append((right - left, kind))
+    return segments
+
+
+def _draw_density_bar(layout, wm, low, high):
+    """The result against the target density, as one bar. Blender cannot lay one widget over another in a panel, and
+    gives no position of a row to draw at, so the bar is a row of colour fields, the target mark one of them (decision 143)."""
+    bar = layout.row(align=True)
+    bar.enabled = False  # the fields are colours to look at, a click must not open the colour picker
+    bar.scale_y = BAR_SCALE
+    segments = bar_segments(low, high)
+    left = 1.0
+    for width, kind in segments[:-1]:
+        split = bar.split(factor=width / left, align=True)
+        split.prop(wm, BAR_COLORS[kind][0], text='')
+        bar = split
+        left -= width
+    bar.prop(wm, BAR_COLORS[segments[-1][1]][0], text='')
+
+
+def _draw_scene_row(layout, scene):
+    tick, value, freedom, check = _cells(layout, VALUE_COLUMN, 1.0 - VALUE_COLUMN - CHECK_COLUMN, CHECK_COLUMN)
+    _no_tick(tick, 'SCENE')
+    value.prop(scene, 'fss_uv_target_density', text='px/cm')
+    freedom.prop(scene, 'fss_uv_density_freedom_min', text='Min')
+    freedom.prop(scene, 'fss_uv_density_freedom_max', text='Max')
+    check.operator(FSS_OT_UvPackCheckAll.bl_idname, text='Check')
+
+
+def _draw_table(layout, context, scene, obj):
+    from . import merge, uv_islands  # both import this module
 
     box = layout.box()
-    box.label(text=f'Object: {obj.name}', icon='OBJECT_DATA')
-    (low, high), source = parent_density(obj, scene)
-    origin = f'from {source.name}' if source is not None else '(scene freedom)'
-    _labelled(box, 'Parent').label(text=f'{_factor_text(low, high)} {origin}')
-    zone = merge.nearest_zone(obj)
-    if zone is None:
-        _labelled(box, 'Zone').label(text='none')
+    table = box.column(align=True)
+    _draw_scene_row(table, scene)
+    if obj is None:
+        table.label(text='No active object', icon='INFO')
+        return
+    zone = merge.nearest_zone(obj.parent)
+    if zone is not None:
+        _draw_mark_row(context, table, 'ZONE', zone, merge.logical_name(zone)[len(merge.ZONE_PREFIX):] or zone.name)
     else:
-        name = merge.logical_name(zone)[len(merge.ZONE_PREFIX):] or zone.name
-        own = own_density(zone)
-        _labelled(box, 'Zone').label(text=f'{name} {_factor_text(*own)}' if own else f'{name} x1.00 (no mark)')
+        _draw_absent_row(table, 'ZONE', 'this object is the zone' if merge.is_zone(obj) else 'no zone')
+    parents = parent_rows(obj, zone)
+    for parent in parents:
+        _draw_mark_row(context, table, 'PARENT', parent)
+    if not parents:
+        _draw_absent_row(table, 'PARENT', 'the parent is the zone' if obj.parent else 'no parent')
+    materials = object_materials(obj)
+    for material in materials:
+        _draw_material_row(context, table, material)
+    if not materials:
+        _draw_absent_row(table, 'MATERIAL', 'no material')
+    _draw_mark_row(context, table, 'OBJECT', obj)
     summary = _object_visibility(obj)
-    _labelled(box, 'Visibility').label(text=_visibility_text(summary))
-    row = _labelled(box, 'Density')
-    row.prop(obj, OWN_PROP, text='own mark')
-    fields = row.row(align=True)
-    fields.enabled = getattr(obj, OWN_PROP)
-    fields.prop(obj, MIN_PROP, text='Min')
-    fields.prop(obj, MAX_PROP, text='Max')
-    row = _labelled(box, '')
-    for preset, text in (('LOWER', 'Lower'), ('HIGHER', 'Higher'), ('CLEAR', 'Clear')):
-        row.operator(FSS_OT_UvSetDensity.bl_idname, text=text).preset = preset
-    box.separator(type='LINE')
+    wm = context.window_manager
+    tick, value, rest = _cells(table, VALUE_COLUMN, 1.0 - VALUE_COLUMN)
+    tick.prop(obj, USE_VISIBILITY_PROP, text='')
+    tick.prop(wm, 'fss_uv_islands_open', text='', emboss=False,
+              icon='TRIA_DOWN' if wm.fss_uv_islands_open else 'TRIA_RIGHT')
+    value.active = uses_visibility(obj)
+    value.label(text=_island_text(summary))
+    count = uv_islands.listed_count(obj, wm)
+    count = summary.get('count') if count is None else count
+    _hint_icon(rest, 'ISLANDS')
+    rest.label(text='' if count is None else f"{count} island{'' if count == 1 else 's'}")
+    box.separator(factor=0.5, type='LINE')
     (a, b), islands = result_range(obj, scene, summary)
-    text = f'{a:.2f} - {b:.2f} px/cm'
-    if islands:
-        text += f'  (islands {islands[0]:.2f} - {islands[1]:.2f})'
-    _labelled(box, 'Result').label(text=text)
-    _labelled(box, '').label(text='= target x parent x own x visibility')
-    value, source = direction(obj)
-    row = _labelled(box, 'Direction')
-    for item in DIRECTIONS + [('CLEAR', 'Clear', '')]:
-        row.operator(FSS_OT_UvSetDirection.bl_idname, text=item[1], depress=item[0] == value).direction = item[0]
-    if source is not None and source != obj:
-        _labelled(box, '').label(text=f'{value.lower()} from {source.name}')
-    box.separator(type='LINE')
-    from . import uv_islands  # it imports this module
-    uv_islands.draw(box, bpy.context, obj)
+    low, high = islands or (a, b)
+    turn, source = direction(obj)
+    text = next(item[1] for item in DIRECTIONS if item[0] == turn)
+    result = box.column(align=True)
+    blank, density_cell, turn_cell = _cells(result, VALUE_COLUMN + DIRECTION_COLUMN, NAME_COLUMN)
+    blank.label(text='')
+    density_cell.label(text=f'{low:.2f} - {high:.2f} px/cm')
+    turn_cell.label(text=f'{text} ({source.name})' if source is not None and source != obj else text)
+    target = max(target_density(scene), 1e-9)
+    _blank, bar_cell = _cells(result, 1.0)
+    _draw_density_bar(bar_cell, wm, low / (BAR_SPAN * target), high / (BAR_SPAN * target))
+    uv_islands.draw(box, context, obj)
 
 
 def texture_set_materials(context):
@@ -680,13 +934,80 @@ def _set_active_index(wm, index):
     wm.fss_uv_pack_active_name = bpy.data.materials[index].name if 0 <= index < len(bpy.data.materials) else ''
 
 
-def active_texture_set(context):
-    """The texture set whose details are drawn below the list: the active row when it is one of the selection's,
-    else the selection's first (the active object's first material); None without any."""
-    materials = texture_set_materials(context)
-    index = context.window_manager.fss_uv_pack_active
-    material = bpy.data.materials[index] if 0 <= index < len(bpy.data.materials) else None
-    return material if material in materials else (materials[0] if materials else None)
+def set_problems(material):
+    """What the artist should know about a texture set, one sentence each (the row's warning icon and tooltip)."""
+    problems = []
+    if margin(material) < BLOCK_PIXELS:
+        problems.append(f'Margin under {BLOCK_PIXELS} px: compressed 4x4 blocks bleed across islands')
+    result = _results.get(material.name)
+    if not result or uv_pack.is_kept(material):
+        return problems
+    if result.get('mode') == 'overflow':
+        problems.append('Does not fit this texture size')
+    if result.get('uv_zero_islands'):
+        problems.append(f"{result['uv_zero_islands']} island(s) with triangles without UV area: re-unwrap them")
+    if result.get('no_area_objects'):
+        problems.append(f"Faces without area in {len(result['no_area_objects'])} object(s)")
+    return problems
+
+
+class FSS_OT_UvCheckSelect(bpy.types.Operator):
+    """A texture set's name in Check Results: selects its objects; the tooltip has the set's result."""
+    bl_idname = 'fss.uv_check_select'
+    bl_label = 'Select Objects'
+    bl_options = {'INTERNAL'}
+
+    material: bpy.props.StringProperty(options={'HIDDEN'})
+
+    @classmethod
+    def description(cls, context, properties):
+        result = _results.get(properties.material)
+        if result is None:
+            return properties.material
+        width, height = result['extent_px']
+        material = bpy.data.materials.get(properties.material)
+        lines = [properties.material, f"Last run: {uv_pack.result_text(result)}{'' if result['written'] else ' (checked)'}",
+                 f"Layout {width:.0f} x {height:.0f} px of {result['size']} x {result['size']}, "
+                 f"the islands cover {result['fill_current_pct']:.0f} %",
+                 f"Density at {result['t'] * 100:.0f} % of its range"]
+        return chr(10).join(lines + (set_problems(material) if material else []) + ['Click: select the objects that use it'])
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT'
+
+    def execute(self, context):
+        return bpy.ops.fss.materials_select(material=self.material)
+
+
+class FSS_UL_CheckResults(bpy.types.UIList):
+    """Every measured texture set: a list over bpy.data.materials that shows only those, so nothing is written while drawing."""
+    bl_idname = 'FSS_UL_check_results'
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        result = _results.get(item.name)
+        if result is None or result.get('mode') in ('kept', 'empty'):
+            return
+        layout.active = not is_stale(result)
+        name, used, room = _result_cells(layout)
+        over = result['mode'] == 'overflow'
+        name.alignment = 'LEFT'
+        name.operator(FSS_OT_UvCheckSelect.bl_idname, text=_fitted(context, item.name, RESULT_NAME_COLUMN, LIST_PADDING),
+                      icon='ERROR' if over else 'RESTRICT_SELECT_OFF', emboss=False).material = item.name
+        width, height = result['extent_px']
+        used.alert = over
+        used.progress(factor=result_used(result), type='BAR', text=f"{width:.0f} x {height:.0f} / {result['size']}")
+        room.alert = over
+        room.label(text='full' if result['mode'] == 'fit' else f'x{result_room(result):.2f}')
+
+    def filter_items(self, context, data, propname):
+        items = getattr(data, propname)
+        flags, order = result_order(items)
+        flags = [self.bitflag_filter_item if shown else 0 for shown in flags]
+        if self.filter_name:
+            named = bpy.types.UI_UL_list.filter_items_by_name(self.filter_name, self.bitflag_filter_item, items, 'name')
+            flags = [flag & by_name for flag, by_name in zip(flags, named)]
+        return flags, order
 
 
 class FSS_UL_TextureSets(bpy.types.UIList):
@@ -695,13 +1016,20 @@ class FSS_UL_TextureSets(bpy.types.UIList):
     bl_idname = 'FSS_UL_texture_sets'
 
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
-        result = _results.get(item.name)
-        warn = bool(result and (result.get('uv_zero_islands') or result.get('no_area_objects')))
-        row = layout.row(align=True)
-        split = row.split(factor=0.5)
-        split.label(text=item.name, icon='LOCKED' if uv_pack.is_kept(item) else 'ERROR' if warn else 'MATERIAL')
-        split.label(text=last_result_text(item, short=True))
-        row.operator('fss.materials_select', text='', icon='RESTRICT_SELECT_OFF', emboss=False).material = item.name
+        kept = uv_pack.is_kept(item)
+        tick, name, size, gap, pack = _cells(layout, SET_NAME_COLUMN, SET_SIZE_COLUMN, SET_MARGIN_COLUMN, SET_PACK_COLUMN)
+        tick.prop(item, KEEP_UVS_PROP, text='', invert_checkbox=True)
+        tick.operator('fss.materials_select', text='', icon='RESTRICT_SELECT_OFF', emboss=False).material = item.name
+        for cell in (name, size, gap):
+            cell.active = not kept
+        name.alignment = 'LEFT'
+        text = _fitted(context, item.name, (1.0 - TICK_COLUMN) * SET_NAME_COLUMN, LIST_PADDING)
+        name.operator(FSS_OT_UvTextureSetInfo.bl_idname, text=text, icon='ERROR' if set_problems(item) else 'NONE',
+                      emboss=False).material = item.name
+        size.prop(item, SIZE_PROP, text='')
+        gap.prop(item, 'fss_uv_margin_px', text='')
+        pack.enabled = not kept
+        pack.operator(FSS_OT_UvPackTextureSet.bl_idname, text='Pack').material = item.name
 
     def filter_items(self, context, data, propname):
         items = getattr(data, propname)
@@ -714,53 +1042,109 @@ class FSS_UL_TextureSets(bpy.types.UIList):
 
 
 def _draw_texture_sets(layout, context):
-    material = active_texture_set(context)
+    materials = texture_set_materials(context)
     box = layout.box()
-    if material is None:
-        box.label(text='Texture set', icon='MATERIAL')
+    if not materials:
         box.label(text='Select objects to list their texture sets', icon='INFO')
         return
-    box.label(text=f'Texture set: {material.name}', icon='MATERIAL')
     box.template_list(FSS_UL_TextureSets.bl_idname, '', bpy.data, 'materials', context.window_manager,
-                      'fss_uv_pack_active', rows=LIST_ROWS)
-    _labelled(box, 'Size').prop(material, SIZE_PROP, text='')
-    _labelled(box, 'Margin').prop(material, 'fss_uv_margin_px', text='')
-    if margin(material) < BLOCK_PIXELS:
-        box.label(text=f'Under {BLOCK_PIXELS} px: compressed 4x4 blocks bleed across islands', icon='ERROR')
-    row = _labelled(box, '')
-    row.prop(material, KEEP_UVS_PROP, text='Keep UVs', toggle=True)
-    sub = row.row(align=True)
-    sub.enabled = not uv_pack.is_kept(material)
-    sub.operator(FSS_OT_UvPackTextureSet.bl_idname, text='Pack', icon='UV').material = material.name
-    _labelled(box, 'Last run').label(text=last_result_text(material))
-    result = _results.get(material.name)
-    if result and result.get('uv_zero_islands'):
-        box.label(text=f"{result['uv_zero_islands']} island(s) with triangles without UV area: re-unwrap them",
-                  icon='ERROR')
-    if result and result.get('no_area_objects'):
-        box.label(text=f"Faces without area in {len(result['no_area_objects'])} object(s)", icon='ERROR')
+                      'fss_uv_pack_active', rows=min(len(materials), LIST_ROWS))
+    ticked = sum(1 for material in materials if not uv_pack.is_kept(material))
+    row = box.row()
+    row.enabled = ticked > 0
+    row.operator(FSS_OT_UvPackAll.bl_idname, text=f'Pack All ({ticked})', icon='UV')
 
 
-def _draw_scene(layout, scene):
-    box = layout.box()
-    box.label(text='Scene', icon='SCENE_DATA')
-    row = _labelled(box, 'Target density')
-    row.prop(scene, 'fss_uv_target_density', text='')
-    row.label(text='px/cm')
-    row = _labelled(box, 'Density freedom')
-    row.prop(scene, 'fss_uv_density_freedom_min', text='Min')
-    row.prop(scene, 'fss_uv_density_freedom_max', text='Max')
-    box.operator(FSS_OT_UvPackCheckAll.bl_idname, text='Check All', icon='VIEWZOOM')
-    if bpy.data.texts.get(uv_pack.REPORT_TEXT_NAME) is not None:
-        box.label(text=f"Full report: Text Editor > '{uv_pack.REPORT_TEXT_NAME}'", icon='INFO')
+def _store_result(result):
+    result['generation'] = _settings_generation
+    _results[result['set']] = result
+    _pack_result_changed()
+
+
+def measured_results():
+    """The results with a layout, of texture sets that still exist: not Keep UVs, not empty."""
+    return [result for name, result in _results.items() if result.get('mode') not in ('kept', 'empty')
+            and (name == uv_pack.set_name(None) or name in bpy.data.materials)]
+
+
+def result_room(result):
+    """How far the density could rise with the layout still fitting: the layout grows about as the density does, so 1 / k.
+    A set the packer already had to lower inside its range has none. Below 1: an overflow, how far it would have to drop."""
+    return 1.0 if result['mode'] == 'fit' else 1.0 / max(result['k'], 1e-9)
+
+
+def result_used(result):
+    """The share of the texture the layout's bounding box takes, 0 to 1."""
+    width, height = result['extent_px']
+    return min(width * height / max(result['size'] ** 2, 1), 1.0)
+
+
+def is_stale(result):
+    return result.get('generation', _settings_generation) != _settings_generation
+
+
+def result_order(materials):
+    """(flags, order) of the Check Results table over bpy.data.materials: the measured sets, tightest first."""
+    def result_of(material):
+        result = _results.get(material.name)
+        return result if result is not None and result.get('mode') not in ('kept', 'empty') else None
+
+    shown = sorted((index for index, material in enumerate(materials) if result_of(material) is not None),
+                   key=lambda index: (result_room(result_of(materials[index])), materials[index].name))
+    order = [0] * len(materials)
+    flags = [0] * len(materials)
+    for position, index in enumerate(shown):
+        order[index], flags[index] = position, 1
+    rest = len(shown)
+    for index, flag in enumerate(flags):
+        if not flag:
+            order[index], rest = rest, rest + 1
+    return flags, order
+
+
+def results_summary(target):
+    """(icon, headline, detail) over all measured sets. What limits a change of the scene's target is the tightest set."""
+    results = measured_results()
+    rooms = sorted(result_room(result) for result in results)
+    count = len(results)
+    overflow = sum(1 for result in results if result['mode'] == 'overflow')
+    if overflow:
+        return ('ERROR', f'{overflow} of {count} sets overflow',
+                f'Target {target * rooms[0]:.2f} px/cm (x{rooms[0]:.2f}), or larger textures')
+    full = sum(1 for room in rooms if room < FULL_ROOM)
+    if full:
+        return ('CHECKMARK', f'All {count} sets fit', f"{full} full, typical room x{rooms[count // 2]:.2f}")
+    return ('CHECKMARK', f'All {count} sets fit', f'Target can rise x{rooms[0]:.2f}, to {target * rooms[0]:.2f} px/cm')
+
+
+def _result_cells(layout):
+    split = layout.split(factor=RESULT_NAME_COLUMN)
+    name = split.row(align=True)
+    split = split.split(factor=RESULT_BAR_COLUMN / (1.0 - RESULT_NAME_COLUMN))
+    return name, split.row(align=True), split.row(align=True)
+
+
+def _draw_results(layout, context):
+    icon, headline, detail = results_summary(target_density(context.scene))
+    head = layout.column(align=True)
+    head.label(text=headline, icon=icon)
+    head.label(text=detail)
+    if any(is_stale(result) for result in measured_results()):
+        head.label(text='Numbers changed: press Check again', icon='INFO')
+    name, used, room = _result_cells(layout)
+    name.label(text='Texture set')
+    used.label(text='Layout / texture')
+    room.label(text='Room')
+    layout.template_list(FSS_UL_CheckResults.bl_idname, 'check_results', bpy.data, 'materials', context.window_manager,
+                         'fss_uv_pack_active', rows=min(len(measured_results()), LIST_ROWS))
 
 
 def _draw_progress(layout):
     p = _progress
     box = layout.box()
-    if p['verb'] == 'Checking':
+    if _several_sets(p):
         box.progress(factor=(p['index'] - 1 + p['fraction']) / max(p['count'], 1), type='BAR',
-                     text=f"Checking {p['index']} of {p['count']}: {p['set']}")
+                     text=f"{p['verb']} {p['index']} of {p['count']}: {p['set']}")
         box.label(text=p['stage'] or 'Starting', icon='TIME')
         box.operator(FSS_OT_UvPackCancel.bl_idname, text='Cancel', icon='CANCEL')
         box.label(text='Cancel and Esc stop after the texture set in work')
@@ -768,6 +1152,11 @@ def _draw_progress(layout):
         box.progress(factor=p['fraction'], type='BAR', text=f"Packing {p['set']}: {int(p['fraction'] * 100)} %")
         box.label(text=p['stage'] or 'Starting', icon='TIME')
         box.label(text='Blender waits until each pack is done')
+
+
+def _several_sets(progress):
+    """Check All, or Pack All with more than one set: shown with its count, and it can be cancelled between sets."""
+    return progress['verb'] == 'Checking' or progress['count'] > 1
 
 
 SPACES = ('VIEW_3D', 'IMAGE_EDITOR')  # the sidebars that draw the Packing section (decision 119)
@@ -795,7 +1184,7 @@ def _on_stage(stage, fraction):
         return
     _progress['stage'] = stage
     _progress['fraction'] = max(_progress['fraction'], fraction)
-    count = f" {_progress['index']}/{_progress['count']}" if _progress['verb'] == 'Checking' else ''
+    count = f" {_progress['index']}/{_progress['count']}" if _several_sets(_progress) else ''
     _status(f"FSS {_progress['verb']}{count}: {_progress['set']} ({stage})...")
     _redraw_sidebar_now(SPACES)
 
@@ -860,7 +1249,7 @@ class FSS_OT_UvPackTextureSet(bpy.types.Operator):
 
     def _run(self, context):
         result = uv_pack.pack(self._material, progress=None if bpy.app.background else _on_stage)
-        _results[result['set']] = result
+        _store_result(result)
         uv_pack.write_report([result], 'Pack', result['time_s'], selected=self._selected)
         extra = [name for name in result.get('objects', []) if name not in self._selected]
         text = _summary(result) + (f'; {len(extra)} object(s) not selected included' if extra else '')
@@ -869,22 +1258,30 @@ class FSS_OT_UvPackTextureSet(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class FSS_OT_UvPackCheckAll(bpy.types.Operator):
-    bl_idname = 'fss.uv_pack_check_all'
-    bl_label = 'Check All'
-    bl_description = ('Measure every texture set of the view layer as Pack would, without writing UVs: which sets fit, '
-                      'leave space or overflow, and the texture size each one needs')
-    bl_options = {'REGISTER'}
-
+class _SetRunner:
+    """One texture set after the other, with progress and Cancel: Check All and Pack All."""
     _timer = None
+    _verb = ''
+    _done_word = ''
+    _report_kind = ''
 
     @classmethod
     def poll(cls, context):
         return _progress is None and context.mode in {'OBJECT', 'EDIT_MESH'}
 
+    def _choose(self, context):
+        raise NotImplementedError
+
+    def _work(self, material, progress):
+        raise NotImplementedError
+
+    def _report_selected(self, context):
+        return None
+
     def execute(self, context):
         global _progress, _cancel_requested
-        self._sets = uv_pack.texture_sets(context.view_layer)
+        self._sets = self._choose(context)
+        self._selected = self._report_selected(context)
         self._done = []
         self._vis_cache = {}
         self._index = 0
@@ -895,16 +1292,15 @@ class FSS_OT_UvPackCheckAll(bpy.types.Operator):
                 self._step(material)
             return self._finish(context)
         _cancel_requested = False
-        _progress = {'verb': 'Checking', 'index': 1, 'count': len(self._sets), 'set': '', 'stage': '', 'fraction': 0.0}
+        _progress = {'verb': self._verb, 'index': 1, 'count': len(self._sets), 'set': '', 'stage': '', 'fraction': 0.0}
         self._timer = context.window_manager.event_timer_add(0.01, window=context.window)
         context.window_manager.modal_handler_add(self)
         _redraw_panels()
         return {'RUNNING_MODAL'}
 
     def _step(self, material):
-        result = uv_pack.measure(material, progress=None if bpy.app.background else _on_stage,
-                                 vis_cache=self._vis_cache)
-        _results[result['set']] = result
+        result = self._work(material, None if bpy.app.background else _on_stage)
+        _store_result(result)
         self._done.append(result)
 
     def _finish(self, context, cancelled=False):
@@ -917,12 +1313,12 @@ class FSS_OT_UvPackCheckAll(bpy.types.Operator):
         _status(None)
         _redraw_panels()
         seconds = time.perf_counter() - self._t_start
-        uv_pack.write_report(self._done, 'Check All', seconds, cancelled=cancelled)
+        uv_pack.write_report(self._done, self._report_kind, seconds, selected=self._selected, cancelled=cancelled)
         over = sum(1 for r in self._done if r['mode'] == 'overflow')
         kept = sum(1 for r in self._done if r['mode'] == 'kept')
         needles = sum(1 for r in self._done if r.get('uv_zero_islands'))
         self.report({'WARNING'} if needles else {'INFO'},
-                    f"Checked {len(self._done)} of {len(self._sets)} texture set(s) in {seconds:.1f} s"
+                    f"{self._done_word} {len(self._done)} of {len(self._sets)} texture set(s) in {seconds:.1f} s"
                     f"{', cancelled' if cancelled else ''}: {over} overflow, {kept} kept"
                     + (f", {needles} with triangles without UV area" if needles else '')
                     + f". See '{uv_pack.REPORT_TEXT_NAME}'.")
@@ -939,7 +1335,7 @@ class FSS_OT_UvPackCheckAll(bpy.types.Operator):
         if not self._announced:
             # show which set comes next before Blender blocks on it
             _progress.update(index=self._index + 1, set=uv_pack.set_name(material), stage='Starting', fraction=0.0)
-            _status(f"FSS Checking {self._index + 1}/{len(self._sets)}: {uv_pack.set_name(material)}...")
+            _status(f"FSS {self._verb} {self._index + 1}/{len(self._sets)}: {uv_pack.set_name(material)}...")
             _redraw_panels()
             self._announced = True
             return {'RUNNING_MODAL'}
@@ -947,22 +1343,61 @@ class FSS_OT_UvPackCheckAll(bpy.types.Operator):
             self._step(material)
         except Exception as ex:
             self._finish(context, cancelled=True)
-            self.report({'ERROR'}, f'Check All stopped at {uv_pack.set_name(material)}: {ex}')
+            self.report({'ERROR'}, f'{self._verb} stopped at {uv_pack.set_name(material)}: {ex}')
             return {'CANCELLED'}
         self._index += 1
         self._announced = False
         return {'RUNNING_MODAL'}
 
 
+class FSS_OT_UvPackCheckAll(_SetRunner, bpy.types.Operator):
+    bl_idname = 'fss.uv_pack_check_all'
+    bl_label = 'Check All'
+    bl_description = ('Measure every texture set of the view layer as Pack would, without writing UVs: which sets fit, '
+                      'leave space or overflow, and the texture size each one needs')
+    bl_options = {'REGISTER'}
+
+    _verb = 'Checking'
+    _done_word = 'Checked'
+    _report_kind = 'Check All'
+
+    def _choose(self, context):
+        return uv_pack.texture_sets(context.view_layer)
+
+    def _work(self, material, progress):
+        return uv_pack.measure(material, progress=progress, vis_cache=self._vis_cache)
+
+
+class FSS_OT_UvPackAll(_SetRunner, bpy.types.Operator):
+    bl_idname = 'fss.uv_pack_all'
+    bl_label = 'Pack All'
+    bl_description = ('Pack every ticked texture set of the list, one after the other: all faces with those materials in '
+                      'the view layer, also on objects that are not selected. Replaces their UVs')
+    bl_options = {'REGISTER', 'UNDO'}
+
+    _verb = 'Packing'
+    _done_word = 'Packed'
+    _report_kind = 'Pack'
+
+    def _choose(self, context):
+        return [material for material in texture_set_materials(context) if not uv_pack.is_kept(material)]
+
+    def _report_selected(self, context):
+        return {o.name for o in context.selected_objects}
+
+    def _work(self, material, progress):
+        return uv_pack.pack(material, progress=progress, vis_cache=self._vis_cache)
+
+
 class FSS_OT_UvPackCancel(bpy.types.Operator):
     bl_idname = 'fss.uv_pack_cancel'
     bl_label = 'Cancel'
-    bl_description = 'Stop Check All after the texture set in work (as Esc)'
+    bl_description = 'Stop after the texture set in work (as Esc)'
     bl_options = {'INTERNAL'}
 
     @classmethod
     def poll(cls, context):
-        return _progress is not None and _progress.get('verb') == 'Checking'
+        return _progress is not None and _several_sets(_progress)
 
     def execute(self, context):
         global _cancel_requested
@@ -982,14 +1417,7 @@ class _PackingSection:
             return
         if _migration:
             _draw_migration(layout)
-        _draw_scene(layout, scene)
-        obj = context.active_object
-        if obj is None:
-            box = layout.box()
-            box.label(text='Object', icon='OBJECT_DATA')
-            box.label(text='No active object', icon='INFO')
-        else:
-            _draw_object(layout, scene, obj)
+        _draw_table(layout, context, scene, context.active_object)
         _draw_texture_sets(layout, context)
 
 
@@ -1002,6 +1430,18 @@ class _PackingAdvanced:
         self.layout.label(text='Whole scene', icon='SCENE_DATA')
         _labelled(self.layout, 'Layout corner').prop(context.scene, 'fss_uv_pack_corner', text='')
         _labelled(self.layout, 'Partly Seen Islands').prop(context.scene, 'fss_uv_partly_seen_value', text='', slider=True)
+
+
+class _PackingResults:
+    bl_label = 'Check Results'
+    bl_order = 0
+
+    @classmethod
+    def poll(cls, context):
+        return _progress is None and bool(measured_results())
+
+    def draw(self, context):
+        _draw_results(self.layout, context)
 
 
 class FSS_PT_UvMarks(_PackingSection, bpy.types.Panel):
@@ -1028,6 +1468,22 @@ class FSS_PT_UvMarksImageEditor(_PackingSection, bpy.types.Panel):
         return getattr(context.space_data, 'mode', 'UV') == 'UV'
 
 
+class FSS_PT_UvMarksResults(_PackingResults, bpy.types.Panel):
+    bl_idname = 'FSS_PT_uv_marks_results'
+    bl_parent_id = 'FSS_PT_uv_marks'
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'FSS MSFS Tools'
+
+
+class FSS_PT_UvMarksImageEditorResults(_PackingResults, bpy.types.Panel):
+    bl_idname = 'FSS_PT_uv_marks_image_results'
+    bl_parent_id = 'FSS_PT_uv_marks_image'
+    bl_space_type = 'IMAGE_EDITOR'
+    bl_region_type = 'UI'
+    bl_category = 'FSS MSFS Tools'
+
+
 class FSS_PT_UvMarksAdvanced(_PackingAdvanced, bpy.types.Panel):
     bl_idname = 'FSS_PT_uv_marks_advanced'
     bl_parent_id = 'FSS_PT_uv_marks'
@@ -1044,8 +1500,9 @@ class FSS_PT_UvMarksImageEditorAdvanced(_PackingAdvanced, bpy.types.Panel):
     bl_category = 'FSS MSFS Tools'
 
 
-CLASSES = (FSS_OT_UvSetDensity, FSS_OT_UvSetDirection, FSS_OT_UvSetSkipAutoseam, FSS_OT_UvPackTextureSet,
-           FSS_OT_UvPackCheckAll, FSS_OT_UvPackCancel, FSS_UL_TextureSets, FSS_PT_UvMarks, FSS_PT_UvMarksImageEditor,
+CLASSES = (FSS_OT_UvTableHint, FSS_OT_UvTextureSetInfo, FSS_OT_UvSelectObject, FSS_OT_UvSetSkipAutoseam, FSS_OT_UvPackTextureSet,
+           FSS_OT_UvPackCheckAll, FSS_OT_UvPackAll, FSS_OT_UvPackCancel, FSS_OT_UvCheckSelect, FSS_UL_TextureSets, FSS_UL_CheckResults,
+           FSS_PT_UvMarks, FSS_PT_UvMarksImageEditor, FSS_PT_UvMarksResults, FSS_PT_UvMarksImageEditorResults,
            FSS_PT_UvMarksAdvanced, FSS_PT_UvMarksImageEditorAdvanced)
 HANDLERS = ((bpy.app.handlers.load_post, _on_load_post),
             (bpy.app.handlers.depsgraph_update_post, _on_depsgraph_update_post))
@@ -1056,21 +1513,31 @@ def register():
         bpy.utils.register_class(cls)
     factor = dict(min=0.01, max=10.0, soft_min=0.1, soft_max=4.0, precision=2)
     bpy.types.Object.fss_uv_density_own = bpy.props.BoolProperty(
-        name='Own Density Mark', default=False, update=_marks_changed,
-        description='This object has its own texel density factor: it multiplies the factors above it, and '
-                    'everything below takes it too')
+        name='Use Density Factor', default=True, update=_marks_changed,
+        description='Use the texel density factor of this row: it multiplies the factors above it, and everything '
+                    'below takes it too. Unticked, the number is kept but ignored (Alt: all selected objects)')
     bpy.types.Object.fss_uv_density_min = bpy.props.FloatProperty(
         name='Min', default=1.0, update=_keep_order(MIN_PROP, MAX_PROP, MIN_PROP),
         description='Lowest texel density factor of this mark (Alt+drag sets it on all selected objects)', **factor)
     bpy.types.Object.fss_uv_density_max = bpy.props.FloatProperty(
         name='Max', default=1.0, update=_keep_order(MIN_PROP, MAX_PROP, MAX_PROP),
         description='Highest texel density factor of this mark (Alt+drag sets it on all selected objects)', **factor)
+    bpy.types.Object.fss_uv_density_factor = bpy.props.FloatProperty(
+        name='Density Factor', get=_get_factor, set=_set_factor,
+        description='Texel density factor of this row, used when its tick is on (Alt: all selected objects)', **factor)
+    bpy.types.Object.fss_uv_use_visibility = bpy.props.BoolProperty(
+        name='Use Visibility', default=True, update=_marks_changed,
+        description="Use the visibility of this object's islands. Unticked, they count as fully visible (x1.00)")
+    bpy.types.Object.fss_uv_direction_mark = bpy.props.EnumProperty(
+        name='Island Direction', items=DIRECTIONS, get=_get_direction_mark, set=_set_direction_mark,
+        description='How the islands may rotate when packed; everything below that is Free takes it too '
+                    '(Alt: all selected objects)')
     bpy.types.Scene.fss_uv_target_density = bpy.props.FloatProperty(
-        name='Target Density', default=DEFAULT_TARGET, min=0.01, soft_min=1.0, soft_max=100.0, precision=2,
+        name='Target Density', default=DEFAULT_TARGET, update=_marks_changed, min=0.01, soft_min=1.0, soft_max=100.0, precision=2,
         description='Texel density at factor 1.0 for the whole scene, in pixels per centimetre (20.48 is 2048 px '
                     'per metre)')
     bpy.types.Scene.fss_uv_partly_seen_value = bpy.props.FloatProperty(
-        name='Partly Seen Islands', default=DEFAULT_PARTLY_SEEN, min=0.0, max=1.0, precision=2,
+        name='Partly Seen Islands', default=DEFAULT_PARTLY_SEEN, update=_marks_changed, min=0.0, max=1.0, precision=2,
         description='What happens to an island when only part of it is seen. 1: any seen part makes the whole island visible. '
                     '0.75: scaled by the seen share, biased towards visible. 0.5: scaled by the seen share of its area. '
                     '0.25: biased towards scaling down. 0: only an island seen whole counts, any other gets the minimum. '
@@ -1087,20 +1554,32 @@ def register():
         name='Max', default=DEFAULT_FREEDOM[1], update=_keep_order(*names, names[1]),
         description='Highest factor the packer may give any island, before the density marks', **factor)
     bpy.types.Material.fss_uv_texture_size = bpy.props.EnumProperty(
-        name='Texture Size', items=TEXTURE_SIZES, default=DEFAULT_TEXTURE,
+        name='Texture Size', items=TEXTURE_SIZES, default=DEFAULT_TEXTURE, update=_marks_changed,
         description='Size of this square texture set in pixels per side')
     bpy.types.Material.fss_uv_margin_px = bpy.props.IntProperty(
-        name='UV Margin', default=DEFAULT_MARGIN, min=0, soft_max=64, subtype='PIXEL',
+        name='UV Margin', default=DEFAULT_MARGIN, update=_marks_changed, min=0, soft_max=64, subtype='PIXEL',
         description='The gap between two islands in pixels of this texture set (8 keeps islands apart to the second '
                     'mip level after 4x4 block compression)')
     bpy.types.Material.fss_uv_keep_uvs = bpy.props.BoolProperty(
-        name='Keep UVs', default=False,
+        name='Keep UVs', default=False, update=_marks_changed,
         description='Leave this texture set out of Pack and Check All and keep its UVs (fur and hair cards, decal '
-                    'sheets, colliders)')
+                    'sheets, colliders). In the packing table: unticked')
+    setattr(bpy.types.Material, MATERIAL_TICK_PROP, bpy.props.BoolProperty(
+        name='Use Material Factor', default=True, update=_marks_changed,
+        description='Use the texel density factor of this material. Unticked, the number is kept but ignored'))
+    setattr(bpy.types.Material, MATERIAL_FACTOR_PROP, bpy.props.FloatProperty(
+        name='Material Factor', default=1.0, update=_marks_changed,
+        description='Texel density factor of every island with this material, on all objects, used when its tick is on',
+        **factor))
     bpy.types.WindowManager.fss_uv_pack_active_name = bpy.props.StringProperty(name='Active Texture Set')
+    bar_tips = {'TRACK': 'From 0 to twice the target density', 'RANGE': 'The range of the density of this object',
+                'MARK': 'The target density of the scene'}
+    for kind, (name, color) in BAR_COLORS.items():
+        setattr(bpy.types.WindowManager, name, bpy.props.FloatVectorProperty(
+            name='Density Bar', subtype='COLOR', size=3, min=0.0, max=1.0, default=color, description=bar_tips[kind]))
     bpy.types.WindowManager.fss_uv_pack_active = bpy.props.IntProperty(
         name='Active Texture Set', get=_get_active_index, set=_set_active_index,
-        description='The texture set whose size, margin, Keep UVs and Pack are shown below the list')
+        description='The highlighted row of the texture set table')
     for handlers, handler in HANDLERS:
         if handler not in handlers:
             handlers.append(handler)
@@ -1121,11 +1600,13 @@ def unregister():
     _results.clear()
     del bpy.types.WindowManager.fss_uv_pack_active
     del bpy.types.WindowManager.fss_uv_pack_active_name
-    for name in (KEEP_UVS_PROP, 'fss_uv_margin_px', SIZE_PROP):
+    for name, _color in BAR_COLORS.values():
+        delattr(bpy.types.WindowManager, name)
+    for name in (MATERIAL_FACTOR_PROP, MATERIAL_TICK_PROP, KEEP_UVS_PROP, 'fss_uv_margin_px', SIZE_PROP):
         delattr(bpy.types.Material, name)
     for name in ('fss_uv_density_freedom_max', 'fss_uv_density_freedom_min', 'fss_uv_pack_corner', 'fss_uv_partly_seen_value', 'fss_uv_target_density'):
         delattr(bpy.types.Scene, name)
-    for name in (MAX_PROP, MIN_PROP, OWN_PROP):
+    for name in (DIRECTION_MARK_PROP, USE_VISIBILITY_PROP, FACTOR_PROP, MAX_PROP, MIN_PROP, OWN_PROP):
         delattr(bpy.types.Object, name)
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)

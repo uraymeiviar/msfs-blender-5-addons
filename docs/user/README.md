@@ -22,7 +22,7 @@ It matches **FSS Blender Tools 0.36.9** and the FSS exporter based on Asobo expo
 
 ## The Pipeline
 
-The cockpit and the exterior go through the same steps. They differ in their camera set for the visibility step, their LOD sphere, and the zones you choose. Each step says:
+The cockpit and the exterior go through the same steps. They differ in their probe lights for the visibility step, their LOD sphere, and the zones you choose. Each step says:
 
 - **Why:** what MSFS needs, and why the step comes at this point.
 - **Do:** what to do, and which tool helps.
@@ -171,22 +171,23 @@ So the topology you model decides what disappears together. A floor plate and it
 
 **Why:** texture space is limited. Parts the pilot sees deserve more texture than parts hidden behind other parts or behind the seat.
 
-**What it measures:** from the cameras you include (for the cockpit the pilot and copilot eyes; for the exterior your own exterior cameras) and over the animation steps, how much of each face is actually visible, weighted by how far the head has to turn from the camera's default view. The score is a factor from 0 to 1 per face that depends neither on distance nor on size: a small knob in plain view scores as high as a large panel. Parts too small to measure (screw heads, small labels) take the value of the part they belong to.
+**What it measures:** probe lights you place at the crew's eyes (for the cockpit a spot at the pilot's and the copilot's head, animated with a look sweep, and a point light between them; for the exterior your own lights) light the model, and each face scores as bright as they make it in the viewport: distance, angle and shadows, soft ones included, over the animation steps. The scores are scaled so the most visible island is 1.0. Parts too small to measure (screw heads, small labels) take the value of the part they belong to.
 
-**How packing uses it:** each island gets a texel density (pixels per centimetre) within the target density × its object's density range × the island's visibility. The density range is the scene's density freedom times every density mark from the root down to the object, zone marks included, all set in [UV Auto Packing](fss-tools.md#uv-auto-packing). An island's visibility comes from its seen faces only, so a partly hidden island keeps the density its visible part needs. No island gets less than a small minimum (x0.10), whether it is seen a little or never seen in the analysed views and steps; nothing is deleted.
+**How packing uses it:** each island gets a texel density (pixels per centimetre) within the target density × its object's density range × the island's visibility. The density range is the scene's density freedom times every density mark from the root down to the object, zone marks included, all set in [UV Auto Packing](fss-tools.md#uv-auto-packing). An island's visibility is the value of its well-lit part (**Island Value**, 90 % by default), so a partly shadowed island keeps the density its lit part needs (**Partly Seen Islands** in UV Auto Packing, default 1, can scale it down by its lit share as well), and islands that touch differ by at most the **Step Limit** (1.5 by default): the darker one rises, a lit island is never lowered. No island scores less than the **Ambient** (x0.10 by default), whether it is lit a little or never lit in the analysed steps; nothing is deleted.
 
 **Do:**
 
-- In **FSS MSFS Tools** > **UV Auto Packing** > **Visibility Scoring**, tick **Include** for your cameras and set each to **Look Around** (the head can turn) or **Fixed View** (only what the camera's own frame shows).
+- Add the probe lights and tag them **No Export** in [Tags](fss-tools.md#tags), so they stay out of the export. Preview what they light in **Rendered** shading with the world light off and **View Transform Standard** ([visibility.md](visibility.md#setting-up-the-probe-lights)).
+- In **FSS MSFS Tools** > **UV Auto Packing** > **Visibility Scoring**, tick **Include** for the probe lights.
 - Set **Animation Steps** (default 5: 0, 25, 50, 75 and 100 % of each animation).
 - Save the `.blend`, then **Update Visibility**. The results go to `<blend name>.visibility` beside the `.blend`. See [visibility.md](visibility.md).
 
 **Check:**
 
-- The [Heatmap](uv.md#heatmap-distortion-texel-density-and-visibility) in **Visibility** mode: what the pilot looks at is blue, what is hidden or far to the side is red, never seen is magenta.
-- **Select Never Seen** and judge the list: switch positions and parts shown only under some conditions are not seen in every analysed step. Hide or delete only what really is never visible.
+- The [Heatmap](uv.md#heatmap-distortion-texel-density-and-visibility) in **Visibility** mode: what the probe lights light well is blue, what is dim or in shadow is red, never lit is magenta.
+- **Select Never Seen** and judge the list: switch positions and parts shown only under some conditions are not lit in every analysed step. Hide or delete only what really is never visible.
 
-**Redo when:** cameras, animations or the geometry change; the panel lists stale meshes. New seams or a new unwrap do not count: the scores belong to faces, not islands.
+**Redo when:** probe lights, animations or the geometry change; the panel lists stale meshes. New seams or a new unwrap do not count: the scores belong to faces, not islands.
 
 ### 8. Packing
 

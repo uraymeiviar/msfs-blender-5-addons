@@ -431,6 +431,9 @@ def _build_group(group, log, root, root_name, target, collections, materials, ma
 def run(context, exported, selected_export, log):
     """Merges every group of the export. Returns (groups merged, objects created)."""
     settings = context.scene.fss_merge
+    in_export = exported
+    # No Export objects never reach the glTF (decision 130): never merge them into a mesh that does
+    exported = lambda obj: in_export(obj) and not tags.is_no_export(obj, context.scene)  # noqa: E731
     skip_tags = set(tags.parse_tag_list(settings.skip_tags))
     created = []
     merged = 0
@@ -491,6 +494,22 @@ class glTF2ExportUserExtension:
 
     def gather_scene_hook(self, gltf2_scene, blender_scene, export_settings):
         _strip_fss_extras(gltf2_scene)
+
+    def gather_tree_filter_tag_hook(self, vtree, export_settings):
+        # No Export (UV journal decision 130): after the exporter decides what to keep and before it removes the rest.
+        # A removed node's kept children would move up to the nearest kept parent, so the whole subtree goes.
+        scene = bpy.context.scene
+        if not tags.get_mark_tags(scene, tags.NO_EXPORT_PROP):
+            return
+        stack = [uuid for uuid, node in vtree.nodes.items()
+                 if node.blender_object is not None and tags.is_no_export(node.blender_object, scene)]
+        while stack:
+            uuid = stack.pop()
+            node = vtree.nodes.get(uuid)
+            if node is None or node.keep_tag is False:
+                continue
+            node.keep_tag = False
+            stack.extend(node.children)
 
     def pre_export_hook(self, export_settings):
         context = bpy.context

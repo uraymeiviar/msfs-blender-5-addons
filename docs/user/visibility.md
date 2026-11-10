@@ -1,92 +1,140 @@
 # Visibility Scoring
 
-**Visibility Scoring** (sidebar `N` > **FSS MSFS Tools** > **UV Auto Packing** > **Visibility Scoring**) analyses how much of each mesh and UV island is visible from reference cameras (such as the pilot and copilot viewpoints) across animation states.
+**Visibility Scoring** (sidebar `N` > **FSS MSFS Tools** > **UV Auto Packing** > **Visibility Scoring**) lights the
+model with probe lights you place in the scene, for the cockpit at the pilot's and copilot's heads, and measures how
+bright each face gets, over the animation steps. Bright faces are the ones the crew sees well; faces in shadow or far
+away get less texture.
 
-The analysis writes its results to an external compressed file, `<blend_name>.visibility`, beside the `.blend` file. It modifies no meshes, leaves no custom properties on exported objects, and does not alter glTF exports. The results are used by the **Heatmap** (Visibility mode) for visual review and will guide the automatic UV packer to distribute texel density where it matters most.
+The results go to a file beside the `.blend`, `<blend_name>.visibility`. The analysis changes no mesh, leaves nothing on
+the exported objects, and does not change the glTF. The **Heatmap** (Visibility mode) shows the results, and **Pack**
+uses them to share out texel density.
 
 ---
 
-## Why Visibility Scoring?
+## What the Score Means
 
-Texture space in MSFS is limited. Geometry positioned in plain sight of the flight crew—such as the glareshield, primary flight instruments, and main throttle pedestal—requires sharp, legible resolution. Geometry occluded beneath seats, buried behind sidewall structures, or facing away from the cockpit cameras does not warrant high texel density.
+- **What you see in the viewport is what is measured.** A face's score follows the brightness the probe lights give it
+  in the viewport, in **Rendered** shading with the world light off, a white material and **View Transform Standard**:
+  light power, distance, the spot's cone and its soft edge, the area light's angle, and shadows, soft ones included.
+  The values are measured against EEVEE and agree within a few percent.
+- **The score is a multiplier from 0 to 1.** All scores are scaled so the most visible island is 1.0. That island gets
+  the full density its marks allow (zone, parents, object); an island at 0.4 gets 0.4 of it.
+- **An island takes the value of its well-lit part.** Its faces are ranked by brightness, by area, and the island takes
+  the value that the share set in **Island Value** stays below (90 % by default). An island half in a shadow keeps the
+  value of its lit half.
+- **Islands that touch on the model do not jump.** When an island is more than the **Step Limit** times darker than
+  an island it touches, it rises to the brighter one divided by the Step Limit, so a seam does not show a sudden
+  change of texel density. No island is ever lowered: a lit island keeps its value, and the darker parts around it
+  get more. The rise travels on: a neighbour of a 1.0 island gets at least 0.67, its neighbour 0.44, and so on.
+- **Nothing scores below the Ambient.** Every face gets the **Ambient** (0.1 by default) as if lit by a faint light
+  from everywhere: a score is the Ambient plus the rest of the way to 1 in proportion to the probe lights' brightness.
+  Faces no probe light reaches score exactly the Ambient, so they keep a tenth of the density.
+- **Animation:** levers, the yoke, doors and the probe lights themselves are sampled over the animation steps. A face
+  takes its brightest step, so a part revealed by a moving control, or lit by a light that sweeps, keeps that value.
+- **Loose parts and decals:** decals and glass do not cast shadows on what is under them. Objects with an invisible
+  material (collision, clickspots) are left out.
+- **Small parts** (screws, small labels) too small to measure take the value of the part they belong to.
+- The scores belong to faces, so new seams or a new unwrap need no update.
 
-The Visibility analyzer computes the solid angle of every face relative to the reference cameras:
-- **Distance Invariance:** Geometry at 0.5 m and 2.0 m receives identical visibility scores when unoccluded. Knobs and circuit breakers in plain view score as high as large bulkheads.
-- **Directional Weighting:** Faces directly in front of the camera receive full weight ($1.0$). As the view angle deviates from camera forward, weight falls off smoothly down to a configurable floor ($0.2$ default at $\ge 90^\circ$).
-- **Animation Coverage:** Lever, yoke, and switch animations are sampled across $2$ to $10$ animation steps, preventing parts revealed by moving controls from being misclassified as occluded.
-- **Loose Parts and Decals:** Decals and glass do not occlude underlying opaque surfaces. Invisible collision and occlusion primitives are excluded from evaluation.
-- **Islands from Seen Faces:** at packing, an island's value comes from its seen faces only, so a partly hidden island keeps the density its visible part needs. The scores belong to faces, so new seams or a new unwrap need no update.
-- **Hierarchy Resolution:** Millimeter-scale fasteners and switches smaller than the raster resolution inherit visibility from their parent assembly, preventing false negatives.
+---
+
+## Setting Up the Probe Lights
+
+1. Add point, spot or area lights where the crew's eyes are, for example under an empty `VISIBILITY_PROBE_LIGHTS`. A
+   spot pointing forward with a wide cone (120°) lights what the pilot looks at; a point light lights all around.
+2. Animate them if the head turns: a spot that sweeps from 45° outboard to 45° inboard over the animation lights
+   everything along the sweep.
+3. **Preview** what they light: viewport shading **Rendered** with **Scene World** on in the shading popover, the
+   world light off (**World** properties > **Surface** > **Strength** 0), and in **Color Management** the **View
+   Transform** **Standard**, **Exposure** 0. Override the material with a white one (**View Layer** > **Override** > **Material**),
+   or judge on the model's own colours. White in this preview is what scores 1.0 before the scaling; soft shadows show
+   as in the scoring.
+4. Keep the lights out of the export: tag them (or the empty above them) and turn on the tag's **No Export** mark in
+   [Tags](fss-tools.md#tags).
+
+Sun lights have no position and do not count; the list warns when one is included.
 
 ---
 
 ## Settings
 
-The settings are saved with the `.blend` file in `Scene.fss_visibility`:
+The settings are saved with the `.blend` file:
 
-### Reference Cameras
-A dynamic list synchronised with the scene cameras:
-- **Include:** Checkbox enabling the camera for analysis.
-- **Mode:**
-  - **Look Around (Default):** Evaluates a full $360^\circ$ spherical cubemap around the camera location, weighted by angle from the camera's default forward vector. Designed for pilot and copilot viewpoints where the flight crew can turn their heads.
-  - **Fixed View:** Evaluates a single frustum matching the camera's focal length and sensor aspect ratio (at $2560 \times 1440$ resolution). Only what lies inside the camera's own frame counts, at full weight; use it for a view whose direction cannot change.
+### Probe Lights
 
-### Animation Steps
-- **Animation Steps:** Slider from $2$ to $10$ (default $5$). Evenly samples actions and NLA tracks across their duration:
-  - 2 steps: $0\%$ and $100\%$
-  - 3 steps: $0\%$, $50\%$, and $100\%$
-  - 5 steps: $0\%$, $25\%$, $50\%$, $75\%$, and $100\%$
+The list follows the scene's lights by itself (added, renamed, deleted). Each row has:
+
+- **Include:** the light is a probe light.
+- The light's name and type icon, and the **select** button (arrow), which selects the light in the viewport.
+- The light's type, power and spot cone, for example `Spot 5 W 120°`.
+
+### Main Settings
+
+- **Animation Steps** (2 to 10, default 5): steps evenly spaced over each animation's length. 2 gives 0 % and 100 %,
+  5 gives 0, 25, 50, 75 and 100 %.
+- **Island Value** (50 to 100 %, default 90 %): what an island takes from its faces, see above. 50 % is the median
+  face, 100 % its brightest face.
+- **Ambient** (0 to 0.5, default 0.1): the lowest score any face or island can have; see above. Pack never goes below
+  it, **Partly Seen Islands** included.
+- **Step Limit** (1 to 4, default 1.5): how many times brighter one island may be than an island it touches; the
+  darker one rises. 1 makes
+  touching islands equal.
 
 ### Advanced Settings
-Expand **Advanced Settings** to inspect or fine-tune algorithmic parameters:
-- **Direction Floor (0.2):** Minimum solid angle weight assigned to peripheral and backward angles.
-- **Falloff (1.0):** Power applied to the cosine of the angle from the camera's forward direction.
-- **Cube Resolution (1,024 px):** Resolution per face of the cubemap passes ($6 \times 1024 \times 1024$).
-- **Pixel Threshold (10 px):** Minimum footprint threshold below which geometry is classified as undetermined and resolved via scene hierarchy.
+
+- **Shadow Samples** (default 4): points spread over each light's **Radius** that the shadows are measured from, for
+  the soft shadows. A light with **Radius** 0 uses one point and casts hard shadows. Each sample costs time.
+- **Cube Resolution** (1,024 px) and **Min Threshold** (10 px): how finely the shadows are measured, and below which
+  size a part counts as too small to measure.
 
 > [!NOTE]
-> Modifying Cube Resolution or Pixel Threshold alters baseline scores. Maintain default values unless instructed by project leads.
+> Changing Cube Resolution or Min Threshold changes the scores. Keep the defaults unless the project lead says
+> otherwise.
 
 ---
 
 ## Workflow: Updating Visibility
 
-1. **Save your file:** The analysis writes `<blend_name>.visibility` to disk. If the `.blend` is unsaved, the operator is disabled.
-2. **Select reference cameras:** Ensure at least one camera (e.g. `CAM_PILOT` or `CAM_COPILOT`) has **Include** checked.
+1. **Save the file:** the analysis writes `<blend_name>.visibility` beside it. Until the `.blend` is saved, the button
+   is greyed out.
+2. **Include** at least one probe light.
 3. **Click Update Visibility:**
-   - In interactive Blender, the operator runs modally. Progress is displayed in the window status bar (e.g. `FSS Visibility: State 50%, Camera 'CAM_PILOT' (4/10)...`).
-   - Pressing `Esc` cancels the analysis cleanly and writes nothing to disk.
-   - The scene state (active frame, action assignments, NLA tracks, and temporary mesh attributes) is restored exactly, even if cancelled or on errors.
-4. **Review Results:**
-   - A summary is displayed directly in the panel header and statistics table.
-   - A detailed breakdown is written to the **FSS Visibility Report** Text datablock in Blender's Text Editor.
+   - A progress bar replaces the button while it runs.
+   - `Esc` cancels; nothing is written.
+   - The scene (current frame, animations, lights) is put back as it was, also after a cancel or an error.
+4. **Read the results** in the panel and in the Text Editor's **FSS Visibility Report**: the lights and their positions
+   per step, the brightest face, what the step limit changed, and the scores per area.
 
 ---
 
-## Panel Report & Inspection Tools
+## Panel Report
 
-After an analysis run, the panel displays:
-- **File Metadata:** Timestamp of the `.visibility` file, camera names, and animation state count.
-- **Surface Breakdown:** Total faces, surface area ($m^2$), and overall scored meshes.
-- **Never-Seen Objects & Islands:** Number of objects and UV islands with a score of $0.000$ (never visible from any included camera in any state).
-  - Click **Select Never Seen** to select them for review. They need no density mark: never-seen faces get the minimum density automatically (x0.10, which is also the floor for faces seen only a little). Check whether they are really never visible: switch positions and parts shown only under some conditions may not be seen in the analysed states. Nothing is deleted.
-- **Undetermined Objects:** Small sub-pixel parts whose scores were inherited from parent panels.
-- **Stale Meshes Warning:** If geometry is modified, subdivided, or deleted after visibility data was generated, the panel alerts: `Mesh geometry changed since last run`.
-  - Click **Select Stale** to select affected objects that need updating.
+After a run, the panel shows:
+
+- **File:** when the `.visibility` file was written, the lights used and the number of views (steps × lights × shadow
+  samples). A note shows when the settings have changed since.
+- **Never Seen:** objects and islands that no probe light reaches in any step. **Select Never Seen** selects them. They
+  need no mark: they score the **Ambient** (x0.10 by default), the lowest score there is.
+  Check whether they are really never visible: switch positions and parts shown only in some conditions may not be lit
+  in the analysed steps. Nothing is deleted.
+- **Undetermined:** small parts that took the value of the part they belong to.
+- **Stale:** meshes changed since the run. **Select Stale** selects them; run **Update Visibility** again.
+- **Scored by an older version:** a file made by the earlier camera-based scoring. The packer does not use it; run
+  **Update Visibility** again.
 
 ---
 
 ## Visualizing Visibility: The Heatmap
 
-To visualize visibility directly on the 3D model:
 1. Open sidebar `N` > **FSS Tools** > **Heatmap**.
-2. Enable **Show Heatmap**.
+2. Turn on **Show Heatmap**.
 3. Set **Mode** to **Visibility**.
 
 ### Color Legend
-- **Blue side ($0.5$ to $1.0$):** High visibility in plain view of the cameras.
-- **Neutral Grey ($0.5$):** Moderate visibility or peripheral coverage.
-- **Red side ($0.0$ to $0.5$):** Low visibility, grazing angles, or heavily occluded.
-- **Magenta:** Never seen ($0.000$ score across all cameras and animation steps).
-- **Cyan:** Undetermined sub-pixel geometry whose score was inherited from parent structures.
-- **Dark Grey (No Data):** Objects not present in the `.visibility` file or whose mesh geometry has become stale.
+
+- **Blue side (0.5 to 1.0):** well lit by the probe lights.
+- **Neutral grey (0.5):** half as bright as the most visible island.
+- **Red side (0.0 to 0.5):** dim: far away, at a grazing angle, or in shadow.
+- **Magenta:** never lit in any step.
+- **Cyan:** a part too small to measure that took its parent's value.
+- **Dark grey (no data):** objects not in the `.visibility` file, or changed since.

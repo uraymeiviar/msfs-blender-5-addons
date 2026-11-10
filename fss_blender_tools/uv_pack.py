@@ -456,6 +456,7 @@ class TextureSet:
         self.size = uv_marks.texture_size(material)
         self.margin_px = int(uv_marks.margin(material))
         target = uv_marks.target_density(scene)
+        material_factor = uv_marks.material_density(material)  # the same on every island of the set (decision 146)
         bu_cm = _cm_per_unit(scene)
         cm2 = bu_cm * bu_cm
         self.parts = parts
@@ -497,13 +498,17 @@ class TextureSet:
                 self.stale_meshes.append(md.me.name)
                 vis = np.ones(ni)
                 facing = np.ones(ni)
+            elif not any(uv_marks.uses_visibility(u) for u in users):  # the artist unticked it (decision 139)
+                vis = np.ones(ni)
+                facing = np.ones(ni)
             else:
                 order = np.argsort(isl, kind='stable')
                 st = np.searchsorted(isl[order], np.arange(ni + 1))
                 partly = uv_marks.partly_seen(scene)
+                floor = float(vis_data.get('ambient', 0.0))
                 vis = np.array([uv_marks.island_visibility(
                     visibility_core.score_face_set(users[0], faces[order[st[k]:st[k + 1]]], vis_data=vis_data),
-                    visibility_core.seen_share_face_set(vis_data, faces[order[st[k]:st[k + 1]]]), partly)
+                    visibility_core.seen_share_face_set(vis_data, faces[order[st[k]:st[k + 1]]]), partly, floor)
                     for k in range(ni)])
                 facing = np.array([visibility_core.facing_face_set(vis_data, faces[order[st[k]:st[k + 1]]])
                                    for k in range(ni)])
@@ -529,8 +534,10 @@ class TextureSet:
                     self.no_area_objects += [o.name for o in users]
                 a3 = np.bincount(isl, weights=areas, minlength=ni)
                 (flo, fhi), _source = uv_marks.density(u, scene)
-                lo = target * flo * vis
-                hi = lo + facing * target * (fhi - flo) * vis
+                use = uv_marks.uses_visibility(u)  # users of one mesh can differ
+                u_vis, u_facing = (vis, facing) if use else (np.ones(ni), np.ones(ni))
+                lo = target * flo * material_factor * u_vis
+                hi = lo + u_facing * target * (fhi - flo) * material_factor * u_vis
                 lo = np.where(override > 0.0, target * override, lo)
                 hi = np.where(override > 0.0, target * override, hi)
                 need = lo / np.maximum(np.sqrt(uv_a / np.maximum(a3, 1e-30)), 1e-30)
@@ -987,6 +994,53 @@ def write_back(ts, res):
 # Pack and measure
 # ------------------------------------------------------------------------------------------------------------------
 
+def _mesh_materials(md, users):
+    """The materials (None for faces without one) that the faces of a mesh use, by its first user."""
+    slots = [slot.material for slot in users[0].material_slots]
+    materials = []
+    for index in np.unique(md.MI).tolist():
+        material = slots[index] if index < len(slots) else None
+        if material not in materials:
+            materials.append(material)
+    return materials
+
+
+def face_densities(objects, scene, view_layer):
+    """The density in px/cm Pack gives each face of the objects' meshes, read from TextureSet without packing: of the
+    set's last Pack or Check All when there is one, else the top of the island's range (as the island list shows it).
+
+    Keep UVs sets get their value too: Keep UVs only leaves a set out of one packing run, it is packed another time.
+    Returns {mesh name: (per face px/cm, NaN where there is none, set names without a result, failed)}. NaN: an island
+    without UV or 3D area, a face of a mesh the packer does not take."""
+    meshes = _meshes(view_layer)
+    vis_cache = {}
+    found = {}
+    for obj in objects:
+        me = obj.data
+        users = meshes.get(me)
+        if users is None or me.name in found:
+            continue
+        values = np.full(len(me.polygons), np.nan)
+        unmeasured = set()
+        failed = False
+        try:
+            md = MeshData(me)
+            for material in _mesh_materials(md, users):
+                faces = np.flatnonzero(_face_material_mask(users[0], md, material))
+                ts = TextureSet(material, [(md, users, faces)], scene, vis_cache)
+                result = uv_marks._results.get(ts.name)
+                t = result.get('t') if result else None
+                if t is None:
+                    unmeasured.add(ts.name)
+                island = ts.hi if t is None else ts.lo + t * (ts.hi - ts.lo)
+                values[faces] = np.where(ts.zero_area | ts.degenerate, np.nan, island)[ts.face_isl[0]]
+        except Exception:  # one odd mesh must not stop the view; the legend counts it
+            values[:] = np.nan
+            failed = True
+        found[me.name] = (values, unmeasured, failed)
+    return found
+
+
 def object_islands(obj, scene, view_layer):
     """The islands of obj's mesh as the packer forms them, one row per island and material: what Pack would use, read
     from TextureSet, without packing. The mesh alone is read, so a set's other objects cost nothing; the values of an
@@ -996,16 +1050,10 @@ def object_islands(obj, scene, view_layer):
     if users is None:
         return None
     md = MeshData(obj.data)
-    slots = [slot.material for slot in users[0].material_slots]
-    materials = []
-    for index in np.unique(md.MI).tolist():
-        material = slots[index] if index < len(slots) else None
-        if material not in materials:
-            materials.append(material)
     vis_cache = {}
     rows = []
     stale = False
-    for material in materials:
+    for material in _mesh_materials(md, users):
         faces = np.flatnonzero(_face_material_mask(users[0], md, material))
         ts = TextureSet(material, [(md, users, faces)], scene, vis_cache)
         stale = stale or bool(ts.stale_meshes)

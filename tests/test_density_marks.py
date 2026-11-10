@@ -1,5 +1,5 @@
 """Density marks multiply down the hierarchy (UV journal decisions 105 to 110): the scene freedom applied once, marks
-on zones and objects multiplied, presets as factors, Clear, unmarked = x1, parent_density() and density(); the
+on zones and objects multiplied, the row's factor and tick, Free inherits, unmarked = x1, parent_density() and density(); the
 migration of the marks of versions before 0.31.0 (custom-property density marks, fss_zone_density, margin fractions)
 at file load and at register, idempotent; the Result drawn by the Packing panel; texture size (square) and margin
 defaults.
@@ -89,7 +89,10 @@ def test_defaults():
     assert uv_marks.texture_size(material) == 1024
     assert not any(hasattr(material, key) for key in uv_marks.OLD_SIZE_KEYS)  # square only (decision 120)
     obj = new_object('UNMARKED')
-    assert not getattr(obj, uv_marks.OWN_PROP) and uv_marks.own_density(obj) is None
+    # Ticked by default; at x1.00 that is still no mark (decision 141)
+    assert getattr(obj, uv_marks.OWN_PROP) and obj.fss_uv_use_visibility and uv_marks.own_density(obj) is None
+    obj.fss_uv_density_factor = 2.0
+    assert uv_marks.own_density(obj) == (2.0, 2.0)
     print("PASS: test_defaults (20.48 px/cm, freedom 0.9-1.1, 4096 x 4096, 8 px)")
 
 
@@ -119,31 +122,60 @@ def test_multiplication():
     print(f"PASS: test_multiplication ({len(cases)} objects; KNOB x1.0125 - x1.36125 from the chain)")
 
 
-def test_presets_and_clear():
+def test_factor_tick_and_order():
     o = build_chain()
-    for obj in bpy.context.scene.objects:
-        obj.select_set(obj in (o['panel'], o['knob']))
-    bpy.context.view_layer.objects.active = o['knob']
-    expected = {'LOWER': (0.75, 0.75), 'HIGHER': (1.5, 1.5)}
-    for preset, factor in expected.items():
-        assert bpy.ops.fss.uv_set_density(preset=preset) == {'FINISHED'}
-        for key in ('panel', 'knob'):
-            assert uv_marks.own_density(o[key]) == factor, (preset, key, uv_marks.own_density(o[key]))
-    assert close(uv_marks.density(o['knob'])[0], (1.35 * 1.5 * 1.5, 1.815 * 1.5 * 1.5))
-    assert bpy.ops.fss.uv_set_density(preset='CLEAR') == {'FINISHED'}
-    for key in ('panel', 'knob'):
-        assert uv_marks.own_density(o[key]) is None and not getattr(o[key], uv_marks.OWN_PROP), key
-        assert (getattr(o[key], uv_marks.MIN_PROP), getattr(o[key], uv_marks.MAX_PROP)) == (1.0, 1.0), key
-    (low, high), source = uv_marks.density(o['knob'])
-    assert close((low, high), (1.35, 1.815)) and source == o['door'], (low, high, source)
-    # Min never above Max: dragging one past the other moves the other along
     knob = o['knob']
+    setattr(knob, uv_marks.OWN_PROP, False)
+    knob.fss_uv_density_factor = 1.0
+    knob.fss_uv_density_factor = 1.5
+    assert uv_marks.own_density(knob) is None, "typing must not tick the row"
+    setattr(knob, uv_marks.OWN_PROP, True)
+    assert uv_marks.own_density(knob) == (1.5, 1.5), uv_marks.own_density(knob)
+    assert close(uv_marks.density(knob)[0], (1.35 * 1.5, 1.815 * 1.5))
+    # Unticked: the number stays, the calculation ignores it
+    setattr(knob, uv_marks.OWN_PROP, False)
+    assert knob.fss_uv_density_factor == 1.5 and uv_marks.own_density(knob) is None
+    (low, high), source = uv_marks.density(knob)
+    assert close((low, high), (1.35, 1.815)) and source == o['door'], (low, high, source)
+    setattr(knob, uv_marks.OWN_PROP, True)
+    assert uv_marks.own_density(knob) == (1.5, 1.5), "ticking again brings the number back"
+    assert not hasattr(bpy.ops.fss, 'uv_set_density') or 'uv_set_density' not in dir(bpy.ops.fss)
+    # Min never above Max: dragging one past the other moves the other along
     mark(knob, 1.0, 1.2)
     setattr(knob, uv_marks.MIN_PROP, 1.5)
     assert close((getattr(knob, uv_marks.MIN_PROP), getattr(knob, uv_marks.MAX_PROP)), (1.5, 1.5))
     setattr(knob, uv_marks.MAX_PROP, 0.5)
     assert close((getattr(knob, uv_marks.MIN_PROP), getattr(knob, uv_marks.MAX_PROP)), (0.5, 0.5))
-    print("PASS: test_presets_and_clear (Lower x0.75, Higher x1.5, Clear, Min/Max order)")
+    print("PASS: test_factor_tick_and_order (typing does not tick, unticked is ignored and kept, Min/Max order)")
+
+
+def test_free_inherits():
+    o = build_chain()
+    assert uv_marks.direction(o['knob']) == ('FREE', None)
+    o['zone'].fss_uv_direction_mark = 'UPRIGHT'
+    assert o['zone'][uv_marks.DIRECTION_KEY] == 'UPRIGHT'
+    assert uv_marks.direction(o['knob']) == ('UPRIGHT', o['zone'])
+    # A Free left by an earlier version counts as no mark
+    o['knob'][uv_marks.DIRECTION_KEY] = 'FREE'
+    assert o['knob'].fss_uv_direction_mark == 'FREE' and uv_marks.direction(o['knob']) == ('UPRIGHT', o['zone'])
+    # The nearest mark wins; setting Free removes the mark
+    o['door'].fss_uv_direction_mark = 'QUARTER'
+    assert uv_marks.direction(o['knob']) == ('QUARTER', o['door'])
+    o['door'].fss_uv_direction_mark = 'FREE'
+    assert uv_marks.DIRECTION_KEY not in o['door'] and uv_marks.direction(o['knob']) == ('UPRIGHT', o['zone'])
+    print("PASS: test_free_inherits (Free takes the mark above, nearest mark wins, Free removes the mark)")
+
+
+def test_select_object():
+    o = build_chain()
+    o['knob'].select_set(True)
+    bpy.context.view_layer.objects.active = o['knob']
+    assert bpy.ops.fss.uv_select_object(target='DOOR_L') == {'FINISHED'}
+    assert bpy.context.view_layer.objects.active == o['door'] and bpy.context.selected_objects == [o['door']]
+    o['panel'].hide_set(True)
+    assert bpy.ops.fss.uv_select_object(target='PANEL') == {'CANCELLED'}
+    assert bpy.context.view_layer.objects.active == o['door']
+    print("PASS: test_select_object (selects only it, makes it active, refuses a hidden object)")
 
 
 def build_old_marks():
@@ -254,12 +286,13 @@ class _Layout:
 def draw_packing():
     calls = []
     bpy.types.FSS_PT_uv_marks.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+    icons = {item.identifier for item in bpy.types.UILayout.bl_rna.functions['label'].parameters['icon'].enum_items}
+    for name, args, kwargs in calls:
+        assert kwargs.get('icon', 'NONE') in icons, kwargs
+        if name == 'prop':
+            assert args[1] in args[0].bl_rna.properties, args
     labels = [kwargs.get('text') for name, _args, kwargs in calls if name == 'label']
     return calls, labels
-
-
-def after(labels, label):
-    return labels[labels.index(label) + 1]
 
 
 def test_panel():
@@ -271,40 +304,133 @@ def test_panel():
     bpy.context.view_layer.objects.active = knob
     knob.select_set(True)
     calls, labels = draw_packing()
-    rows = {label: after(labels, label) for label in ('Parent', 'Zone', 'Visibility', 'Result')}
-    assert rows == {'Parent': 'x1.35 - x1.82 from DOOR_L', 'Zone': 'FWD x1.50', 'Visibility': 'no data: x1.00',
-                    'Result': '20.74 - 27.88 px/cm'}, rows
-    assert after(labels, 'Result') == '20.74 - 27.88 px/cm'
-    assert '= target x parent x own x visibility' in labels
+    assert '20.74 - 27.88 px/cm' in labels and 'no data' in labels and 'Free' in labels, labels
     props = [(args[0], args[1], kwargs.get('text')) for name, args, kwargs in calls if name == 'prop']
     scene = bpy.context.scene
-    for prop in ((scene, 'fss_uv_target_density', ''), (scene, 'fss_uv_density_freedom_min', 'Min'),
-                 (scene, 'fss_uv_density_freedom_max', 'Max'), (knob, uv_marks.OWN_PROP, 'own mark'),
-                 (knob, uv_marks.MIN_PROP, 'Min'), (knob, uv_marks.MAX_PROP, 'Max'),
-                 (materials[0], uv_marks.SIZE_PROP, ''), (materials[0], 'fss_uv_margin_px', '')):
+    expected = [(scene, 'fss_uv_target_density', 'px/cm'), (scene, 'fss_uv_density_freedom_min', 'Min'),
+                (scene, 'fss_uv_density_freedom_max', 'Max'), (knob, uv_marks.USE_VISIBILITY_PROP, ''),
+                (o['door'], uv_marks.MIN_PROP, ''), (o['door'], uv_marks.MAX_PROP, '')]  # a range stays two fields
+    for key in ('zone', 'panel', 'knob'):
+        expected.append((o[key], uv_marks.FACTOR_PROP, ''))
+    for key in ('zone', 'door', 'panel', 'knob'):
+        expected += [(o[key], uv_marks.OWN_PROP, ''), (o[key], uv_marks.DIRECTION_MARK_PROP, '')]
+    for prop in expected:
         assert prop in props, (prop, props)
-    texts = [kwargs.get('text') for name, _args, kwargs in calls if name == 'operator']
-    # Scene: Check All; Object: the presets and directions; Texture set: Pack (decisions 114, 115, 121)
-    assert texts == ['Check All', 'Lower', 'Higher', 'Clear', 'Free', 'Upright', 'Flip', 'Quarter', 'Clear', 'Pack'], (
-        texts)
+    assert not any(owner == scene and name == uv_marks.OWN_PROP for owner, name, _text in props)
+    texts = [kwargs.get('text') for name, _args, kwargs in calls if name == 'operator' and kwargs.get('text')]
+    # top to bottom: scene, zone, marked parent, direct parent, object; then the texture set (EMPTY_ROOT_TEST is above the zone)
+    assert texts == ['Check', 'FWD', 'DOOR_L', 'PANEL', 'KNOB_MAT_0', 'KNOB', 'Pack All (7)'], texts
+    # every icon of a row is a button with a tooltip
+    hints = [kwargs['icon'] for name, _args, kwargs in calls if name == 'operator' and kwargs.get('emboss') is False]
+    assert hints == ['SCENE_DATA', 'OUTLINER_OB_EMPTY', 'ORIENTATION_PARENT', 'ORIENTATION_PARENT', 'MATERIAL', 'OBJECT_DATA',
+                     'UV_ISLANDSEL'], hints
+    assert all(uv_marks.FSS_OT_UvTableHint.description(bpy.context, SimpleNamespace(kind=kind))
+               for kind in uv_marks.TABLE_ICONS)
+    assert 'KNOB' in uv_marks.FSS_OT_UvSelectObject.description(bpy.context, SimpleNamespace(target='KNOB'))
+    # the density bar: track, range, the target mark and the rest are colour fields, disabled
+    colors = {args[1] for name, args, _kwargs in calls if name == 'prop' and args[1].startswith('fss_uv_bar_')}
+    assert colors == {'fss_uv_bar_track', 'fss_uv_bar_range', 'fss_uv_bar_mark'}, colors
     headings = [label for label in labels if label == 'Scene' or (label or '').startswith(('Object: ', 'Texture set: '))]
-    assert headings == ['Scene', 'Object: KNOB', 'Texture set: KNOB_MAT_0'], headings
-    assert 'Select Marked' not in texts and not hasattr(bpy.types, 'FSS_OT_uv_select_marked')
-    sets = [label for label in labels if label and label.startswith('Texture set: ')]
-    assert sets == ['Texture set: KNOB_MAT_0'], sets
+    assert headings == [], headings
     # all 7 texture sets are in the list (a UIList over bpy.data.materials, filtered to the selection's)
     assert [name for name, _args, _kwargs in calls].count('template_list') == 1 and not [
         label for label in labels if label and label.startswith('... ')], labels
     assert [m.name for m in uv_marks.texture_set_materials(bpy.context)] == [f'KNOB_MAT_{index}' for index in range(7)]
-    # Root of the scene: the scene freedom; outside every zone
+    # An unticked mark keeps its row, but no longer counts in the Result
+    setattr(o['door'], uv_marks.OWN_PROP, False)
+    calls, labels = draw_packing()
+    assert [kwargs.get('text') for name, _args, kwargs in calls if name == 'operator' and kwargs.get('text')][2] == 'DOOR_L'
+    assert '20.74 - 25.34 px/cm' in labels, labels
+    setattr(o['door'], uv_marks.OWN_PROP, True)
+    # An unmarked parent that is not the direct parent has no row
+    assert uv_marks.parent_rows(o['knob'], o['zone']) == [o['door'], o['panel']]
+    o['extra'] = new_object('EXTRA', o['knob'], mesh=True)
+    assert uv_marks.parent_rows(o['extra'], o['zone']) == [o['door'], o['knob']]
+    setattr(o['knob'], uv_marks.OWN_PROP, False)
+    setattr(o['knob'], uv_marks.MIN_PROP, 1.0)
+    setattr(o['knob'], uv_marks.MAX_PROP, 1.0)
+    child = new_object('CHILD', o['extra'], mesh=True)
+    assert uv_marks.parent_rows(child, o['zone']) == [o['door'], o['extra']]
+    # The direct parent is the zone; the zone itself; the root of the scene
+    bpy.context.view_layer.objects.active = o['door']
+    _calls, labels = draw_packing()
+    assert 'the parent is the zone' in labels, labels
+    bpy.context.view_layer.objects.active = o['zone']
+    _calls, labels = draw_packing()
+    assert 'this object is the zone' in labels, labels
     bpy.context.view_layer.objects.active = o['root']
     _calls, labels = draw_packing()
-    assert (after(labels, 'Parent'), after(labels, 'Zone')) == ('x0.90 - x1.10 (scene freedom)', 'none')
-    print("PASS: test_panel (Parent, Zone, Visibility, Result 20.74 - 27.88 px/cm, 7 texture sets in the list)")
+    assert 'no zone' in labels and 'no parent' in labels, labels
+    # No active object: the Scene row still draws
+    bpy.context.view_layer.objects.active = None
+    calls, labels = draw_packing()
+    assert 'No active object' in labels and any(a[1] == 'fss_uv_target_density' for n, a, _k in calls if n == 'prop')
+    print("PASS: test_panel (table rows, ticks, parents up to the zone, Result 20.74 - 27.88 px/cm, 7 texture sets)")
+
+
+def test_material_factor():
+    o = build_chain()
+    knob = o['knob']
+    assert uv_marks.material_density(None) == 1.0
+    a, b, unused = (bpy.data.materials.new(name) for name in ('MAT_A', 'MAT_B', 'MAT_UNUSED'))
+    assert getattr(a, uv_marks.MATERIAL_TICK_PROP) and uv_marks.material_density(a) == 1.0, "x1.00 and ticked by default"
+    me = bpy.data.meshes.new('TWO')
+    me.from_pydata([(0, 0, 0), (1, 0, 0), (0, 1, 0), (1, 1, 0)], [], [(0, 1, 2), (1, 3, 2)])
+    for material in (a, b, unused, a):
+        me.materials.append(material)
+    me.polygons.foreach_set('material_index', [0, 1])
+    knob.data = me
+    bpy.context.view_layer.objects.active = knob
+    # Only the materials the faces use, each once; a slot without a material or an object without faces gives none
+    assert uv_marks.object_materials(knob) == [a, b], uv_marks.object_materials(knob)
+    assert uv_marks.object_materials(o['zone']) == []
+    setattr(a, uv_marks.MATERIAL_FACTOR_PROP, 0.5)
+    setattr(b, uv_marks.MATERIAL_FACTOR_PROP, 2.0)
+    calls, labels = draw_packing()
+    texts = [kwargs.get('text') for name, _args, kwargs in calls if name == 'operator' and kwargs.get('text')]
+    # The table's order: scene, zone, parents, materials, object
+    assert texts[:7] == ['Check', 'FWD', 'DOOR_L', 'PANEL', 'MAT_A', 'MAT_B', 'KNOB'], texts
+    props = [(args[0], args[1]) for name, args, _kwargs in calls if name == 'prop']
+    for material in (a, b):
+        assert (material, uv_marks.MATERIAL_TICK_PROP) in props and (material, uv_marks.MATERIAL_FACTOR_PROP) in props, props
+    assert not any(owner in (a, b) and name == uv_marks.DIRECTION_MARK_PROP for owner, name in props)
+    # The chain alone is 20.74 - 27.88: the Result runs from the lowest material to the highest
+    assert '10.37 - 55.76 px/cm' in labels, labels
+    # Unticked: the number is kept and ignored
+    setattr(b, uv_marks.MATERIAL_TICK_PROP, False)
+    assert uv_marks.material_density(b) == 1.0 and getattr(b, uv_marks.MATERIAL_FACTOR_PROP) == 2.0
+    _calls, labels = draw_packing()
+    assert '10.37 - 27.88 px/cm' in labels, labels
+    # A material row selects the objects that use it
+    selects = [args[0] for name, args, _kwargs in calls if name == 'operator']
+    assert selects.count('fss.materials_select') >= 2, selects
+    # No material on the faces: a dimmed row says so
+    bpy.context.view_layer.objects.active = o['door']
+    _calls, labels = draw_packing()
+    assert 'no material' in labels, labels
+    print("PASS: test_material_factor (used materials only, between parents and object, Result lowest to highest, tick)")
+
+
+def test_bar_and_names():
+    def kinds(*args):
+        segments = uv_marks.bar_segments(*args, mark=0.01)
+        assert abs(sum(width for width, _kind in segments) - 1.0) < 1e-9, segments
+        return [kind for _width, kind in segments]
+
+    assert kinds(0.25, 0.75) == ['TRACK', 'RANGE', 'MARK', 'RANGE', 'TRACK']  # the target inside the range
+    assert kinds(0.1, 0.3) == ['TRACK', 'RANGE', 'TRACK', 'MARK', 'TRACK']  # below it
+    assert kinds(0.7, 0.9) == ['TRACK', 'MARK', 'TRACK', 'RANGE', 'TRACK']  # above it
+    assert kinds(0.8, 1.7) == ['TRACK', 'MARK', 'TRACK', 'RANGE']  # past the end of the bar: stops there
+    narrow = uv_marks.bar_segments(0.3, 0.3)
+    assert [width for width, kind in narrow if kind == 'RANGE'] and sum(
+        width for width, kind in narrow if kind == 'RANGE') >= uv_marks.BAR_MIN_RANGE - 1e-9, narrow
+    assert uv_marks.trim_start('@MERGE_SHELL', 8, len) == '...SHELL'
+    assert uv_marks.trim_start('SHORT', 8, len) == 'SHORT'
+    print("PASS: test_bar_and_names (bar segments around the target, the end of a long name stays)")
 
 
 def test_panel_visibility():
-    """The Visibility row and the Result with island values, through a stand-in for get_object_visibility (the
+    """The Islands row and the Result with island values, through a stand-in for get_object_visibility (the
     analysis itself is tested in tests/uv_prototype/test_visibility.py)."""
     o = build_chain()
     knob = o['knob']
@@ -315,7 +441,7 @@ def test_panel_visibility():
     bpy.ops.wm.save_as_mainfile(filepath=str(path))
     path.with_suffix('.visibility').write_bytes(b'stand-in')
     calls = []
-    answer = {'stale': False, 'never_seen': False, 'object_score': 0.8, 'island_values': {0: 0.5, 1: 0.0, 2: 0.9}}
+    answer = {'stale': False, 'never_seen': False, 'object_score': 0.8, 'island_values': {0: 0.5, 1: 0.1, 2: 0.9}}
 
     def stand_in(obj, uv_name=None, vis_path=None, use_cache=True):
         calls.append(obj.name)
@@ -327,39 +453,49 @@ def test_panel_visibility():
         knob = bpy.data.objects['KNOB']
         bpy.context.view_layer.objects.active = knob
         _draw, labels = draw_packing()
-        # Islands: 0.0 is never seen and gets the minimum x0.10 (decision 74)
-        assert after(labels, 'Visibility') == 'x0.80  islands 0.10-0.90', after(labels, 'Visibility')
-        assert after(labels, 'Result') == '16.59 - 22.30 px/cm  (islands 2.07 - 25.09)', after(labels, 'Result')
+        # Islands: a never-lit island scores the file's Ambient, 0.1 (decision 133)
+        assert '0.10 - 0.90' in labels and '3 islands' in labels, labels
+        assert '2.07 - 25.09 px/cm' in labels, labels
+        # The Islands tick off: the islands count as fully visible, the number is still shown
+        knob.fss_uv_use_visibility = False
+        _draw, labels = draw_packing()
+        assert '0.10 - 0.90' in labels and '20.74 - 27.88 px/cm' in labels, labels
+        knob.fss_uv_use_visibility = True
         draw_packing()
         assert calls == ['KNOB'], f"a redraw scored the islands again: {calls}"
-        answer.update(never_seen=True, object_score=0.0)
+        answer.update(never_seen=True, object_score=0.1)
         uv_marks._vis_cache.clear()
         _draw, labels = draw_packing()
-        assert after(labels, 'Visibility') == 'never seen: x0.10', after(labels, 'Visibility')
+        assert 'never lit' in labels, labels
         answer.update(stale=True)
         uv_marks._vis_cache.clear()
         _draw, labels = draw_packing()
-        assert after(labels, 'Visibility') == 'no data: x1.00', after(labels, 'Visibility')
+        assert 'no data' in labels, labels
     finally:
         visibility_core.get_object_visibility = real
-    print("PASS: test_panel_visibility (x0.80, islands 0.10-0.90, Result 16.59 - 22.30, cached across redraws)")
+    print("PASS: test_panel_visibility (islands 0.10-0.90, Result 2.07 - 25.09, the tick, cached across redraws)")
 
 
 def test_visibility_floor():
-    # Decision 111: the minimum is a floor, so a face seen a little never gets less than a face never seen
-    for score, expected in ((0.0, 0.1), (0.05, 0.1), (0.1, 0.1), (0.5, 0.5), (1.0, 1.0)):
+    # Decision 133: the score carries its floor (Ambient); the packer only keeps a density above 0
+    for score, expected in ((0.0, 0.01), (0.005, 0.01), (0.05, 0.05), (0.5, 0.5), (1.0, 1.0)):
         got = uv_marks.visibility_factor(score)
         assert abs(got - expected) < 1e-9, (score, got, expected)
-    print("PASS: test_visibility_floor (0 and 0.05 give x0.10, 0.5 stays x0.50)")
+    # An island takes at least the file's Ambient, also when Partly Seen scales it down
+    assert uv_marks.island_visibility(0.8, 0.01, 0.5, 0.1) == 0.1 and uv_marks.island_visibility(0.8, 0.01, 0.5) == 0.01
+    print("PASS: test_visibility_floor (0 gives x0.01, 0.05 stays x0.05; Partly Seen stops at the Ambient)")
 
 
 def test_heatmap_after_mark_change():
     # A parent's mark changes its children's density: the heatmap drops its cached objects once the edit pauses
     from fss_blender_tools import uv_heatmap
     o = build_chain()
+    material = bpy.data.materials.new('MARKS_CHANGED')
     edits = [lambda: setattr(o['door'], uv_marks.MIN_PROP, 0.9),
              lambda: setattr(o['door'], uv_marks.MAX_PROP, 1.2),
              lambda: setattr(o['zone'], uv_marks.OWN_PROP, False),
+             lambda: setattr(material, uv_marks.MATERIAL_FACTOR_PROP, 0.5),
+             lambda: setattr(material, uv_marks.MATERIAL_TICK_PROP, False),
              lambda: setattr(bpy.context.scene, 'fss_uv_density_freedom_min', 0.8)]
     for edit in edits:
         uv_heatmap._cache['KNOB'] = object()
@@ -378,10 +514,14 @@ def test_heatmap_after_mark_change():
 def main():
     test_defaults()
     test_multiplication()
-    test_presets_and_clear()
+    test_factor_tick_and_order()
+    test_free_inherits()
+    test_select_object()
     test_migration()
     test_migration_at_load_and_register()
     test_panel()
+    test_material_factor()
+    test_bar_and_names()
     test_panel_visibility()
     test_visibility_floor()
     test_heatmap_after_mark_change()

@@ -405,12 +405,13 @@ def test_opaque_surface_shader():
     shader = uv_heatmap._heatmap_shader()
     glyph_texture = uv_heatmap._glyphs()
     uvs = np.zeros((len(pos), 2), np.float32)
-    batch = batch_for_shader(shader, 'TRIS', {'pos': pos, 'nor': nor, 'color': col, 'uv': uvs})
+    batch = batch_for_shader(shader, 'TRIS', {'pos': pos, 'nor': nor, 'color': col, 'uv': uvs,
+                                              'edge': np.ones((len(pos), 3), np.float32)})
     bpy.context.scene.fss_uv_heatmap_grid = False
     size = 64
     off = gpu.types.GPUOffScreen(size, size)
     try:
-        def centre_pixel(opacity):
+        def centre_pixel():
             with off.bind():
                 fb = gpu.state.active_framebuffer_get()
                 fb.clear(color=(0, 0, 0, 1), depth=1.0)
@@ -420,20 +421,160 @@ def test_opaque_surface_shader():
                 uv_heatmap._bind_surface_shader(shader, bpy.context.scene, glyph_texture)
                 shader.uniform_float('mvp', proj @ view)
                 shader.uniform_float('normal_matrix', view.inverted_safe().transposed())
-                shader.uniform_float('opacity', opacity)
                 batch.draw(shader)
                 gpu.state.depth_test_set('NONE')
                 return np.array(fb.read_color(size // 2, size // 2, 1, 1, 4, 0, 'FLOAT').to_list()).ravel()
 
-        full = centre_pixel(1.0)
-        assert full[0] > 0.95 and full[2] < 0.05, f"the near plane must hide the far one, got {full}"
-        half = centre_pixel(0.5)
-        expected = 0.5 * uv_heatmap.BASE_GREY + 0.5  # facing the camera: shade 1.0
-        assert abs(half[0] - expected) < 0.02 and abs(half[1] - 0.5 * uv_heatmap.BASE_GREY) < 0.02, \
-            f"opacity 0.5 must mix the colour with grey, got {half}"
+        full = centre_pixel()
+        assert full[0] > 0.95 and full[1] < 0.05 and full[2] < 0.05, f"the near plane at full colour, got {full}"
     finally:
         off.free()
-    print(f"  -> PASS: near plane wins ({np.round(full[:3], 3)}), opacity mixes with grey ({np.round(half[:3], 3)}).")
+    print(f"  -> PASS: near plane wins at full colour ({np.round(full[:3], 3)}).")
+
+
+def test_own_wireframe():
+    """The wireframe follows the polygons' edges (no diagonals inside a quad) and the panel's switch."""
+    print("Test: heatmap's own wireframe (offscreen)...")
+    import math
+    import gpu
+    from mathutils import Matrix
+    gpu.init()
+    clean_scene()
+    me = bpy.data.meshes.new("Quad_Mesh")
+    bm = bmesh.new()
+    face = bm.faces.new([bm.verts.new(co) for co in ((-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0))])
+    uv_layer = bm.loops.layers.uv.new("UVMap")
+    for loop, uv in zip(face.loops, ((0, 0), (1, 0), (1, 1), (0, 1))):
+        loop[uv_layer].uv = uv
+    bm.to_mesh(me)
+    bm.free()
+    obj = bpy.data.objects.new("Quad", me)
+    bpy.context.scene.collection.objects.link(obj)
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    scene = bpy.context.scene
+    scene.fss_uv_heatmap_grid = False
+    scene.fss_uv_heatmap_show = True
+    entry = uv_heatmap._cache["Quad"]
+    assert entry.n_tris == 2 and entry.tri_real.sum() == 4, f"4 outer edges of 6: {entry.tri_real}"
+
+    shader = uv_heatmap._heatmap_shader()
+    glyphs = uv_heatmap._glyphs()
+    batch = entry.get_batch('SHAPE', shader, 'SHEAR')
+    t = 1.0 / math.tan(math.radians(30))
+    proj = Matrix(((t, 0, 0, 0), (0, t, 0, 0), (0, 0, -1.002, -0.02), (0, 0, -1, 0)))
+    view = Matrix.Translation((0, 0, -3.0))
+    W = 256
+    off = gpu.types.GPUOffScreen(W, W)
+
+    def luminance():
+        with off.bind():
+            fb = gpu.state.active_framebuffer_get()
+            fb.clear(color=(0, 0, 0, 1), depth=1.0)
+            gpu.state.depth_test_set('LESS_EQUAL')
+            shader.bind()
+            uv_heatmap._bind_surface_shader(shader, scene, glyphs)
+            shader.uniform_float('mvp', proj @ view)
+            shader.uniform_float('normal_matrix', view.inverted_safe().transposed())
+            batch.draw(shader)
+            gpu.state.depth_test_set('NONE')
+            return np.array(fb.read_color(0, 0, W, W, 4, 0, 'FLOAT').to_list(), np.float32)[..., :3].mean(-1).reshape(W, W)
+
+    try:
+        half = W // 2
+        margin = int(W * 0.5 * (t / 3.0)) - 8  # just inside the quad's outline on screen
+        scene.fss_uv_heatmap_wire = True
+        scene.fss_uv_heatmap_wire_opacity = 1.0
+        strong = luminance()
+        inside = strong[half - margin:half + margin, half - margin:half + margin]
+        surface = float(np.median(inside))
+        assert surface > 0.6, f"the surface must be drawn: {surface}"
+        assert inside.min() > surface - 0.05, "a line inside the quad: the triangle diagonal is drawn"
+
+        scene.fss_uv_heatmap_wire = False
+        off_row = luminance()[half]
+        on_surface = off_row > 0.3
+        assert off_row[on_surface].min() > surface - 0.05, "switched off, no line may be drawn"
+    finally:
+        off.free()
+        scene.fss_uv_heatmap_wire = True
+        scene.fss_uv_heatmap_wire_opacity = 0.5
+        scene.fss_uv_heatmap_show = False
+    print("  -> PASS: surface drawn, no diagonal inside a quad, nothing drawn when switched off.")
+
+
+def test_wire_width():
+    """A line between two faces is 1 pixel wide on screen, also when it runs diagonally; opacity scales it."""
+    print("Test: wireframe width (offscreen)...")
+    import math
+    import gpu
+    from mathutils import Matrix
+    gpu.init()
+    clean_scene()
+    me = bpy.data.meshes.new("TwoQuads_Mesh")
+    bm = bmesh.new()
+    verts = [bm.verts.new(co) for co in ((-1, -1, 0), (0, -1, 0), (1, -1, 0), (-1, 1, 0), (0, 1, 0), (1, 1, 0))]
+    faces = [bm.faces.new((verts[0], verts[1], verts[4], verts[3])), bm.faces.new((verts[1], verts[2], verts[5], verts[4]))]
+    uv_layer = bm.loops.layers.uv.new("UVMap")
+    for face in faces:
+        for loop in face.loops:
+            loop[uv_layer].uv = (loop.vert.co.x * 0.25 + 0.5, loop.vert.co.y * 0.25 + 0.5)
+    bm.to_mesh(me)
+    bm.free()
+    obj = bpy.data.objects.new("TwoQuads", me)
+    bpy.context.scene.collection.objects.link(obj)
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    scene = bpy.context.scene
+    scene.fss_uv_heatmap_grid = False
+    scene.fss_uv_heatmap_wire = True
+    scene.fss_uv_heatmap_wire_opacity = 1.0
+    scene.fss_uv_heatmap_show = True
+    shader = uv_heatmap._heatmap_shader()
+    glyphs = uv_heatmap._glyphs()
+    batch = uv_heatmap._cache["TwoQuads"].get_batch('SHAPE', shader, 'SHEAR')
+    t = 1.0 / math.tan(math.radians(30))
+    proj = Matrix(((t, 0, 0, 0), (0, t, 0, 0), (0, 0, -1.002, -0.02), (0, 0, -1, 0)))
+    W = 256
+    off = gpu.types.GPUOffScreen(W, W)
+
+    def row(angle):
+        model = Matrix.Translation((0, 0, -3.0)) @ Matrix.Rotation(angle, 4, 'Z')
+        with off.bind():
+            fb = gpu.state.active_framebuffer_get()
+            fb.clear(color=(0, 0, 0, 1), depth=1.0)
+            gpu.state.depth_test_set('LESS_EQUAL')
+            shader.bind()
+            uv_heatmap._bind_surface_shader(shader, scene, glyphs)
+            shader.uniform_float('mvp', proj @ model)
+            shader.uniform_float('normal_matrix', model.inverted_safe().transposed())
+            batch.draw(shader)
+            gpu.state.depth_test_set('NONE')
+            return np.array(fb.read_color(0, 0, W, W, 4, 0, 'FLOAT').to_list(), np.float32)[..., :3].mean(-1).reshape(W, W)[W // 2 + 7]
+
+    def covered(angle):
+        """Width of the line across the row in pixels: how far the pixels are darkened, added up."""
+        line = row(angle)[W // 2 - 20:W // 2 + 20]
+        surface = float(np.median(line))
+        return float(((surface - line) / (surface - INK)).sum())
+
+    INK = 0.08
+    try:
+        for angle in (0.0, math.radians(35)):
+            width = covered(angle) * math.cos(angle)  # the row crosses a slanted line at an angle
+            print(f"  width at {math.degrees(angle):.0f} degrees: {width:.2f} px")
+            assert 0.7 < width < 1.3, f"the line must be 1 pixel wide at {math.degrees(angle):.0f} degrees, got {width:.2f}"
+        scene.fss_uv_heatmap_wire_opacity = 0.25
+        faint = covered(0.0)
+        assert 0.15 < faint < 0.35, f"opacity 0.25 gives a quarter of the line: {faint:.2f}"
+        scene.fss_uv_heatmap_wire = False
+        assert abs(covered(0.0)) < 0.05, "switched off, no line may be drawn"
+        scene.fss_uv_heatmap_wire = True
+    finally:
+        off.free()
+        scene.fss_uv_heatmap_wire_opacity = 0.5
+        scene.fss_uv_heatmap_show = False
+    print("  -> PASS: a line between two faces is 1 pixel wide.")
 
 
 def test_uv_grid_and_labels(image_path=None):
@@ -451,7 +592,8 @@ def test_uv_grid_and_labels(image_path=None):
     col = np.tile([0.92, 0.92, 0.92, 1.0], (6, 1)).astype(np.float32)
     shader = uv_heatmap._heatmap_shader()
     glyph_texture = uv_heatmap._glyphs()
-    batch = batch_for_shader(shader, 'TRIS', {'pos': pos, 'nor': nor, 'color': col, 'uv': uvs})
+    batch = batch_for_shader(shader, 'TRIS', {'pos': pos, 'nor': nor, 'color': col, 'uv': uvs,
+                                              'edge': np.ones((len(pos), 3), np.float32)})
     scene = bpy.context.scene
     scene.fss_uv_heatmap_grid = True
     scene.fss_uv_heatmap_grid_cells = '8'
@@ -550,10 +692,30 @@ def test_wire_display_takeover():
     other.select_set(True)
     bpy.context.view_layer.objects.active = obj
     scene = bpy.context.scene
+    views = [space for screen in bpy.data.screens for area in screen.areas for space in area.spaces if space.type == 'VIEW_3D']
+    assert views, "no 3D view to check the overlay on"
+    own = [index != len(views) - 1 for index in range(len(views))]  # the last view has its overlays off already
+    for space, shown in zip(views, own):
+        space.overlay.show_overlays = shown
+    assert own[0] or len(views) == 1, "the test needs a view whose overlays are on"
+
+    def overlays():
+        return [space.overlay.show_overlays for space in views]
+
+    off = [False] * len(views)
 
     scene.fss_uv_heatmap_show = False
     scene.fss_uv_heatmap_show = True  # the toggle's update callback takes the selection over
     assert obj.display_type == 'WIRE', f"shown object should display as wire, got {obj.display_type}"
+    assert overlays() == off, "Blender's own lines must be gone: overlays off in every view"
+    uv_heatmap._on_save_pre(None)
+    assert overlays() == own, "saved with each view's own state"
+    uv_heatmap._on_save_post(None)
+    assert overlays() == off, "after saving, off again"
+    views[0].overlay.show_overlays = True  # the artist wants them back while the heatmap shows
+    uv_heatmap._sync_display()
+    assert views[0].overlay.show_overlays, "a view the artist switched back on is left alone"
+    views[0].overlay.show_overlays = False
 
     obj.select_set(False)
     uv_heatmap._sync_display()
@@ -571,6 +733,7 @@ def test_wire_display_takeover():
     # an undo that brings back a wire display after the heatmap was switched off is repaired
     scene.fss_uv_heatmap_show = False
     assert obj.display_type == 'TEXTURED', "switching off restores the display"
+    assert overlays() == own, "switching off gives each view its own state back"
     obj.display_type = 'WIRE'  # what an undo to an earlier step would bring back
     uv_heatmap._on_undo_redo_post(None)
     assert obj.display_type == 'TEXTURED', "after an undo the original display is restored"
@@ -643,6 +806,81 @@ def test_area_distortion_and_islands():
     print("  -> PASS: plane area 1.0, colours, view masks, Both chart with islands over limit.")
 
 
+def test_calculated_density():
+    """Density's Calculated view shows what Pack gives each island, whatever the UVs are now."""
+    print("Test: Calculated density matches the packer, without packed UVs...")
+    from fss_blender_tools import uv_pack
+    clean_scene()
+    scene = bpy.context.scene
+    scene.fss_uv_density_freedom_min = 0.5
+    scene.fss_uv_density_freedom_max = 1.5
+    target = uv_marks.target_density(scene)
+    mat = bpy.data.materials.new("CalcMat")
+    kept = bpy.data.materials.new("KeptMat")
+    kept.fss_uv_keep_uvs = True
+    small_uv = create_plane("Calc_SmallUV", size=2.0, uv_scale=(0.1, 0.1))
+    big_uv = create_plane("Calc_BigUV", size=2.0, uv_scale=(0.9, 0.9), location=(5, 0, 0))
+    mirrored = create_plane("Calc_Mirror", size=2.0, uv_scale=(0.5, 0.5), location=(10, 0, 0))
+    kept_obj = create_plane("Calc_Kept", size=2.0, location=(15, 0, 0))
+    for obj in (small_uv, big_uv, mirrored):
+        obj.data.materials.append(mat)
+    kept_obj.data.materials.append(kept)
+    mirrored.modifiers.new("Mirror", 'MIRROR').use_axis[1] = True
+    uv_marks._results.clear()
+    for obj in (small_uv, big_uv, mirrored, kept_obj):
+        obj.select_set(True)
+    bpy.context.view_layer.objects.active = small_uv
+
+    scene.fss_uv_heatmap_mode = 'DENSITY'
+    scene.fss_uv_heatmap_show = True
+    uv_heatmap.update_heatmap_cache(bpy.context)
+    assert uv_heatmap._cache["Calc_SmallUV"].density_calc is None, "read although the view is not Calculated"
+    scene.fss_uv_heatmap_density_source = 'CALCULATED'
+
+    # no Pack or Check All yet: the top of the range, the same for very different UVs (no visibility data in this scene)
+    small, big = uv_heatmap._cache["Calc_SmallUV"], uv_heatmap._cache["Calc_BigUV"]
+    np.testing.assert_allclose(small.density_calc, 1.5, atol=1e-6)
+    np.testing.assert_allclose(big.density_calc, 1.5, atol=1e-6)
+    rows = uv_pack.object_islands(small_uv, scene, bpy.context.view_layer)[0]
+    np.testing.assert_allclose(small.density_calc * target, rows[0]['high'], atol=1e-6)
+    np.testing.assert_allclose(uv_heatmap._cache["Calc_Kept"].density_calc, 1.5, atol=1e-6)  # Keep UVs: a value too
+    stats = uv_heatmap._global_stats
+    assert stats['calc_unmeasured'] == 2, stats['calc_unmeasured']  # CalcMat and KeptMat
+
+    # after a Pack or Check All of the set: its t, as the island list shows it
+    uv_marks._results["CalcMat"] = {'t': 0.25, 'set': "CalcMat"}
+    uv_heatmap._drop_calculated()
+    assert small.density_calc is None
+    uv_heatmap.update_heatmap_cache(bpy.context, refresh=False)
+    np.testing.assert_allclose(small.density_calc, 0.5 + 0.25 * (1.5 - 0.5), atol=1e-6)
+    assert uv_heatmap._global_stats['calc_unmeasured'] == 1  # KeptMat
+
+    # a mirror without a saved face map has no value: orange, not a colour of the scale
+    entry = uv_heatmap._cache["Calc_Mirror"]
+    assert np.isnan(entry.density_calc).all()
+    np.testing.assert_allclose(entry.colors_density_calc[0], uv_heatmap.COLOR_NO_DATA, atol=1e-6)
+
+    # the scale: red at x0.1, neutral at the target, blue at x2
+    low, mid, high = uv_heatmap.calculated_density_colors(np.array([0.1, 1.0, 2.0]))
+    np.testing.assert_allclose(low, uv_heatmap.COLOR_RED, atol=1e-5)
+    np.testing.assert_allclose(mid, uv_heatmap.COLOR_NEUTRAL, atol=1e-5)
+    np.testing.assert_allclose(high, uv_heatmap.COLOR_BLUE, atol=1e-5)
+
+    stats = uv_heatmap._global_stats
+    assert len(stats['chart_density_calc']) == len(stats['chart_area_calc']) > 0
+    data = uv_heatmap.chart_data('DENSITY_CALC', stats)
+    assert data is not None and data['title'] == 'Calculated density', data
+    assert uv_heatmap.render_chart is not None
+
+    # the other view is untouched by the switch
+    scene.fss_uv_heatmap_density_source = 'CURRENT'
+    assert uv_heatmap.chart_data('DENSITY', uv_heatmap._global_stats) is not None
+    assert not np.isnan(small.rel_density).any()
+    uv_marks._results.clear()
+    scene.fss_uv_heatmap_show = False
+    print("  -> PASS")
+
+
 def run_all_tests():
     print("=" * 70)
     print("RUNNING UV HEATMAP & SKIP MARK TESTS")
@@ -656,11 +894,14 @@ def run_all_tests():
     test_uvmetrics_parity_on_trim_panel()
     test_overhead_shell_performance()
     test_opaque_surface_shader()
+    test_own_wireframe()
+    test_wire_width()
     test_uv_grid_and_labels()
     test_distribution_chart()
     test_updates_after_uv_change()
     test_wire_display_takeover()
     test_area_distortion_and_islands()
+    test_calculated_density()
     print("=" * 70)
     print("ALL UV HEATMAP TESTS PASSED SUCCESSFULLY.")
     print("=" * 70)

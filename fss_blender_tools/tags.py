@@ -16,7 +16,9 @@ INVISIBLE_PROP = "fss_invisible_tags"  # scene: the tags of objects marked as in
 ANIMATED_PROP = "fss_animated_tags"  # scene: the tags of objects marked as animated; only a mark
 WHOLE_PROP = "fss_whole_tags"  # scene: the tags of objects whose loose pieces the LOD export never drops one by one
 NO_TEXTURE_PROP = "fss_no_texture_tags"  # scene: the tags of objects that need no texture, for example gauge screens
-MARK_PROPS = (AO_NO_OCCLUDER_PROP, AO_SKIP_BAKE_PROP, INVISIBLE_PROP, ANIMATED_PROP, WHOLE_PROP, NO_TEXTURE_PROP)
+NO_EXPORT_PROP = "fss_no_export_tags"  # scene: the tags of objects that no export writes, with their children
+MARK_PROPS = (AO_NO_OCCLUDER_PROP, AO_SKIP_BAKE_PROP, INVISIBLE_PROP, ANIMATED_PROP, WHOLE_PROP, NO_TEXTURE_PROP,
+              NO_EXPORT_PROP)
 
 
 def get_tags(obj) -> list:
@@ -117,6 +119,18 @@ def is_marked_animated(obj, scene) -> bool:
 def needs_no_texture(obj, scene) -> bool:
     """True when a tag of the object says it needs no texture."""
     return bool(set(get_tags(obj)).intersection(get_mark_tags(scene, NO_TEXTURE_PROP)))
+
+
+def is_no_export(obj, scene) -> bool:
+    """True when a tag of the object or of one of its parents keeps it out of every export (UV journal decision 130)."""
+    marks = set(get_mark_tags(scene, NO_EXPORT_PROP))
+    if not marks:
+        return False
+    while obj is not None:
+        if marks.intersection(get_tags(obj)):
+            return True
+        obj = obj.parent
+    return False
 
 
 def is_whole(obj, scene) -> bool:
@@ -328,6 +342,21 @@ class FSS_OT_TagToggleNoTexture(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class FSS_OT_TagToggleNoExport(bpy.types.Operator):
+    bl_idname = 'fss.tag_toggle_no_export'
+    bl_label = 'No Export Tag'
+    bl_description = ("Objects with this tag, and everything parented below them, are left out of every export (MSFS "
+                      "2024 and 2020) and of the merge. For helpers that live in the file, such as the probe lights of "
+                      "Visibility Scoring")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    tag: bpy.props.StringProperty(name='Tag')
+
+    def execute(self, context):
+        _toggle_mark_tag(context.scene, NO_EXPORT_PROP, self.tag)
+        return {'FINISHED'}
+
+
 class FSS_OT_TagRename(bpy.types.Operator):
     bl_idname = "fss.tag_rename"
     bl_label = "Rename Tag"
@@ -438,6 +467,7 @@ class FSS_PT_Tags(bpy.types.Panel):
             animated_tags = set(get_mark_tags(scene, ANIMATED_PROP))
             whole_tags = set(get_mark_tags(scene, WHOLE_PROP))
             no_texture_tags = set(get_mark_tags(scene, NO_TEXTURE_PROP))
+            no_export_tags = set(get_mark_tags(scene, NO_EXPORT_PROP))
             column = layout.column(align=True)
             for tag in sorted(counts):
                 skipped = tag in skip_tags
@@ -502,6 +532,8 @@ class FSS_PT_Tags(bpy.types.Panel):
                                     depress=tag in whole_tags).tag = tag
                 action_row.operator(FSS_OT_TagToggleNoTexture.bl_idname, text="", icon='TEXTURE',
                                     depress=tag in no_texture_tags).tag = tag
+                action_row.operator(FSS_OT_TagToggleNoExport.bl_idname, text="", icon='EXPORT',
+                                    depress=tag in no_export_tags).tag = tag
                 action_row.separator(factor=0.5)
                 action_row.operator(FSS_OT_TagDelete.bl_idname, text="", icon='TRASH').tag = tag
         else:
@@ -520,6 +552,7 @@ CLASSES = (
     FSS_OT_TagToggleAnimated,
     FSS_OT_TagToggleWhole,
     FSS_OT_TagToggleNoTexture,
+    FSS_OT_TagToggleNoExport,
     FSS_OT_TagRename,
     FSS_OT_TagDelete,
     FSS_PT_Tags,
@@ -537,9 +570,11 @@ def register():
     bpy.types.Scene.fss_animated_tags = bpy.props.StringProperty(name="Animated Tags")
     bpy.types.Scene.fss_whole_tags = bpy.props.StringProperty(name="Whole Mesh Tags")
     bpy.types.Scene.fss_no_texture_tags = bpy.props.StringProperty(name="No Texture Tags")
+    bpy.types.Scene.fss_no_export_tags = bpy.props.StringProperty(name="No Export Tags")
 
 
 def unregister():
+    del bpy.types.Scene.fss_no_export_tags
     del bpy.types.Scene.fss_no_texture_tags
     del bpy.types.Scene.fss_whole_tags
     del bpy.types.Scene.fss_animated_tags

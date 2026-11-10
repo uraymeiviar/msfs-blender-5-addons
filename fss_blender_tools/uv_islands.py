@@ -1,4 +1,4 @@
-"""The island list of the active object, inside UV Auto Packing's Object box: every island as the packer forms it, with
+"""The island list of the active object, below UV Auto Packing's table: every island as the packer forms it, with
 its multiplier and density, so an artist can see what Pack will give each island before packing. A click on a column's
 title sorts by it, highest first, and a second click reverses; a bar under each number shows it against the list's largest.
 A click on a row, or Select Faces for the row already active, enters Edit Mode and selects the island's faces; nothing
@@ -8,7 +8,7 @@ Set and Clear give the ticked islands a multiplier by hand, stored on their face
 in px/cm is turned into that multiplier when set, against the scene's target density; only the multiplier is stored.
 
 The rows come from uv_pack.object_islands, so they are the packer's own values. A panel may not write while drawing, so
-the draw compares a key and a timer fills the rows right after it (as visibility.schedule_camera_sync). The list is
+the draw compares a key and a timer fills the rows right after it (as visibility.schedule_light_sync). The list is
 closed by default and costs nothing until opened. In Edit Mode the mesh's own data is not current, so the rows stay as
 they were when Edit Mode was entered.
 """
@@ -71,8 +71,8 @@ def _key(obj, scene):
     materials = [slot.material for slot in obj.material_slots if slot.material is not None]
     overrides = uv_marks.face_overrides(me)
     return (_generation, obj.name, me.name, len(me.polygons), layer.name if layer else '', mtime,
-            None if overrides is None else hash(overrides.tobytes()), uv_marks.density(obj, scene)[0], uv_marks.target_density(scene), uv_marks.partly_seen(scene),
-            tuple((uv_marks.texture_size(m), uv_pack.is_kept(m), id(uv_marks._results.get(m.name))) for m in materials))
+            None if overrides is None else hash(overrides.tobytes()), uv_marks.density(obj, scene)[0], uv_marks.uses_visibility(obj), uv_marks.target_density(scene), uv_marks.partly_seen(scene),
+            tuple((uv_marks.texture_size(m), uv_pack.is_kept(m), uv_marks.material_density(m), id(uv_marks._results.get(m.name))) for m in materials))
 
 
 def sync(obj, scene, view_layer, wm):
@@ -469,12 +469,15 @@ def _draw_details(layout, row):
     layout.operator(FSS_OT_UvIslandSelect.bl_idname, text='Select Faces', icon='RESTRICT_SELECT_OFF')
 
 
+def listed_count(obj, wm):
+    """The number of islands in the open list of this object, or None when the list is closed or of another object."""
+    return len(wm.fss_uv_island_rows) if wm.fss_uv_islands_open and _state['object'] == obj.name else None
+
+
 def draw(layout, context, obj):
-    """The Islands section of the Object box."""
+    """The island list, opened by the arrow of the table's Islands row."""
     wm = context.window_manager
-    is_open = wm.fss_uv_islands_open
-    layout.prop(wm, 'fss_uv_islands_open', text='Islands', emboss=False, icon='TRIA_DOWN' if is_open else 'TRIA_RIGHT')
-    if not is_open:
+    if not wm.fss_uv_islands_open:
         return
     if obj.type != 'MESH' or obj.data is None:
         layout.label(text='Not a mesh', icon='INFO')

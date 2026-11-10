@@ -1,14 +1,17 @@
 """FSS Blender Tools: visibility analysis core engine.
 
-Measures per-face visibility sums (weighted visible solid angle and unoccluded solid angle)
-from artist-defined reference cameras across animation states, computing per-face patch scores,
-undetermined hierarchy resolution, and unbiased seen-face island values from discrete sums
-(Decisions 72 to 86). Independent of UI.
+Scores every face by the light the artist's probe lights cast on it, as EEVEE shows a white diffuse surface in the
+viewport with View Transform Standard (UV journal decisions 124 to 130): per light, the share of the face each
+soft-shadow sample point reaches (visible over unoccluded solid angle from that point, with patches for faces too small
+to measure, decisions 72 to 82), times the light EEVEE gives it without shadows; summed over the lights, displayed with
+the sRGB transfer, the highest over the animation states. An island takes a percentile of its faces by area (decision
+127), touching islands meet in the middle when they differ by more than the step limit (decision 128), and the most
+visible island is 1.0. Independent of UI.
 """
 
+import heapq
 import json
 import math
-import os
 import re
 import time
 from pathlib import Path
@@ -24,8 +27,9 @@ except ImportError:
     batch_for_shader = None
 
 ORIG_FACE_ATTR_NAME = "_fss_orig_face_idx"
-# 6: Look Around images weighted the right way up, and no direction weight (decision 73 removed). 5 added face_facing.
-VISIBILITY_SCHEMA = 6
+# 7: scored by probe lights (decision 124), not cameras. 6: Look Around images weighted the right way up, and no
+# direction weight (decision 73 removed). 5 added face_facing.
+VISIBILITY_SCHEMA = 8
 PIECE_SECONDS = 0.2  # a long loop hands back to Blender about this often, so a modal run can draw and read Esc
 # The bar's share of each stage, in units of one view besides reading the scene; from a run on the E2 cockpit
 UNITS_PREPARE, UNITS_READ, UNITS_VIEW, UNITS_FINAL = 12.0, 6.0, 1.0, 8.0
@@ -169,13 +173,8 @@ def perspective_proj(fovy, aspect, near, far):
     ))
 
 
-def get_camera_forward(cam_obj):
-    """Return forward vector of camera in world space (Blender camera looks down -Z)."""
-    return (cam_obj.matrix_world.to_3x3() @ Vector((0, 0, -1))).normalized()
-
-
-def compute_scene_extent(view_layer, cam_pos):
-    """Compute near and far clipping planes from scene extent (Decision 81, Requirement 4)."""
+def compute_scene_extent(view_layer, eye):
+    """Near and far clipping planes from the scene's extent seen from eye (Decision 81, Requirement 4)."""
     min_v = np.array([float('inf'), float('inf'), float('inf')], dtype=np.float32)
     max_v = np.array([float('-inf'), float('-inf'), float('-inf')], dtype=np.float32)
     found = False
@@ -188,154 +187,42 @@ def compute_scene_extent(view_layer, cam_pos):
                 max_v = np.maximum(max_v, w_arr)
                 found = True
     if not found:
-        return 0.05, 30.0
+        return 0.01, 30.0
 
     diag = float(np.linalg.norm(max_v - min_v))
-    cam_arr = np.array(cam_pos, dtype=np.float32)
-    corners = np.array([
-        [min_v[0], min_v[1], min_v[2]],
-        [min_v[0], min_v[1], max_v[2]],
-        [min_v[0], max_v[1], min_v[2]],
-        [min_v[0], max_v[1], max_v[2]],
-        [max_v[0], min_v[1], min_v[2]],
-        [max_v[0], min_v[1], max_v[2]],
-        [max_v[0], max_v[1], min_v[2]],
-        [max_v[0], max_v[1], max_v[2]],
-    ], dtype=np.float32)
-    dists = np.linalg.norm(corners - cam_arr, axis=1)
-    max_dist = float(np.max(dists))
-
-    near = 0.05
-    far = max(30.0, max_dist * 1.5, diag * 1.5)
-    return near, far
+    eye_arr = np.array(eye, dtype=np.float32)
+    corners = np.array([[x, y, z] for x in (min_v[0], max_v[0]) for y in (min_v[1], max_v[1])
+                        for z in (min_v[2], max_v[2])], dtype=np.float32)
+    max_dist = float(np.max(np.linalg.norm(corners - eye_arr, axis=1)))
+    return 0.01, max(30.0, max_dist * 1.5, diag * 1.5)
 
 
-def cubemap_face_matrices(cam_pos, cam_forward=None, near=0.05, far=30.0):
-    """Return 6 (name, view_matrix, proj_matrix) for a look-around cube map."""
+CUBE_FACE_DIRECTIONS = {'FORWARD': (0, -1, 0), 'BACKWARD': (0, 1, 0), 'LEFT': (-1, 0, 0), 'RIGHT': (1, 0, 0),
+                        'UP': (0, 0, 1), 'DOWN': (0, 0, -1)}
+CUBE_CORNER_ANGLE = math.acos(1.0 / math.sqrt(3.0))  # from a cube face's centre direction to its corner
+
+
+def cubemap_face_matrices(eye, near=0.01, far=30.0):
+    """Return 6 (name, view_matrix, proj_matrix) for a cube map around eye."""
     proj = perspective_proj(math.radians(90.0), 1.0, near, far)
-    p = Vector(cam_pos)
-    faces = [
-        ("FORWARD",  look_at(p, p + Vector((0, -1, 0)), Vector((0, 0, 1))),  proj),
-        ("BACKWARD", look_at(p, p + Vector((0, 1, 0)),  Vector((0, 0, 1))),  proj),
-        ("LEFT",     look_at(p, p + Vector((-1, 0, 0)), Vector((0, 0, 1))),  proj),
-        ("RIGHT",    look_at(p, p + Vector((1, 0, 0)),  Vector((0, 0, 1))),  proj),
-        ("UP",       look_at(p, p + Vector((0, 0, 1)),  Vector((0, -1, 0))), proj),
-        ("DOWN",     look_at(p, p + Vector((0, 0, -1)), Vector((0, 1, 0))),  proj),
-    ]
-    return faces
+    p = Vector(eye)
+    ups = {'UP': Vector((0, -1, 0)), 'DOWN': Vector((0, 1, 0))}
+    return [(name, look_at(p, p + Vector(direction), ups.get(name, Vector((0, 0, 1)))), proj)
+            for name, direction in CUBE_FACE_DIRECTIONS.items()]
 
 
-def look_sweep(cam_obj, yaw_limit, pitch_limit):
-    """A Look Around camera's limits for the functions below, or None when it can look everywhere: (right, up, forward,
-    yaw, pitch), the axes from the camera and the angles in radians either side of straight ahead."""
-    if cam_obj is None or (yaw_limit >= 180.0 and pitch_limit >= 90.0):
-        return None
-    axes = cam_obj.matrix_world.to_3x3().normalized()
-    right, up, back = (np.array(axes.col[i], dtype=np.float32) for i in range(3))
-    return right, up, -back, math.radians(yaw_limit), math.radians(pitch_limit)
-
-
-def directions_in_sweep(dirs, sweep):
-    """True per unit direction (..., 3) inside the limits."""
-    right, up, forward, yaw, pitch = sweep
-    side = np.sum(dirs * right, axis=-1)
-    ahead = np.sum(dirs * forward, axis=-1)
-    height = np.clip(np.sum(dirs * up, axis=-1), -1.0, 1.0)
-    return (np.abs(np.arctan2(side, ahead)) <= yaw) & (np.abs(np.arcsin(height)) <= pitch)
-
-
-def batch_triangles_in_sweep(eye, V0, V1, V2, sweep):
-    """True per triangle with a corner or its centre inside the limits, as batch_triangles_in_frame for a fixed view."""
-    eye_arr = np.array(eye, dtype=np.float32).reshape(1, 3)
-    inside = None
-    for V in (V0, V1, V2, (V0 + V1 + V2) / 3.0):
-        to_point = V - eye_arr
-        dirs = to_point / np.maximum(np.linalg.norm(to_point, axis=-1, keepdims=True), 1e-12)
-        found = directions_in_sweep(dirs, sweep)
-        inside = found if inside is None else inside | found
-    return inside
-
-
-def sphere_lines(yaw_limit, pitch_limit, radius=1.0):
-    """The cut vision sphere in camera space (x right, y up, -z forward), as line pairs: (grid, cut edges and the
-    forward line). A sphere with no cut has only the grid and the forward line."""
-    def point(yaw, pitch):
-        return (radius * math.sin(yaw) * math.cos(pitch), radius * math.sin(pitch), -radius * math.cos(yaw) * math.cos(pitch))
-
-    def polyline(points):
-        return [p for pair in zip(points[:-1], points[1:]) for p in pair]
-
-    yaw, pitch = math.radians(yaw_limit), math.radians(pitch_limit)
-    yaws = [-yaw + 2.0 * yaw * i / 72 for i in range(73)]
-    pitches = [-pitch + 2.0 * pitch * i / 36 for i in range(37)]
-    n_meridians = max(2, int(round(yaw_limit / 15.0)) * 2)
-    n_parallels = max(2, int(round(pitch_limit / 15.0)) * 2)
-    grid, edges = [], [(0.0, 0.0, 0.0), point(0.0, 0.0)]
-    for i in range(n_meridians + 1):
-        at = -yaw + 2.0 * yaw * i / n_meridians
-        grid += polyline([point(at, p) for p in pitches])
-    for i in range(n_parallels + 1):
-        at = -pitch + 2.0 * pitch * i / n_parallels
-        grid += polyline([point(y, at) for y in yaws])
-    if yaw_limit < 180.0:
-        for at in (-yaw, yaw):
-            edges += polyline([point(at, p) for p in pitches])
-    if pitch_limit < 90.0:
-        for at in (-pitch, pitch):
-            edges += polyline([point(y, at) for y in yaws])
-    return np.array(grid, dtype=np.float32), np.array(edges, dtype=np.float32)
-
-
-def precompute_cubemap_weights(faces, cube_res=1024, sweep=None):
-    """Per-pixel solid angle for all 6 cube faces (decision 72). Directions outside the camera's limits (sweep) weigh
-    nothing; inside them every direction counts the same. Row 0 is the image's bottom, as read_color returns it."""
+def precompute_cubemap_weights(cube_res=1024):
+    """Per-pixel solid angle of a cube map face (decision 72), the same for all 6 faces. Row 0 is the image's bottom,
+    as read_color returns it."""
     W = cube_res
     u = (np.arange(W, dtype=np.float32) + 0.5) * (2.0 / W) - 1.0
     U, V = np.meshgrid(u, u)
-
-    d_omega = ((4.0 / (W * W)) / np.power(U * U + V * V + 1.0, 1.5)).astype(np.float32)
-    if sweep is None:
-        return {face_name: d_omega for face_name, _v_mat, _proj in faces}
-    local_rays = np.stack([U, V, -np.ones_like(U)], axis=-1)
-
-    face_weights = {}
-    for face_name, v_mat, _ in faces:
-        R_world = np.array(v_mat.to_3x3().transposed(), dtype=np.float32)
-        world_rays = local_rays @ R_world.T
-        lens = np.linalg.norm(world_rays, axis=-1, keepdims=True)
-        world_dirs = world_rays / np.maximum(lens, 1e-12)
-
-        face_weights[face_name] = (d_omega * directions_in_sweep(world_dirs, sweep)).astype(np.float32)
-
-    return face_weights
-
-
-def precompute_frustum_weights(cam_obj, frustum_res=(2560, 1440)):
-    """Precompute differential solid angle map for fixed-view camera frustum. Row 0 is the image's bottom, as read_color
-    returns it."""
-    W, H = frustum_res
-    dg = bpy.context.evaluated_depsgraph_get()
-    proj = cam_obj.calc_matrix_camera(dg, x=W, y=H)
-
-    p00 = float(proj[0][0])
-    p11 = float(proj[1][1])
-
-    u = (np.arange(W, dtype=np.float32) + 0.5) * (2.0 / W) - 1.0
-    v = (np.arange(H, dtype=np.float32) + 0.5) * (2.0 / H) - 1.0
-    U, V = np.meshgrid(u, v)
-
-    X = U / p00
-    Y = V / p11
-
-    dx = 2.0 / (W * p00)
-    dy = 2.0 / (H * p11)
-
-    d_omega = (dx * dy) / np.power(X * X + Y * Y + 1.0, 1.5).astype(np.float32)
-    return d_omega
+    return ((4.0 / (W * W)) / np.power(U * U + V * V + 1.0, 1.5)).astype(np.float32)
 
 
 def batch_triangle_solid_angle(eye, V0, V1, V2):
-    """Vectorized calculation of spherical solid angle for a batch of triangles (Oosterom & Strackee 1983)."""
+    """Vectorized calculation of spherical solid angle for a batch of triangles (Oosterom & Strackee 1983). A triangle
+    turned away from eye gives 0."""
     eye_arr = np.array(eye, dtype=np.float32).reshape(1, 3)
     A = V0 - eye_arr
     B = V1 - eye_arr
@@ -364,34 +251,143 @@ def batch_triangle_solid_angle(eye, V0, V1, V2):
     return np.where(valid, omega, 0.0).astype(np.float32)
 
 
-def batch_triangles_in_frame(mvp, V0, V1, V2):
-    """True per triangle unless all its corners lie outside the same side of the camera's frame. A triangle crossing the
-    frame's edge counts whole, so a triangle that shows a pixel always counts."""
-    M = np.array(mvp, dtype=np.float32)
-    outside = None
-    for V in (V0, V1, V2):
-        clip = V @ M[:3, :3].T + M[:3, 3]
-        w = V @ M[3, :3] + M[3, 3]
-        sides = np.stack([clip[:, 0] > w, clip[:, 0] < -w, clip[:, 1] > w, clip[:, 1] < -w, clip[:, 2] > w, clip[:, 2] < -w], axis=1)
-        outside = sides if outside is None else outside & sides
-    return ~outside.any(axis=1)
+# ---------------------------------------------------------------------------
+# Probe Lights: the light EEVEE gives a white diffuse surface (decision 126)
+# ---------------------------------------------------------------------------
+
+# Measured with EEVEE test renders (UV journal Session 109): a white Diffuse BSDF shows P / (4 pi^2 d^2) x cos from a
+# point or spot light of P watts and P / (pi^2 d^2) x cos x the cosine at the emitter from an area light, each faded to
+# nothing at the light's reach by (1 - (d / r)^4)^2, r = sqrt(P / (100 x Light Threshold)) or the Custom Distance. A
+# spot light has a point light's brightness inside its cone, and Blender's smoothstep over Spot Blend at its edge.
+POINT_FACTOR = 1.0 / (4.0 * math.pi ** 2)
+AREA_FACTOR = 1.0 / (math.pi ** 2)
+PROBE_LIGHT_TYPES = ('POINT', 'SPOT', 'AREA')
+MIN_LIGHT_DISTANCE = 0.01  # metres: a face touching a light does not take an endless value
 
 
-def batch_face_cosines(eye, V0, V1, V2, tri_ids, n_ids, in_frame=None):
-    """Per evaluated face, how directly it faces the eye: the cosine between each triangle's normal and the direction
-    to the eye, 0 for a triangle turned away or outside the frame, averaged by triangle area. Occlusion plays no part
-    here."""
-    eye_arr = np.array(eye, dtype=np.float32).reshape(1, 3)
+def srgb_encode(linear):
+    """The sRGB transfer of the Standard view transform, continued above 1 instead of clipped at white."""
+    x = np.maximum(np.asarray(linear, dtype=np.float64), 0.0)
+    return np.where(x <= 0.0031308, 12.92 * x, 1.055 * np.power(x, 1.0 / 2.4) - 0.055)
+
+
+def light_reach(light_data, power, scene):
+    """Where EEVEE fades the light to nothing: its Custom Distance, else where it falls below the Light Threshold."""
+    if getattr(light_data, 'use_custom_distance', False):
+        return float(light_data.cutoff_distance)
+    threshold = float(getattr(getattr(scene, 'eevee', None), 'light_threshold', 0.01))
+    return math.sqrt(power / (100.0 * threshold)) if threshold > 0.0 else float('inf')
+
+
+def light_record(obj, scene, depsgraph=None):
+    """What the score needs of a probe light at the current frame, or None for one that lights nothing here (a sun,
+    no power, not a light)."""
+    if obj is None or obj.type != 'LIGHT':
+        return None
+    ev = obj.evaluated_get(depsgraph) if depsgraph is not None else obj
+    data = ev.data
+    if data.type not in PROBE_LIGHT_TYPES:
+        return None
+    power = float(data.energy) * max(float(c) for c in data.color)
+    if power <= 0.0:
+        return None
+    axes = np.array(ev.matrix_world.to_3x3(), dtype=np.float64)
+    scale = np.linalg.norm(axes, axis=0)
+    unit = axes / np.maximum(scale, 1e-12)
+    record = {
+        'name': obj.name,
+        'type': data.type,
+        'pos': np.array(ev.matrix_world.translation, dtype=np.float64),
+        'unit': unit,  # columns: the light's own x, y and z, unit length
+        'power': power,
+        'factor': AREA_FACTOR if data.type == 'AREA' else POINT_FACTOR,
+        'reach': light_reach(data, power, scene),
+        'radius': float(getattr(data, 'shadow_soft_size', 0.0)),
+    }
+    if data.type == 'AREA':
+        record['radius'] = 0.5 * max(float(data.size), float(getattr(data, 'size_y', data.size)))
+    if data.type == 'SPOT':
+        z = max(float(scale[2]), 1e-12)
+        record['cos_half'] = math.cos(float(data.spot_size) * 0.5)
+        record['blend'] = float(data.spot_blend)
+        record['ellipse'] = (float(scale[0]) / z, float(scale[1]) / z)
+    return record
+
+
+def light_cone(record, dirs):
+    """Per unit direction from the light (n, 3): 1 for a point light, the cosine at the emitter for an area light (it
+    lights its front side, along -Z), Blender's smoothstep at a spot light's edge, 0 outside the cone."""
+    if record['type'] == 'POINT':
+        return np.ones(len(dirs))
+    local = dirs @ record['unit']
+    if record['type'] == 'AREA':
+        return np.maximum(-local[:, 2], 0.0)
+    ex, ey = record['ellipse']
+    x, y, z = local[:, 0] / max(ex, 1e-12), local[:, 1] / max(ey, 1e-12), -local[:, 2]
+    cos_off = np.where(z > 0.0, z / np.maximum(np.sqrt(x * x + y * y + z * z), 1e-12), -1.0)
+    smooth = (1.0 - record['cos_half']) * record['blend']
+    if smooth <= 1e-8:
+        return (cos_off > record['cos_half']).astype(np.float64)
+    t = np.clip((cos_off - record['cos_half']) / smooth, 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def light_direction(record):
+    """The direction a spot or area light points (its -Z)."""
+    return -record['unit'][:, 2]
+
+
+def batch_light_term(record, V0, V1, V2, tri_ids, n_ids):
+    """Per evaluated face, the light a white diffuse face gets from the light without shadows, summed over its
+    triangles by area, and their area: (sum of area x light, area), so faces split by modifiers can be added up."""
+    V0, V1, V2 = (np.asarray(V, dtype=np.float64) for V in (V0, V1, V2))
     N = np.cross(V1 - V0, V2 - V0)
-    length = np.linalg.norm(N, axis=-1)
-    to_eye = eye_arr - (V0 + V1 + V2) / 3.0
-    cos = np.sum(N * to_eye, axis=-1) / np.maximum(length * np.linalg.norm(to_eye, axis=-1), 1e-12)
-    area = 0.5 * length
-    cos = np.maximum(cos, 0.0)
-    if in_frame is not None:
-        cos = cos * in_frame
-    weighted = np.bincount(tri_ids, weights=area * cos, minlength=n_ids)
-    return weighted / np.maximum(np.bincount(tri_ids, weights=area, minlength=n_ids), 1e-30)
+    twice_area = np.linalg.norm(N, axis=-1)
+    to_face = (V0 + V1 + V2) / 3.0 - record['pos']
+    dist = np.linalg.norm(to_face, axis=-1)
+    dirs = to_face / np.maximum(dist, 1e-12)[:, None]
+    cos_face = np.maximum(-np.sum(N * dirs, axis=-1) / np.maximum(twice_area, 1e-30), 0.0)
+    d = np.maximum(dist, MIN_LIGHT_DISTANCE)
+    window = np.ones_like(d)
+    if math.isfinite(record['reach']):
+        f = (d * d) / max(record['reach'] ** 2, 1e-12)
+        window = np.square(np.clip(1.0 - f * f, 0.0, 1.0))
+    light = record['factor'] * record['power'] / (d * d) * cos_face * window * light_cone(record, dirs)
+    area = 0.5 * twice_area
+    return (np.bincount(tri_ids, weights=area * light, minlength=n_ids),
+            np.bincount(tri_ids, weights=area, minlength=n_ids))
+
+
+def light_sample_offsets(n):
+    """n directions spread evenly over the unit sphere (a Fibonacci sphere): where the soft-shadow samples sit on the
+    light's radius. One sample is the light's centre."""
+    if n <= 1:
+        return np.zeros((1, 3))
+    i = np.arange(n) + 0.5
+    z = 1.0 - 2.0 * i / n
+    r = np.sqrt(np.maximum(1.0 - z * z, 0.0))
+    phi = math.pi * (3.0 - math.sqrt(5.0)) * i
+    return np.stack([r * np.cos(phi), r * np.sin(phi), z], axis=1)
+
+
+def cube_faces_in_cone(record):
+    """The cube map faces a light can reach: all for a point light or a spot scaled out of round, otherwise those whose
+    directions can meet the spot cone or an area light's front side."""
+    if record['type'] == 'POINT':
+        return set(CUBE_FACE_DIRECTIONS)
+    if record['type'] == 'SPOT':
+        if max(record['ellipse']) > 1.0 + 1e-6:
+            return set(CUBE_FACE_DIRECTIONS)
+        half = math.acos(max(min(record['cos_half'], 1.0), -1.0))
+    else:
+        half = math.pi / 2.0
+    axis = light_direction(record)
+    found = set()
+    for name, direction in CUBE_FACE_DIRECTIONS.items():
+        angle = math.acos(max(min(float(np.dot(axis, direction)), 1.0), -1.0))
+        if angle <= half + CUBE_CORNER_ANGLE + 1e-6:
+            found.add(name)
+    return found
 
 
 # ---------------------------------------------------------------------------
@@ -940,370 +936,291 @@ def render_camera_view(offscreen, shader, batch_opaque, batch_decal, mvp, weight
 # Per-Face Patches, Hierarchy Fallback & Island Scoring (Decisions 79 & 82)
 # ---------------------------------------------------------------------------
 
-def compute_patch_scores_and_groups(mesh_meta, mesh_arrays, min_px_threshold=10.0, ref_cube_res=1024, scene=None):
-    return _drain(_patch_pieces(mesh_meta, mesh_arrays, min_px_threshold, ref_cube_res, scene))
+def _lit_shares(meta, m_data, omega_threshold, d_omega_px, pause, report_fraction):
+    """Per view, instance and face, the share of the face the view's sample point reaches, 0 to 1 (V, K, F): visible
+    over unoccluded solid angle. A face too small to measure from any view takes the share of a patch of its
+    neighbours grown until it is measurable (decision 79); a piece too small even as a whole is undetermined and is
+    resolved later. A generator: yields between pieces, its value is (lit, undetermined, patch size in pixels)."""
+    vis_arr = m_data['vis_omega']
+    unocc_arr = m_data['unocc_omega']
+    n_faces = meta['n_orig_faces']
+    adj = meta['adjacency']
+    lit = np.zeros(vis_arr.shape, dtype=np.float32)
+    undetermined = np.zeros(n_faces, dtype=bool)
+    patch_px = np.zeros(n_faces, dtype=np.float32)
+    if vis_arr.shape[0] == 0 or n_faces == 0:
+        return lit, undetermined, patch_px
+
+    face_max = unocc_arr.max(axis=(0, 1))
+    direct = face_max >= omega_threshold
+    if np.any(direct):
+        u = unocc_arr[:, :, direct]
+        lit[:, :, direct] = np.where(u > 1e-12, np.clip(vis_arr[:, :, direct] / np.maximum(u, 1e-12), 0.0, 1.0), 0.0)
+    patch_px[direct] = face_max[direct] / d_omega_px
+
+    for comp_faces in meta['components']:
+        if len(comp_faces) == 0:
+            continue
+        comp_max = float(np.max(np.sum(unocc_arr[:, :, comp_faces], axis=-1)))
+        if 0.0 < comp_max < omega_threshold:
+            undetermined[comp_faces] = True
+            patch_px[comp_faces] = comp_max / d_omega_px
+
+    small = np.flatnonzero((face_max > 0.0) & ~direct & ~undetermined)
+    for count, f in enumerate(small):
+        if pause.due():
+            report_fraction(count / max(len(small), 1))
+            yield
+        patch_set = {int(f)}
+        cur_ring = [int(f)]
+        patch_unocc = unocc_arr[:, :, f].astype(np.float64)
+        while float(np.max(patch_unocc)) < omega_threshold:
+            nxt_ring = []
+            for u in cur_ring:
+                for v in adj[u]:
+                    if v not in patch_set:
+                        patch_set.add(v)
+                        nxt_ring.append(v)
+            if not nxt_ring:
+                break
+            patch_unocc += np.sum(unocc_arr[:, :, nxt_ring], axis=-1)
+            cur_ring = nxt_ring
+        p_max = float(np.max(patch_unocc))
+        patch_px[f] = p_max / d_omega_px
+        if p_max < omega_threshold:
+            undetermined[f] = True
+            continue
+        patch_vis = np.sum(vis_arr[:, :, list(patch_set)], axis=-1)
+        lit[:, :, f] = np.where(patch_unocc > 1e-12, np.clip(patch_vis / np.maximum(patch_unocc, 1e-12), 0.0, 1.0), 0.0)
+    return lit, undetermined, patch_px
 
 
-def _patch_pieces(mesh_meta, mesh_arrays, min_px_threshold=10.0, ref_cube_res=1024, scene=None, report=_no_report):
-    """Compute per-face scores from patches, resolve undetermined pieces, and compute island values (Decision 82)."""
+def limit_steps(values, pairs, ratio):
+    """Touching islands may differ by at most ratio (decisions 128 and 134): a darker island rises to its brighter
+    neighbour divided by ratio; no island is ever lowered. The brightest islands are settled first, so one pass in
+    falling order settles all (a rise travels on through the risen island's own neighbours). 1 makes all touching
+    islands equal to the brightest of them. Returns (new values, pairs still above the ratio: always 0)."""
+    v = np.array(values, dtype=np.float64)
+    if len(pairs) == 0:
+        return v, 0
+    ratio = max(float(ratio), 1.0)
+    neighbours = [[] for _ in range(len(v))]
+    for a, b in pairs:
+        neighbours[a].append(b)
+        neighbours[b].append(a)
+    heap = [(-value, i) for i, value in enumerate(v)]
+    heapq.heapify(heap)
+    while heap:
+        negative, i = heapq.heappop(heap)
+        if -negative < v[i]:
+            continue  # risen since it was queued
+        floor = v[i] / ratio
+        for n in neighbours[i]:
+            if v[n] < floor * (1.0 - 1e-12):
+                v[n] = floor
+                heapq.heappush(heap, (-floor, n))
+    return v, 0
+
+
+def island_pairs(adjacency, island_index):
+    """The pairs of islands (indices) that share an edge in 3D: a UV seam between them."""
+    found = set()
+    for f, neighbours in enumerate(adjacency):
+        a = island_index[f]
+        for g in neighbours:
+            b = island_index[g]
+            if a != b:
+                found.add((a, b) if a < b else (b, a))
+    return sorted(found)
+
+
+def _score_pieces(mesh_meta, mesh_arrays, view_pairs, pair_states, pair_samples, n_states, min_px_threshold=10.0,
+                  ref_cube_res=1024, island_percentile=0.9, step_limit=1.5, ambient=0.1, scene=None,
+                  report=_no_report):
+    """Score faces, islands and objects from the probe lights' views (decisions 124 to 128).
+
+    view_pairs: per view, its (state, light) pair; pair_states: per pair, its state; pair_samples: per pair, how many
+    sample points it has. A generator: yields between pieces, its value is the summaries."""
     t_start = time.perf_counter()
     d_omega_px = 4.0 / (ref_cube_res * ref_cube_res)
     omega_threshold = min_px_threshold * d_omega_px
     scene = scene or bpy.context.scene
+    view_pairs = np.asarray(view_pairs, dtype=np.int64)
+    pair_states = np.asarray(pair_states, dtype=np.int64)
+    pair_samples = np.maximum(np.asarray(pair_samples, dtype=np.float64), 1.0)
+    n_pairs = len(pair_states)
 
-    # Hierarchy maps for scene objects
     children_map = {}
     for o in scene.objects:
-        p_name = o.parent.name if o.parent else None
-        children_map.setdefault(p_name, []).append(o)
+        children_map.setdefault(o.parent.name if o.parent else None, []).append(o)
 
-    def get_subtree_mesh_objects(root_obj):
-        res = []
-        queue = [root_obj]
-        head = 0
-        while head < len(queue):
-            curr = queue[head]
-            head += 1
-            if curr.type == 'MESH' and curr.data:
-                res.append(curr)
-            for child in children_map.get(curr.name, []):
-                queue.append(child)
-        return res
+    def subtree_meshes(root):
+        found, stack = [], [root]
+        while stack:
+            obj = stack.pop()
+            if obj.type == 'MESH' and obj.data:
+                found.append(obj)
+            stack.extend(children_map.get(obj.name, []))
+        return found
 
-    # 1. Grow patches per face on each mesh
-    pause = _Pause()
-    for index, (m_name, meta) in enumerate(mesh_meta.items()):
-        if pause.due():
-            report(0.8 * index / len(mesh_meta))
-            yield
-        m_data = mesh_arrays[m_name]
-        vis_arr = m_data['vis_omega']      # (V, K, F)
-        unocc_arr = m_data['unocc_omega']  # (V, K, F)
-        n_faces = meta['n_orig_faces']
-        adj = meta['adjacency']
-        components = meta['components']
-
-        face_scores = np.zeros(n_faces, dtype=np.float32)
-        face_undetermined = np.zeros(n_faces, dtype=bool)
-        face_never_seen = np.zeros(n_faces, dtype=bool)
-        face_patch_size_px = np.zeros(n_faces, dtype=np.float32)
-
-        # Check maximum unoccluded solid angle for each connected piece
-        comp_unocc_max = {}
-        for c_id, comp_faces in enumerate(components):
-            if len(comp_faces) == 0:
-                comp_unocc_max[c_id] = 0.0
+    def view_share(objects):
+        """Per view, the lit share of a set of objects together, and its largest unoccluded solid angle."""
+        vis = np.zeros(len(view_pairs))
+        unocc = np.zeros(len(view_pairs))
+        for o in objects:
+            if is_invisible_object(o) or o.data.name not in mesh_meta or o.data.name not in mesh_arrays:
                 continue
-            c_unocc = np.sum(unocc_arr[:, :, comp_faces], axis=-1)
-            comp_unocc_max[c_id] = float(np.max(c_unocc))
+            k = mesh_meta[o.data.name]['instance_map'].get((o.name, 0), 0)
+            vis += np.sum(mesh_arrays[o.data.name]['vis_omega'][:, k, :], axis=-1)
+            unocc += np.sum(mesh_arrays[o.data.name]['unocc_omega'][:, k, :], axis=-1)
+        share = np.where(unocc > 1e-12, np.clip(vis / np.maximum(unocc, 1e-12), 0.0, 1.0), 0.0)
+        return share, float(np.max(unocc)) if len(unocc) else 0.0
 
-        # Identify components that cannot reach threshold:
-        undetermined_comp_ids = {c_id for c_id, max_u in comp_unocc_max.items() if 0.0 < max_u < omega_threshold}
-        never_seen_comp_ids = {c_id for c_id, max_u in comp_unocc_max.items() if max_u == 0.0}
-
-        for c_id in undetermined_comp_ids:
-            c_faces = components[c_id]
-            face_undetermined[c_faces] = True
-            face_never_seen[c_faces] = False
-            face_patch_size_px[c_faces] = comp_unocc_max[c_id] / d_omega_px
-
-        for c_id in never_seen_comp_ids:
-            c_faces = components[c_id]
-            face_scores[c_faces] = 0.0
-            face_undetermined[c_faces] = False
-            face_never_seen[c_faces] = True
-            face_patch_size_px[c_faces] = 0.0
-
-        # Expand patches for faces in measurable components
-        for c_id, comp_faces in enumerate(components):
-            if c_id in undetermined_comp_ids or c_id in never_seen_comp_ids:
-                continue
-
-            for f in comp_faces:
-                f_unocc = unocc_arr[:, :, f]
-                f_max_u = float(np.max(f_unocc))
-
-                if f_max_u == 0.0:
-                    # No view can show this face (turned away, or outside every frame and limit). Patches are for faces
-                    # too small to measure: this one must not take a score from visible neighbours.
-                    face_scores[f] = 0.0
-                    face_never_seen[f] = True
-                    face_undetermined[f] = False
-                    face_patch_size_px[f] = 0.0
-                elif f_max_u >= omega_threshold:
-                    valid = f_unocc > 1e-12
-                    f_vis = vis_arr[:, :, f]
-                    ratio = np.where(valid, np.clip(f_vis / np.maximum(f_unocc, 1e-12), 0.0, 1.0), 0.0)
-                    face_scores[f] = float(np.max(ratio))
-                    face_never_seen[f] = bool(np.max(f_vis) == 0.0)
-                    face_undetermined[f] = False
-                    face_patch_size_px[f] = f_max_u / d_omega_px
-                else:
-                    patch_set = {int(f)}
-                    cur_ring = [int(f)]
-                    patch_unocc = f_unocc.copy()
-                    while float(np.max(patch_unocc)) < omega_threshold:
-                        nxt_ring = []
-                        for u in cur_ring:
-                            for v in adj[u]:
-                                if v not in patch_set:
-                                    patch_set.add(v)
-                                    nxt_ring.append(v)
-                        if not nxt_ring:
-                            break
-                        patch_unocc += np.sum(unocc_arr[:, :, nxt_ring], axis=-1)
-                        cur_ring = nxt_ring
-
-                    p_max_u = float(np.max(patch_unocc))
-                    if 0.0 < p_max_u < omega_threshold:
-                        face_undetermined[f] = True
-                        face_never_seen[f] = False
-                        face_patch_size_px[f] = p_max_u / d_omega_px
-                    elif p_max_u == 0.0:
-                        face_scores[f] = 0.0
-                        face_undetermined[f] = False
-                        face_never_seen[f] = True
-                        face_patch_size_px[f] = 0.0
-                    else:
-                        patch_faces = list(patch_set)
-                        patch_vis = np.sum(vis_arr[:, :, patch_faces], axis=-1)
-                        valid = patch_unocc > 1e-12
-                        ratio = np.where(valid, np.clip(patch_vis / np.maximum(patch_unocc, 1e-12), 0.0, 1.0), 0.0)
-                        face_scores[f] = float(np.max(ratio))
-                        face_never_seen[f] = bool(np.max(patch_vis) == 0.0)
-                        face_undetermined[f] = False
-                        face_patch_size_px[f] = p_max_u / d_omega_px
-
-        m_data['face_scores'] = face_scores
-        m_data['face_undetermined'] = face_undetermined
-        m_data['face_never_seen'] = face_never_seen
-        m_data['face_patch_size_px'] = face_patch_size_px
-
-    patch_expansion_time = time.perf_counter() - t_start
-
-    # 2. Hierarchy Fallback Resolution for Undetermined Pieces (Decision 79)
-    def resolve_object_score(obj):
-        m_name = obj.data.name
-        inst_idx = mesh_meta[m_name]['instance_map'].get((obj.name, 0), 0)
-        unocc_o = np.sum(mesh_arrays[m_name]['unocc_omega'][:, inst_idx, :], axis=-1)
-        if float(np.max(unocc_o)) >= omega_threshold:
-            vis_o = np.sum(mesh_arrays[m_name]['vis_omega'][:, inst_idx, :], axis=-1)
-            valid = unocc_o > 1e-12
-            ratio = np.where(valid, np.clip(vis_o / np.maximum(unocc_o, 1e-12), 0.0, 1.0), 0.0)
-            return float(np.max(ratio)), 'OBJECT', float(np.max(unocc_o)) / d_omega_px
-
+    def resolve_share(obj):
+        """A piece too small to measure takes the lit share of its object, else of the nearest parent's subtree that
+        is measurable, else counts as fully lit (decision 79)."""
+        share, size = view_share([obj])
+        if size >= omega_threshold:
+            return share, 'OBJECT'
         cur = obj.parent
         while cur is not None:
-            descendants = get_subtree_mesh_objects(cur)
-            V = mesh_arrays[m_name]['vis_omega'].shape[0]
-            sub_vis = np.zeros(V, dtype=np.float64)
-            sub_unocc = np.zeros(V, dtype=np.float64)
-            for d in descendants:
-                if is_invisible_object(d):
-                    continue
-                dm_name = d.data.name
-                if dm_name in mesh_meta and dm_name in mesh_arrays:
-                    d_inst = mesh_meta[dm_name]['instance_map'].get((d.name, 0), 0)
-                    sub_vis += np.sum(mesh_arrays[dm_name]['vis_omega'][:, d_inst, :], axis=-1)
-                    sub_unocc += np.sum(mesh_arrays[dm_name]['unocc_omega'][:, d_inst, :], axis=-1)
-
-            sub_max_u = float(np.max(sub_unocc))
-            if sub_max_u >= omega_threshold:
-                valid = sub_unocc > 1e-12
-                ratio = np.where(valid, np.clip(sub_vis / np.maximum(sub_unocc, 1e-12), 0.0, 1.0), 0.0)
-                return float(np.max(ratio)), 'PARENT_SUBTREE', sub_max_u / d_omega_px
-
+            share, size = view_share(subtree_meshes(cur))
+            if size >= omega_threshold:
+                return share, 'PARENT_SUBTREE'
             cur = cur.parent
+        return np.ones(len(view_pairs)), 'FALLBACK_1.0'
 
-        return 1.0, 'FALLBACK_1.0', 0.0
-
-    resolved_counts = {
-        'OBJECT': {'faces': 0, 'pieces': 0, 'objects': 0},
-        'PARENT_SUBTREE': {'faces': 0, 'pieces': 0, 'objects': 0},
-        'FALLBACK_1.0': {'faces': 0, 'pieces': 0, 'objects': 0},
-    }
-
-    object_summaries = {}
-    island_summaries = {}
-
-    for index, (m_name, meta) in enumerate(mesh_meta.items()):
-        if pause.due():
-            report(0.8 + 0.2 * index / len(mesh_meta))
-            yield
+    resolved_counts = {level: {'faces': 0, 'pieces': 0, 'objects': 0}
+                       for level in ('OBJECT', 'PARENT_SUBTREE', 'FALLBACK_1.0')}
+    pause = _Pause()
+    names = list(mesh_meta)
+    raw_isl = {}
+    for index, m_name in enumerate(names):
+        meta = mesh_meta[m_name]
         m_data = mesh_arrays[m_name]
-        face_scores = m_data['face_scores']
-        face_undetermined = m_data['face_undetermined']
-        face_never_seen = m_data['face_never_seen']
-        areas = meta['orig_areas']
-        island_ids = meta['island_ids']
-        components = meta['components']
+        frac = 0.75 * index / max(len(names), 1)
+        lit, undetermined, patch_px = yield from _lit_shares(
+            meta, m_data, omega_threshold, d_omega_px, pause,
+            lambda part: report(frac + 0.75 * part / max(len(names), 1)))
+        if np.any(undetermined):
+            for k, inst in enumerate(meta['instances']):
+                obj = bpy.data.objects.get(inst['object_name'])
+                share, level = resolve_share(obj) if obj is not None else (np.ones(len(view_pairs)), 'FALLBACK_1.0')
+                lit[:, k, undetermined] = share[:, None]
+                resolved_counts[level]['faces'] += int(np.count_nonzero(undetermined))
+                resolved_counts[level]['objects'] += 1
+                resolved_counts[level]['pieces'] += sum(
+                    1 for comp in meta['components'] if len(comp) and np.all(undetermined[comp]))
+
+        n_inst = lit.shape[1]
         n_faces = meta['n_orig_faces']
+        mean_lit = np.zeros((n_pairs, n_inst, n_faces), dtype=np.float64)
+        if len(view_pairs):
+            np.add.at(mean_lit, view_pairs, lit)
+        mean_lit /= pair_samples[:, None, None]
+        term = m_data['term_w'] / np.maximum(m_data['term_a'], 1e-30)
+        light = np.zeros((n_states, n_inst, n_faces), dtype=np.float64)
+        np.add.at(light, pair_states, mean_lit * term)
+        raw = srgb_encode(light).max(axis=(0, 1)) if n_states and n_inst else np.zeros(n_faces)
+        del mean_lit, lit
 
-        if np.any(face_undetermined):
-            cand_scores = []
-            cand_levels = []
-            for inst_info in meta['instances']:
-                o_name = inst_info['object_name']
-                o_obj = bpy.data.objects.get(o_name)
-                if o_obj:
-                    s_inh, lvl, _ = resolve_object_score(o_obj)
-                    cand_scores.append(s_inh)
-                    cand_levels.append(lvl)
-                else:
-                    cand_scores.append(1.0)
-                    cand_levels.append('FALLBACK_1.0')
+        island_ids = meta['island_ids']
+        unique_isls, isl_index = np.unique(island_ids, return_inverse=True)
+        areas = meta['orig_areas'].astype(np.float64)
+        isl_raw = np.zeros(len(unique_isls))
+        order = np.argsort(isl_index, kind='stable')
+        starts = np.searchsorted(isl_index[order], np.arange(len(unique_isls) + 1))
+        for k in range(len(unique_isls)):
+            faces = order[starts[k]:starts[k + 1]]
+            isl_raw[k] = weighted_percentile(raw[faces], areas[faces], island_percentile)
 
-            best_idx = int(np.argmax(cand_scores)) if cand_scores else 0
-            best_inh_score = cand_scores[best_idx] if cand_scores else 1.0
-            best_lvl = cand_levels[best_idx] if cand_levels else 'FALLBACK_1.0'
+        m_data['face_raw'] = raw.astype(np.float32)
+        m_data['face_undetermined'] = undetermined
+        m_data['face_never_seen'] = (raw <= 0.0) & ~undetermined
+        m_data['face_patch_size_px'] = patch_px
+        m_data['face_facing'] = np.ones(n_faces, dtype=np.float32)  # the light holds the facing (decision 126)
+        raw_isl[m_name] = (unique_isls, isl_index, isl_raw, island_pairs(meta['adjacency'], isl_index))
+        if pause.due():
+            report(0.75 * (index + 1) / max(len(names), 1))
+            yield
 
-            face_scores[face_undetermined] = best_inh_score
-            face_never_seen[face_undetermined] = False
+    # One scale for the scene: the most visible island is 1.0 (decision 126)
+    scale = max((float(np.max(entry[2])) for entry in raw_isl.values() if len(entry[2])), default=0.0)
+    scale = scale if scale > 0.0 else 1.0
+    face_max_raw = max((float(np.max(mesh_arrays[m]['face_raw'])) for m in names if len(mesh_arrays[m]['face_raw'])),
+                       default=0.0)
 
-            n_u_faces = int(np.count_nonzero(face_undetermined))
-            resolved_counts[best_lvl]['faces'] += n_u_faces
+    island_summaries = {}
+    object_summaries = {}
+    step_stats = {'pairs_left': 0, 'lowered': 0, 'raised': 0, 'largest_lowering': 1.0, 'largest_raising': 1.0,
+                  'raised_area_m2': 0.0}
+    ambient = min(max(float(ambient), 0.0), 1.0)
+    for index, m_name in enumerate(names):
+        meta = mesh_meta[m_name]
+        m_data = mesh_arrays[m_name]
+        unique_isls, isl_index, isl_raw, pairs = raw_isl[m_name]
+        areas = meta['orig_areas'].astype(np.float64)
+        undetermined = m_data['face_undetermined']
+        # Ambient lifts every island by the same share of the way to 1 (decision 133), then the step limit raises
+        base = ambient + (1.0 - ambient) * isl_raw / scale
+        values, left = limit_steps(base, pairs, step_limit)
+        step_stats['pairs_left'] += left
+        raised = values > base * (1.0 + 1e-9)
+        step_stats['raised'] += int(np.count_nonzero(raised))
+        if np.any(raised):
+            step_stats['largest_raising'] = max(step_stats['largest_raising'],
+                                                float(np.max(values[raised] / np.maximum(base[raised], 1e-30))))
+            isl_area = np.bincount(isl_index, weights=areas, minlength=len(unique_isls))
+            step_stats['raised_area_m2'] += float(np.sum(isl_area[raised]))
 
-            for c in components:
-                if len(c) > 0 and np.all(face_undetermined[c]):
-                    resolved_counts[best_lvl]['pieces'] += 1
-
-        # 3. Compute Island Values (Decision 82)
-        unique_isls = np.unique(island_ids)
-        isl_values_arr = np.zeros(len(unique_isls), dtype=np.float32)
-        isl_never_seen_arr = np.zeros(len(unique_isls), dtype=bool)
-        isl_seen_share_arr = np.zeros(len(unique_isls), dtype=np.float32)
-        isl_undet_only_arr = np.zeros(len(unique_isls), dtype=bool)
-        isl_r4_avg_arr = np.zeros(len(unique_isls), dtype=np.float32)
-
-        for idx, isl_id in enumerate(unique_isls):
-            isl_mask = (island_ids == isl_id)
-            isl_faces = np.flatnonzero(isl_mask)
-            f_sc = face_scores[isl_faces]
-            f_ar = areas[isl_faces]
-            f_udet = face_undetermined[isl_faces]
-
-            f_unocc = np.sum(m_data['unocc_omega'][:, :, isl_faces], axis=-1)
-            isl_size_px = float(np.max(f_unocc)) / d_omega_px
-            tot_area = float(np.sum(f_ar))
-
-            seen_mask = (f_sc > 0.0)
-            seen_area = float(np.sum(f_ar[seen_mask]))
-            seen_faces = isl_faces[seen_mask]
-
-            if seen_area > 0.0:
-                never_seen = False
-                seen_share = seen_area / max(tot_area, 1e-12)
-                is_undet_only = bool(np.all(f_udet[seen_mask]))
-                r4_avg = float(np.sum(f_sc[seen_mask] * f_ar[seen_mask]) / seen_area)
-
-                seen_unocc = np.sum(m_data['unocc_omega'][:, :, seen_faces], axis=-1)
-                max_seen_unocc = float(np.max(seen_unocc))
-
-                if max_seen_unocc >= omega_threshold:
-                    seen_vis = np.sum(m_data['vis_omega'][:, :, seen_faces], axis=-1)
-                    valid = seen_unocc > 1e-12
-                    ratio = np.where(valid, np.clip(seen_vis / np.maximum(seen_unocc, 1e-12), 0.0, 1.0), 0.0)
-                    isl_val = float(np.max(ratio))
-                else:
-                    isl_val = r4_avg
-            else:
-                isl_val = 0.0
-                r4_avg = 0.0
-                never_seen = True
-                seen_share = 0.0
-                is_undet_only = False
-
-            isl_values_arr[idx] = isl_val
-            isl_never_seen_arr[idx] = never_seen
-            isl_seen_share_arr[idx] = seen_share
-            isl_undet_only_arr[idx] = is_undet_only
-            isl_r4_avg_arr[idx] = r4_avg
-
+        m_data['face_scores'] = (ambient + (1.0 - ambient) * np.clip(m_data['face_raw'] / scale, 0.0, 1.0)).astype(
+            np.float32)
+        m_data['face_island_values'] = values[isl_index].astype(np.float32)
+        m_data['island_scores'] = values.astype(np.float32)
+        lit_faces = m_data['face_raw'] > 0.0
+        for k, isl_id in enumerate(unique_isls):
+            faces = np.flatnonzero(isl_index == k)
+            total = float(np.sum(areas[faces]))
+            seen = float(np.sum(areas[faces][lit_faces[faces]]))
             island_summaries[f"{m_name}__isl_{isl_id}"] = {
                 'mesh_name': m_name,
                 'island_id': int(isl_id),
-                'score': isl_val,
-                'r4_avg': r4_avg,
-                'size_px': isl_size_px,
-                'never_seen': never_seen,
-                'seen_area_share': seen_share,
-                'undetermined_only': is_undet_only,
-                'area_m2': tot_area,
-                'n_faces': len(isl_faces),
+                'score': float(values[k]),
+                'before_step_limit': float(base[k]),
+                'size_px': float(np.max(m_data['face_patch_size_px'][faces])) if len(faces) else 0.0,
+                'never_seen': bool(isl_raw[k] <= 0.0 and not np.any(undetermined[faces])),
+                'seen_area_share': seen / total if total > 0.0 else 0.0,
+                'undetermined_only': bool(len(faces) and np.all(undetermined[faces])),
+                'area_m2': total,
+                'n_faces': int(len(faces)),
             }
-
-        m_data['island_scores'] = isl_values_arr
-        m_data['island_never_seen'] = isl_never_seen_arr
-        m_data['island_seen_shares'] = isl_seen_share_arr
-        m_data['island_undet_only'] = isl_undet_only_arr
-        m_data['island_r4_avgs'] = isl_r4_avg_arr
-
-        # 4. Compute Object Summaries (Decision 82)
-        for inst_info in meta['instances']:
-            o_name = inst_info['object_name']
-            if o_name in object_summaries:
+        total = float(np.sum(areas))
+        o_score = weighted_percentile(m_data['face_island_values'].astype(np.float64), areas, island_percentile)
+        for inst in meta['instances']:
+            if inst['object_name'] in object_summaries:
                 continue
-
-            o_obj = bpy.data.objects.get(o_name)
-            inst_idx = inst_info['inst_idx']
-            o_unocc = np.sum(m_data['unocc_omega'][:, inst_idx, :], axis=-1)
-            o_size_px = float(np.max(o_unocc)) / d_omega_px
-            o_tot_area = float(np.sum(areas))
-
-            if 0.0 < o_size_px < min_px_threshold:
-                o_score, o_lvl, _ = resolve_object_score(o_obj) if o_obj else (1.0, 'FALLBACK_1.0', 0.0)
-                o_r4_avg = o_score
-                o_never_seen = False
-                o_undetermined = True
-                o_seen_share = 1.0
-                resolved_counts[o_lvl]['objects'] += 1
-            elif o_size_px == 0.0:
-                o_score = 0.0
-                o_r4_avg = 0.0
-                o_never_seen = True
-                o_undetermined = False
-                o_seen_share = 0.0
-            else:
-                seen_mask = (face_scores > 0.0)
-                seen_area = float(np.sum(areas[seen_mask]))
-                seen_faces = np.flatnonzero(seen_mask)
-                if seen_area > 0.0:
-                    o_r4_avg = float(np.sum(face_scores[seen_mask] * areas[seen_mask]) / seen_area)
-                    seen_unocc_mesh = np.sum(m_data['unocc_omega'][:, :, seen_faces], axis=-1)
-                    max_seen_unocc_mesh = float(np.max(seen_unocc_mesh))
-                    if max_seen_unocc_mesh >= omega_threshold:
-                        seen_vis_mesh = np.sum(m_data['vis_omega'][:, :, seen_faces], axis=-1)
-                        valid_mesh = seen_unocc_mesh > 1e-12
-                        ratio_mesh = np.where(valid_mesh, np.clip(seen_vis_mesh / np.maximum(seen_unocc_mesh, 1e-12), 0.0, 1.0), 0.0)
-                        o_score = float(np.max(ratio_mesh))
-                    else:
-                        o_score = o_r4_avg
-                    o_never_seen = False
-                    o_seen_share = seen_area / max(o_tot_area, 1e-12)
-                else:
-                    o_score = 0.0
-                    o_r4_avg = 0.0
-                    o_never_seen = True
-                    o_seen_share = 0.0
-                o_undetermined = False
-
-            object_summaries[o_name] = {
+            object_summaries[inst['object_name']] = {
                 'mesh_name': m_name,
                 'score': o_score,
-                'r4_avg': o_r4_avg,
-                'size_px': o_size_px,
-                'never_seen': o_never_seen,
-                'undetermined': o_undetermined,
-                'seen_area_share': o_seen_share,
-                'area_m2': o_tot_area,
-                'n_faces': n_faces,
+                'size_px': float(np.max(m_data['face_patch_size_px'])) if len(areas) else 0.0,
+                'never_seen': bool(not np.any(lit_faces) and not np.any(undetermined)),
+                'undetermined': bool(len(areas) and np.all(undetermined)),
+                'seen_area_share': float(np.sum(areas[lit_faces]) / total) if total > 0.0 else 0.0,
+                'area_m2': total,
+                'n_faces': int(meta['n_orig_faces']),
             }
+        if pause.due():
+            report(0.75 + 0.25 * (index + 1) / max(len(names), 1))
+            yield
 
     return {
-        'patch_expansion_time_s': patch_expansion_time,
+        'patch_expansion_time_s': time.perf_counter() - t_start,
         'resolved_counts': resolved_counts,
         'object_summaries': object_summaries,
         'island_summaries': island_summaries,
+        'scale': scale,
+        'brightest_face': face_max_raw,
+        'step_limit': step_stats,
     }
 
 
@@ -1343,8 +1260,16 @@ def save_visibility_file(blend_path, results, settings=None):
         'patch_expansion_time_s': results.get('patch_expansion_time_s', 0.0),
         'state_timings': results.get('state_timings', {}),
         'views': results.get('views', []),
+        'lights': results.get('lights', []),
+        'light_states': results.get('light_states', []),
         'ref_cube_res': results.get('ref_cube_res', 1024),
         'min_px_threshold': results.get('min_px_threshold', 10.0),
+        'island_percentile': results.get('island_percentile', 0.9),
+        'step_limit': results.get('step_limit', 1.5),
+        'ambient': results.get('ambient', 0.1),
+        'step_limit_result': results.get('step_limit_result', {}),
+        'scale': results.get('scale', 1.0),
+        'brightest_face': results.get('brightest_face', 0.0),
         'total_faces': results.get('total_faces', 0),
         'total_surface_area_m2': results.get('total_surface_area_m2', 0.0),
         'total_objects': results.get('total_objects', 0),
@@ -1359,7 +1284,6 @@ def save_visibility_file(blend_path, results, settings=None):
         'face_percentiles': results.get('face_percentiles', {}),
         'island_percentiles': results.get('island_percentiles', {}),
         'resolved_counts': results.get('resolved_counts', {}),
-        'glareshield_island_report': results.get('glareshield_island_report', {}),
         'mesh_face_counts': mesh_face_counts,
         'object_eval_face_counts': results.get('object_eval_face_counts', {}),
         'object_summaries': results.get('object_summaries', {}),
@@ -1373,9 +1297,11 @@ def save_visibility_file(blend_path, results, settings=None):
 
     for m_name, m_data in results['mesh_arrays'].items():
         safe_name = m_name.replace('/', '_').replace('\\', '_')
-        arrays_to_save[f"{safe_name}__vis_omega"] = m_data['vis_omega'].astype(np.float32)
-        arrays_to_save[f"{safe_name}__unocc_omega"] = m_data['unocc_omega'].astype(np.float32)
+        # The per-view sums are not kept: the scores hold all a reader needs, and the sums grow with every light
+        # sample and state
         arrays_to_save[f"{safe_name}__face_scores"] = m_data['face_scores'].astype(np.float32)
+        arrays_to_save[f"{safe_name}__face_island_values"] = m_data.get(
+            'face_island_values', m_data['face_scores']).astype(np.float32)
         arrays_to_save[f"{safe_name}__face_undetermined"] = m_data['face_undetermined'].astype(bool)
         arrays_to_save[f"{safe_name}__face_never_seen"] = m_data['face_never_seen'].astype(bool)
         arrays_to_save[f"{safe_name}__face_patch_size_px"] = m_data['face_patch_size_px'].astype(np.float32)
@@ -1461,48 +1387,10 @@ def load_visibility_file(vis_path, scene_meshes=None, use_cache=True):
 # Heatmap RGBA Color Mapping (0.0 red, 0.5 neutral, 1.0 blue)
 # ---------------------------------------------------------------------------
 
-def compute_heatmap_colors(scores, undetermined_mask, never_seen_mask, alpha=0.75):
-    """Map visibility score in [0.0, 1.0] to RGBA colors.
-
-    - Undetermined: Cyan (0.0, 0.85, 0.85, alpha)
-    - Never Seen (0.0): Magenta (1.0, 0.0, 1.0, alpha)
-    - Seen (0.0, 0.5]: Red (0.95, 0.15, 0.15) to Neutral Grey (0.92, 0.92, 0.92)
-    - Seen [0.5, 1.0]: Neutral Grey (0.92, 0.92, 0.92) to Blue (0.10, 0.35, 0.95)
-    """
-    n = len(scores)
-    colors = np.empty((n, 4), dtype=np.float32)
-
-    c_cyan = np.array([0.0, 0.85, 0.85, alpha], dtype=np.float32)
-    c_mag = np.array([1.0, 0.0, 1.0, alpha], dtype=np.float32)
-    c_red = np.array([0.95, 0.15, 0.15, alpha], dtype=np.float32)
-    c_neu = np.array([0.92, 0.92, 0.92, alpha], dtype=np.float32)
-    c_blue = np.array([0.10, 0.35, 0.95, alpha], dtype=np.float32)
-
-    # 1. Never seen
-    colors[never_seen_mask] = c_mag
-
-    # 2. Undetermined
-    colors[undetermined_mask] = c_cyan
-
-    # 3. Measurable seen
-    seen = (~never_seen_mask) & (~undetermined_mask)
-    if np.any(seen):
-        s_vals = scores[seen]
-        seen_idx = np.flatnonzero(seen)
-
-        low_mask = (s_vals <= 0.5)
-        if np.any(low_mask):
-            l_idx = seen_idx[low_mask]
-            t = np.clip(s_vals[low_mask] / 0.5, 0.0, 1.0)[:, None]
-            colors[l_idx] = (1.0 - t) * c_red + t * c_neu
-
-        high_mask = (s_vals > 0.5)
-        if np.any(high_mask):
-            h_idx = seen_idx[high_mask]
-            t = np.clip((s_vals[high_mask] - 0.5) / 0.5, 0.0, 1.0)[:, None]
-            colors[h_idx] = (1.0 - t) * c_neu + t * c_blue
-
-    return colors
+def compute_heatmap_colors(scores, alpha=0.75):
+    """Map visibility scores in [0.0, 1.0] to RGBA colors: black (0.0) to white (1.0)."""
+    grey = np.clip(np.asarray(scores, dtype=np.float32), 0.0, 1.0)
+    return np.column_stack((grey, grey, grey, np.full(len(grey), alpha, dtype=np.float32)))
 
 
 # ---------------------------------------------------------------------------
@@ -1510,35 +1398,47 @@ def compute_heatmap_colors(scores, undetermined_mask, never_seen_mask, alpha=0.7
 # ---------------------------------------------------------------------------
 
 class VisibilityAnalyzer:
-    """Visibility analysis coordinator supporting one view per step (Decision 81)."""
+    """Visibility analysis from the included probe lights, one view (a light's sample point at an animation state) per
+    step, so a modal operator can run it in pieces (Decisions 81 and 124)."""
 
     def __init__(
         self,
         scene,
         view_layer,
-        cameras,
+        lights,
         anim_states=(0.0, 0.25, 0.5, 0.75, 1.0),
         cube_res=1024,
-        frustum_res=(2560, 1440),
         min_px_threshold=10.0,
         blend_path=None,
+        shadow_samples=4,
+        island_percentile=0.9,
+        step_limit=1.5,
+        ambient=0.1,
     ):
-        if not cameras:
-            raise ValueError("No reference cameras specified (Decision 80).")
+        if not lights:
+            raise ValueError("No probe lights included.")
 
         self.scene = scene
         self.view_layer = view_layer
-        self.cameras = cameras
+        self.lights = [name if isinstance(name, str) else name.name for name in lights]
         self.anim_states = tuple(float(s) for s in anim_states)
         self.cube_res = cube_res
-        self.frustum_res = frustum_res
         self.min_px_threshold = min_px_threshold
-        self.blend_path = blend_path or (scene.fss_visibility.cameras[0].camera_name if hasattr(scene, 'fss_visibility') and len(scene.fss_visibility.cameras) else "")
+        self.blend_path = blend_path or ""
+        self.shadow_samples = max(1, int(shadow_samples))
+        self.island_percentile = float(island_percentile)
+        self.step_limit = float(step_limit)
+        self.ambient = float(ambient)
 
-        # State tracking
+        # One sample for a light without radius (its soft shadows are hard), else shadow_samples over its radius
+        self.light_samples = []
+        for name in self.lights:
+            record = light_record(bpy.data.objects.get(name), scene)
+            self.light_samples.append(self.shadow_samples if record and record['radius'] > 0.0 else 1)
+
         self.shader = None
         self.off_cube = None
-        self.off_frustum = None
+        self.cube_weights = None
         self.anim_ctrl = None
         self.mesh_meta = None
         self.mesh_arrays = None
@@ -1549,18 +1449,21 @@ class VisibilityAnalyzer:
         self.current_state_idx = -1
         self.batches = None
         self.eval_poly_info = None
+        self.eval_index = None
         self.tri_geom = None
         self.max_id = 0
         self.batch_op = None
         self.batch_dec = None
+        self.records = {}
+        self.light_log = []
         self.t_start = 0.0
         self.state_timings = {}
         self._state_t0 = 0.0
         self.prepared = False
         self.cleaned_up = False
         self.activity = ''  # what is in work, for the bar's text
-        self._units_total = (UNITS_PREPARE + UNITS_FINAL + len(self.anim_states) * UNITS_READ
-                             + len(self.anim_states) * len(self.cameras) * UNITS_VIEW)
+        n_views = len(self.anim_states) * sum(self.light_samples)
+        self._units_total = UNITS_PREPARE + UNITS_FINAL + len(self.anim_states) * UNITS_READ + n_views * UNITS_VIEW
         self._units_done = 0.0
         self._units_now = 0.0
         self._part_now = 0.0
@@ -1600,32 +1503,38 @@ class VisibilityAnalyzer:
 
         self.mesh_meta = yield from _discover_pieces(self.view_layer, self._part)
 
-        # Build view list: camera x animation state
+        # Views: per animation state, per light, per sample point; a (state, light) pair shares one light term
         self.view_configs = []
+        n_lights = len(self.lights)
         for state_idx, state_val in enumerate(self.anim_states):
-            for cam in self.cameras:
-                self.view_configs.append({
-                    'state_idx': state_idx,
-                    'state_val': state_val,
-                    'camera': cam['name'],
-                    'cam_dict': cam,
-                })
+            for light_idx, name in enumerate(self.lights):
+                for sample in range(self.light_samples[light_idx]):
+                    self.view_configs.append({
+                        'state_idx': state_idx,
+                        'state_val': state_val,
+                        'light': name,
+                        'sample': sample,
+                        'n_samples': self.light_samples[light_idx],
+                        'pair': state_idx * n_lights + light_idx,
+                    })
 
-        N_views = len(self.view_configs)
+        n_views = len(self.view_configs)
+        n_pairs = len(self.anim_states) * n_lights
         self.mesh_arrays = {}
         for m_name, meta in self.mesh_meta.items():
-            N_inst = max(len(meta['instances']), 1)
-            N_faces = meta['n_orig_faces']
+            n_inst = max(len(meta['instances']), 1)
+            n_faces = meta['n_orig_faces']
             self.mesh_arrays[m_name] = {
-                'vis_omega': np.zeros((N_views, N_inst, N_faces), dtype=np.float32),
-                'unocc_omega': np.zeros((N_views, N_inst, N_faces), dtype=np.float32),
-                'face_best_cos': np.zeros(N_faces, dtype=np.float32),  # the most direct view of any camera and state
+                'vis_omega': np.zeros((n_views, n_inst, n_faces), dtype=np.float32),
+                'unocc_omega': np.zeros((n_views, n_inst, n_faces), dtype=np.float32),
+                'term_w': np.zeros((n_pairs, n_inst, n_faces), dtype=np.float32),
+                'term_a': np.zeros((n_pairs, n_inst, n_faces), dtype=np.float32),
                 'area': meta['orig_areas'],
                 'island_ids': meta['island_ids'],
             }
 
         self.off_cube = gpu.types.GPUOffScreen(self.cube_res, self.cube_res)
-        self.off_frustum = gpu.types.GPUOffScreen(self.frustum_res[0], self.frustum_res[1])
+        self.cube_weights = precompute_cubemap_weights(self.cube_res)
         self.anim_ctrl = AnimationStateController(self.scene)
 
         self.current_step = 0
@@ -1640,168 +1549,119 @@ class VisibilityAnalyzer:
         return self.current_step >= len(self.view_configs)
 
     def execute_next_step(self):
-        """Execute one view pass (one camera at one animation state)."""
+        """Execute one view pass (one light sample at one animation state)."""
         if not self.prepared:
             self.prepare()
         if self.is_finished():
             return None
         return _drain(self._pieces_of_view())
 
+    def _read_state(self, state_val):
+        """Set the animation state, read the scene's geometry and the lights as they are at that frame."""
+        self.anim_ctrl.apply_percentage_state(state_val)
+        dg = bpy.context.evaluated_depsgraph_get()
+        (self.batches, self.eval_poly_info, self.tri_geom, self.max_id,
+         obj_maps, obj_counts) = yield from _extract_pieces(dg, self.view_layer, self.mesh_meta, self._part)
+        self.object_eval_face_maps.update(obj_maps)
+        self.object_eval_face_counts.update(obj_counts)
+
+        # Per mesh, which evaluated faces land on which instance and face, for adding a view's sums at once
+        grouped = {}
+        for eid, (m_name, inst_idx, orig_idx) in self.eval_poly_info.items():
+            grouped.setdefault(m_name, ([], [], []))
+            entry = grouped[m_name]
+            entry[0].append(eid)
+            entry[1].append(inst_idx)
+            entry[2].append(orig_idx)
+        self.eval_index = {m: tuple(np.array(part, dtype=np.int64) for part in entry) for m, entry in grouped.items()}
+
+        self.records = {name: light_record(bpy.data.objects.get(name), self.scene, dg) for name in self.lights}
+        self.light_log.append({name: None if r is None else {
+            'type': r['type'], 'power': r['power'], 'radius': r['radius'], 'reach': r['reach'],
+            'pos': [float(c) for c in r['pos']]} for name, r in self.records.items()})
+
+        self.batch_op = None
+        if len(self.batches['opaque_pos']) > 0:
+            b = batch_for_shader(self.shader, 'TRIS', {
+                'pos': self.batches['opaque_pos'],
+                'face_id': self.batches['opaque_ids']
+            })
+            self.batch_op = BatchWrapper(b, len(self.batches['opaque_pos']) // 3)
+
+        self.batch_dec = None
+        if len(self.batches['decal_pos']) > 0:
+            b = batch_for_shader(self.shader, 'TRIS', {
+                'pos': self.batches['decal_pos'],
+                'face_id': self.batches['decal_ids']
+            })
+            self.batch_dec = BatchWrapper(b, len(self.batches['decal_pos']) // 3)
+
     def _pieces_of_view(self):
         """A generator: one view, yielding between pieces; its value is the view's info."""
         view_cfg = self.view_configs[self.current_step]
         state_idx = view_cfg['state_idx']
         state_val = view_cfg['state_val']
-        cam = view_cfg['cam_dict']
 
-        # Transition to new animation state if needed
         if state_idx != self.current_state_idx:
             if self.current_state_idx >= 0:
                 pct_prev = f"{int(self.anim_states[self.current_state_idx] * 100)}%"
                 self.state_timings[pct_prev] = time.perf_counter() - self._state_t0
-
             self.current_state_idx = state_idx
             self._state_t0 = time.perf_counter()
             self._begin(UNITS_READ, f'Reading the scene at animation {int(round(state_val * 100))} %')
             yield
-            self.anim_ctrl.apply_percentage_state(state_val)
-
-            dg = bpy.context.evaluated_depsgraph_get()
-            (self.batches, self.eval_poly_info, self.tri_geom, self.max_id,
-             obj_maps, obj_counts) = yield from _extract_pieces(dg, self.view_layer, self.mesh_meta, self._part)
-            if not self.object_eval_face_maps:
-                self.object_eval_face_maps = obj_maps
-                self.object_eval_face_counts = obj_counts
-            else:
-                self.object_eval_face_maps.update(obj_maps)
-                self.object_eval_face_counts.update(obj_counts)
-
-            self.batch_op = None
-            if len(self.batches['opaque_pos']) > 0:
-                b = batch_for_shader(self.shader, 'TRIS', {
-                    'pos': self.batches['opaque_pos'],
-                    'face_id': self.batches['opaque_ids']
-                })
-                self.batch_op = BatchWrapper(b, len(self.batches['opaque_pos']) // 3)
-
-            self.batch_dec = None
-            if len(self.batches['decal_pos']) > 0:
-                b = batch_for_shader(self.shader, 'TRIS', {
-                    'pos': self.batches['decal_pos'],
-                    'face_id': self.batches['decal_ids']
-                })
-                self.batch_dec = BatchWrapper(b, len(self.batches['decal_pos']) // 3)
+            yield from self._read_state(state_val)
             yield
 
-        self._begin(UNITS_VIEW, f"View {self.current_step + 1} of {len(self.view_configs)}: {cam['name']}, "
-                                f"animation {int(round(state_val * 100))} %")
-        cam_name = cam['name']
-        cam_type = cam['type']
-        cam_pos = cam['pos']
-        cam_fwd = cam.get('forward', Vector((0, -1, 0)))
+        name = view_cfg['light']
+        sample = view_cfg['sample']
+        self._begin(UNITS_VIEW, f"View {self.current_step + 1} of {len(self.view_configs)}: {name}"
+                                + (f", shadow sample {sample + 1} of {view_cfg['n_samples']}" if view_cfg['n_samples'] > 1 else '')
+                                + f", animation {int(round(state_val * 100))} %")
+        record = self.records.get(name)
+        info = {'step': self.current_step + 1, 'total_steps': len(self.view_configs), 'light': name,
+                'sample': sample, 'state_pct': state_val}
+        if record is None or len(self.tri_geom['V0']) == 0:
+            self.current_step += 1
+            return info
 
-        # A fixed view shows its frame only, and a Look Around camera what its limits allow. What lies outside cannot be
-        # seen from this view, so it is not counted as visible-if-nothing-were-in-front either: an island partly outside
-        # is not marked down for that part.
-        fixed_mvp = None
-        fixed_cam = bpy.data.objects.get(cam.get('obj_name', cam_name)) if cam_type == 'FIXED_VIEW' else None
-        if fixed_cam:
-            dg = bpy.context.evaluated_depsgraph_get()
-            fixed_mvp = fixed_cam.calc_matrix_camera(dg, x=self.frustum_res[0], y=self.frustum_res[1]) @ fixed_cam.matrix_world.inverted()
-        sweep = None
-        if cam_type == 'LOOK_AROUND':
-            sweep = look_sweep(bpy.data.objects.get(cam.get('obj_name', cam_name)), cam.get('yaw_limit', 180.0), cam.get('pitch_limit', 90.0))
-
-        # 1. Unoccluded solid angle from camera position
-        if len(self.tri_geom['V0']) > 0:
-            tri_omega = batch_triangle_solid_angle(
-                cam_pos, self.tri_geom['V0'], self.tri_geom['V1'], self.tri_geom['V2']
-            )
-            in_frame = None
-            if fixed_mvp is not None:
-                in_frame = batch_triangles_in_frame(fixed_mvp, self.tri_geom['V0'], self.tri_geom['V1'], self.tri_geom['V2'])
-            elif sweep is not None:
-                in_frame = batch_triangles_in_sweep(cam_pos, self.tri_geom['V0'], self.tri_geom['V1'], self.tri_geom['V2'], sweep)
-            eval_unocc_all = None
-            if in_frame is not None:
-                eval_unocc_all = np.bincount(self.tri_geom['tri_ids'], weights=tri_omega, minlength=self.max_id + 1)
-                tri_omega = tri_omega * in_frame
-            eval_unocc = np.bincount(
-                self.tri_geom['tri_ids'], weights=tri_omega, minlength=self.max_id + 1
-            )
-            eval_cos = batch_face_cosines(
-                cam_pos, self.tri_geom['V0'], self.tri_geom['V1'], self.tri_geom['V2'],
-                self.tri_geom['tri_ids'], self.max_id + 1, in_frame
-            )
-        else:
-            eval_unocc = np.zeros(self.max_id + 1, dtype=np.float32)
-            eval_unocc_all = None
-            eval_cos = np.zeros(self.max_id + 1, dtype=np.float64)
-
-        eval_vis = np.zeros(self.max_id + 1, dtype=np.float64)
-
+        offsets = light_sample_offsets(view_cfg['n_samples'])
+        eye = record['pos'] + offsets[sample] * record['radius']
+        n_ids = self.max_id + 1
+        tri_omega = batch_triangle_solid_angle(eye, self.tri_geom['V0'], self.tri_geom['V1'], self.tri_geom['V2'])
+        eval_unocc = np.bincount(self.tri_geom['tri_ids'], weights=tri_omega, minlength=n_ids)
+        term = None
+        if sample == 0:
+            term = batch_light_term(record, self.tri_geom['V0'], self.tri_geom['V1'], self.tri_geom['V2'],
+                                    self.tri_geom['tri_ids'], n_ids)
         self._part(0.1)
         yield
 
-        # Near and far clipping planes from scene extent (Requirement 4)
-        near_plane, far_plane = compute_scene_extent(self.view_layer, cam_pos)
+        near_plane, far_plane = compute_scene_extent(self.view_layer, eye)
+        eval_vis = np.zeros(n_ids, dtype=np.float64)
+        reached = cube_faces_in_cone(record)
+        faces = [face for face in cubemap_face_matrices(eye, near=near_plane, far=far_plane) if face[0] in reached]
+        for side, (_face_name, v_mat, p_mat) in enumerate(faces, 1):
+            eval_vis += render_camera_view(self.off_cube, self.shader, self.batch_op, self.batch_dec, p_mat @ v_mat,
+                                           self.cube_weights, self.max_id)
+            self._part(0.1 + 0.85 * side / max(len(faces), 1))
+            yield
 
-        # 2. Render view
-        if cam_type == 'LOOK_AROUND':
-            faces = cubemap_face_matrices(cam_pos, cam_fwd, near=near_plane, far=far_plane)
-            face_weights = precompute_cubemap_weights(faces, cube_res=self.cube_res, sweep=sweep)
-            for side, (face_name, v_mat, p_mat) in enumerate(faces, 1):
-                mvp = p_mat @ v_mat
-                w_map = face_weights[face_name]
-                vis_counts = render_camera_view(
-                    self.off_cube, self.shader, self.batch_op, self.batch_dec, mvp, w_map, self.max_id
-                )
-                eval_vis += vis_counts
-                self._part(0.1 + 0.85 * side / len(faces))
-                yield
-
-        elif cam_type == 'FIXED_VIEW':
-            if fixed_cam:
-                w_map = precompute_frustum_weights(fixed_cam, self.frustum_res)
-                vis_counts = render_camera_view(
-                    self.off_frustum, self.shader, self.batch_op, self.batch_dec, fixed_mvp, w_map, self.max_id
-                )
-                eval_vis += vis_counts
-
-        # A large triangle can show pixels with no corner or centre inside the limits: it still counts
-        if eval_unocc_all is not None:
-            missed = (eval_vis > 0.0) & (eval_unocc <= 0.0)
-            eval_unocc = np.where(missed, eval_unocc_all, eval_unocc)
-
-        # 3. Accumulate sums into mesh_arrays
-        # The camera's weight scales what it sees: every score is the visible sum over the unoccluded sum, highest view
-        # first, so a lower-weight camera lifts only what the others miss and never lowers what they see.
-        weight = cam.get('weight', 1.0)
-        measurable = self.min_px_threshold * 4.0 / (self.cube_res * self.cube_res)
-        for eid, (m_name, inst_idx, orig_idx) in self.eval_poly_info.items():
-            v_vis = eval_vis[eid]
-            v_unocc = eval_unocc[eid]
-            self.mesh_arrays[m_name]['vis_omega'][self.current_step, inst_idx, orig_idx] += v_vis * weight
-            self.mesh_arrays[m_name]['unocc_omega'][self.current_step, inst_idx, orig_idx] += v_unocc
-            # A face large enough to measure that shows no pixel is hidden in this view: this view says nothing about how
-            # it faces. A smaller face may show no pixel by chance, so it keeps its angle.
-            if v_vis > 0.0 or v_unocc < measurable:
-                best = self.mesh_arrays[m_name]['face_best_cos']
-                best[orig_idx] = max(best[orig_idx], eval_cos[eid] * weight)
-
-        step_info = {
-            'step': self.current_step + 1,
-            'total_steps': len(self.view_configs),
-            'camera': cam_name,
-            'mode': cam_type,
-            'state_pct': state_val,
-        }
+        step = self.current_step
+        pair = view_cfg['pair']
+        for m_name, (eids, ks, fs) in self.eval_index.items():
+            arrays = self.mesh_arrays[m_name]
+            np.add.at(arrays['vis_omega'][step], (ks, fs), eval_vis[eids])
+            np.add.at(arrays['unocc_omega'][step], (ks, fs), eval_unocc[eids])
+            if term is not None:
+                np.add.at(arrays['term_w'][pair], (ks, fs), term[0][eids])
+                np.add.at(arrays['term_a'][pair], (ks, fs), term[1][eids])
 
         self.current_step += 1
-        return step_info
+        return info
 
     def finalize(self):
-        """Compute patch expansion, undetermined resolution, and build results dict."""
+        """Score faces, islands and objects, and build the results dict."""
         return _drain(self._finalize_pieces())
 
     def _finalize_pieces(self):
@@ -1811,98 +1671,68 @@ class VisibilityAnalyzer:
             pct_last = f"{int(self.anim_states[self.current_state_idx] * 100)}%"
             self.state_timings[pct_last] = time.perf_counter() - self._state_t0
 
+        n_lights = len(self.lights)
+        n_pairs = len(self.anim_states) * n_lights
+        pair_states = [pair // n_lights for pair in range(n_pairs)]
+        pair_samples = [self.light_samples[pair % n_lights] for pair in range(n_pairs)]
+        view_pairs = [cfg['pair'] for cfg in self.view_configs]
+        score = yield from _score_pieces(
+            self.mesh_meta, self.mesh_arrays, view_pairs, pair_states, pair_samples, len(self.anim_states),
+            min_px_threshold=self.min_px_threshold, ref_cube_res=self.cube_res,
+            island_percentile=self.island_percentile, step_limit=self.step_limit, ambient=self.ambient, scene=self.scene,
+            report=self._part)
         total_time = time.perf_counter() - self.t_start
 
-        patch_res = yield from _patch_pieces(self.mesh_meta, self.mesh_arrays, min_px_threshold=self.min_px_threshold,
-                                             ref_cube_res=self.cube_res, scene=self.scene, report=self._part)
-
-        all_face_scores = []
-        all_face_areas = []
-        tot_nv_faces = 0
-        tot_nv_area = 0.0
-        tot_udet_faces = 0
-        tot_udet_area = 0.0
-
+        all_face_scores, all_face_areas = [], []
+        tot_nv_faces = tot_udet_faces = 0
+        tot_nv_area = tot_udet_area = 0.0
         for m_name, meta in self.mesh_meta.items():
             m_data = self.mesh_arrays[m_name]
-            f_sc = m_data['face_scores']
             f_ar = meta['orig_areas']
-            f_nv = m_data['face_never_seen']
-            f_udet = m_data['face_undetermined']
-            # A hidden or back face has facing 0. Seen comes from the patch scores: a small face may cover no pixel of
-            # its own, and its per-view count would call it hidden.
-            m_data['face_facing'] = m_data['face_best_cos'] * (f_sc > 0.0)
-
-            all_face_scores.append(f_sc)
+            all_face_scores.append(m_data['face_scores'])
             all_face_areas.append(f_ar)
-
-            tot_nv_faces += int(np.count_nonzero(f_nv))
-            tot_nv_area += float(np.sum(f_ar[f_nv]))
-            tot_udet_faces += int(np.count_nonzero(f_udet))
-            tot_udet_area += float(np.sum(f_ar[f_udet]))
+            tot_nv_faces += int(np.count_nonzero(m_data['face_never_seen']))
+            tot_nv_area += float(np.sum(f_ar[m_data['face_never_seen']]))
+            tot_udet_faces += int(np.count_nonzero(m_data['face_undetermined']))
+            tot_udet_area += float(np.sum(f_ar[m_data['face_undetermined']]))
 
         concat_scores = np.concatenate(all_face_scores) if all_face_scores else np.zeros(0, dtype=np.float32)
         concat_areas = np.concatenate(all_face_areas) if all_face_areas else np.zeros(0, dtype=np.float32)
-
-        face_p50 = weighted_percentile(concat_scores, concat_areas, 0.50)
-        face_p90 = weighted_percentile(concat_scores, concat_areas, 0.90)
-        face_p95 = weighted_percentile(concat_scores, concat_areas, 0.95)
-
-        isl_sums = patch_res['island_summaries']
+        isl_sums = score['island_summaries']
         isl_scores = np.array([isl['score'] for isl in isl_sums.values()], dtype=np.float32)
         isl_areas = np.array([isl['area_m2'] for isl in isl_sums.values()], dtype=np.float32)
+        obj_sums = score['object_summaries']
 
-        isl_p50 = weighted_percentile(isl_scores, isl_areas, 0.50)
-        isl_p90 = weighted_percentile(isl_scores, isl_areas, 0.90)
-        isl_p95 = weighted_percentile(isl_scores, isl_areas, 0.95)
-
-        obj_sums = patch_res['object_summaries']
-        nv_objs = sum(1 for o in obj_sums.values() if o['never_seen'])
-        undet_objs = sum(1 for o in obj_sums.values() if o['undetermined'])
-        nv_isls = sum(1 for isl in isl_sums.values() if isl['never_seen'])
-
-        # Check glareshield island if present in scene
-        glareshield_rep = {}
-        for k, v in isl_sums.items():
-            if v['mesh_name'].startswith('C3_001.018') and v['island_id'] == 4:
-                glareshield_rep = {
-                    'key': k,
-                    'score': v['score'],
-                    'r4_avg': v['r4_avg'],
-                    'seen_share': v['seen_area_share'],
-                    'area_m2': v['area_m2'],
-                    'n_faces': v['n_faces'],
-                }
-                break
-
-        results = {
+        return {
             'blend_file': str(self.blend_path),
             'total_time_s': total_time,
-            'patch_expansion_time_s': patch_res['patch_expansion_time_s'],
+            'patch_expansion_time_s': score['patch_expansion_time_s'],
             'state_timings': self.state_timings,
-            'views': [
-                {'camera': v['camera'], 'type': v['cam_dict']['type'], 'state': v['state_val'],
-                 'yaw_limit': v['cam_dict'].get('yaw_limit', 180.0), 'pitch_limit': v['cam_dict'].get('pitch_limit', 90.0),
-                 'weight': v['cam_dict'].get('weight', 1.0)}
-                for v in self.view_configs
-            ],
+            'views': [{'light': v['light'], 'sample': v['sample'], 'state': v['state_val']} for v in self.view_configs],
+            'lights': [{'name': name, 'samples': n} for name, n in zip(self.lights, self.light_samples)],
+            'light_states': self.light_log,
             'ref_cube_res': self.cube_res,
             'min_px_threshold': self.min_px_threshold,
+            'island_percentile': self.island_percentile,
+            'step_limit': self.step_limit,
+            'ambient': self.ambient,
+            'step_limit_result': score['step_limit'],
+            'scale': score['scale'],
+            'brightest_face': score['brightest_face'],
             'total_faces': len(concat_scores),
             'total_surface_area_m2': float(np.sum(concat_areas)),
             'total_objects': len(obj_sums),
-            'never_seen_objects_count': nv_objs,
-            'undetermined_objects_count': undet_objs,
+            'never_seen_objects_count': sum(1 for o in obj_sums.values() if o['never_seen']),
+            'undetermined_objects_count': sum(1 for o in obj_sums.values() if o['undetermined']),
             'total_islands': len(isl_sums),
-            'never_seen_islands_count': nv_isls,
+            'never_seen_islands_count': sum(1 for isl in isl_sums.values() if isl['never_seen']),
             'total_never_seen_faces': tot_nv_faces,
             'total_never_seen_face_area_m2': tot_nv_area,
             'total_undetermined_faces': tot_udet_faces,
             'total_undetermined_face_area_m2': tot_udet_area,
-            'face_percentiles': {'p50': face_p50, 'p90': face_p90, 'p95': face_p95},
-            'island_percentiles': {'p50': isl_p50, 'p90': isl_p90, 'p95': isl_p95},
-            'resolved_counts': patch_res['resolved_counts'],
-            'glareshield_island_report': glareshield_rep,
+            'face_percentiles': {f'p{q}': weighted_percentile(concat_scores, concat_areas, q / 100.0) for q in (50, 90, 95)},
+            'island_percentiles': {f'p{q}': weighted_percentile(isl_scores, isl_areas, q / 100.0) for q in (50, 90, 95)},
+            'resolved_counts': score['resolved_counts'],
             'mesh_meta': self.mesh_meta,
             'mesh_arrays': self.mesh_arrays,
             'object_summaries': obj_sums,
@@ -1910,7 +1740,6 @@ class VisibilityAnalyzer:
             'object_eval_face_maps': self.object_eval_face_maps,
             'object_eval_face_counts': self.object_eval_face_counts,
         }
-        return results
 
     def cleanup(self):
         """Restore scene state, frame, actions and remove temporary attributes."""
@@ -1937,23 +1766,19 @@ class VisibilityAnalyzer:
                 pass
             self.off_cube = None
 
-        if self.off_frustum is not None:
-            try:
-                self.off_frustum.free()
-            except Exception:
-                pass
-            self.off_frustum = None
-
 
 def analyze_visibility(
     blend_path,
-    cameras=None,
+    lights,
     anim_states=(0.0, 0.25, 0.5, 0.75, 1.0),
     cube_res=1024,
-    frustum_res=(2560, 1440),
     min_px_threshold=10.0,
     scene=None,
     view_layer=None,
+    shadow_samples=4,
+    island_percentile=0.9,
+    step_limit=1.5,
+    ambient=0.1,
 ):
     """Synchronous execution of visibility analysis returning complete results dict."""
     scene = scene or bpy.context.scene
@@ -1962,12 +1787,15 @@ def analyze_visibility(
     analyzer = VisibilityAnalyzer(
         scene=scene,
         view_layer=view_layer,
-        cameras=cameras,
+        lights=lights,
         anim_states=anim_states,
         cube_res=cube_res,
-        frustum_res=frustum_res,
         min_px_threshold=min_px_threshold,
         blend_path=blend_path,
+        shadow_samples=shadow_samples,
+        island_percentile=island_percentile,
+        step_limit=step_limit,
+        ambient=ambient,
     )
 
     analyzer.prepare()
@@ -2037,8 +1865,9 @@ def get_object_visibility(obj, uv_name=None, vis_path=None, use_cache=True):
 
     face_undetermined = data.get(f"{safe_name}__face_undetermined", np.zeros(n_faces, dtype=bool))
     face_never_seen = data.get(f"{safe_name}__face_never_seen", np.zeros(n_faces, dtype=bool))
-    vis_omega = data.get(f"{safe_name}__vis_omega")
-    unocc_omega = data.get(f"{safe_name}__unocc_omega")
+    face_island_values = data.get(f"{safe_name}__face_island_values")
+    island_percentile = float(meta.get('island_percentile', 0.9))
+    ambient = float(meta.get('ambient', 0.0))
 
     # Extract UV islands under requested or active UV map
     island_ids = extract_mesh_uv_islands(me, uv_name=uv_name)
@@ -2065,18 +1894,13 @@ def get_object_visibility(obj, uv_name=None, vis_path=None, use_cache=True):
                 poly_area += 0.5 * np.linalg.norm(np.cross(e1, e2))
             orig_areas[i] = poly_area
 
-    ref_cube_res = meta.get('ref_cube_res', 1024)
-    min_px_thresh = meta.get('min_px_threshold', 10.0)
-    d_omega_px = 4.0 / (ref_cube_res * ref_cube_res)
-    omega_threshold = min_px_thresh * d_omega_px
-
     vis_data_ctx = {
         'stale': False,
         'face_scores': face_scores,
+        'face_island_values': face_island_values,
+        'island_percentile': island_percentile,
+        'ambient': ambient,
         'orig_areas': orig_areas,
-        'vis_omega': vis_omega,
-        'unocc_omega': unocc_omega,
-        'omega_threshold': omega_threshold,
     }
 
     island_values = {}
@@ -2101,22 +1925,25 @@ def get_object_visibility(obj, uv_name=None, vis_path=None, use_cache=True):
         'face_scores': face_scores,
         'face_undetermined': face_undetermined,
         'face_never_seen': face_never_seen,
-        'vis_omega': vis_omega,
-        'unocc_omega': unocc_omega,
+        'face_island_values': face_island_values,
+        'island_percentile': island_percentile,
+        'ambient': ambient,
         'orig_areas': orig_areas,
-        'omega_threshold': omega_threshold,
         'face_facing': data.get(f"{safe_name}__face_facing"),
     }
 
 
 def seen_share_face_set(vis_data, face_indices):
-    """The share of a face set's area that is seen in any view, 0 to 1 (seen as score_face_set counts it)."""
+    """The share of a face set's area that some probe light reaches, 0 to 1. Every face scores at least the Ambient
+    (decision 133), so the file's never-lit flags decide; without them, a score above 0."""
     faces = np.asarray(face_indices, dtype=np.int32)
     areas = vis_data['orig_areas'][faces]
     total = float(np.sum(areas))
     if total <= 0.0:
         return 1.0
-    return float(np.sum(areas[vis_data['face_scores'][faces] > 0.0]) / total)
+    never = vis_data.get('face_never_seen')
+    lit = ~np.asarray(never, dtype=bool)[faces] if never is not None else vis_data['face_scores'][faces] > 0.0
+    return float(np.sum(areas[lit]) / total)
 
 
 def facing_face_set(vis_data, face_indices):
@@ -2134,54 +1961,25 @@ def facing_face_set(vis_data, face_indices):
 
 
 def score_face_set(obj, face_indices, vis_data=None, vis_path=None, use_cache=True):
-    """Compute Decision 82 visibility score for an arbitrary set of original face indices.
-
-    Uses discrete sum ratio (visible solid angle / unoccluded solid angle) over seen faces,
-    or area-weighted average fallback if unoccluded solid angle is below threshold (10 reference pixels).
-    Falls back to 1.0 if visibility data is missing or stale.
-    """
+    """The visibility value of a set of faces (an island at pack time): the file's island percentile, by area, of the
+    island values its faces had when the file was written (decision 127, after the step limit of decision 128). For an
+    island unchanged since then this is its value. Without island values, the percentile of the face scores. 1.0 when
+    the visibility data is missing or stale."""
     if obj is None or obj.type != 'MESH' or not obj.data:
         return 1.0
-
     if vis_data is None:
         vis_data = get_object_visibility(obj, vis_path=vis_path, use_cache=use_cache)
-
     if vis_data.get('stale', True):
         return 1.0
-
     face_indices = np.asarray(face_indices, dtype=np.int32)
     if len(face_indices) == 0:
         return 0.0
-
-    face_scores = vis_data.get('face_scores')
+    values = vis_data.get('face_island_values')
+    if values is None:
+        values = vis_data.get('face_scores')  # data without island values: the percentile of the faces themselves
     orig_areas = vis_data.get('orig_areas')
-    if face_scores is None or orig_areas is None:
+    if values is None or orig_areas is None:
         return 1.0
-
-    vis_omega = vis_data.get('vis_omega')
-    unocc_omega = vis_data.get('unocc_omega')
-    omega_threshold = vis_data.get('omega_threshold', 10.0 * 4.0 / (1024 * 1024))
-
-    f_sc = face_scores[face_indices]
-    f_ar = orig_areas[face_indices]
-
-    seen_mask = (f_sc > 0.0)
-    seen_area = float(np.sum(f_ar[seen_mask]))
-    seen_faces = face_indices[seen_mask]
-
-    if seen_area > 0.0:
-        r4_avg = float(np.sum(f_sc[seen_mask] * f_ar[seen_mask]) / seen_area)
-        if unocc_omega is not None and vis_omega is not None:
-            seen_unocc = np.sum(unocc_omega[:, :, seen_faces], axis=-1)
-            max_seen_unocc = float(np.max(seen_unocc))
-            if max_seen_unocc >= omega_threshold:
-                seen_vis = np.sum(vis_omega[:, :, seen_faces], axis=-1)
-                valid = seen_unocc > 1e-12
-                ratio = np.where(valid, np.clip(seen_vis / np.maximum(seen_unocc, 1e-12), 0.0, 1.0), 0.0)
-                return float(np.max(ratio))
-            else:
-                return r4_avg
-        else:
-            return r4_avg
-    else:
-        return 0.0
+    return weighted_percentile(np.asarray(values, dtype=np.float64)[face_indices],
+                               np.asarray(orig_areas, dtype=np.float64)[face_indices],
+                               float(vis_data.get('island_percentile', 0.9)))
