@@ -32,7 +32,7 @@ while repo_root_str in sys.path:
 sys.path.insert(0, repo_root_str)
 
 import fss_blender_tools  # noqa: E402
-from fss_blender_tools import uv_marks, visibility_core  # noqa: E402
+from fss_blender_tools import merge, uv_marks, visibility_core  # noqa: E402
 
 fss_blender_tools.register()
 assert Path(uv_marks.__file__).resolve().is_relative_to(REPO_ROOT), uv_marks.__file__
@@ -457,11 +457,24 @@ def test_panel_visibility():
         # Islands: a never-lit island scores the file's Ambient, 0.1 (decision 133)
         assert '0.10 - 0.90' in labels and '3 islands' in labels, labels
         assert '2.07 - 25.09 px/cm' in labels, labels
-        # The Islands tick off: the islands count as fully visible, the number is still shown
+        # The object's sun highlighted (its switch off): the islands count as fully visible; the Islands row says so
         knob.fss_uv_use_visibility = False
-        _draw, labels = draw_packing()
-        assert '0.10 - 0.90' in labels and '20.74 - 27.88 px/cm' in labels, labels
+        draw, labels = draw_packing()
+        assert 'x1.00: object' in labels and '0.10 - 0.90' not in labels and '20.74 - 27.88 px/cm' in labels, labels
+        suns = [(args[0], kw) for name, args, kw in draw if name == 'prop' and args[1] == uv_marks.USE_VISIBILITY_PROP]
+        assert (knob, {'text': '', 'icon': uv_marks.VISIBILITY_ICON, 'invert_checkbox': True}) in suns, suns
         knob.fss_uv_use_visibility = True
+        # a parent's sun: everything below ignores visibility, nothing below can switch it back; its row is shown
+        parent = knob.parent
+        assert parent is not None, "the test needs a parent above KNOB"
+        parent.fss_uv_use_visibility = False
+        assert not uv_marks.uses_visibility(knob) and uv_marks.visibility_off_source(knob) == parent
+        _draw, labels = draw_packing()
+        assert f'x1.00: {parent.name}' in labels and '20.74 - 27.88 px/cm' in labels, labels
+        zone = merge.nearest_zone(knob.parent)
+        assert parent in uv_marks.parent_rows(knob, zone) or parent == zone
+        parent.fss_uv_use_visibility = True
+        assert uv_marks.uses_visibility(knob)
         # Visibility off on every material of the object: the same as the Islands tick off
         added = not uv_marks.object_materials(knob)
         if added:
@@ -472,13 +485,34 @@ def test_panel_visibility():
         for material in knob_materials:
             setattr(material, uv_marks.MATERIAL_VIS_PROP, False)
         _draw, labels = draw_packing()
-        assert '20.74 - 27.88 px/cm' in labels, labels
+        # the Islands row says the scores are not used, instead of showing them
+        assert '20.74 - 27.88 px/cm' in labels and 'x1.00: material' in labels and '0.10 - 0.90' not in labels, labels
+        # one material of two switched off: the scores stay, with a note (on a two-face object of its own)
+        for material in knob_materials:
+            setattr(material, uv_marks.MATERIAL_VIS_PROP, True)
+        two = bpy.data.objects.new('TWO_MATS', bpy.data.meshes.new('TWO_MATS'))
+        two.data.from_pydata([(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (2, 0, 0), (2, 1, 0)], [],
+                             [(0, 1, 2, 3), (1, 4, 5, 2)])
+        mat_a, mat_b = bpy.data.materials.new('TWO_A'), bpy.data.materials.new('TWO_B')
+        two.data.materials.append(mat_a)
+        two.data.materials.append(mat_b)
+        two.data.polygons[1].material_index = 1
+        bpy.context.scene.collection.objects.link(two)
+        bpy.context.view_layer.objects.active = two
+        setattr(mat_a, uv_marks.MATERIAL_VIS_PROP, False)
+        _draw, labels = draw_packing()
+        assert any(label and 'x1.00 on 1 material' in label for label in labels), labels
+        setattr(mat_b, uv_marks.MATERIAL_VIS_PROP, False)
+        _draw, labels = draw_packing()
+        assert 'x1.00: material' in labels and not any(label and 'x1.00 on' in label for label in labels), labels
+        bpy.data.objects.remove(two)
+        bpy.context.view_layer.objects.active = knob
         for material in knob_materials:
             setattr(material, uv_marks.MATERIAL_VIS_PROP, True)
         if added:
             knob.data.materials.pop()
         draw_packing()
-        assert calls == ['KNOB'], f"a redraw scored the islands again: {calls}"
+        assert calls.count('KNOB') == 1, f"a redraw scored the islands again: {calls}"  # TWO_MATS once too
         answer.update(never_seen=True, object_score=0.1)
         uv_marks._vis_cache.clear()
         _draw, labels = draw_packing()
@@ -489,7 +523,8 @@ def test_panel_visibility():
         assert 'no data' in labels, labels
     finally:
         visibility_core.get_object_visibility = real
-    print("PASS: test_panel_visibility (islands 0.10-0.90, Result 2.07 - 25.09, the tick, cached across redraws)")
+    print("PASS: test_panel_visibility (islands 0.10-0.90, Result 2.07 - 25.09, the suns of object, parent and "
+          "material, cached across redraws)")
 
 
 def test_visibility_floor():

@@ -33,7 +33,7 @@ from .tags import _editable
 # On an object: the own density mark, a factor range [min, max] (one factor when min == max)
 OWN_PROP = 'fss_uv_density_own'  # the row's tick: unticked, the factor stays but is ignored (decision 139)
 FACTOR_PROP = 'fss_uv_density_factor'  # the table's field: one factor, read from and written to Min and Max
-USE_VISIBILITY_PROP = 'fss_uv_use_visibility'  # the Islands row's tick: unticked, the object's islands ignore visibility
+USE_VISIBILITY_PROP = 'fss_uv_use_visibility'  # off on an object or any parent or zone: its islands ignore visibility
 MIN_PROP = 'fss_uv_density_min'
 MAX_PROP = 'fss_uv_density_max'
 DIRECTION_KEY = 'fss_uv_direction'
@@ -42,7 +42,8 @@ SKIP_AUTOSEAM_KEY = 'fss_uv_skip_autoseam'
 KEEP_UVS_PROP = 'fss_uv_keep_uvs'  # on a material: its texture set is not packed (decision 116)
 MATERIAL_FACTOR_PROP = 'fss_uv_material_density'  # on a material: the density factor of all its islands (decision 146)
 MATERIAL_TICK_PROP = 'fss_uv_material_density_use'  # the Material row's tick: unticked, the factor stays but is ignored
-MATERIAL_VIS_PROP = 'fss_uv_material_use_visibility'  # the Material row's Visibility: off, its islands ignore visibility
+MATERIAL_VIS_PROP = 'fss_uv_material_use_visibility'  # off on a material: its islands ignore visibility, on all objects
+VISIBILITY_ICON = 'LIGHT_SUN'  # the table's switch, highlighted while it is off: the islands count as fully lit
 SIZE_PROP = 'fss_uv_texture_size'  # on a material: the square texture size (decision 120)
 OVERRIDE_KEY = 'fss_uv_island_multiplier'  # a face attribute: the island's multiplier set by hand, 0 for none
 # Before 0.31.0, read only to migrate: the density mark [min, max] (a custom property; the nearest marked ancestor
@@ -87,10 +88,12 @@ TABLE_ICONS = {'SCENE': 'SCENE_DATA', 'ZONE': 'OUTLINER_OB_EMPTY', 'PARENT': 'OR
 TABLE_HINTS = {
     'SCENE': 'Scene: the target density and the freedom the packer has around it, for everything',
     'ZONE': 'Zone: its factor and direction apply to everything in the zone',
-    'PARENT': 'Parent: the direct parent, or a parent with a density mark. Its factor and direction apply to everything below it',
+    'PARENT': 'Parent: the direct parent, or a parent with a density mark or a highlighted sun. Its factor, sun and '
+              'direction apply to everything below it',
     'MATERIAL': 'Material: its factor applies to every island with this material, on all objects',
     'OBJECT': 'Object: the active object',
-    'ISLANDS': "Islands: the range of the visibility multipliers of this object's islands",
+    'ISLANDS': "Islands: the range of the visibility multipliers of this object's islands; x1.00 and the row's name "
+               "when a highlighted sun above makes them ignore Visibility Scoring",
 }
 PANEL_PADDING, LIST_PADDING, BUTTON_PADDING = 56, 30, 14  # pixels at UI scale 1: what the panel, a list and a button take
 BAR_SPAN = 2.0  # the density bar runs from 0 to this x the target density, so the target mark stays in the middle
@@ -280,9 +283,20 @@ def texture_size(material):
     return int(getattr(material, SIZE_PROP, DEFAULT_TEXTURE))
 
 
+def visibility_off_source(obj):
+    """The object, parent or zone whose switch makes obj's islands ignore visibility, the nearest first; None when
+    every switch from obj up is on. Off anywhere above wins: nothing below can switch it back on."""
+    while obj is not None:
+        if not getattr(obj, USE_VISIBILITY_PROP, True):
+            return obj
+        obj = obj.parent
+    return None
+
+
 def uses_visibility(obj):
-    """False when the artist unticked the Islands row of this object: its islands count as fully visible."""
-    return getattr(obj, USE_VISIBILITY_PROP, True)
+    """False when the switch of the object or of any parent or zone above it is off: its islands count as fully
+    visible (x1.00)."""
+    return visibility_off_source(obj) is None
 
 
 def material_uses_visibility(material):
@@ -758,7 +772,8 @@ def _no_tick(cell, kind):
 
 
 def _draw_mark_row(context, layout, kind, obj, title=None):
-    """A row of the table: the tick, the object's factor, its direction and a button that selects it."""
+    """A row of the table: the tick, the object's factor, its visibility switch and direction, and a button that
+    selects it."""
     tick, value, turn, name = _cells(layout, VALUE_COLUMN, DIRECTION_COLUMN, NAME_COLUMN)
     tick.prop(obj, OWN_PROP, text='')
     _hint_icon(tick, kind)
@@ -769,20 +784,22 @@ def _draw_mark_row(context, layout, kind, obj, title=None):
         value.prop(obj, MAX_PROP, text='')
     else:
         value.prop(obj, FACTOR_PROP, text='')
+    turn.prop(obj, USE_VISIBILITY_PROP, text='', icon=VISIBILITY_ICON, invert_checkbox=True)
     turn.prop(obj, DIRECTION_MARK_PROP, text='')
     text = _fitted(context, title or obj.name, (1.0 - TICK_COLUMN) * NAME_COLUMN)
     name.operator(FSS_OT_UvSelectObject.bl_idname, text=text).target = obj.name
 
 
 def _draw_material_row(context, layout, material):
-    """A Material row: as _draw_mark_row, with the material's Visibility switch where a mark row has its direction;
-    the name selects the objects that use the material."""
+    """A Material row: as _draw_mark_row, with the visibility switch and no direction; the name selects the objects
+    that use the material."""
     tick, value, visible, name = _cells(layout, VALUE_COLUMN, DIRECTION_COLUMN, NAME_COLUMN)
     tick.prop(material, MATERIAL_TICK_PROP, text='')
     _hint_icon(tick, 'MATERIAL')
     value.enabled = getattr(material, MATERIAL_TICK_PROP)
     value.prop(material, MATERIAL_FACTOR_PROP, text='')
-    visible.prop(material, MATERIAL_VIS_PROP, text='Visibility', toggle=True)
+    visible.prop(material, MATERIAL_VIS_PROP, text='', icon=VISIBILITY_ICON, invert_checkbox=True)
+    visible.label(text='')  # keeps the switch as small as on the other rows
     text = _fitted(context, material.name, (1.0 - TICK_COLUMN) * NAME_COLUMN)
     name.operator('fss.materials_select', text=text).material = material.name
 
@@ -797,12 +814,14 @@ def _draw_absent_row(layout, kind, text):
 
 
 def parent_rows(obj, zone):
-    """The parents the table shows, topmost first: the direct parent and every one with a density mark up to the zone
-    (without it). A mark is a number other than 1.00, ticked or not: an unticked one needs its row to be ticked again."""
+    """The parents the table shows, topmost first: the direct parent and every one with a density mark or with its
+    visibility switched off, up to the zone (without it). A mark is a number other than 1.00, ticked or not: an
+    unticked one needs its row to be ticked again."""
     rows = []
     parent = obj.parent
     while parent is not None and parent != zone:
-        if parent == obj.parent or _stored_range(parent) != (1.0, 1.0):
+        if (parent == obj.parent or _stored_range(parent) != (1.0, 1.0)
+                or not getattr(parent, USE_VISIBILITY_PROP, True)):
             rows.append(parent)
         parent = parent.parent
     return rows[::-1]
@@ -879,16 +898,28 @@ def _draw_table(layout, context, scene, obj):
     _draw_mark_row(context, table, 'OBJECT', obj)
     summary = _object_visibility(obj)
     wm = context.window_manager
+    # the Islands row only shows: the switches are on the rows above. Off there, the scores are not used
+    source = visibility_off_source(obj)
+    off = [material for material in materials if not material_uses_visibility(material)]
+    all_off = bool(materials) and len(off) == len(materials)
     tick, value, rest = _cells(table, VALUE_COLUMN, 1.0 - VALUE_COLUMN)
-    tick.prop(obj, USE_VISIBILITY_PROP, text='')
+    tick.label(text='', icon='BLANK1')
     tick.prop(wm, 'fss_uv_islands_open', text='', emboss=False,
               icon='TRIA_DOWN' if wm.fss_uv_islands_open else 'TRIA_RIGHT')
-    value.active = uses_visibility(obj)
-    value.label(text=_island_text(summary))
+    value.active = source is None and not all_off
+    if source is not None:
+        value.label(text='x1.00: object' if source == obj else f'x1.00: {source.name}')
+    elif all_off:
+        value.label(text='x1.00: material')
+    else:
+        value.label(text=_island_text(summary))
     count = uv_islands.listed_count(obj, wm)
     count = summary.get('count') if count is None else count
     _hint_icon(rest, 'ISLANDS')
-    rest.label(text='' if count is None else f"{count} island{'' if count == 1 else 's'}")
+    text = '' if count is None else f"{count} island{'' if count == 1 else 's'}"
+    if off and not all_off and source is None:
+        text += f"{', ' if text else ''}x1.00 on {len(off)} material{'' if len(off) == 1 else 's'}"
+    rest.label(text=text)
     box.separator(factor=0.5, type='LINE')
     (a, b), islands = result_range(obj, scene, summary)
     low, high = islands or (a, b)
@@ -1547,8 +1578,11 @@ def register():
         name='Density Factor', get=_get_factor, set=_set_factor,
         description='Texel density factor of this row, used when its tick is on (Alt: all selected objects)', **factor)
     bpy.types.Object.fss_uv_use_visibility = bpy.props.BoolProperty(
-        name='Use Visibility', default=True, update=_marks_changed,
-        description="Use the visibility of this object's islands. Unticked, they count as fully visible (x1.00)")
+        name='Ignore Visibility Scoring', default=True, update=_marks_changed,
+        description='Highlighted: the islands of this object and of everything below it ignore Visibility Scoring and '
+                    'count as fully lit (x1.00), so they all get the same density. A highlighted row above wins: '
+                    'nothing below can switch it back. Not highlighted: their visibility scores are used '
+                    '(Alt: all selected objects)')
     bpy.types.Object.fss_uv_direction_mark = bpy.props.EnumProperty(
         name='Island Direction', items=DIRECTIONS, get=_get_direction_mark, set=_set_direction_mark,
         description='How the islands may rotate when packed; everything below that is Free takes it too '
@@ -1593,9 +1627,10 @@ def register():
         description='Texel density factor of every island with this material, on all objects, used when its tick is on',
         **factor))
     setattr(bpy.types.Material, MATERIAL_VIS_PROP, bpy.props.BoolProperty(
-        name='Use Visibility', default=True, update=_marks_changed,
-        description="Use the visibility of the islands with this material, on every object. Off, they count as fully "
-                    "visible (x1.00), whatever the objects' Islands tick says"))
+        name='Ignore Visibility Scoring', default=True, update=_marks_changed,
+        description='Highlighted: every island with this material, on all objects, ignores Visibility Scoring and '
+                    'counts as fully lit (x1.00), so they all get the same density. Not highlighted: their visibility '
+                    'scores are used, unless a zone, parent or object row above is highlighted'))
     bpy.types.WindowManager.fss_uv_pack_active_name = bpy.props.StringProperty(name='Active Texture Set')
     bar_tips = {'TRACK': 'From 0 to twice the target density', 'RANGE': 'The range of the density of this object',
                 'MARK': 'The target density of the scene'}
