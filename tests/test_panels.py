@@ -1,6 +1,6 @@
 """The FSS sidebar layout of material-management decision 16: the tab FSS MSFS Tools with the top-level panels in
 pipeline order (Zones & Merge Tree, Materials with By Texture Need, Tags, Object LOD, Viewport LOD, LOD Settings with its
-subpanels (decision 22), UV Auto Seam, UV Auto Packing (decision 26)), the tab FSS Tools with General, Empty Bounds, Heatmap, Checks (top-level, closed by default), Packing in the
+subpanels (decision 22), UV Auto Seam, UV Auto Packing (decision 26), AO Bake (auto-bake journal, decision 29)), the tab FSS Tools with General, Empty Bounds, Heatmap, Checks (top-level, closed by default), Packing in the
 UV editor's FSS MSFS Tools tab too, no other tab, and every panel drawing without errors. Object LOD draws the
 selection, the active object's mark, "mixed" and the number row only for Hidden from / Visible from, without writing.
 
@@ -54,6 +54,7 @@ EXPECTED = {
     'FSS_PT_visibility': ("Visibility Scoring", 'FSS_PT_uv_marks', 0, MSFS),
     'FSS_PT_uv_marks_results': ("Check Results", 'FSS_PT_uv_marks', 0, MSFS),
     'FSS_PT_uv_marks_advanced': ("Advanced", 'FSS_PT_uv_marks', 1, MSFS),
+    'FSS_PT_ao_bake': ("AO Bake", '', 8, MSFS),
     'FSS_PT_tools': ("General", '', 0, TOOLS),
     'FSS_PT_empty_bounds': ("Empty Bounds", '', 1, TOOLS),
     'FSS_PT_uv_heatmap': ("Heatmap", '', 2, TOOLS),
@@ -94,11 +95,11 @@ def test_layout():
     # The group panel Utilities stays gone (decisions 15 and 16)
     assert not [cls for cls in panels.values() if cls.bl_label == 'Utilities']
     # Two tabs: no panel of the add-on elsewhere, and top-level orders without gaps or doubles in each tab
-    # (FSS MSFS Tools 0..7, FSS Tools 0..3)
+    # (FSS MSFS Tools 0..8, FSS Tools 0..3)
     other_tabs = sorted((idname, cls.bl_category) for idname, cls in panels.items()
                         if cls.bl_category not in (MSFS, TOOLS))
     assert not other_tabs, other_tabs
-    for category, count in ((MSFS, 8), (TOOLS, 4)):
+    for category, count in ((MSFS, 9), (TOOLS, 4)):
         orders = sorted(getattr(cls, 'bl_order', 0) for idname, cls in panels.items()
                         if cls.bl_space_type == 'VIEW_3D' and not getattr(cls, 'bl_parent_id', '')
                         and cls.bl_category == category)
