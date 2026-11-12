@@ -46,6 +46,7 @@ from ..utils.msfs_material_utils import MSFS2024_MaterialProperties
 from ..utils.msfs_constants import DefaultUV
 
 from .msfs_material_ope import MSFS2024_OT_SetPbrTextureSet
+from ... import material_preview  # FSS
 
 class MSFS2024_Material:
     bl_idname = "MSFS2024_ShaderNodeTree"
@@ -268,6 +269,7 @@ class MSFS2024_Material:
 
         if (omr_tex_node.image or detail_omr_tex_node.image):
             link(self.links, omr_group_node.outputs[2], apply_ao_group_node.inputs[1])
+        material_preview.apply_occlusion_strength(self)  # FSS: Occlusion Strength in the preview
 
     def _update_emissive_links(self):
         emissive_tex_node = get_node_by_name(self.nodes, MSFS2024_ShaderNodes.EMISSIVETEX.value)

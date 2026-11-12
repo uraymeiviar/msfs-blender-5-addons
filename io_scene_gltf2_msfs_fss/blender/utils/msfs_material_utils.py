@@ -212,7 +212,8 @@ class MSFS2024_MaterialProperties(MSFS2024_Enum_Properties):
     DECALBLENDMASKTEXTURE = "Decal Blend Mask Texture", None, "msfs_decal_blend_mask_texture", "blendMaskTexture"
     DECALMELTROUGHNESSMETALLICTEXTURE = "Melt Pattern (R) Roughness (G) Metallic (B)", None, "msfs_detail_occlusion_metallic_roughness_texture", "detailMetalRoughAOTexture"
 
-    CLEARCOATCOLORROUGHNESSTEXTURE = "Clearcoat amount (R), Clearcoat rough (G)", None, "msfs_clearcoat_color_roughness_texture", "clearcoatColorRoughnessTexture"
+    # FSS: label of the MSFS 2024 layout (SDK); Asobo: "Clearcoat amount (R), Clearcoat rough (G)"
+    CLEARCOATCOLORROUGHNESSTEXTURE = "Clearcoat Color (RGB), Clearcoat Roughness (A)", None, "msfs_clearcoat_color_roughness_texture", "clearcoatColorRoughnessTexture"
     CLEARCOATNORMALTEXTURE = "Clearcoat Normal", None, "msfs_clearcoat_normal_texture", "clearcoatNormalTexture"
 
     FRONTGLASSCOLORTEXTURE = "Front Glass Color Texture", None, "msfs_base_color_texture", None

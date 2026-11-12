@@ -29,8 +29,9 @@ from ..utils.msfs_material_utils import (
     MSFS2024_MaterialUtilsUI
 )
 from .msfs_material import MSFS2024_Material
+from ... import anisotropic_preview, material_preview  # FSS
 
-class MSFS2024_Clearcoat(MSFS2024_Material):
+class MSFS2024_Clearcoat(material_preview.ClearcoatPreviewMixin, MSFS2024_Material):  # FSS: mixin
 
     attributes = [
         MSFS2024_MaterialProperties.BASECOLOR,
@@ -187,6 +188,7 @@ class MSFS2024_Clearcoat(MSFS2024_Material):
                 principled_bsdf_node, 
                 MSFS2024_PrincipledBSDFInputs.CLEARCOATROUGHNESS.value
             )
+        material_preview.sync(self)  # FSS
 
     def set_clearcoat_normal_tex(self, image:bpy.types.Image | None): 
         ## TODO - Update shader node tree for clearcoat -> Lucas ?
@@ -212,6 +214,7 @@ class MSFS2024_Clearcoat(MSFS2024_Material):
                 principled_bsdf_node, 
                 MSFS2024_PrincipledBSDFInputs.CLEARCOATNORMAL.value
             )
+        material_preview.sync(self)  # FSS
 
     #endregion
     
@@ -528,6 +531,7 @@ class MSFS2024_Clearcoat(MSFS2024_Material):
             prop=MSFS2024_MaterialProperties.CLEARCOATNORMALTEXTURE.attribute_name(),
             text=MSFS2024_MaterialProperties.CLEARCOATNORMALTEXTURE.property_name()
         )
+        anisotropic_preview.draw_update_operator(box, material, always=True)  # FSS
         
         ## Wear Albedo (RGB) Mask (A)
         MSFS2024_MaterialUtilsUI.draw_wear_albedo_mask_texture_prop(

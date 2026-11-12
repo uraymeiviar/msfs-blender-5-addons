@@ -18,6 +18,7 @@ from io_scene_gltf2.io.com.gltf2_io_extensions import Extension
 
 from .....blender.utils.msfs_material_utils import MSFS2024_MaterialProperties
 from .....io.com.msfs_material_utils import MSFS2024_MaterialUtils
+from ..... import material_preview  # FSS
 
 
 class AsoboOcclusionStrengthExtension:
@@ -65,7 +66,8 @@ def register():
         min=0.0,
         max=2.0,
         default=MSFS2024_MaterialProperties.OCCLUSIONSTRENGTH.default_value(),
-        precision=3
+        precision=3,
+        update=material_preview.update_occlusion_strength,  # FSS
     )
 
 def unregister():

@@ -437,9 +437,9 @@ class MSFS_FSS_OT_update_material_nodes(bpy.types.Operator):
     bl_idname = "msfs_fss.update_material_nodes"
     bl_label = "Update Material Nodes"
     bl_description = (
-        "Update the preview nodes of every Anisotropic and Hair material in this file, so their anisotropic texture "
-        "shows in Material Preview and Rendered views. Materials saved before this feature need it once. "
-        "Exports do not change"
+        "Update the preview nodes of every MSFS material in this file: the anisotropic texture of Anisotropic and Hair "
+        "materials, the coat of Clearcoat materials and the Occlusion Strength, in Material Preview and Rendered "
+        "views. Materials saved before these previews need it once. Exports do not change"
     )
     bl_options = {"REGISTER", "UNDO"}
 
@@ -454,10 +454,14 @@ class MSFS_FSS_OT_update_material_nodes(bpy.types.Operator):
             image = getattr(material, _IMAGE_ATTRIBUTE)
             msfs_material.set_aniso_tex(image)
             updated += image is not None
-        self.report({"INFO"}, f"Updated the preview nodes of {updated} material(s) with an anisotropic texture")
+        from . import material_preview
+
+        coats = material_preview.update_all(bpy.data.materials)
+        self.report({"INFO"}, f"Updated the preview nodes of {updated} material(s) with an anisotropic texture "
+                              f"and {coats} Clearcoat material(s)")
         return {"FINISHED"}
 
 
-def draw_update_operator(layout, material):
-    if getattr(material, _IMAGE_ATTRIBUTE) is not None:
+def draw_update_operator(layout, material, always=False):
+    if always or getattr(material, _IMAGE_ATTRIBUTE) is not None:
         layout.operator(MSFS_FSS_OT_update_material_nodes.bl_idname)

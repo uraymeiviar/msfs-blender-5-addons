@@ -23,6 +23,7 @@ from .....blender.utils.msfs_material_utils import (
     MSFS2024_MaterialTypes
 )
 from .....io.com.msfs_material_utils import MSFS2024_MaterialUtils
+from ..... import material_preview  # FSS
 
 
 class AsoboClearcoatExtension:
@@ -166,6 +167,7 @@ class AsoboClearcoatExtension:
 def update_inverse_clearcoat_roughness(self, context):
     if not self.msfs_clearcoat_inverse_roughness:
         self.msfs_clearcoat_base_roughness = MSFS2024_MaterialProperties.CLEARCOATBASEROUGHNESS.default_value()
+    material_preview.update_clearcoat(self, context)  # FSS
              
 def register():
     # region Extension Parameters
@@ -173,28 +175,32 @@ def register():
         name=MSFS2024_MaterialProperties.CLEARCOATROUGHNESSFACTOR.property_name(),
         min=0.0,
         max=1.0,
-        default=MSFS2024_MaterialProperties.CLEARCOATROUGHNESSFACTOR.default_value()
+        default=MSFS2024_MaterialProperties.CLEARCOATROUGHNESSFACTOR.default_value(),
+        update=material_preview.update_clearcoat,  # FSS
     )
 
     bpy.types.Material.msfs_clearcoat_normal_factor = bpy.props.FloatProperty(
         name=MSFS2024_MaterialProperties.CLEARCOATNORMALFACTOR.property_name(),
         min=0.0,
         max=1.0,
-        default=MSFS2024_MaterialProperties.CLEARCOATNORMALFACTOR.default_value()
+        default=MSFS2024_MaterialProperties.CLEARCOATNORMALFACTOR.default_value(),
+        update=material_preview.update_clearcoat,  # FSS
     )
 
     bpy.types.Material.msfs_clearcoat_color_roughness_tiling = bpy.props.FloatProperty(
         name=MSFS2024_MaterialProperties.CLEARCOATCOLORROUGHNESSTILING.property_name(),
         min=0.0,
         max=1000.0,
-        default=MSFS2024_MaterialProperties.CLEARCOATCOLORROUGHNESSTILING.default_value()
+        default=MSFS2024_MaterialProperties.CLEARCOATCOLORROUGHNESSTILING.default_value(),
+        update=material_preview.update_clearcoat,  # FSS
     )
 
     bpy.types.Material.msfs_clearcoat_normal_tiling = bpy.props.FloatProperty(
         name=MSFS2024_MaterialProperties.CLEARCOATNORMALTILING.property_name(),
         min=0.0,
         max=1000.0,
-        default=MSFS2024_MaterialProperties.CLEARCOATNORMALTILING.default_value()
+        default=MSFS2024_MaterialProperties.CLEARCOATNORMALTILING.default_value(),
+        update=material_preview.update_clearcoat,  # FSS
     )
 
     bpy.types.Material.msfs_clearcoat_inverse_roughness = bpy.props.BoolProperty(
@@ -208,13 +214,15 @@ def register():
         name=MSFS2024_MaterialProperties.CLEARCOATBASEROUGHNESS.property_name(),
         min=0.0,
         max=1.0,
-        default=MSFS2024_MaterialProperties.CLEARCOATBASEROUGHNESS.default_value()
+        default=MSFS2024_MaterialProperties.CLEARCOATBASEROUGHNESS.default_value(),
+        update=material_preview.update_clearcoat,  # FSS
     )
 
     bpy.types.Material.msfs_base_normal_affect_coat = bpy.props.BoolProperty(
         name=MSFS2024_MaterialProperties.BASE_NORMAL_AFFECT_COAT.property_name(),
         default=MSFS2024_MaterialProperties.BASE_NORMAL_AFFECT_COAT.default_value(),
-        description="This used to determine if the base normal affect or not the normal coat"
+        description="This used to determine if the base normal affect or not the normal coat",
+        update=material_preview.update_clearcoat,  # FSS
     )
     # endregion
 
