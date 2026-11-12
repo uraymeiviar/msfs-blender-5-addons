@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bake_common as bc  # noqa: E402
 import bake_copy as bcp  # noqa: E402
 import bake_geom as bg  # noqa: E402
+import bake_layouts as bl  # noqa: E402
 
 args = dict(a.split('=', 1) for a in (sys.argv[sys.argv.index('--') + 1:] if '--' in sys.argv else []))
 tag = args.get('tag', 'panel')
@@ -65,79 +66,7 @@ DM = float(mz['density'])
 bc.log(f'{tag}: {info["target"]}, {len(tris)} tris, texture {S}, master {mW}x{mH} at {DM:.1f} px/m', LOG)
 
 
-def pack(uvpx, isl, sep=2 * PAD, width=None):
-    """Shelf-pack islands (no rotation, no scaling); returns new uvpx."""
-    out = uvpx.copy()
-    ids = np.unique(isl)
-    boxes = []
-    for i in ids:
-        P = uvpx[isl == i].reshape(-1, 2)
-        lo, hi = P.min(axis=0), P.max(axis=0)
-        boxes.append((i, lo, hi - lo))
-    width = width or S
-    width = max(width, int(math.ceil(max(b[2][0] for b in boxes))) + sep)
-    boxes.sort(key=lambda b: (-b[2][1], -b[2][0], b[0]))
-    x = y = shelf = 0
-    for i, lo, ext in boxes:
-        w_, h_ = int(math.ceil(ext[0])) + sep, int(math.ceil(ext[1])) + sep
-        if x + w_ > width:
-            x, y, shelf = 0, y + shelf, 0
-        out[isl == i] = uvpx[isl == i] - lo + np.array([x + PAD, y + PAD])
-        x += w_
-        shelf = max(shelf, h_)
-    return out
-
-
-def transform_islands(uvpx, isl, scale=1.0, angle=0.0):
-    out = uvpx.copy()
-    c, s = math.cos(math.radians(angle)), math.sin(math.radians(angle))
-    R = np.array([[c, -s], [s, c]]) * scale
-    for i in np.unique(isl):
-        P = uvpx[isl == i]
-        flat = P.reshape(-1, 2)
-        ctr = (flat.min(axis=0) + flat.max(axis=0)) / 2
-        out[isl == i] = (P - ctr) @ R.T + ctr
-    return out
-
-
-def smart_uv():
-    dup = target.copy()
-    dup.data = target.data.copy()
-    bpy.context.scene.collection.objects.link(dup)
-    layer = dup.data.uv_layers.new(name='SMART')
-    dup.data.uv_layers.active = layer
-    for o in bpy.context.view_layer.objects:
-        o.select_set(False)
-    dup.select_set(True)
-    bpy.context.view_layer.objects.active = dup
-    bpy.ops.object.mode_set(mode='EDIT')
-    bpy.ops.mesh.select_all(action='SELECT')
-    bpy.ops.uv.smart_project(angle_limit=math.radians(66.0), island_margin=0.0, scale_to_bounds=False)
-    bpy.ops.object.mode_set(mode='OBJECT')
-    _, _, _, u2 = bc.mesh_arrays(dup.data)
-    bpy.data.objects.remove(dup)
-    return u2['SMART']
-
-
-isl_a = bg.uv_islands(wt, uv0)
-layouts = {}
-base = uv0 * S
-med_a = bg.weighted_median(bg.densities(pos, tris, base)[a3 > 0], a3[a3 > 0])
-if 'a' in LAYOUTS:
-    layouts['a'] = (base, S, isl_a)
-if 'b' in LAYOUTS:
-    layouts['b'] = (pack(transform_islands(base, isl_a, angle=37.0), isl_a), S, isl_a)
-for key, sc in (('c', 0.5), ('d', 1.9), ('e', 2.5)):
-    if key in LAYOUTS:
-        layouts[key] = (pack(transform_islands(base, isl_a, scale=sc), isl_a, width=int(S * max(sc, 1))), S, isl_a)
-if 'f' in LAYOUTS:
-    su = smart_uv()
-    isl_f = bg.uv_islands(wt, su)
-    d_f = bg.weighted_median(bg.densities(pos, tris, su * S)[a3 > 0], a3[a3 > 0])
-    layouts['f'] = (pack(su * S * (med_a / d_f), isl_f), S, isl_f)
-if 'g' in LAYOUTS:
-    layouts['g'] = (uv0 * (S // 4), S // 4, isl_a)
-
+layouts, med_a = bl.make_layouts(target, pos, tris, wt, uv0, S, PAD, LAYOUTS)
 
 def stats(d):
     if d.size == 0:
