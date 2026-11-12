@@ -16,6 +16,8 @@ Run (CPU wrapper, no blend file):
 Island join order: order=growlen (default; see bake_unfold.py).
 mirror_open=1 (P15, Session 6): open mesh edges get the face itself mirrored as skirt; suffix=<s> names the output
 master_<tag><s>.
+fold_split=30 (P18, Session 8): islands are never joined across folds over 30 degrees, and such split edges get the
+face itself mirrored as skirt (bake_unfold.build_master).
 """
 import hashlib
 import json
@@ -38,6 +40,7 @@ GUTTER = int(args.get('gutter', 2))
 ORDER = args.get('order', 'growlen')
 MIRROR_OPEN = args.get('mirror_open', '0') == '1'  # P15: mirrored skirt beyond open mesh edges
 SUFFIX = args.get('suffix', '')  # output name master_<tag><suffix>, so earlier masters stay
+FOLD_SPLIT = float(args['fold_split']) if 'fold_split' in args else None  # P18: split islands at folds over (deg)
 OUT = os.path.join(bc.WORK, 'master')
 os.makedirs(OUT, exist_ok=True)
 LOG = os.path.join(OUT, f'master_{tag}{SUFFIX}.log.txt')
@@ -57,12 +60,13 @@ bc.log(f'{tag}: {info["target"]}, {len(tris)} tris, layout (a) median density {m
        f'master density {D:.1f} px/m', LOG)
 
 t = time.time()
-m = bu.build_master(pos, tris, cn, D, gutter=GUTTER, order=ORDER, mirror_open=MIRROR_OPEN)
+m = bu.build_master(pos, tris, cn, D, gutter=GUTTER, order=ORDER, mirror_open=MIRROR_OPEN, fold_split=FOLD_SPLIT)
 t_build = time.time() - t
 chk = bu.check_master(pos, tris, m)
 bc.log(f'  master {m["W"]}x{m["H"]} px, {m["n_islands"]} islands, {len(m["skirt_pos"])} skirt pieces, '
        f'{m["n_border_edges"]} border edges ({m["n_border_without_neighbour"]} without neighbour, '
-       f'{m["n_mirrored"]} mirrored), '
+       f'{m["n_mirrored"]} mirrored; fold split {FOLD_SPLIT}: {m["n_mirrored_fold"]} mirrored at folds, '
+       f'{m["n_fold_inner_cut"]} continuous fold half-edges cut), '
        f'degenerate faces {int(m["degenerate"].sum())}, rejected joins {m["rejected"]}, built in {t_build:.2f} s', LOG)
 bc.log(f'  check: {chk}', LOG)
 
@@ -216,11 +220,12 @@ np.savez_compressed(npz, muv=m['muv'], island=m['island'], density=D, W=W, H=H, 
                     gutter=GUTTER, degenerate=m['degenerate'], filled=(M >= 0), face_map=face_map.astype(np.int32),
                     meta=json.dumps(dict(schema=1, tag=tag, target=info['target'], mesh_fingerprint=fp,
                                          ao_distance=bc.AO_DISTANCE, samples=N, seeds=[11, 12],
-                                         order=ORDER, mirror_open=MIRROR_OPEN, bake='selected-to-active from the target, extrusion %g m' % EXTRUSION,
+                                         order=ORDER, mirror_open=MIRROR_OPEN, fold_split=FOLD_SPLIT, bake='selected-to-active from the target, extrusion %g m' % EXTRUSION,
                                          layout_a_median_density=median_d, texture_size=S)))
 res = dict(tag=tag, order=ORDER, target=info['target'], tris=int(len(tris)), median_density_a=median_d, master_density=D,
            W=W, H=H, n_islands=m['n_islands'], skirt_pieces=int(ns), border_edges=m['n_border_edges'],
            border_without_neighbour=m['n_border_without_neighbour'], mirrored=m['n_mirrored'],
+           fold_split=FOLD_SPLIT, mirrored_fold=m['n_mirrored_fold'], fold_inner_cut_half_edges=m['n_fold_inner_cut'],
            mirror_open=MIRROR_OPEN, degenerate=int(m['degenerate'].sum()),
            rejected=m['rejected'], check=chk, side=side, compose=comp, times=dict(times, build_s=t_build),
            png_bytes=os.path.getsize(png), npz_bytes=os.path.getsize(npz), samples=N,

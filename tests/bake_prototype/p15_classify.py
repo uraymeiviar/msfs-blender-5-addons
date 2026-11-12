@@ -14,7 +14,7 @@ makes the layouts again (bake_layouts.py, deterministic). Classes of a pixel (se
 Sets: wrong (inside, |copy - GT| > 0.1) in the `classify` layouts, and the seam band.
 For the `measure` layouts it also measures copy and direct against GT on the inside pixels that Cycles counts as
 inside (MAE, P99, max, seam / interior), next to Session 2's figures on all inside pixels.
-Writes p15_classify.json and p15_classify.log.txt into that folder.
+Writes p15_classify.json and p15_classify.log.txt into that folder (name=<base> to change the name).
 """
 import json
 import math
@@ -39,7 +39,8 @@ DIST = float(args.get('dist', 2.0))
 FOLD = float(args.get('fold_deg', 30.0))
 PAD = 8
 OUT = os.path.join(bc.WORK, 'layouts', tag + SUF)
-LOG = os.path.join(OUT, 'p15_classify.log.txt')
+NAME = args.get('name', 'p15_classify')  # output base name (Session 8: p18_classify, so Session 6's files stay)
+LOG = os.path.join(OUT, f'{NAME}.log.txt')
 t_all = time.time()
 
 target, info = bc.load_scene(tag)
@@ -69,6 +70,12 @@ for key, lst in em.items():
                 fold_e += [lst[x], lst[y]]
 bc.log(f'{tag}: {len(tris)} faces; open edges {len(open_e)}, fold edges (> {FOLD} deg, one master island) '
        f'{len(fold_e) // 2}', LOG)
+# P18 (Session 8): the fold class stays defined by Session 2's master islands (master_<tag>.npz), so before and after
+# compare the same edges; count_master=<suffix> reports how many of them lie in one island of that master
+if 'count_master' in args:
+    misl2 = np.load(os.path.join(bc.WORK, 'master', f'master_{tag}{args["count_master"]}.npz'))['island']
+    n_same = sum(1 for x in range(0, len(fold_e), 2) if misl2[fold_e[x][0]] == misl2[fold_e[x + 1][0]])
+    bc.log(f'  of these fold edges, {n_same} lie in one island of master_{tag}{args["count_master"]}', LOG)
 
 
 def seg_dist(P, A, B):
@@ -161,6 +168,6 @@ for key, (uvpx, size, tisl) in layouts.items():
            f'covered but not inside {row["covered_not_inside_px"]}, coverage bake {t_cov:.2f} s', LOG)
     res['layouts'][key] = row
 res['total_s'] = round(time.time() - t_all, 1)
-with open(os.path.join(OUT, 'p15_classify.json'), 'w') as f:
+with open(os.path.join(OUT, f'{NAME}.json'), 'w') as f:
     json.dump(res, f, indent=1)
 bc.log(f'done in {res["total_s"]} s', LOG)

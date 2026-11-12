@@ -17,6 +17,9 @@ Skirt (P2): for each border edge of an island, the neighbour triangle across tha
 smallest fold if there are several) is hinged flat onto the edge and clipped to a band of (gutter + 1) px outside the
 edge. The clipped pieces keep their exact 3D positions (affine in the hinged triangle), so a bake of them reads the
 real neighbour surface. Pixels beyond corners are filled later from the nearest baked pixel.
+
+P18 (build_master fold_split): islands are not joined across folds over the limit, and such split edges get the face
+itself mirrored as the skirt (as mirror_open does at open edges).
 """
 import math
 
@@ -304,11 +307,19 @@ def _clip(poly, clip):
     return out
 
 
-def build_master(pos, tris, cn, density, gutter=2, order='fold', mirror_open=False):
+def build_master(pos, tris, cn, density, gutter=2, order='fold', mirror_open=False, fold_split=None):
     """Returns a dict with the master layout: per triangle island id and master UV in px; core and skirt meshes.
 
     mirror_open (P15): a border edge without a 3D neighbour (open mesh border) gets the face itself mirrored across
-    the edge as its skirt piece; without it such edges get no skirt (the corner fill takes the nearest pixel)."""
+    the edge as its skirt piece; without it such edges get no skirt (the corner fill takes the nearest pixel).
+    fold_split (P18, degrees): islands grow ('growlen' only) across folds of at most this angle, so an edge whose
+    faces differ by more is never joined inside an island; and a border edge whose nearest 3D neighbour lies across
+    such a fold gets the face itself mirrored as its skirt piece (the copy's surface-aware read would skip the
+    neighbour's texels), as mirror_open does at open edges. Such an edge is also never counted as an inner edge."""
+    if fold_split is not None:
+        if order != 'growlen':
+            raise ValueError('fold_split needs order growlen')
+        order = f'growlen{float(fold_split)}'
     isl = Islands(pos, tris).build(order)
     T = len(tris)
     island = np.full(T, -1, dtype=np.int64)
@@ -356,7 +367,7 @@ def build_master(pos, tris, cn, density, gutter=2, order='fold', mirror_open=Fal
     # border edges and the skirt
     skirt_pos, skirt_uv, skirt_n, skirt_isl, skirt_src = [], [], [], [], []
     band = gutter + 1.0
-    n_border = n_no_neighbour = n_mirrored = 0
+    n_border = n_no_neighbour = n_mirrored = n_mirrored_fold = n_fold_inner = 0
     for t in range(T):
         i = island[t]
         if i < 0:
@@ -365,9 +376,16 @@ def build_master(pos, tris, cn, density, gutter=2, order='fold', mirror_open=Fal
             a, b = int(isl.wt[t, ci]), int(isl.wt[t, cj])
             key = (a, b) if a < b else (b, a)
             lst = isl.edges[key]
-            inner = [u for (u, _, _) in lst if u != t and island[u] == i
+            mine = [e for e in lst if e[0] == t][0]
+            inner = [u for (u, iu, ju) in lst if u != t and island[u] == i
                      and np.allclose(muv[u][list(isl.wt[u]).index(a)], muv[t][ci], rtol=0, atol=1e-6)
                      and np.allclose(muv[u][list(isl.wt[u]).index(b)], muv[t][cj], rtol=0, atol=1e-6)]
+            if fold_split is not None and inner:
+                # P18: a fold over the limit is never an inner edge, even where a closing fan made it continuous
+                folded = [u for u in inner if isl.fold(t, mine[1], mine[2], *[e for e in lst if e[0] == u][0])
+                          > fold_split]
+                n_fold_inner += len(folded)
+                inner = [u for u in inner if u not in folded]
             if inner:
                 continue
             n_border += 1
@@ -381,8 +399,11 @@ def build_master(pos, tris, cn, density, gutter=2, order='fold', mirror_open=Fal
                 u = t
                 n_mirrored += 1
             else:
-                mine = [e for e in lst if e[0] == t][0]
                 u, iu, ju = min(neigh, key=lambda e: (isl.fold(t, mine[1], mine[2], e[0], e[1], e[2]), e[0]))
+                if fold_split is not None and isl.fold(t, mine[1], mine[2], u, iu, ju) > fold_split:
+                    # P18: the neighbour lies across a split fold; the face itself, mirrored, is the skirt
+                    u = t
+                    n_mirrored_fold += 1
             a2, b2 = muv[t][ci], muv[t][cj]
             c_own = muv[t][3 - ci - cj]
             ru = [int(v) for v in isl.wt[u]]
@@ -432,6 +453,7 @@ def build_master(pos, tris, cn, density, gutter=2, order='fold', mirror_open=Fal
                 skirt_n=np.array(skirt_n).reshape(-1, 3, 3), skirt_island=np.array(skirt_isl, dtype=np.int64),
                 skirt_src=np.array(skirt_src, dtype=np.int64),
                 n_border_edges=n_border, n_border_without_neighbour=n_no_neighbour, n_mirrored=n_mirrored,
+                n_mirrored_fold=n_mirrored_fold, n_fold_inner_cut=n_fold_inner, fold_split=fold_split,
                 rejected=isl.rejected,
                 n_join_candidates=len(isl.join_order))
 
