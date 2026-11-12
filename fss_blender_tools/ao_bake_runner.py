@@ -17,9 +17,11 @@ pixel area is cut into square tiles whose size fits the memory budget (ao_bake_c
 Cycles bake of the core triangles that overlap it, then one of the skirt's, with UVs relative to the tile, into a
 tile-sized image (Cycles clips a triangle at the image's edges: Session 20), each tile with its own seed. The master is
 paged (decision 33, Session 23): a row of tiles is a band; the bands are baked from the top, and once a band is baked
-the band above it is composed (it now has its halo) and written to <stem>.ao.png and <stem>.ao.map row by row, then
-dropped; only two bands are held, never the whole master. Then <stem>.ao.npz (the layout); index.json gets the
-master's entry with the tile size and the peak working set.
+the band above it is composed (it now has its halo) and written to <stem>.ao.map and, for the AO, to a raw scratch file
+row by row, then dropped; only two bands are held, never the whole master. At the end the AO is encoded as lossless
+JPEG XL, <stem>.ao.jxl (decision 37; PNG, <stem>.ao.png, when the library cannot be loaded, logged once), then
+<stem>.ao.npz (the layout); index.json gets the master's entry with the tile size, the peak working set and the
+image's format, size and encoding time.
 """
 import importlib.util
 import json
@@ -397,7 +399,7 @@ def bake_item(item, coll):
     cuv = m['muv'][core_tris]
     ns = len(m['skirt_pos'])
     preview = Preview(W, H)
-    files = core.MasterWriter(FOLDER, item['key'], W, H)
+    files = core.MasterWriter(FOLDER, item['key'], W, H, threads=int(SET['threads']))
     finished = False
     done = [0]
 
@@ -494,7 +496,7 @@ def bake_item(item, coll):
                  times=dict(build_s=round(t_build, 3), core_s=round(t_core, 3), skirt_s=round(t_skirt, 3),
                             bake_s=round(t_core + t_skirt, 3), compose_s=round(t_compose, 3),
                             save_s=round(t_save, 3), total_s=round(time.time() - t0, 3)),
-                 compose=counts)
+                 compose=counts, image=files.stats)
     update_index(entry)
     return dict(status='baked', W=int(W), H=int(H), tile=int(tile), n_tiles=int(n), bake_s=round(t_core + t_skirt, 3),
                 total_s=round(time.time() - t0, 3), peak_working_set_gb=entry['tiles']['peak_working_set_gb'],
@@ -608,6 +610,13 @@ def main():
         + (f" ({BUDGET_SOURCE}; physical {total / gb:.1f} GB, free {avail / gb:.1f} GB)" if total else
            f' ({BUDGET_SOURCE})'))
     state.update(budget_gb=round(BUDGET / gb, 2), budget_source=BUDGET_SOURCE)
+    lib = core.jxl()  # decision 37: JPEG XL masters; PNG when the library cannot be loaded, said once
+    if lib.available():
+        state.update(master_format='jxl', jxl_library=lib.version())
+        log(f'masters as lossless JPEG XL (libjxl {lib.version()}, effort {lib.EFFORT})')
+    else:
+        state.update(master_format='png', jxl_error=lib.error())
+        log(f'masters as PNG: the JPEG XL library could not be loaded ({lib.error()})')
     _run['coll'] = setup_scene()
     write_status()
     if bpy.app.background:

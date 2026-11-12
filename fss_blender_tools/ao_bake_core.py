@@ -4,20 +4,45 @@ numpy, so the second Blender that bakes (ao_bake_runner.py) loads this file by i
 The three prototype parts below are tests/bake_prototype/bake_geom.py, bake_unfold.py and bake_copy.py, copied with
 their computation unchanged (only the module prefix `bg.` dropped); the prototype scripts stay as they are. After them
 come the tool's own parts: the settings the prototype was measured with (Sessions 8, 11 and 14), the composition of a
-master from its core and skirt bakes (step3_master.py), the evaluated triangles and their hash, 16-bit PNG files, and
-the resampling of an ORM texture's green and blue inside islands (decisions 24 to 26).
+master from its core and skirt bakes (step3_master.py), the master's files (the AO as lossless JPEG XL through
+ao_bake_jxl.py, decision 37, or PNG), the evaluated triangles and their hash, 16-bit PNG files, and the resampling of
+an ORM texture's green and blue inside islands (decisions 24 to 26).
 
 Pixel convention (Blender's bake): an image of W x H pixels, UV (u, v) at pixel coordinates (u * W, v * H), pixel (i, j)
 has its centre at (i + 0.5, j + 0.5); arrays are indexed [j, i] with row 0 at the bottom.
 """
+import ctypes
 import hashlib
+import importlib.util
 import json
 import math
 import os
 import struct
+import sys
 import zlib
 
 import numpy as np
+
+_jxl_module = []
+
+
+def jxl():
+    """ao_bake_jxl (the JPEG XL wrapper), imported from the package or, when this file was loaded by its path (the
+    second Blender), by its path too."""
+    if not _jxl_module:
+        try:
+            from . import ao_bake_jxl as mod
+        except ImportError:
+            name = '_fss_ao_bake_jxl'
+            mod = sys.modules.get(name)
+            if mod is None:
+                spec = importlib.util.spec_from_file_location(
+                    name, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ao_bake_jxl.py'))
+                mod = importlib.util.module_from_spec(spec)
+                sys.modules[name] = mod
+                spec.loader.exec_module(mod)
+        _jxl_module.append(mod)
+    return _jxl_module[0]
 
 
 # -------------------------------------------------------------------------------------------------------------------
@@ -960,7 +985,7 @@ def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode=
 # The tool's settings: the prototype as measured in Sessions 8, 11 and 14 (decision 9)
 # ---------------------------------------------------------------------------------------------------------------------
 
-SCHEMA = 2  # index.json and the master's files (2: the per-pixel data in <stem>.ao.map, Session 23; 1 still read)
+SCHEMA = 3  # index.json and the master's files (3: the AO as <stem>.ao.jxl, decision 37; 2 and 1 (PNG) still read)
 METHOD = 1  # what a master is (the settings below); a change makes every master's surroundings stale
 DENSITY_FACTOR = 4.0  # master density = 4 x the object's median density in its layout at bake time (Session 12)
 GUTTER = 2
@@ -1343,10 +1368,13 @@ def bake_paged(m, tile, bake_tile, write_rows, counts, on_strip=None):
             bands.trim(kb, ys1 + FILL - yb0)  # the rows the band's last strips read
 
 # ---------------------------------------------------------------------------------------------------------------------
-# A master's files (decisions 18 and 33): <stem>.ao.png, <stem>.ao.map, <stem>.ao.npz
+# A master's files (decisions 18, 33 and 37): <stem>.ao.jxl (or .ao.png), <stem>.ao.map, <stem>.ao.npz
 # ---------------------------------------------------------------------------------------------------------------------
 #
-# <stem>.ao.png: the AO, 16-bit grey (decision 18), written row by row from the top as a band is composed.
+# <stem>.ao.jxl: the AO, 16-bit grey, lossless JPEG XL (decision 37, schema 3), encoded by ao_bake_jxl from the rows
+#   handed from the top as a band is composed (through a raw scratch file, <stem>.ao.jxl.tmp.raw, deleted afterwards).
+#   When the library cannot be loaded, <stem>.ao.png instead (decision 18, as schemas 1 and 2 wrote it), written row
+#   by row from the top. A master has one of the two; a new bake removes the other.
 # <stem>.ao.map: the per-pixel data Apply reads besides the AO (Session 23; schema 1 kept them as `filled` and
 #   `face_map` in the .npz): MAP_MAGIC, then the version, W and H as little-endian uint32, then one zlib stream of the
 #   rows from the top, each W little-endian int32 codes: (face + 1) * 2 + filled, face -1 for none.
@@ -1357,10 +1385,33 @@ MAP_MAGIC = b'FSSAOMAP'
 MAP_VERSION = 1
 
 
-def master_paths(folder, stem):
-    """(png, map, npz) of a master."""
+def image_paths(folder, stem):
+    """(jxl, png): the two names a master's AO image can have."""
     base = os.path.join(folder, stem)
-    return base + '.ao.png', base + '.ao.map', base + '.ao.npz'
+    return base + '.ao.jxl', base + '.ao.png'
+
+
+def master_paths(folder, stem):
+    """(image, map, npz) of a master; image is its .ao.jxl, or its .ao.png when only that exists (a master of 0.55, or
+    one baked without the JPEG XL library)."""
+    jx, pn = image_paths(folder, stem)
+    base = os.path.join(folder, stem)
+    image = pn if (os.path.isfile(pn) and not os.path.isfile(jx)) else jx
+    return image, base + '.ao.map', base + '.ao.npz'
+
+
+def all_master_files(folder, stem):
+    """Every file a master can have (for a rename)."""
+    base = os.path.join(folder, stem)
+    return [base + ext for ext in ('.ao.jxl', '.ao.png', '.ao.map', '.ao.npz')]
+
+
+def read_image(path):
+    """A master's AO image whole as (H, W) uint16, row 0 = bottom (tests and small masters)."""
+    if path.endswith('.jxl'):
+        return jxl().read_whole(path)[::-1]
+    img = read_png(path)[0]
+    return img[:, :, 0] if img.ndim == 3 else img
 
 
 def map_code(face, filled):
@@ -1470,38 +1521,55 @@ def save_master(folder, stem, M16, m, filled, face_map, tri_src, meta):
 
 class MasterWriter:
     """The files of one master, written to temporary names row by row from the top (the AO and the map), then the
-    layout; finish() replaces the old files, abort() removes the temporary ones (a cancelled bake keeps the old
-    master)."""
+    layout; finish() replaces the old files (and removes the AO image of the other format), abort() removes the
+    temporary ones (a cancelled bake keeps the old master). The AO is JPEG XL when the library loads (decision 37),
+    else PNG (`format`, and `fallback` says why)."""
 
-    def __init__(self, folder, stem, W, H):
-        self.paths = master_paths(folder, stem)
-        self.png = PngRowWriter(self.paths[0] + '.tmp', W, H, bits=16, channels=1)
+    def __init__(self, folder, stem, W, H, threads=None):
+        jx, pn = image_paths(folder, stem)
+        base = os.path.join(folder, stem)
+        lib = jxl()
+        self.format = 'jxl' if lib.available() else 'png'
+        self.fallback = None if self.format == 'jxl' else lib.error()
+        self.image, self.other = (jx, pn) if self.format == 'jxl' else (pn, jx)
+        self.paths = (self.image, base + '.ao.map', base + '.ao.npz')
+        self.stats = {}
+        if self.format == 'jxl':
+            self.img = lib.Writer(self.image + '.tmp', W, H, threads=threads or lib.THREADS)
+        else:
+            self.img = PngRowWriter(self.image + '.tmp', W, H, bits=16, channels=1)
         try:
             self.map = MapRowWriter(self.paths[1] + '.tmp', W, H)
         except BaseException:
-            self.png.abort()
+            self.img.abort()
             raise
 
     def write_rows(self, values, codes):
         """values (n, W) uint16 and codes (n, W) int32: rows in file order (the top first)."""
-        self.png.write(values)
+        self.img.write(values)
         self.map.write(codes)
 
     def finish(self, m, tri_src, meta):
-        png, mp, npz = self.paths
-        self.png.close()
+        image, mp, npz = self.paths
+        self.img.close()
+        self.stats = dict(format=self.format, **getattr(self.img, 'stats', {}))
         self.map.close()
         with open(npz + '.tmp', 'wb') as f:
             np.savez_compressed(f, muv=m['muv'], island=m['island'], density=m['density'], W=m['W'], H=m['H'],
                                 rects=m['rects'], gutter=m['gutter'], degenerate=m['degenerate'],
                                 tri_src=np.asarray(tri_src, dtype=np.int64), meta=json.dumps(meta))
-        os.replace(png + '.tmp', png)
+        os.replace(image + '.tmp', image)
         os.replace(mp + '.tmp', mp)
         os.replace(npz + '.tmp', npz)
-        return png, npz
+        try:
+            os.remove(self.other)  # a re-bake replaces a master of the other format (a 0.55 PNG by a JPEG XL)
+        except OSError:
+            pass
+        self.stats['bytes'] = os.path.getsize(image)
+        return image, npz
 
     def abort(self):
-        self.png.abort()
+        self.img.abort()
         self.map.abort()
         try:
             os.remove(self.paths[2] + '.tmp')
@@ -1535,9 +1603,7 @@ def load_master(folder, stem):
         old = 'filled' in z.files
         if old:
             out.update(filled=z['filled'], face_map=z['face_map'])
-    img = read_png(png)[0]
-    if img.ndim == 3:
-        img = img[:, :, 0]
+    img = read_image(png)
     H, W = img.shape
     out.update(image=img, W=W, H=H)
     if not old:
@@ -1600,6 +1666,43 @@ class _TiledWriter:
         self._flush()
         self.f.truncate(self.ntx * self.nty * self.T * self.T * self.dtype.itemsize)
         self.f.close()
+
+
+class _TiledSink:
+    """The same tiled scratch file as _TiledWriter (uint16), filled from pieces of rows in any order (the JPEG XL
+    decoder hands them group by group, from several threads, one call at a time): put(x, y, n, address) with y from
+    the top. A row of tiles is buffered until every pixel of it came, then written and dropped; the decoder works on
+    groups of 2048 px at most, so a few rows of tiles are open at a time, never the whole image."""
+
+    def __init__(self, path, H, W, T=PAGE_TILE):
+        self.path, self.H, self.W, self.T = path, int(H), int(W), T
+        self.ntx, self.nty = -(-self.W // T), -(-self.H // T)
+        self.open = {}  # tile row: [buffer (T, ntx * T), address, pixels received]
+        self.most_open = 0
+        self.f = open(path, 'wb')
+        self.f.truncate(self.ntx * self.nty * T * T * 2)
+
+    def put(self, x, y, n, address):
+        j = self.H - 1 - y
+        ty = j // self.T
+        e = self.open.get(ty)
+        if e is None:
+            buf = np.zeros((self.T, self.ntx * self.T), np.uint16)
+            e = self.open[ty] = [buf, buf.ctypes.data, 0]
+            self.most_open = max(self.most_open, len(self.open))
+        ctypes.memmove(e[1] + 2 * ((j - ty * self.T) * self.ntx * self.T + x), address, 2 * n)
+        e[2] += n
+        if e[2] >= self.W * min(self.T, self.H - ty * self.T):
+            T = self.T
+            tiles = np.ascontiguousarray(e[0].reshape(T, self.ntx, T).transpose(1, 0, 2))
+            self.f.seek(ty * self.ntx * T * T * 2)
+            self.f.write(tiles.tobytes())
+            del self.open[ty]
+
+    def close(self):
+        self.f.close()
+        if self.open:
+            raise ValueError(f'{self.path}: {len(self.open)} rows of tiles incomplete')
 
 
 class PagedArray:
@@ -1681,10 +1784,10 @@ class _PagedView:
 
 
 def open_master(folder, stem, cache_bytes=PAGE_CACHE_BYTES):
-    """The master paged (decision 33), or None when a file is missing: the PNG and the map decoded once, row by row,
-    into two tiled scratch files in the bake folder (<stem>.ao.page and <stem>.ao.mappage), read through a cache of
-    tiles; close() closes and deletes them. A master of schema 1 (filled and the face map in the .npz) is loaded whole
-    (load_master)."""
+    """The master paged (decision 33), or None when a file is missing: the AO image (JPEG XL or PNG) and the map
+    decoded once into two tiled scratch files in the bake folder (<stem>.ao.page and <stem>.ao.mappage), read through
+    a cache of tiles; close() closes and deletes them. A master of schema 1 (filled and the face map in the .npz) is
+    loaded whole (load_master)."""
     png, mp, npz = master_paths(folder, stem)
     if not (os.path.isfile(png) and os.path.isfile(npz)):
         return None
@@ -1701,15 +1804,32 @@ def open_master(folder, stem, cache_bytes=PAGE_CACHE_BYTES):
     page_img, page_map = base + '.ao.page', base + '.ao.mappage'
     made = []
     try:
-        reader = PngRows(png)
-        if (reader.w, reader.h) != (W, H):
-            reader.close()
-            raise ValueError(f'{png}: {reader.w} x {reader.h} px, the layout says {W} x {H}')
-        tw = _TiledWriter(page_img, H, W, np.uint16)
-        made.append(page_img)
-        for block in reader:
-            tw.write(block[:, :, 0])
-        tw.close()
+        if png.endswith('.jxl'):
+            lib = jxl()
+            if not lib.available():
+                raise lib.JxlError(f'{png}: the JPEG XL library is not loaded ({lib.error()})')
+            iw, ih = lib.info(png)
+            if (iw, ih) != (W, H):
+                raise ValueError(f'{png}: {iw} x {ih} px, the layout says {W} x {H}')
+            sink = _TiledSink(page_img, H, W)
+            made.append(page_img)
+            try:
+                lib.decode_rows(png, sink.put, threads=lib.DECODE_THREADS)
+            except BaseException:
+                sink.f.close()
+                raise
+            sink.close()
+            out['decode_open_tile_rows'] = sink.most_open
+        else:
+            reader = PngRows(png)
+            if (reader.w, reader.h) != (W, H):
+                reader.close()
+                raise ValueError(f'{png}: {reader.w} x {reader.h} px, the layout says {W} x {H}')
+            tw = _TiledWriter(page_img, H, W, np.uint16)
+            made.append(page_img)
+            for block in reader:
+                tw.write(block[:, :, 0])
+            tw.close()
         mW, mH, rows = map_rows(mp)
         if (mW, mH) != (W, H):
             raise ValueError(f'{mp}: {mW} x {mH} px, the layout says {W} x {H}')

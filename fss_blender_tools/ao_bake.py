@@ -202,6 +202,8 @@ def finish_bake():
         by.setdefault(r['status'], []).append(r)
     lines = [f"{status.get('state', 'ended')}: {status.get('n_done', 0)} of {status.get('n_total', 0)} in "
              f"{status.get('elapsed_s', 0)} s; baked {len(by.get('baked', []))}"]
+    if status.get('master_format') == 'png':  # decision 37: said once per bake
+        lines.append(f"masters written as PNG: the JPEG XL library could not be loaded ({status.get('jxl_error')})")
     for kind in ('skipped', 'failed', 'cancelled'):
         for r in by.get(kind, []):
             lines.append(f"{kind}: {r['name']} ({r.get('reason', '')})")

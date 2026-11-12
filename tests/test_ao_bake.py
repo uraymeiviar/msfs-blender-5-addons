@@ -10,6 +10,9 @@ Blender). Checked:
   object's faces without a material are not baked, an object without one is excluded and listed (decision 30);
 - the master paged (Session 23): baked and written band by band, no per-pixel array in the .npz, Apply in bands of 5
   rows, of 256 rows and from the whole master in memory byte-identical, no scratch file left;
+- the masters as JPEG XL (Session 26, decision 37): every master .jxl; a PNG master as 0.55.2 wrote it is up to date
+  and applied byte-identically, and a re-bake replaces it with a .jxl and removes the PNG; with the library made
+  unloadable (FSS_AO_BAKE_NO_JXL) the bake writes PNG, the report says so once, and Apply works;
 - staleness: a moved vertex, changed custom normals and an added modifier give "mesh changed"; a moved occluder inside
   the AO distance, an occluder tagged Non-AO-Occluder, the AO distance and a moved object give "surroundings changed";
   an occluder moved outside the distance, UVs moved, scaled and re-unwrapped, a material changed leave it up to date;
@@ -475,7 +478,7 @@ def test_tiles():
     r = status['results'][0]
     assert r['status'] == 'cancelled', r
     assert (os.path.getmtime(png), os.path.getmtime(npz), file_hash(png), file_hash(mp)) == old
-    assert not any(os.path.exists(p + '.tmp') for p in (png, mp, npz))
+    assert not any(os.path.exists(p + '.tmp') for p in (png, mp, npz)) and not os.path.exists(png + '.tmp.raw')
     log_text = (FOLDER / 'bake.log').read_text(encoding='utf-8')
     tile_s = max(float(x.split(', ')[-1].rstrip(' s')) for x in log_text.splitlines()
                  if 'tile ' in x and ' triangles, ' in x)
@@ -538,11 +541,95 @@ def test_paged():
         assert h256 == h5 == hw, (tag, h256, h5, hw)
         assert rep['written_px'] == rep5['written_px'] == repw['written_px'] > 0
         sizes[tag] = rep['written_px']
-    left = [f for f in os.listdir(FOLDER) if f.endswith('.page') or f.endswith('.mappage') or f.endswith('.tmp')]
+    left = [f for f in os.listdir(FOLDER) if f.endswith(('.page', '.mappage', '.tmp', '.raw'))]
     assert not left, left
     print(f"PASS: test_paged (A's master {entry['W']} x {entry['H']} px in {tiles['n']} tiles, {tiles['bands']} bands; "
           f"no per-pixel array in the .npz; Apply of the set and of A alone: bands of 5 and 256 rows and the whole "
           f"master in memory give byte-identical files ({sizes} px written); no scratch file left)")
+
+
+def test_formats():
+    """Session 26 (decision 37), finish lines 5 and 6: the masters are JPEG XL; a PNG master as 0.55.2 wrote it is
+    applied unchanged and a re-bake replaces it with a .jxl, removing the PNG; with the library made unloadable the
+    bake writes PNG, says so once in the report, and Apply works."""
+    lib = core.jxl()
+    assert lib.available(), lib.error()
+    refresh()
+    folder = str(FOLDER)
+    names = os.listdir(folder)
+    assert not any(n.endswith('.ao.png') for n in names), [n for n in names if n.endswith('.ao.png')]
+    index = store.read_index(folder, use_cache=False)
+    assert index['schema'] == core.SCHEMA == 3
+    jx = [e for e in index['masters'].values() if e.get('image', {}).get('format') == 'jxl']
+    assert len(jx) == len(index['masters']) and all(e['schema'] == 3 for e in jx), len(jx)
+    assert all(n.endswith('.ao.jxl') for n in names if '.ao.' in n and n.endswith(('.jxl', '.png')))
+    entry, stem = entry_of('A')
+    jpath, ppath = core.image_paths(folder, stem)
+    img = core.read_image(jpath)
+    m = core.load_master(folder, stem)
+    assert m['image'].shape == (entry['H'], entry['W']) and np.array_equal(m['image'], img)
+    ref = apply_set('SET_A', file_name='fmt_jxl.png')
+    # a PNG master as 0.55.2 wrote it (its writer is unchanged): the same pixels, the .jxl removed, schema 2
+    core.write_png_int(ppath, img)
+    os.remove(jpath)
+    index['masters'][stem]['schema'] = 2
+    index['masters'][stem].pop('image', None)
+    store.write_index(folder, index)
+    refresh()
+    assert grade_of('A') == 'UP_TO_DATE' and core.master_paths(folder, stem)[0] == ppath
+    old = apply_set('SET_A', file_name='fmt_png_0552.png')
+    assert file_hash(old['path']) == file_hash(ref['path']) and old['written_px'] == ref['written_px'] > 0
+    # a re-bake replaces it with a .jxl and removes the PNG
+    select(['A'])
+    assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
+    assert os.path.isfile(jpath) and not os.path.exists(ppath), os.listdir(folder)
+    assert grade_of('A') == 'UP_TO_DATE'
+    OUT.mkdir(parents=True, exist_ok=True)
+    base = np.random.default_rng(7).integers(0, 65536, (SIZE, SIZE, 3))
+    for tag in ('rebaked_jxl', 'nolib_png'):
+        write_png(OUT / f'fmt_{tag}.png', base)
+    # per object: without the library only A's master (PNG) can be read; the set's other masters are .jxl
+    rebaked = apply_set('SET_A', [bpy.data.objects['A']], file_name='fmt_rebaked_jxl.png')
+    # no library: the second Blender inherits the switch
+    os.environ[lib.DISABLE_ENV] = '1'
+    lib.reset()
+    try:
+        assert not lib.available() and lib.DISABLE_ENV in lib.error()
+        assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
+        report = bpy.context.window_manager.fss_ao_bake_state.report
+        status = store.read_status(folder)
+        assert status['master_format'] == 'png' and status['results'][0]['status'] == 'baked', status
+        assert report.count('masters written as PNG') == 1, report
+        assert os.path.isfile(ppath) and not os.path.exists(jpath), os.listdir(folder)
+        log_lines = [x for x in (FOLDER / 'bake.log').read_text(encoding='utf-8').splitlines()[-6:]
+                     if 'masters as PNG' in x]
+        assert len(log_lines) == 1, log_lines
+        refresh()
+        assert grade_of('A') == 'UP_TO_DATE'
+        nolib = apply_set('SET_A', [bpy.data.objects['A']], file_name='fmt_nolib_png.png')
+        try:  # the whole set needs the other masters' .jxl: reported as an error, nothing written
+            ao_bake_apply.apply_set(bpy.context, bpy.data.materials['SET_A'], None,
+                                    ApplySettings(file_name='fmt_nolib_set.png'))
+            set_error = None
+        except OSError as exc:
+            set_error = str(exc)
+        assert set_error and 'JPEG XL library is not loaded' in set_error, set_error
+        assert not (OUT / 'fmt_nolib_set.png').exists()
+    finally:
+        del os.environ[lib.DISABLE_ENV]
+        lib.reset()
+    assert lib.available()
+    same_bake = file_hash(nolib['path']) == file_hash(rebaked['path'])  # reported: equal when Cycles repeats itself
+    # and back to JPEG XL
+    assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
+    assert os.path.isfile(jpath) and not os.path.exists(ppath)
+    left = [f for f in os.listdir(FOLDER) if f.endswith(('.page', '.mappage', '.tmp', '.raw'))]
+    assert not left, left
+    print(f"PASS: test_formats ({len(jx)} masters .jxl, schema 3; A as a 0.55.2 PNG master: up to date, Apply "
+          f"byte-identical to the .jxl's ({ref['written_px']} px); a re-bake wrote the .jxl and removed the PNG; "
+          f"without the library: PNG written, the report says so once ({[x for x in report.splitlines() if 'PNG' in x][0]}), "
+          f"Apply of A written ({nolib['written_px']} px; the same file as the JPEG XL re-bake's: {same_bake}), the "
+          f"whole set (other masters .jxl) refused with an error; back to .jxl; no scratch file left)")
 
 def test_staleness():
     """FL2: each change gives its grade."""
@@ -797,6 +884,7 @@ if __name__ == '__main__':
     test_cancel()
     test_tiles()
     test_paged()
+    test_formats()
     test_staleness()
     test_apply_orm()
     test_apply_per_object()
