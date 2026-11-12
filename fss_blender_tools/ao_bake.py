@@ -86,6 +86,8 @@ class FSS_AOBakeState(bpy.types.PropertyGroup):
     running: bpy.props.BoolProperty()
     n_done: bpy.props.IntProperty()
     n_total: bpy.props.IntProperty()
+    tile: bpy.props.IntProperty()
+    n_tiles: bpy.props.IntProperty()
     current: bpy.props.StringProperty()
     elapsed: bpy.props.FloatProperty()
     left: bpy.props.FloatProperty(default=-1.0)
@@ -167,11 +169,27 @@ def _poll_timer():
         st.current = status.get('current', '')
         st.elapsed = status.get('elapsed_s', 0.0)
         st.left = status.get('left_s') if status.get('left_s') is not None else -1.0
+        st.tile = status.get('tile', 0) or 0
+        st.n_tiles = status.get('n_tiles', 0) or 0
     if store.running():
         _redraw()
         return 0.5
     finish_bake()
     return None
+
+
+def excluded_lines(limit=8):
+    """The objects the last Refresh excluded, per reason (decision 30: also those without a face of a texture set)."""
+    by = {}
+    for name, why in sorted(store._state.get('excluded', {}).items()):
+        by.setdefault(why, []).append(name)
+    lines = []
+    for why, names in sorted(by.items()):
+        more = f' and {len(names) - limit} more' if len(names) > limit else ''
+        lines.append(f"excluded ({why}): {len(names)}: {', '.join(names[:limit])}{more}")
+        for name in names:
+            print(f'AO Bake: excluded {name} ({why})')
+    return lines
 
 
 def finish_bake():
@@ -184,9 +202,10 @@ def finish_bake():
         by.setdefault(r['status'], []).append(r)
     lines = [f"{status.get('state', 'ended')}: {status.get('n_done', 0)} of {status.get('n_total', 0)} in "
              f"{status.get('elapsed_s', 0)} s; baked {len(by.get('baked', []))}"]
-    for kind in ('skipped', 'failed'):
+    for kind in ('skipped', 'failed', 'cancelled'):
         for r in by.get(kind, []):
             lines.append(f"{kind}: {r['name']} ({r.get('reason', '')})")
+    lines += excluded_lines()
     st.report = '\n'.join(lines)
     sync_state(bpy.context)
     read_index_on_open()
@@ -205,6 +224,8 @@ class FSS_OT_AOBakeStart(bpy.types.Operator):
     hidden: bpy.props.BoolProperty(default=False, options={'HIDDEN', 'SKIP_SAVE'})  # tests: no window
     wait: bpy.props.BoolProperty(default=False, options={'HIDDEN', 'SKIP_SAVE'})  # tests: return when done
     test_delay: bpy.props.FloatProperty(default=0.0, options={'HIDDEN', 'SKIP_SAVE'})  # tests: pause per object
+    test_tile_delay: bpy.props.FloatProperty(default=0.0, options={'HIDDEN', 'SKIP_SAVE'})  # tests: pause per tile
+    tile: bpy.props.IntProperty(default=0, min=0, options={'HIDDEN', 'SKIP_SAVE'})  # tests: force the tile size
 
     @classmethod
     def poll(cls, context):
@@ -221,7 +242,7 @@ class FSS_OT_AOBakeStart(bpy.types.Operator):
         if not stems:
             self.report({'INFO'}, 'AO Bake: nothing to bake')
             return {'CANCELLED'}
-        job = store.make_job(context, stems, self.test_delay)
+        job = store.make_job(context, stems, self.test_delay, self.tile, self.test_tile_delay)
         proc = store.start_bake(job, hidden=self.hidden)
         st = _state(context)
         st.running, st.n_done, st.n_total, st.current, st.report = True, 0, len(stems), '', ''
@@ -237,7 +258,8 @@ class FSS_OT_AOBakeStart(bpy.types.Operator):
 class FSS_OT_AOBakeCancel(bpy.types.Operator):
     bl_idname = 'fss.ao_bake_cancel'
     bl_label = 'Cancel'
-    bl_description = 'Stop the bake after the current object; the finished masters are kept'
+    bl_description = ('Stop the bake after the current tile; the finished masters are kept, the object being baked '
+                      'keeps its old master')
     bl_options = {'REGISTER'}
 
     @classmethod
@@ -374,6 +396,8 @@ class FSS_PT_AOBake(bpy.types.Panel):
             col.progress(factor=st.n_done / max(st.n_total, 1),
                          text=f'Object {min(st.n_done + 1, st.n_total)} of {st.n_total}')
             col.label(text=st.current or '...')
+            if st.n_tiles > 1:
+                col.label(text=f'Tile {st.tile} of {st.n_tiles}')
             left = _fmt_time(st.left) if st.left >= 0 else '-'
             col.label(text=f'Spent {_fmt_time(st.elapsed)}, left {left}')
             col.operator('fss.ao_bake_cancel', icon='CANCEL')

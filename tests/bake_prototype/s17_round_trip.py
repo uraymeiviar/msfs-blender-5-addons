@@ -2,7 +2,10 @@
 Session 14's FAIR reference.
 
 Run (CPU cap; the tool's second Blender inherits it), one object per run:
-    blender -b --factory-startup --python s17_round_trip.py -- tag=panel layouts=abdf
+    blender -b --factory-startup --python s17_round_trip.py -- tag=panel layouts=abdf [tile=512] [sub=s20] [seed_offset=1]
+
+tile: force the bake's tile size (Session 20, finish lines 3 and 4; 0 or none: the tool's choice); sub: the folder in
+tests/_work/ao_bake/ for the files (default s17).
 
 1. A .blend in tests/_work/ao_bake/s17/<tag>.blend: the prototype's scene_<tag>.blend (TARGET and its occluders), the
    TARGET with a material whose texture set size is the object's texture size and its material's UV map active.
@@ -55,7 +58,10 @@ tag = args.get('tag', 'panel')
 LAYOUTS = args.get('layouts', 'abdf')
 SUF = '_s11x4'
 PAD = 8
-OUT = os.path.join(bc.WORK, 's17')
+TILE = int(args.get('tile', 0))
+if args.get('seed_offset'):
+    os.environ['FSS_AO_BAKE_SEED_OFFSET'] = args['seed_offset']  # the second Blender inherits it (a control bake)
+OUT = os.path.join(bc.WORK, args.get('sub', 's17'))
 os.makedirs(OUT, exist_ok=True)
 LOG = os.path.join(OUT, f's17_{tag}.log.txt')
 if os.path.exists(LOG):
@@ -90,13 +96,14 @@ item = store._state['items'][store._state['by_object'][target.name]]
 bc.log(f"{tag}: {len(store._state['items'])} items, TARGET with {len(item['occluders'])} occluders "
        f"(prototype {info['n_occluders']}), uv {item['uv']}, texture {S}", LOG)
 t = time.time()
-assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
+assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True, tile=TILE) == {'FINISHED'}
 t_bake_run = time.time() - t
 status = store.read_status(folder)
 entry = store.read_index(folder, use_cache=False)['masters'][item['key']]
 bc.log(f"  bake: {status['state']} {status['n_done']} of {status['n_total']}, second Blender {t_bake_run:.1f} s; "
        f"master {entry['W']} x {entry['H']} at {entry['density']:.1f} px/m, times {entry['times']}", LOG)
 master = core.load_master(folder, item['key'])
+master['image'] = master['image'] / 65535.0  # the tool's master is uint16 (Session 20)
 proto = np.load(os.path.join(bc.WORK, 'master', f'master_{tag}{SUF}.npz'))
 proto_img = bc.read_png16(os.path.join(bc.WORK, 'master', f'master_{tag}{SUF}.png'))
 same_layout = bool(proto_img.shape == master['image'].shape and np.allclose(proto['muv'], master['muv'], atol=1e-6))
@@ -154,7 +161,7 @@ for key, (uvpx, size, _tisl) in layouts.items():
            f"-> {'MET' if row['met'] else 'NOT MET'}; vs S11 copy MAE {dc.mean():.5f} max {dc.max():.4f}; "
            f"Apply {rep['seconds']} s; faces under 4 x {rep['faces_under_4x']} of {rep['faces']}", LOG)
     target.data.uv_layers.active = target.data.uv_layers[info['uv']]
-out = dict(tag=tag, texture=S, status=dict(state=status['state'], n_done=status['n_done'], n_total=status['n_total']),
+out = dict(tag=tag, texture=S, tile=TILE, status=dict(state=status['state'], n_done=status['n_done'], n_total=status['n_total']),
            bake_run_s=round(t_bake_run, 2), entry=entry, master_vs_s11=master_cmp, layouts=rows,
            total_s=round(time.time() - t_all, 1))
 with open(os.path.join(OUT, f's17_{tag}.json'), 'w') as f:

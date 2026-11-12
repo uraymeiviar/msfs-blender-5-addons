@@ -192,8 +192,11 @@ def dilate_ids(owner, iterations, mask_allowed=None):
     return own, steps
 
 
-def bilinear(img, x, y):
-    """img (H, W); x, y pixel coordinates (centres at +0.5). Clamped at the image edge."""
+def bilinear(img, x, y, den=1.0):
+    """img (H, W); x, y pixel coordinates (centres at +0.5). Clamped at the image edge. den: the values are divided
+    by it (65535 for a uint16 master, read without converting the whole image)."""
+    if den != 1.0:
+        return bilinear(img, x, y) / den
     H, W = img.shape
     fx = x - 0.5
     fy = y - 0.5
@@ -731,10 +734,20 @@ def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode=
     x0, y0, w, h = crop
     muv = master['muv']
     M = master['image']
+    # a tool master is uint16 (Session 20): only the texels read are converted
+    den = 65535.0 if M.dtype == np.uint16 else 1.0
     mH, mW = M.shape
-    rect_id = master['rect_id']
+    rect_id = master.get('rect_id')
+    rects = np.asarray(master['rects']) if rect_id is None else None
     filled = master['filled']
     misl = master['island']
+
+    def in_own_rect(xi, yi, isl):
+        """rect_id[yi, xi] == isl, from the rectangles (they do not overlap) when there is no per-pixel map."""
+        if rect_id is not None:
+            return rect_id[yi, xi] == isl
+        r = rects[np.maximum(isl, 0)]
+        return (isl >= 0) & (xi >= r[:, 0]) & (xi < r[:, 0] + r[:, 2]) & (yi >= r[:, 1]) & (yi < r[:, 1] + r[:, 3])
     wt = weld_ids(pos)[tris]
     nb = _neighbours(wt)
     face_map = master.get('face_map')
@@ -747,7 +760,7 @@ def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode=
         mp = np.einsum('nk,nkd->nd', bary, muv[tri_ids])
         xi = np.clip(np.floor(mp[:, 0]).astype(np.int64), 0, mW - 1)
         yi = np.clip(np.floor(mp[:, 1]).astype(np.int64), 0, mH - 1)
-        ok = (rect_id[yi, xi] == misl[tri_ids]) & filled[yi, xi]
+        ok = in_own_rect(xi, yi, misl[tri_ids]) & filled[yi, xi]
         bad = ~ok
         n_clamped = int(bad.sum())
         if bad.any():
@@ -755,7 +768,7 @@ def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode=
             bb /= np.maximum(bb.sum(axis=1, keepdims=True), 1e-30)
             mp[bad] = np.einsum('nk,nkd->nd', bb, muv[tri_ids[bad]])
         if surface_cos is None or face_map is None:
-            return bilinear(M, mp[:, 0], mp[:, 1]), n_clamped
+            return bilinear(M, mp[:, 0], mp[:, 1], den), n_clamped
         return _surface_bilinear(mp, tri_ids), n_clamped
 
     def _surface_bilinear(mp, tri_ids):
@@ -777,13 +790,14 @@ def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode=
             f = face_map[yc, xc]
             ok = (f >= 0) & (np.einsum('nd,nd->n', tri_normal[np.maximum(f, 0)], nt) >= surface_cos)
             wv = np.where(ok, wgt, 0.0)
-            acc += wv * M[yc, xc]
+            mv = M[yc, xc] / den
+            acc += wv * mv
             wsum += wv
             if same_face:
                 wf = np.where(f == tri_ids, wgt, 0.0)
-                acc_f += wf * M[yc, xc]
+                acc_f += wf * mv
                 wsum_f += wf
-        plain = bilinear(M, mp[:, 0], mp[:, 1])
+        plain = bilinear(M, mp[:, 0], mp[:, 1], den)
         out_ = np.where(wsum > 1e-9, acc / np.maximum(wsum, 1e-30), plain)
         if same_face:
             out_ = np.where(wsum_f > 1e-9, acc_f / np.maximum(wsum_f, 1e-30), out_)
@@ -940,51 +954,221 @@ def master_density(pos, tris, uv_px, factor=DENSITY_FACTOR):
     return factor * weighted_median(dens[ok], a3[ok])
 
 
-def compose_master(m, A, B):
-    """Core pixels, then skirt pixels, then the remaining pixels of each island's rectangle from the nearest baked
-    pixel of the same rectangle; and the face map. A, B: the core and skirt bakes (H, W), -1 where not baked.
-    Returns (image with 0 where nothing, filled, face_map, rect_id, counts)."""
+FILL = 2 * GUTTER + 4  # the nearest fill and the face map grow this many pixels inside each island's rectangle
+TILE_MIN = 512
+# the tile sizes the runner chooses from (decision 32): tiles over 2048 px were slower, not faster (Session 20: the
+# 214 Mpx floor's bake 300 s in tiles of 1024 and 2048 px, 319 s in 4096 and 320 s in 8192 px, at 2.3, 2.3, 4.8 and
+# 16.2 GB), so more memory buys no time and the largest tile is 2048 px; a smaller budget gets smaller tiles
+TILE_SIZES = (2048, 1024, 512)
+
+
+# The memory model of the bake in tiles (Session 20, measured on the floor at 54 and 214 Mpx and on the cap): per
+# master pixel the uint16 image, the flags and the int32 face map with the composition's and the files' temporaries
+# (about 10 bytes: 2.3 GB peak at 214 Mpx with small tiles); per tile pixel Cycles' bake data and the tile's float
+# image and buffers (measured 240 to 280 bytes).
+BYTES_PER_MASTER_PX = 10.0
+BYTES_PER_TILE_PX = 280.0
+TILE_OVERHEAD = 0.25 * 2 ** 30  # bytes beyond the pixels (the scene's copies, Cycles' BVH, a composition window)
+BUDGET_SHARE = 0.6  # of the physical memory free when the bake starts
+BUDGET_MAX = 32 * 2 ** 30  # decision 32: never more than 32 GB
+
+
+def memory_status():
+    """(total, available) physical memory in bytes (Windows: GlobalMemoryStatusEx), or (None, None)."""
+    try:
+        import ctypes
+
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [('dwLength', ctypes.c_ulong), ('dwMemoryLoad', ctypes.c_ulong),
+                        ('ullTotalPhys', ctypes.c_ulonglong), ('ullAvailPhys', ctypes.c_ulonglong),
+                        ('ullTotalPageFile', ctypes.c_ulonglong), ('ullAvailPageFile', ctypes.c_ulonglong),
+                        ('ullTotalVirtual', ctypes.c_ulonglong), ('ullAvailVirtual', ctypes.c_ulonglong),
+                        ('ullAvailExtendedVirtual', ctypes.c_ulonglong)]
+        st = MEMORYSTATUSEX()
+        st.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+            return int(st.ullTotalPhys), int(st.ullAvailPhys)
+    except (AttributeError, OSError, ImportError):
+        pass
+    try:
+        info = {}
+        with open('/proc/meminfo', encoding='ascii') as f:
+            for line in f:
+                k, v = line.split(':', 1)
+                info[k] = int(v.split()[0]) * 1024
+        return info['MemTotal'], info.get('MemAvailable', info['MemFree'])
+    except (OSError, KeyError, ValueError):
+        return None, None
+
+
+def process_memory():
+    """(working set, peak working set) of this process in bytes (Windows: GetProcessMemoryInfo), or (None, None)."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class PMC(ctypes.Structure):
+            _fields_ = [('cb', wintypes.DWORD), ('PageFaultCount', wintypes.DWORD),
+                        ('PeakWorkingSetSize', ctypes.c_size_t), ('WorkingSetSize', ctypes.c_size_t),
+                        ('QuotaPeakPagedPoolUsage', ctypes.c_size_t), ('QuotaPagedPoolUsage', ctypes.c_size_t),
+                        ('QuotaPeakNonPagedPoolUsage', ctypes.c_size_t), ('QuotaNonPagedPoolUsage', ctypes.c_size_t),
+                        ('PagefileUsage', ctypes.c_size_t), ('PeakPagefileUsage', ctypes.c_size_t)]
+        pmc = PMC()
+        pmc.cb = ctypes.sizeof(PMC)
+        k32 = ctypes.windll.kernel32
+        k32.GetCurrentProcess.restype = wintypes.HANDLE
+        k32.GetCurrentProcess.argtypes = []
+        k32.K32GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(PMC), wintypes.DWORD]
+        k32.K32GetProcessMemoryInfo.restype = wintypes.BOOL
+        if k32.K32GetProcessMemoryInfo(k32.GetCurrentProcess(), ctypes.byref(pmc), pmc.cb):
+            return int(pmc.WorkingSetSize), int(pmc.PeakWorkingSetSize)
+    except (AttributeError, OSError, ImportError, ctypes.ArgumentError):
+        pass
+    try:
+        import resource
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+        return None, peak
+    except (ImportError, AttributeError):
+        return None, None
+
+
+def memory_budget(override_gb=None):
+    """The bake's memory budget in bytes (decision 32): an override (tests), else BUDGET_SHARE of the physical
+    memory free now, at most BUDGET_MAX; 4 GB when the free memory cannot be read."""
+    if override_gb:
+        return int(float(override_gb) * 2 ** 30)
+    _total, avail = memory_status()
+    if not avail:
+        return 4 * 2 ** 30
+    return int(min(BUDGET_MAX, BUDGET_SHARE * avail))
+
+
+def choose_tile(W, H, budget, in_use):
+    """The largest tile size whose bake fits the budget: the whole master when it is not larger than the largest of
+    TILE_SIZES and fits, else the largest of TILE_SIZES that fits; in_use: the process's working set before the
+    master (Blender, the scene). Returns (size, estimate of the peak in bytes, fits)."""
+    fixed = in_use + BYTES_PER_MASTER_PX * W * H
+    longest = max(W, H)
+    sizes = ([longest] if longest <= TILE_SIZES[0] else []) + [s for s in TILE_SIZES if s < longest]
+    for s in sizes:
+        est = fixed + TILE_OVERHEAD + BYTES_PER_TILE_PX * min(s, W) * min(s, H)
+        if est <= budget:
+            return int(s), est, True
+    s = min(TILE_MIN, longest)
+    return int(s), fixed + TILE_OVERHEAD + BYTES_PER_TILE_PX * min(s, W) * min(s, H), False
+
+
+def tile_grid(W, H, size):
+    """Tiles (x0, y0, w, h) of at most size x size px over a W x H master, row by row from the bottom left."""
+    size = max(1, int(size))
+    return [(x0, y0, min(size, W - x0), min(size, H - y0)) for y0 in range(0, H, size) for x0 in range(0, W, size)]
+
+
+def tile_seed(base, i, n):
+    """Cycles' seed of tile i of n: the base seed for a single tile (the untiled bake), else one per tile, since
+    Cycles' noise depends on the pixel's position in the image and would repeat from tile to tile."""
+    return int(base) if n == 1 else int(base) + 1009 * (int(i) + 1)
+
+
+def tris_in_window(uvpx, x0, y0, w, h, margin=1.0):
+    """Indices of the triangles (N, 3, 2 px) whose bounding box overlaps the window (plus a margin)."""
+    if not len(uvpx):
+        return np.zeros(0, dtype=np.int64)
+    lo = uvpx.min(axis=1)
+    hi = uvpx.max(axis=1)
+    ok = ((hi[:, 0] >= x0 - margin) & (lo[:, 0] <= x0 + w + margin) & (hi[:, 1] >= y0 - margin)
+          & (lo[:, 1] <= y0 + h + margin))
+    return np.nonzero(ok)[0]
+
+
+def rect_window(rects, x0, y0, w, h):
+    """The island rectangle id (int32, -1 for none) of each pixel of a window."""
+    rid = np.full((h, w), -1, dtype=np.int32)
+    r = np.asarray(rects, dtype=np.int64).reshape(-1, 4)
+    if not len(r):
+        return rid
+    ax0 = np.maximum(r[:, 0], x0)
+    ay0 = np.maximum(r[:, 1], y0)
+    ax1 = np.minimum(r[:, 0] + r[:, 2], x0 + w)
+    ay1 = np.minimum(r[:, 1] + r[:, 3], y0 + h)
+    for i in np.nonzero((ax1 > ax0) & (ay1 > ay0))[0].tolist():
+        rid[ay0[i] - y0:ay1[i] - y0, ax0[i] - x0:ax1[i] - x0] = i
+    return rid
+
+
+def quantize16(values):
+    """Floats 0..1 as the 16-bit values of the master PNG (as write_png rounds them)."""
+    return np.round(np.clip(np.asarray(values, dtype=np.float64), 0.0, 1.0) * 65535.0).astype(np.uint16)
+
+
+def compose_window(m, M16, flags, face_map, win):
+    """The composition of a master (step3_master.py) for one window of the whole master, after every tile is baked.
+
+    M16 (H, W) uint16: the core and skirt values; flags (H, W) uint8: bit 1 = baked (core or skirt), set by the bake;
+    this sets bit 2 = filled (baked or nearest fill) and fills, inside each island's rectangle, the pixels within
+    FILL steps of a baked pixel of the same rectangle with that pixel's value; face_map (H, W) int32 gets the window's
+    face per pixel (core faces, then skirt faces inside rectangles, grown FILL steps inside rectangles).
+    The window is read with a halo of FILL pixels, so the result equals the composition of the whole image at once.
+    Returns the window's counts."""
     W, H = m['W'], m['H']
-    core = m['core_tris']
-    in_rect = np.zeros((H, W), dtype=bool)
-    rect_id = np.full((H, W), -1, dtype=np.int64)
-    for i, (x, y, w, h) in enumerate(m['rects']):
-        in_rect[y:y + h, x:x + w] = True
-        rect_id[y:y + h, x:x + w] = i
-    M = np.full((H, W), -1.0)
-    cm = A >= 0
-    M[cm] = A[cm]
-    sm = (~cm) & (B >= 0) & in_rect
-    M[sm] = B[sm]
-    filled = M >= 0
-    idx = np.where(filled, np.arange(H * W).reshape(H, W), -1)
-    grown, _steps = dilate_ids(idx, 2 * GUTTER + 4, mask_allowed=in_rect)
-    fm = (~filled) & (grown >= 0)
+    x0, y0, w, h = win
+    ex0, ey0 = max(0, x0 - FILL), max(0, y0 - FILL)
+    ex1, ey1 = min(W, x0 + w + FILL), min(H, y0 + h + FILL)
+    ew, eh = ex1 - ex0, ey1 - ey0
+    sub = (slice(y0 - ey0, y0 - ey0 + h), slice(x0 - ex0, x0 - ex0 + w))
+    rid = rect_window(m['rects'], ex0, ey0, ew, eh)
+    in_rect = rid >= 0
+    baked = (flags[ey0:ey1, ex0:ex1] & 1) != 0
+    idx = np.where(baked, np.arange(eh * ew, dtype=np.int32).reshape(eh, ew), np.int32(-1))
+    grown, _steps = dilate_ids(idx, FILL, mask_allowed=in_rect)
+    del idx, _steps
+    fm = (~baked) & (grown >= 0)
     same = np.zeros_like(fm)
-    same[fm] = rect_id.ravel()[grown[fm]] == rect_id[fm]
+    same[fm] = rid.ravel()[grown[fm]] == rid[fm]
     fm &= same
-    M[fm] = M.ravel()[grown[fm]]
-    own_core, _ = rasterize_ids(m['muv'][core], W, H)
-    face_map = np.where(own_core >= 0, core[np.maximum(own_core, 0)], -1)
-    if len(m['skirt_pos']):
-        own_sk, _ = rasterize_ids(m['skirt_uv'], W, H)
-        sk_face = np.where(own_sk >= 0, m['skirt_src'][np.maximum(own_sk, 0)], -1)
-        take = (face_map < 0) & (sk_face >= 0) & in_rect
-        face_map[take] = sk_face[take]
-    fidx = np.where(face_map >= 0, np.arange(H * W).reshape(H, W), -1)
-    fgrown, _ = dilate_ids(fidx, 2 * GUTTER + 4, mask_allowed=in_rect)
-    fm2 = (face_map < 0) & (fgrown >= 0)
-    face_map[fm2] = face_map.ravel()[fgrown[fm2]]
-    counts = dict(core_px=int(cm.sum()), skirt_px=int(sm.sum()), nearest_fill_px=int(fm.sum()),
-                  rect_px_unfilled=int((in_rect & (M < 0)).sum()), rect_px=int(in_rect.sum()), image_px=int(W * H))
-    return np.where(M >= 0, M, 0.0), M >= 0, face_map.astype(np.int32), rect_id, counts
+    del same
+    fmi = fm[sub]
+    if fmi.any():
+        src = M16[ey0:ey1, ex0:ex1].ravel()[grown[sub][fmi]]  # sources are baked pixels: never written by a fill
+        M16[y0:y0 + h, x0:x0 + w][fmi] = src
+    del grown
+    filled = baked[sub] | fmi
+    flags[y0:y0 + h, x0:x0 + w] |= np.where(filled, np.uint8(2), np.uint8(0))
+    counts = dict(nearest_fill_px=int(fmi.sum()), rect_px_unfilled=int((in_rect[sub] & ~filled).sum()),
+                  rect_px=int(in_rect[sub].sum()))
+    del fm, baked
+    # the face map
+    core = m['core_tris']
+    cuv = m['muv'][core]
+    sel = tris_in_window(cuv, ex0, ey0, ew, eh)
+    fmap = np.full((eh, ew), -1, dtype=np.int32)
+    if len(sel):
+        own, _cnt = rasterize_ids(cuv[sel], ew, eh, 1, ex0, ey0)
+        fmap = np.where(own >= 0, core[sel][np.maximum(own, 0)], -1).astype(np.int32)
+        del own, _cnt
+    sel = tris_in_window(m['skirt_uv'], ex0, ey0, ew, eh) if len(m['skirt_pos']) else []
+    if len(sel):
+        own, _cnt = rasterize_ids(m['skirt_uv'][sel], ew, eh, 1, ex0, ey0)
+        sk_face = np.where(own >= 0, m['skirt_src'][sel][np.maximum(own, 0)], -1)
+        del own, _cnt
+        take = (fmap < 0) & (sk_face >= 0) & in_rect
+        fmap[take] = sk_face[take]
+        del sk_face, take
+    fidx = np.where(fmap >= 0, np.arange(eh * ew, dtype=np.int32).reshape(eh, ew), np.int32(-1))
+    fgrown, _steps = dilate_ids(fidx, FILL, mask_allowed=in_rect)
+    del fidx, _steps
+    fm2 = (fmap < 0) & (fgrown >= 0)
+    fmap[fm2] = fmap.ravel()[fgrown[fm2]]
+    face_map[y0:y0 + h, x0:x0 + w] = fmap[sub]
+    return counts
 
 
-def save_master(folder, stem, image, m, filled, face_map, tri_src, meta):
-    """<stem>.ao.png (16-bit grey) and <stem>.ao.npz (the layout). Written to temporary names, then replaced."""
+def save_master(folder, stem, M16, m, filled, face_map, tri_src, meta):
+    """<stem>.ao.png (16-bit grey, written row by row from the uint16 master) and <stem>.ao.npz (the layout).
+    Written to temporary names, then replaced, so a bake that stops on the way keeps the old master."""
     png = os.path.join(folder, stem + '.ao.png')
     npz = os.path.join(folder, stem + '.ao.npz')
-    write_png(png + '.tmp', image, bits=16)
+    write_png_int(png + '.tmp', M16, bits=16)
     with open(npz + '.tmp', 'wb') as f:
         np.savez_compressed(f, muv=m['muv'], island=m['island'], density=m['density'], W=m['W'], H=m['H'],
                             rects=m['rects'], gutter=m['gutter'], degenerate=m['degenerate'], filled=filled,
@@ -996,7 +1180,8 @@ def save_master(folder, stem, image, m, filled, face_map, tri_src, meta):
 
 
 def load_master(folder, stem):
-    """The master as copy_master reads it, or None when a file is missing."""
+    """The master as copy_master reads it (the image as uint16, 0..65535; the island rectangles instead of a per-pixel
+    map), or None when a file is missing."""
     png = os.path.join(folder, stem + '.ao.png')
     npz = os.path.join(folder, stem + '.ao.npz')
     if not (os.path.isfile(png) and os.path.isfile(npz)):
@@ -1005,12 +1190,8 @@ def load_master(folder, stem):
     img = read_png(png)[0]
     if img.ndim == 3:
         img = img[:, :, 0]
-    img = img.astype(np.float64) / 65535.0
     H, W = img.shape
-    rect_id = np.full((H, W), -1, dtype=np.int64)
-    for i, (x, y, w, h) in enumerate(z['rects']):
-        rect_id[y:y + h, x:x + w] = i
-    return dict(muv=z['muv'], image=img, rect_id=rect_id, filled=z['filled'], island=z['island'],
+    return dict(muv=z['muv'], image=img, rects=z['rects'], filled=z['filled'], island=z['island'],
                 face_map=z['face_map'], density=float(z['density']), tri_src=z['tri_src'], W=W, H=H,
                 meta=json.loads(str(z['meta'])))
 
@@ -1107,20 +1288,27 @@ COLOUR_TYPE = {1: 0, 2: 4, 3: 2, 4: 6}  # channels: PNG colour type
 CHANNELS = {0: 1, 4: 2, 2: 3, 6: 4}
 
 
-def write_png_int(path, q, bits=16):
-    """q: (H, W) or (H, W, C) integers in the file's depth, row 0 = bottom. Filter 0, zlib level 6."""
+def write_png_int(path, q, bits=16, rows=256):
+    """q: (H, W) or (H, W, C) integers in the file's depth, row 0 = bottom. Filter 0, zlib level 6. Written row by
+    row (`rows` at a time, one IDAT chunk per compressed block), so no copy of the whole image is made."""
     q = np.asarray(q)
     h, w = q.shape[:2]
     ch = 1 if q.ndim == 2 else q.shape[2]
     dtype = '>u2' if bits == 16 else np.uint8
-    rows = np.ascontiguousarray(q[::-1].astype(dtype)).reshape(h, -1)
-    raw = np.zeros((h, rows.shape[1] * rows.itemsize + 1), dtype=np.uint8)
-    raw[:, 1:] = rows.view(np.uint8).reshape(h, -1)
     ihdr = struct.pack('>IIBBBBB', w, h, bits, COLOUR_TYPE[ch], 0, 0, 0)
+    comp = zlib.compressobj(6)
     with open(path, 'wb') as f:
         f.write(b'\x89PNG\r\n\x1a\n')
         f.write(_png_chunk(b'IHDR', ihdr))
-        f.write(_png_chunk(b'IDAT', zlib.compress(raw.tobytes(), 6)))
+        for top in range(0, h, rows):
+            bot = min(h, top + rows)
+            block = np.ascontiguousarray(q[h - bot:h - top][::-1].astype(dtype)).reshape(bot - top, -1)
+            raw = np.zeros((bot - top, block.shape[1] * block.itemsize + 1), dtype=np.uint8)
+            raw[:, 1:] = block.view(np.uint8).reshape(bot - top, -1)
+            data = comp.compress(raw.tobytes())
+            if data:
+                f.write(_png_chunk(b'IDAT', data))
+        f.write(_png_chunk(b'IDAT', comp.flush()))
         f.write(_png_chunk(b'IEND', b''))
 
 
@@ -1174,24 +1362,55 @@ def read_png(path):
     ch = CHANNELS[ct]
     bpp = ch * bits // 8
     stride = w * bpp
-    raw = np.frombuffer(zlib.decompress(b''.join(idat)), dtype=np.uint8).reshape(h, 1 + stride)
-    filters = raw[:, 0]
-    if np.any(filters > 2):
-        raise PngNotDecoded('filter Average or Paeth')
-    rows = raw[:, 1:].copy()
-    if np.any(filters != 0):
-        for y in range(h):
-            f = filters[y]
-            if f == 1:
-                r = rows[y].reshape(w, bpp).astype(np.uint32)
-                rows[y] = (np.cumsum(r, axis=0) % 256).astype(np.uint8).ravel()
-            elif f == 2 and y > 0:
-                rows[y] = (rows[y].astype(np.uint16) + rows[y - 1]) % 256
-    if bits == 16:
-        vals = rows.view('>u2').astype(np.uint16).reshape(h, w, ch)
-    else:
-        vals = rows.reshape(h, w, ch).astype(np.uint16)
-    vals = vals[::-1]
+    rowlen = 1 + stride
+    vals = np.empty((h, w, ch), dtype=np.uint16)
+    # decoded in blocks of rows (no copy of the whole raw image); file row y is vals row h - 1 - y
+    d = zlib.decompressobj()
+    pending = bytearray()
+    state = dict(y=0, prev=None)
+
+    def rows_out(n):
+        block = np.frombuffer(bytes(pending[:n * rowlen]), dtype=np.uint8).reshape(n, rowlen)
+        del pending[:n * rowlen]
+        filters = block[:, 0]
+        if np.any(filters > 2):
+            raise PngNotDecoded('filter Average or Paeth')
+        rows = block[:, 1:].copy()
+        if np.any(filters != 0):
+            for k in range(n):
+                f = filters[k]
+                if f == 1:
+                    r = rows[k].reshape(w, bpp).astype(np.uint32)
+                    rows[k] = (np.cumsum(r, axis=0) % 256).astype(np.uint8).ravel()
+                elif f == 2:
+                    prev = rows[k - 1] if k > 0 else state['prev']
+                    if prev is not None:
+                        rows[k] = (rows[k].astype(np.uint16) + prev) % 256
+        state['prev'] = rows[-1].copy()
+        y = state['y']
+        if bits == 16:
+            v = rows.view('>u2').reshape(n, w, ch)
+        else:
+            v = rows.reshape(n, w, ch)
+        vals[h - y - n:h - y] = v[::-1]
+        state['y'] = y + n
+
+    for chunk in idat:
+        data = d.decompress(chunk, 1 << 24)
+        while True:
+            pending.extend(data)
+            n = len(pending) // rowlen
+            if n:
+                rows_out(min(n, h - state['y']))
+            if not d.unconsumed_tail:
+                break
+            data = d.decompress(d.unconsumed_tail, 1 << 24)
+    pending.extend(d.flush())
+    n = min(len(pending) // rowlen, h - state['y'])
+    if n:
+        rows_out(n)
+    if state['y'] != h:
+        raise PngNotDecoded(f'{state["y"]} of {h} rows decoded')
     return (vals[:, :, 0] if ch == 1 else vals), bits, ct
 
 

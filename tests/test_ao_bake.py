@@ -5,6 +5,9 @@ tests/_work/ao_bake_suite/suite.blend and baked through the tool's operators in 
 Blender). Checked:
 - the second Blender: status.json reaches m of m; Cancel stops after the current object and keeps the finished masters
   (finish line 8);
+- the bake in tiles (Session 19): a master in tiles of 64 px has the untiled master's layout, filled pixels and face
+  map, and differs by noise only; Cancel between tiles stops within one tile and keeps the object's old master; an
+  object's faces without a material are not baked, an object without one is excluded and listed (decision 30);
 - staleness: a moved vertex, changed custom normals and an added modifier give "mesh changed"; a moved occluder inside
   the AO distance, an occluder tagged Non-AO-Occluder, the AO distance and a moved object give "surroundings changed";
   an occluder moved outside the distance, UVs moved, scaled and re-unwrapped, a material changed leave it up to date;
@@ -227,6 +230,15 @@ def build_scene():
             for li in poly.loop_indices:
                 x, y, _z = obj.data.vertices[obj.data.loops[li].vertex_index].co
                 uv.data[li].uv = (u0 + (x / 0.2 + 0.5) * (u1 - u0), 0.2 + (y / 0.2 + 0.5) * 0.5)
+    # decision 30: N has faces of SET_A and faces in an empty slot; NM has no material at all
+    n_obj = plane('N', (10, 0, 0), set_a, 6)
+    n_obj.data.materials.append(None)
+    for poly in n_obj.data.polygons:
+        if poly.index < 4:
+            poly.material_index = 1
+    cube('ON', (10, 0, 0), set_b, 10)
+    nm = plane('NM', (11, 0, 0), set_a, 7)
+    nm.data.materials.clear()
     WORK.mkdir(parents=True, exist_ok=True)
     bpy.ops.wm.save_as_mainfile(filepath=str(BLEND))
 
@@ -275,7 +287,7 @@ def entry_of(name):
 def master_image(name):
     _e, stem = entry_of(name)
     m = core.load_master(str(FOLDER), stem)
-    return m, m['image'][m['filled']]
+    return m, m['image'][m['filled']] / 65535.0
 
 
 def file_hash(path):
@@ -377,6 +389,16 @@ def test_bake_all():
     skip_tris = {i for i, mi in enumerate(ev['mat'].tolist()) if slots[mi] in ('F_DECAL', 'F_GLASS')}
     assert len(skip_tris) == 4 and not skip_tris & set(f_master['tri_src'].tolist()), skip_tris
     assert len(f_master['tri_src']) == len(ev['tris']) - 4
+    # decision 30 (Session 19, finish line 6): N's faces without a material not in its master; NM excluded
+    assert state['excluded'].get('NM') == 'no face with a texture set (material)', state['excluded']
+    assert 'NM' not in names and not any(p.startswith('NM_') for p in files), files
+    n_master, _vals = master_image('N')
+    ev_n = core.evaluated_triangles(bpy.data.objects['N'], bpy.context.evaluated_depsgraph_get(), [])
+    no_set = set(np.nonzero(ev_n['mat'] == 1)[0].tolist())
+    assert len(no_set) == 8 and not no_set & set(n_master['tri_src'].tolist()), no_set
+    assert len(n_master['tri_src']) == len(ev_n['tris']) - 8
+    report = bpy.context.window_manager.fss_ao_bake_state.report
+    assert 'excluded (no face with a texture set (material)): 1: NM' in report, report
     # FL7: darkening
     mins = {n: float(master_image(n)[1].min()) for n in ('A', 'B', 'C', 'D', 'E', 'O1', 'S1', 'M')}
     assert mins['A'] < 0.9 and mins['D'] < 0.9 and mins['E'] < 0.9, mins  # O1, S1/S2, K (skip-bake) darken
@@ -386,8 +408,9 @@ def test_bake_all():
     assert mins['O1'] < 0.9 and mins['M'] < 0.9, mins  # an own-mesh cube is darkened by its plane
     times = {r['name']: r['bake_s'] for r in status['results']}
     print(f"PASS: test_bake_all ({m} masters in {time.time() - t:.1f} s, m of m; .blend hash, datablocks, matrices, "
-          f"materials, images unchanged; no master for K; F's 4 decal/glass triangles not in its master; minima {mins}; "
-          f"bake s {times})")
+          f"materials, images unchanged; no master for K; F's 4 decal/glass triangles not in its master; N's 8 "
+          f"triangles without a material not in its master ({len(n_master['tri_src'])} kept); NM excluded and "
+          f"listed in the report; minima {mins}; bake s {times})")
     return status
 
 
@@ -419,6 +442,59 @@ def test_cancel():
             assert os.path.getmtime(store.master_files(str(FOLDER), s)[0]) == old[s], s
     print(f"PASS: test_cancel (cancelled after {status['n_done']} of {status['n_total']}: {status['results'][0]['name']} "
           "re-baked, the others' masters kept unchanged)")
+
+
+def test_tiles():
+    """Session 19: a master baked in tiles of 64 px equals the untiled one but for noise; Cancel between tiles stops
+    within one tile and keeps the object's old master (finish line 7)."""
+    select(['A'])
+    stem = store.items_for_objects([bpy.data.objects['A']])[0]
+    png, npz = store.master_files(str(FOLDER), stem)
+    untiled, _v = master_image('A')
+    old = (os.path.getmtime(png), os.path.getmtime(npz), file_hash(png))
+    # Cancel between tiles
+    res = bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=False, tile=64, test_tile_delay=1.0)
+    assert res == {'FINISHED'}
+    proc = store._run['proc']
+    t = time.time()
+    while time.time() - t < 120:
+        st = store.read_status()
+        if st and st.get('tile', 0) >= 2:
+            break
+        time.sleep(0.05)
+    n_tiles = st['n_tiles']
+    t_cancel = time.time()
+    store.cancel()
+    proc.wait(timeout=300)
+    stop_s = time.time() - t_cancel
+    ao_bake.finish_bake()
+    status = store.read_status()
+    assert status['state'] == 'cancelled' and status['n_done'] == 0, status
+    r = status['results'][0]
+    assert r['status'] == 'cancelled', r
+    assert (os.path.getmtime(png), os.path.getmtime(npz), file_hash(png)) == old
+    assert not os.path.exists(png + '.tmp') and not os.path.exists(npz + '.tmp')
+    log_text = (FOLDER / 'bake.log').read_text(encoding='utf-8')
+    tile_s = max(float(x.split(', ')[-1].rstrip(' s')) for x in log_text.splitlines()
+                 if 'tile ' in x and ' triangles, ' in x)
+    # within one tile's time (and the test's pause of 1 s per tile, and Blender's quit)
+    assert stop_s < 1.0 + tile_s + 5.0, (stop_s, tile_s)
+    # a whole bake in tiles of 64 px
+    res = bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True, tile=64)
+    status = store.read_status()
+    assert status['state'] == 'done' and status['results'][0]['status'] == 'baked', status
+    assert status['results'][0]['n_tiles'] == n_tiles > 1
+    tiled, _v = master_image('A')
+    assert tiled['image'].shape == untiled['image'].shape and np.array_equal(tiled['filled'], untiled['filled'])
+    assert np.array_equal(tiled['face_map'], untiled['face_map'])
+    both = tiled['filled'] & untiled['filled']
+    mae = float(np.abs(tiled['image'][both].astype(np.float64) - untiled['image'][both]).mean() / 65535.0)
+    assert mae < 0.05, mae
+    assert grade_of('A') == 'UP_TO_DATE'
+    print(f"PASS: test_tiles (Cancel: {r['reason']}; stopped {stop_s:.1f} s after the cancel file, a tile "
+          f"took at most {tile_s:.2f} s + the test's 1 s pause; the old master kept byte for byte; a bake in "
+          f"{n_tiles} tiles of 64 px: the same layout, filled pixels and face map as the untiled master, MAE "
+          f"{mae:.4f} at 16 samples)")
 
 
 def test_staleness():
@@ -672,6 +748,7 @@ if __name__ == '__main__':
     build_scene()
     test_bake_all()
     test_cancel()
+    test_tiles()
     test_staleness()
     test_apply_orm()
     test_apply_per_object()

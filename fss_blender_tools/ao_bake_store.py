@@ -10,7 +10,8 @@ decisions 12 to 18, 21 and 27; P32 to P35).
   bounds (name, world matrix, geometry hash, tags) and the settings differs. A master missing for an object whose
   geometry hash matches exactly one orphaned master (its object or mesh gone) is linked to it again (a rename).
 - Rules (P35, decision 15): baked are the visible LOD0 mesh objects with faces and a UV map, without the Skip-AO-Bake,
-  No Texture, Invisible or No Export tags, and only their faces without skip materials (uv_autoseam._is_skip_material).
+  No Texture, Invisible or No Export tags, and only their faces of a texture set: a material that is not a skip
+  material (uv_autoseam._is_skip_material); an object without such faces is excluded (decision 30).
   Occluders are the visible LOD0 meshes without the Non-AO-Occluder, Invisible or No Export tags, without their skip
   faces, and not movers (animated, or under an animated parent, or tagged Animated): movers cast no AO onto other
   objects and are baked in the current frame's pose. A shared mesh gets its self-shading only.
@@ -169,7 +170,7 @@ def is_occluder(obj, scene):
 
 def texture_size(material):
     from .uv_marks import texture_size as size_of
-    return size_of(material) if material is not None else 4096
+    return size_of(material)
 
 
 def _world_box(obj):
@@ -245,6 +246,15 @@ def refresh(context, relink=True):
         stem = core.safe_stem(kind, name)
         uv = me.uv_layers.active.name
         ev = ev_of(first, [uv])
+        slots = [slot.material for slot in first.material_slots]
+        skip = skip_slots(first)
+        mats = sorted(set(int(m) for m in np.unique(ev['mat']).tolist()))
+        # decision 30: only faces whose material is a texture set (a material, not a skip material) are baked
+        set_mats = [m for m in mats if m < len(slots) and slots[m] is not None and m not in skip]
+        if not set_mats:
+            for o in objs:
+                excluded[o.name] = 'no face with a texture set (material)'
+            continue
         mh = geo_hash(first)
         mover = is_mover(first, scene)
         if shared:
@@ -259,12 +269,8 @@ def refresh(context, relink=True):
                              occluders=[(n, core.matrix_key(bpy.data.objects[n].matrix_world),
                                          geo_hash(bpy.data.objects[n]), sorted(tags.get_tags(bpy.data.objects[n])))
                                         for n in occ]))
-        slots = [slot.material for slot in first.material_slots]
-        skip = skip_slots(first)
-        mats = sorted(set(int(m) for m in np.unique(ev['mat']).tolist()))
-        sets = sorted({slots[m].name for m in mats if m < len(slots) and slots[m] is not None and m not in skip})
-        tex = {str(m): int(texture_size(slots[m] if m < len(slots) else None)) for m in mats}
-        tex['default'] = 4096
+        sets = sorted({slots[m].name for m in set_mats})
+        tex = {str(m): int(texture_size(slots[m])) for m in set_mats}  # faces of other indices are not baked
         item = dict(key=stem, kind=kind, name=name, object=first.name, mesh=me.name, users=[o.name for o in objs],
                     uv=uv, mesh_hash=mh, surround_hash=sur, occluders=occ, mover=mover, frame=frame,
                     skip_slots=skip, tex_size=tex, sets=sets, grade='MISSING')
@@ -353,7 +359,7 @@ def items_for_objects(objects):
 # The bake in a second Blender
 # ---------------------------------------------------------------------------------------------------------------------
 
-def make_job(context, stems, test_delay_s=0.0):
+def make_job(context, stems, test_delay_s=0.0, tile_px=0, test_tile_delay_s=0.0):
     scene = context.scene
     folder = bake_folder()
     os.makedirs(folder, exist_ok=True)
@@ -366,7 +372,8 @@ def make_job(context, stems, test_delay_s=0.0):
                           surround_hash=item['surround_hash'], mesh_hash=item['mesh_hash'], mover=item['mover'],
                           frame=item['frame']))
     job = dict(schema=core.SCHEMA, blend=bpy.data.filepath, folder=folder, settings=settings_dict(scene),
-               items=items, created=time.strftime('%Y-%m-%d %H:%M:%S'), test_delay_s=float(test_delay_s))
+               items=items, created=time.strftime('%Y-%m-%d %H:%M:%S'), test_delay_s=float(test_delay_s),
+               tile_px=int(tile_px), test_tile_delay_s=float(test_tile_delay_s))
     path = os.path.join(folder, 'job.json')
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(job, f, indent=1)
