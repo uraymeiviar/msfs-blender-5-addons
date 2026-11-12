@@ -462,6 +462,21 @@ def test_panel_visibility():
         _draw, labels = draw_packing()
         assert '0.10 - 0.90' in labels and '20.74 - 27.88 px/cm' in labels, labels
         knob.fss_uv_use_visibility = True
+        # Visibility off on every material of the object: the same as the Islands tick off
+        added = not uv_marks.object_materials(knob)
+        if added:
+            knob.data.materials.append(bpy.data.materials.new('KNOB_VIS_MAT'))
+        knob_materials = uv_marks.object_materials(knob)
+        _draw, labels = draw_packing()
+        assert '0.10 - 0.90' in labels and '2.07 - 25.09 px/cm' in labels, labels  # with visibility, as above
+        for material in knob_materials:
+            setattr(material, uv_marks.MATERIAL_VIS_PROP, False)
+        _draw, labels = draw_packing()
+        assert '20.74 - 27.88 px/cm' in labels, labels
+        for material in knob_materials:
+            setattr(material, uv_marks.MATERIAL_VIS_PROP, True)
+        if added:
+            knob.data.materials.pop()
         draw_packing()
         assert calls == ['KNOB'], f"a redraw scored the islands again: {calls}"
         answer.update(never_seen=True, object_score=0.1)

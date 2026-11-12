@@ -72,7 +72,7 @@ def _key(obj, scene):
     overrides = uv_marks.face_overrides(me)
     return (_generation, obj.name, me.name, len(me.polygons), layer.name if layer else '', mtime,
             None if overrides is None else hash(overrides.tobytes()), uv_marks.density(obj, scene)[0], uv_marks.uses_visibility(obj), uv_marks.target_density(scene), uv_marks.partly_seen(scene),
-            tuple((uv_marks.texture_size(m), uv_pack.is_kept(m), uv_marks.material_density(m), id(uv_marks._results.get(m.name))) for m in materials))
+            tuple((uv_marks.texture_size(m), uv_pack.is_kept(m), uv_marks.material_density(m), uv_marks.material_uses_visibility(m), id(uv_marks._results.get(m.name))) for m in materials))
 
 
 def sync(obj, scene, view_layer, wm):

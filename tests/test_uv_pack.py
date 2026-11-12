@@ -487,7 +487,7 @@ def test_panel_rows():
     # the list's rows: the selection's texture sets, the active object's first
     assert [m_.name for m_ in uv_marks.texture_set_materials(bpy.context)] == ['SHARED', 'PRIVATE', 'FUR']
     assert not [label for label in labels if label and label.startswith('Texture set: ')] and 'Last run' not in labels
-    material_props = {uv_marks.MATERIAL_TICK_PROP, uv_marks.MATERIAL_FACTOR_PROP}  # the Material rows of the table
+    material_props = {uv_marks.MATERIAL_TICK_PROP, uv_marks.MATERIAL_FACTOR_PROP, uv_marks.MATERIAL_VIS_PROP}  # the Material rows
     assert not [1 for name, args, _kw in calls if name == 'prop' and isinstance(args[0], bpy.types.Material) and args[1] not in material_props]
     ops = [kw.get('text') for name, _a, kw in calls if name == 'operator' and kw.get('text')]
     # SHARED and PRIVATE; FUR is Keep UVs; no row highlighted, so the Problems list has a hint and no Recheck
@@ -1362,6 +1362,21 @@ def test_island_list():
         uv_islands.sync(obj, scene, view_layer, wm)
         assert all(abs(row.high - target * 1.1) < 1e-4 and abs(row.low - target * 0.9) < 1e-4 for row in rows)
         obj.fss_uv_use_visibility = True
+        uv_islands.sync(obj, scene, view_layer, wm)
+        by_number = {row.number: row for row in rows}
+        assert abs(by_number[3].low - target * 0.9 * 0.1) < 1e-4
+
+        # Visibility off on the material ISL_A: its islands count as fully visible on every object; ISL_B keeps it
+        setattr(a, uv_marks.MATERIAL_VIS_PROP, False)
+        uv_islands.sync(obj, scene, view_layer, wm)
+        by_number = {row.number: row for row in rows}
+        for number in (1, 2, 3):
+            row = by_number[number]
+            assert row.factor == 1.0 and abs(row.high - target * 1.1) < 1e-4 and abs(row.low - target * 0.9) < 1e-4, number
+        assert abs(by_number[4].factor - 0.25) < 1e-6, by_number[4].factor
+        ts_off = uv_pack.TextureSet(a, parts, scene, {})
+        assert np.allclose(ts_off.vis, 1.0), "the packer ignores visibility for the whole material, other objects too"
+        setattr(a, uv_marks.MATERIAL_VIS_PROP, True)
         uv_islands.sync(obj, scene, view_layer, wm)
         by_number = {row.number: row for row in rows}
         assert abs(by_number[3].low - target * 0.9 * 0.1) < 1e-4

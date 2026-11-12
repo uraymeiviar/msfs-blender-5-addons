@@ -301,7 +301,10 @@ its own and can be repeated, none requires another to have run (UV 7, 42). Artis
   Parent), Visibility (object score and island range; "no data: x1.00", "never seen: x0.10"; Object Mode), its own
   Density mark (tick, Min, Max, greyed while off), and Result (the px/cm range: target × parent × own mark ×
   visibility, with the range over its islands). The Heatmap's Density mode follows a mark change shortly after
-  dragging stops.
+  dragging stops. Each Material row has a Visibility switch (`Material.fss_uv_material_use_visibility`, default on):
+  off, every island with that material counts as fully visible (x1.00) in Pack, Check All, the Islands list, the
+  Result range, the Materials estimate and the Calculated density heatmap, on every object; an island uses visibility
+  only when its object's Islands tick and its material's switch are both on (UV decision 154).
 - **Data:** DAT-023, DAT-036
 - **Decision:** UV 109 (amended by 121)
 - **Test:** `tests/test_density_marks.py::test_panel`, `tests/test_density_marks.py::test_panel_visibility`,

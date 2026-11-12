@@ -563,7 +563,8 @@ class TextureSet:
                 self.stale_meshes.append(md.me.name)
                 vis = np.ones(ni)
                 facing = np.ones(ni)
-            elif not any(uv_marks.uses_visibility(u) for u in users):  # the artist unticked it (decision 139)
+            elif (not uv_marks.material_uses_visibility(material)  # switched off for the whole material
+                  or not any(uv_marks.uses_visibility(u) for u in users)):  # the artist unticked it (decision 139)
                 vis = np.ones(ni)
                 facing = np.ones(ni)
             else:

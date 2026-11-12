@@ -42,6 +42,7 @@ SKIP_AUTOSEAM_KEY = 'fss_uv_skip_autoseam'
 KEEP_UVS_PROP = 'fss_uv_keep_uvs'  # on a material: its texture set is not packed (decision 116)
 MATERIAL_FACTOR_PROP = 'fss_uv_material_density'  # on a material: the density factor of all its islands (decision 146)
 MATERIAL_TICK_PROP = 'fss_uv_material_density_use'  # the Material row's tick: unticked, the factor stays but is ignored
+MATERIAL_VIS_PROP = 'fss_uv_material_use_visibility'  # the Material row's Visibility: off, its islands ignore visibility
 SIZE_PROP = 'fss_uv_texture_size'  # on a material: the square texture size (decision 120)
 OVERRIDE_KEY = 'fss_uv_island_multiplier'  # a face attribute: the island's multiplier set by hand, 0 for none
 # Before 0.31.0, read only to migrate: the density mark [min, max] (a custom property; the nearest marked ancestor
@@ -282,6 +283,12 @@ def texture_size(material):
 def uses_visibility(obj):
     """False when the artist unticked the Islands row of this object: its islands count as fully visible."""
     return getattr(obj, USE_VISIBILITY_PROP, True)
+
+
+def material_uses_visibility(material):
+    """False when the artist switched Visibility off on the Material row: the islands with this material count as
+    fully visible on every object."""
+    return material is None or getattr(material, MATERIAL_VIS_PROP, True)
 
 
 def visibility_factor(score):
@@ -674,17 +681,21 @@ def _island_text(summary):
 
 def result_range(obj, scene, summary):
     """((a, b), (c, d) or None): the object's density range in px/cm with its visibility score, and the range over
-    its islands' visibility (target x parent x material x own x visibility). With the Islands row unticked, visibility
-    is 1. With several materials: from the lowest factor to the highest."""
+    its islands' visibility (target x parent x material x own x visibility). With the Islands row unticked, or
+    Visibility off on every material, visibility is 1; off on some, the top of the range is at visibility 1. With
+    several materials: from the lowest factor to the highest."""
     (low, high), _source = density(obj, scene)
-    factors = [material_density(material) for material in object_materials(obj)] or [1.0]
+    materials = object_materials(obj)
+    factors = [material_density(material) for material in materials] or [1.0]
     low, high = low * min(factors), high * max(factors)
     target = target_density(scene)
-    use = uses_visibility(obj)
+    with_vis = [material_uses_visibility(material) for material in materials] or [True]
+    use = uses_visibility(obj) and any(with_vis)
+    top = 1.0 if not all(with_vis) else None  # some materials ignore visibility: their islands are at x1
     vis = summary.get('object', 1.0) if use else 1.0
     islands = summary.get('islands') if use else None
-    return ((target * low * vis, target * high * vis),
-            (target * low * islands[0], target * high * islands[1]) if islands else None)
+    return ((target * low * vis, target * high * (vis if top is None else top)),
+            (target * low * islands[0], target * high * (islands[1] if top is None else top)) if islands else None)
 
 
 def _draw_migration(layout):
@@ -764,12 +775,14 @@ def _draw_mark_row(context, layout, kind, obj, title=None):
 
 
 def _draw_material_row(context, layout, material):
-    """A Material row: as _draw_mark_row without a direction; the name selects the objects that use the material."""
-    tick, value, _turn, name = _cells(layout, VALUE_COLUMN, DIRECTION_COLUMN, NAME_COLUMN)
+    """A Material row: as _draw_mark_row, with the material's Visibility switch where a mark row has its direction;
+    the name selects the objects that use the material."""
+    tick, value, visible, name = _cells(layout, VALUE_COLUMN, DIRECTION_COLUMN, NAME_COLUMN)
     tick.prop(material, MATERIAL_TICK_PROP, text='')
     _hint_icon(tick, 'MATERIAL')
     value.enabled = getattr(material, MATERIAL_TICK_PROP)
     value.prop(material, MATERIAL_FACTOR_PROP, text='')
+    visible.prop(material, MATERIAL_VIS_PROP, text='Visibility', toggle=True)
     text = _fitted(context, material.name, (1.0 - TICK_COLUMN) * NAME_COLUMN)
     name.operator('fss.materials_select', text=text).material = material.name
 
@@ -1579,6 +1592,10 @@ def register():
         name='Material Factor', default=1.0, update=_marks_changed,
         description='Texel density factor of every island with this material, on all objects, used when its tick is on',
         **factor))
+    setattr(bpy.types.Material, MATERIAL_VIS_PROP, bpy.props.BoolProperty(
+        name='Use Visibility', default=True, update=_marks_changed,
+        description="Use the visibility of the islands with this material, on every object. Off, they count as fully "
+                    "visible (x1.00), whatever the objects' Islands tick says"))
     bpy.types.WindowManager.fss_uv_pack_active_name = bpy.props.StringProperty(name='Active Texture Set')
     bar_tips = {'TRACK': 'From 0 to twice the target density', 'RANGE': 'The range of the density of this object',
                 'MARK': 'The target density of the scene'}
@@ -1610,7 +1627,7 @@ def unregister():
     del bpy.types.WindowManager.fss_uv_pack_active_name
     for name, _color in BAR_COLORS.values():
         delattr(bpy.types.WindowManager, name)
-    for name in (MATERIAL_FACTOR_PROP, MATERIAL_TICK_PROP, KEEP_UVS_PROP, 'fss_uv_margin_px', SIZE_PROP):
+    for name in (MATERIAL_VIS_PROP, MATERIAL_FACTOR_PROP, MATERIAL_TICK_PROP, KEEP_UVS_PROP, 'fss_uv_margin_px', SIZE_PROP):
         delattr(bpy.types.Material, name)
     for name in ('fss_uv_density_freedom_max', 'fss_uv_density_freedom_min', 'fss_uv_pack_corner', 'fss_uv_partly_seen_value', 'fss_uv_target_density'):
         delattr(bpy.types.Scene, name)

@@ -236,6 +236,8 @@ def scan(context):
                 cm2 = sum(areas[index] for index, slot in enumerate(slots) if slot == material)
                 entry.area += cm2 * 1e-4
                 zone[2] += cm2 * 1e-4
+                if not uv_marks.material_uses_visibility(material):
+                    vis = None
                 entry.estimate_sq += cm2 * (target * high * uv_marks.material_density(material) * (1.0 if vis is None else vis)) ** 2
                 entry.with_visibility |= vis is not None
         for material, material_users in mesh_users.items():
