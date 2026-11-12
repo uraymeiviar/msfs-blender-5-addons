@@ -20,7 +20,7 @@ Task journals of this repository: design, decisions, progress and hand-offs, one
 | [20261103.weighted-normal-instancing.md](20261103.weighted-normal-instancing.md) | Shared meshes with Weighted Normal exported once, for batched draw calls | Reviewed, MSFS check open |
 | [20261105.uv-seam-mismatch-substance.md](20261105.uv-seam-mismatch-substance.md) | Artists' seam mismatch in Substance Painter (triplanar), and 16-bit UVs | Paused, waiting for a session with Substance |
 | [20261110.wiper-mask-16bit.md](20261110.wiper-mask-16bit.md) | Wiper Mask Generator saves 16 bits per channel | Done, MSFS check open |
-| [20261112.auto-bake-ao-curvature.md](20261112.auto-bake-ao-curvature.md) | Auto-bake of AO and curvature; masters that survive UV changes | Prototype of master and copy (Session 2), reviewed (Session 3); P12 stopped at step 1 (Session 4): the wrong pixels are on the open border, not on narrow faces; proposals P14, P15 open |
+| [20261112.auto-bake-ao-curvature.md](20261112.auto-bake-ao-curvature.md) | Auto-bake of AO and curvature; masters that survive UV changes | Prototype of master and copy (Session 2), reviewed (Session 3); P12 stopped at step 1 (Session 4); P15 (Session 6): the open border is the largest cause, a mirrored skirt helps a little, seam and maximum-error lines still NOT MET; proposals P16 to P18 open |
 
 The first five were started in the FSS aircraft repository (`codes/wasm/doc/journal/`) and moved here; their copies
 there end with a session pointing here.

@@ -14,6 +14,8 @@ Run (CPU wrapper, no blend file):
 - save master_<tag>.png (16-bit grey) and master_<tag>.npz (master UV per face corner, island per face, density,
   rectangles, face map, settings) in tests/_work/ao_bake/master/.
 Island join order: order=growlen (default; see bake_unfold.py).
+mirror_open=1 (P15, Session 6): open mesh edges get the face itself mirrored as skirt; suffix=<s> names the output
+master_<tag><s>.
 """
 import hashlib
 import json
@@ -34,9 +36,11 @@ tag = args.get('tag', 'panel')
 N = int(args.get('samples', 64))
 GUTTER = int(args.get('gutter', 2))
 ORDER = args.get('order', 'growlen')
+MIRROR_OPEN = args.get('mirror_open', '0') == '1'  # P15: mirrored skirt beyond open mesh edges
+SUFFIX = args.get('suffix', '')  # output name master_<tag><suffix>, so earlier masters stay
 OUT = os.path.join(bc.WORK, 'master')
 os.makedirs(OUT, exist_ok=True)
-LOG = os.path.join(OUT, f'master_{tag}.log.txt')
+LOG = os.path.join(OUT, f'master_{tag}{SUFFIX}.log.txt')
 EXTRUSION, RAY_DIST = 2e-5, 4e-5
 t_all = time.time()
 
@@ -53,11 +57,12 @@ bc.log(f'{tag}: {info["target"]}, {len(tris)} tris, layout (a) median density {m
        f'master density {D:.1f} px/m', LOG)
 
 t = time.time()
-m = bu.build_master(pos, tris, cn, D, gutter=GUTTER, order=ORDER)
+m = bu.build_master(pos, tris, cn, D, gutter=GUTTER, order=ORDER, mirror_open=MIRROR_OPEN)
 t_build = time.time() - t
 chk = bu.check_master(pos, tris, m)
 bc.log(f'  master {m["W"]}x{m["H"]} px, {m["n_islands"]} islands, {len(m["skirt_pos"])} skirt pieces, '
-       f'{m["n_border_edges"]} border edges ({m["n_border_without_neighbour"]} without neighbour), '
+       f'{m["n_border_edges"]} border edges ({m["n_border_without_neighbour"]} without neighbour, '
+       f'{m["n_mirrored"]} mirrored), '
        f'degenerate faces {int(m["degenerate"].sum())}, rejected joins {m["rejected"]}, built in {t_build:.2f} s', LOG)
 bc.log(f'  check: {chk}', LOG)
 
@@ -197,28 +202,29 @@ comp = dict(core_px=int(cm.sum()), skirt_px=int(sm.sum()), nearest_fill_px=int(f
             rect_px_unfilled=int((in_rect & (M < 0)).sum()), rect_px=int(in_rect.sum()), image_px=int(W * H))
 bc.log(f'  compose: {comp}', LOG)
 M_out = np.where(M >= 0, M, 0.0)
-png = os.path.join(OUT, f'master_{tag}.png')
+png = os.path.join(OUT, f'master_{tag}{SUFFIX}.png')
 bc.write_png(png, M_out)
 src_rgb = np.zeros((H, W, 3))
 src_rgb[src == 1] = (0.8, 0.8, 0.8)
 src_rgb[src == 2] = (0.2, 0.6, 1.0)
 src_rgb[src == 3] = (1.0, 0.4, 0.1)
-bc.write_png(os.path.join(OUT, f'master_{tag}_sources.png'), src_rgb, bits=8)
+bc.write_png(os.path.join(OUT, f'master_{tag}{SUFFIX}_sources.png'), src_rgb, bits=8)
 fp = hashlib.sha1(np.ascontiguousarray(pos).tobytes() + np.ascontiguousarray(tris).tobytes()
                   + np.round(cn, 5).tobytes()).hexdigest()
-npz = os.path.join(OUT, f'master_{tag}.npz')
+npz = os.path.join(OUT, f'master_{tag}{SUFFIX}.npz')
 np.savez_compressed(npz, muv=m['muv'], island=m['island'], density=D, W=W, H=H, rects=m['rects'],
                     gutter=GUTTER, degenerate=m['degenerate'], filled=(M >= 0), face_map=face_map.astype(np.int32),
                     meta=json.dumps(dict(schema=1, tag=tag, target=info['target'], mesh_fingerprint=fp,
                                          ao_distance=bc.AO_DISTANCE, samples=N, seeds=[11, 12],
-                                         order=ORDER, bake='selected-to-active from the target, extrusion %g m' % EXTRUSION,
+                                         order=ORDER, mirror_open=MIRROR_OPEN, bake='selected-to-active from the target, extrusion %g m' % EXTRUSION,
                                          layout_a_median_density=median_d, texture_size=S)))
 res = dict(tag=tag, order=ORDER, target=info['target'], tris=int(len(tris)), median_density_a=median_d, master_density=D,
            W=W, H=H, n_islands=m['n_islands'], skirt_pieces=int(ns), border_edges=m['n_border_edges'],
-           border_without_neighbour=m['n_border_without_neighbour'], degenerate=int(m['degenerate'].sum()),
+           border_without_neighbour=m['n_border_without_neighbour'], mirrored=m['n_mirrored'],
+           mirror_open=MIRROR_OPEN, degenerate=int(m['degenerate'].sum()),
            rejected=m['rejected'], check=chk, side=side, compose=comp, times=dict(times, build_s=t_build),
            png_bytes=os.path.getsize(png), npz_bytes=os.path.getsize(npz), samples=N,
            total_s=round(time.time() - t_all, 1))
-with open(os.path.join(OUT, f'master_{tag}.json'), 'w') as f:
+with open(os.path.join(OUT, f'master_{tag}{SUFFIX}.json'), 'w') as f:
     json.dump(res, f, indent=1)
 bc.log(f'  saved {png} ({res["png_bytes"]} B) and npz ({res["npz_bytes"]} B); total {res["total_s"]} s', LOG)

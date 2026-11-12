@@ -304,8 +304,11 @@ def _clip(poly, clip):
     return out
 
 
-def build_master(pos, tris, cn, density, gutter=2, order='fold'):
-    """Returns a dict with the master layout: per triangle island id and master UV in px; core and skirt meshes."""
+def build_master(pos, tris, cn, density, gutter=2, order='fold', mirror_open=False):
+    """Returns a dict with the master layout: per triangle island id and master UV in px; core and skirt meshes.
+
+    mirror_open (P15): a border edge without a 3D neighbour (open mesh border) gets the face itself mirrored across
+    the edge as its skirt piece; without it such edges get no skirt (the corner fill takes the nearest pixel)."""
     isl = Islands(pos, tris).build(order)
     T = len(tris)
     island = np.full(T, -1, dtype=np.int64)
@@ -353,7 +356,7 @@ def build_master(pos, tris, cn, density, gutter=2, order='fold'):
     # border edges and the skirt
     skirt_pos, skirt_uv, skirt_n, skirt_isl, skirt_src = [], [], [], [], []
     band = gutter + 1.0
-    n_border = n_no_neighbour = 0
+    n_border = n_no_neighbour = n_mirrored = 0
     for t in range(T):
         i = island[t]
         if i < 0:
@@ -371,9 +374,15 @@ def build_master(pos, tris, cn, density, gutter=2, order='fold'):
             neigh = [(u, iu, ju) for (u, iu, ju) in lst if u != t and not isl.degenerate[u]]
             if not neigh:
                 n_no_neighbour += 1
-                continue
-            mine = [e for e in lst if e[0] == t][0]
-            u, iu, ju = min(neigh, key=lambda e: (isl.fold(t, mine[1], mine[2], e[0], e[1], e[2]), e[0]))
+                if not mirror_open:
+                    continue
+                # P15: an open edge gets the face itself, mirrored across the edge (the hinge point of the face's
+                # own third corner, on the far side), so the skirt bakes the face's own surface near the edge
+                u = t
+                n_mirrored += 1
+            else:
+                mine = [e for e in lst if e[0] == t][0]
+                u, iu, ju = min(neigh, key=lambda e: (isl.fold(t, mine[1], mine[2], e[0], e[1], e[2]), e[0]))
             a2, b2 = muv[t][ci], muv[t][cj]
             c_own = muv[t][3 - ci - cj]
             ru = [int(v) for v in isl.wt[u]]
@@ -422,7 +431,8 @@ def build_master(pos, tris, cn, density, gutter=2, order='fold'):
                 skirt_pos=np.array(skirt_pos).reshape(-1, 3, 3), skirt_uv=np.array(skirt_uv).reshape(-1, 3, 2),
                 skirt_n=np.array(skirt_n).reshape(-1, 3, 3), skirt_island=np.array(skirt_isl, dtype=np.int64),
                 skirt_src=np.array(skirt_src, dtype=np.int64),
-                n_border_edges=n_border, n_border_without_neighbour=n_no_neighbour, rejected=isl.rejected,
+                n_border_edges=n_border, n_border_without_neighbour=n_no_neighbour, n_mirrored=n_mirrored,
+                rejected=isl.rejected,
                 n_join_candidates=len(isl.join_order))
 
 

@@ -41,6 +41,7 @@ SURF = args.get('surface_deg', '30')
 SURF_COS = None if SURF == 'off' else math.cos(math.radians(float(SURF)))
 KMAX = int(args.get('kmax', 16))
 SUFFIX = args.get('suffix', '')
+MSUF = args.get('master_suffix', '')  # reads master_<tag><master_suffix>.npz / .png
 OUT = os.path.join(bc.WORK, 'layouts', tag + SUFFIX)
 os.makedirs(OUT, exist_ok=True)
 LOG = os.path.join(OUT, 'log.txt')
@@ -54,8 +55,8 @@ wt = bg.weld_ids(pos)[tris]
 a3 = bg.tri_areas_3d(pos, tris)
 
 # master
-mz = np.load(os.path.join(bc.WORK, 'master', f'master_{tag}.npz'))
-Mimg = bc.read_png16(os.path.join(bc.WORK, 'master', f'master_{tag}.png'))
+mz = np.load(os.path.join(bc.WORK, 'master', f'master_{tag}{MSUF}.npz'))
+Mimg = bc.read_png16(os.path.join(bc.WORK, 'master', f'master_{tag}{MSUF}.png'))
 mH, mW = Mimg.shape
 rect_id = np.full((mH, mW), -1, dtype=np.int64)
 for i, (x, y, w, h) in enumerate(mz['rects']):
@@ -101,7 +102,7 @@ def ring_band(lab, inside, width=2):
     return band
 
 
-results = dict(tag=tag, target=info['target'], texture=S, master_density=DM, median_density_a=med_a,
+results = dict(tag=tag, master_suffix=MSUF, target=info['target'], texture=S, master_density=DM, median_density_a=med_a,
                samples=N, gt_samples=NGT, padding=PAD, copy_mode=MODE, kmax=KMAX, surface_deg=SURF, layouts={})
 for key, (uvpx, size, tisl) in layouts.items():
     t0 = time.time()
