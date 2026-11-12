@@ -728,10 +728,57 @@ def _hinged_uv(pos, tris, wt, uvpx, t, k, u):
     return out
 
 
+COPY_CHUNK = 1 << 19  # sub-samples per step of the copy (Session 23: bounds its temporaries, not the result)
+
+
+def raster_window(uvpx, W, H, k=1, x0=0, y0=0, eps=1e-9):
+    """rasterize_ids over only the triangles whose bounds reach the grid: the same owners (indices into uvpx, the last
+    triangle still wins) and counts, without looping over every triangle of the mesh for a small window."""
+    sel = tris_in_window(uvpx, x0, y0, W, H)
+    if len(sel) == len(uvpx):
+        return rasterize_ids(uvpx, W, H, k, x0, y0, eps)
+    if not len(sel):
+        return np.full((H * k, W * k), -1, dtype=np.int64), np.zeros((H * k, W * k), dtype=np.int32)
+    own, cnt = rasterize_ids(uvpx[sel], W, H, k, x0, y0, eps)
+    return np.where(own >= 0, sel[np.maximum(own, 0)], -1), cnt
+
+
+def copy_context(pos, tris, uvpx, master, k, kmax=16):
+    """What copy_master computes from the whole mesh (welded neighbours, normals, samples per triangle), so a copy in
+    bands (Session 23) computes it once."""
+    muv = master['muv']
+    wt = weld_ids(pos)[tris]
+    nb = _neighbours(wt)
+    pp = pos[tris]
+    tri_normal = np.cross(pp[:, 1] - pp[:, 0], pp[:, 2] - pp[:, 0])
+    tri_normal /= np.maximum(np.linalg.norm(tri_normal, axis=1, keepdims=True), 1e-30)
+    # samples per pixel axis per triangle: the target pixel's footprint in the master (largest singular value of the
+    # map layout px -> master px) sampled at least twice per master pixel; `k` is the minimum, kmax the cap
+    Mt = np.stack([uvpx[:, 1] - uvpx[:, 0], uvpx[:, 2] - uvpx[:, 0]], axis=2)
+    Mm = np.stack([muv[:, 1] - muv[:, 0], muv[:, 2] - muv[:, 0]], axis=2)
+    with np.errstate(all='ignore'):
+        J = Mm @ np.linalg.pinv(Mt)
+        sig = np.linalg.svd(J, compute_uv=False)[:, 0]
+    sig = np.where(np.isfinite(sig), sig, 1.0)
+    kt_raw = np.ceil(2 * sig).astype(np.int64)
+    kt = np.clip(kt_raw, k, kmax)
+    return dict(wt=wt, nb=nb, tri_normal=tri_normal, sig=sig, kt_raw=kt_raw, kt=kt)
+
+
+def _chunks(n, per):
+    """Index ranges of at most `per` items (at least one) over n items."""
+    per = max(1, int(per))
+    return [(a, min(n, a + per)) for a in range(0, n, per)]
+
+
 def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode='tri', kmax=16, surface_cos=None,
-                same_face=False):
-    """Returns (image (h,w) with -1 where nothing was written, info)."""
+                same_face=False, ctx=None, chunk=COPY_CHUNK):
+    """Returns (image (h,w) with -1 where nothing was written, info). ctx: copy_context (computed here when None);
+    chunk: sub-samples per step (the result does not depend on it). master['image'], ['filled'] and ['face_map'] may be
+    arrays or PagedArray views (read a[yi, xi] with index arrays)."""
     x0, y0, w, h = crop
+    if ctx is None:
+        ctx = copy_context(pos, tris, uvpx, master, k, kmax)
     muv = master['muv']
     M = master['image']
     # a tool master is uint16 (Session 20): only the texels read are converted
@@ -748,12 +795,10 @@ def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode=
             return rect_id[yi, xi] == isl
         r = rects[np.maximum(isl, 0)]
         return (isl >= 0) & (xi >= r[:, 0]) & (xi < r[:, 0] + r[:, 2]) & (yi >= r[:, 1]) & (yi < r[:, 1] + r[:, 3])
-    wt = weld_ids(pos)[tris]
-    nb = _neighbours(wt)
+    wt = ctx['wt']
+    nb = ctx['nb']
     face_map = master.get('face_map')
-    pp = pos[tris]
-    tri_normal = np.cross(pp[:, 1] - pp[:, 0], pp[:, 2] - pp[:, 0])
-    tri_normal /= np.maximum(np.linalg.norm(tri_normal, axis=1, keepdims=True), 1e-30)
+    tri_normal = ctx['tri_normal']
 
     def read(tri_ids, bary):
         """bary (N,3) w.r.t. triangles tri_ids -> master values; clamps points outside their island's baked area."""
@@ -803,29 +848,20 @@ def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode=
             out_ = np.where(wsum_f > 1e-9, acc_f / np.maximum(wsum_f, 1e-30), out_)
         return out_
 
-    owner_c, count_c = rasterize_ids(uvpx, w, h, 1, x0, y0)
+    owner_c, count_c = raster_window(uvpx, w, h, 1, x0, y0)
     out = np.full((h, w), -1.0)
-    # samples per pixel axis per triangle: the target pixel's footprint in the master (largest singular value of the
-    # map layout px -> master px) sampled at least twice per master pixel; `k` is the minimum, kmax the cap
-    Mt = np.stack([uvpx[:, 1] - uvpx[:, 0], uvpx[:, 2] - uvpx[:, 0]], axis=2)
-    Mm = np.stack([muv[:, 1] - muv[:, 0], muv[:, 2] - muv[:, 0]], axis=2)
-    with np.errstate(all='ignore'):
-        J = Mm @ np.linalg.pinv(Mt)
-        sig = np.linalg.svd(J, compute_uv=False)[:, 0]
-    sig = np.where(np.isfinite(sig), sig, 1.0)
-    kt_raw = np.ceil(2 * sig).astype(np.int64)
-    kt = np.clip(kt_raw, k, kmax)
+    sig, kt_raw, kt = ctx['sig'], ctx['kt_raw'], ctx['kt']
     n_cl_in = 0
     jj, ii = np.nonzero(owner_c >= 0)
     lvl = kt[owner_c[jj, ii]]
     capped_px = int((kt_raw[owner_c[jj, ii]] > kmax).sum())
-    for L in np.unique(lvl):
-        sel = lvl == L
+    def inside_step(L, sel):
+        """The inside pixels jj[sel], ii[sel] of level L (a chunk of them)."""
         pj_, pi_ = jj[sel], ii[sel]
         # owners of the sub-samples on an L x L grid, only over the box of these pixels
         bx0, by0 = int(pi_.min()), int(pj_.min())
         bw, bh = int(pi_.max()) - bx0 + 1, int(pj_.max()) - by0 + 1
-        owner_s, _ = rasterize_ids(uvpx, bw, bh, int(L), x0 + bx0, y0 + by0)
+        owner_s, _ = raster_window(uvpx, bw, bh, int(L), x0 + bx0, y0 + by0)
         sub = (np.arange(L) + 0.5) / L
         sx, sy = np.meshgrid(sub, sub)
         sx, sy = sx.ravel(), sy.ravel()
@@ -850,13 +886,24 @@ def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode=
         wgt = same.astype(np.float64) if outside_mode in ('drop', 'tri') else np.ones(len(use))
         bary = barycentric_many(np.stack([px, py], axis=1), uvpx[use])
         vals, c_ = read(use, bary)
-        n_cl_in += c_
         wv = wgt.reshape(n, L * L)
         vv = vals.reshape(n, L * L)
         sw = wv.sum(axis=1)
         cb = barycentric_many(np.stack([x0 + pi_ + 0.5, y0 + pj_ + 0.5], axis=1), uvpx[owner_c[pj_, pi_]])
         cv, _ = read(owner_c[pj_, pi_], cb)
         out[pj_, pi_] = np.where(sw > 0, (vv * wv).sum(axis=1) / np.maximum(sw, 1e-30), cv)
+        return c_
+
+    for L in np.unique(lvl):
+        at_level = np.nonzero(lvl == L)[0]
+        # in square blocks whose sub-sample raster (the block's area x L x L) is at most `chunk`: the pixels of one
+        # level may lie scattered over the whole window, and the raster covers the box of the pixels it is given
+        side = max(1, int(math.sqrt(chunk / (int(L) * int(L)))))
+        key = (jj[at_level] // side) * (w // side + 1) + ii[at_level] // side
+        order = np.argsort(key, kind='stable')
+        cuts = np.flatnonzero(np.diff(key[order])) + 1
+        for grp in np.split(at_level[order], cuts):
+            n_cl_in += inside_step(int(L), grp)
     # padding pixels
     grown, steps = dilate_ids(owner_c, padding)
     pj, pi = np.nonzero((owner_c < 0) & (grown >= 0))
@@ -885,19 +932,22 @@ def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode=
             src[n] = u
         plvl = kt[T]
         for L in np.unique(plvl):
-            sel = np.nonzero(plvl == L)[0]
+            at_level = np.nonzero(plvl == L)[0]
             sub = (np.arange(L) + 0.5) / L
             sx, sy = np.meshgrid(sub, sub)
             sx, sy = sx.ravel(), sy.ravel()
-            ppx = (pi[sel][:, None] + x0 + sx[None, :]).ravel()
-            ppy = (pj[sel][:, None] + y0 + sy[None, :]).ravel()
-            bary = barycentric_many(np.stack([ppx, ppy], axis=1), np.repeat(tri_uv[sel], L * L, axis=0))
-            # stay on the neighbour face: its nearest point (a thin neighbour extended further would reach other faces)
-            bary = np.clip(bary, 0, None)
-            bary /= np.maximum(bary.sum(axis=1, keepdims=True), 1e-30)
-            vals, c_ = read(np.repeat(src[sel], L * L), bary)
-            n_cl_pad += c_
-            out[pj[sel], pi[sel]] = vals.reshape(len(sel), L * L).mean(axis=1)
+            for c0, c1 in _chunks(len(at_level), chunk // (int(L) * int(L))):
+                sel = at_level[c0:c1]
+                ppx = (pi[sel][:, None] + x0 + sx[None, :]).ravel()
+                ppy = (pj[sel][:, None] + y0 + sy[None, :]).ravel()
+                bary = barycentric_many(np.stack([ppx, ppy], axis=1), np.repeat(tri_uv[sel], L * L, axis=0))
+                # stay on the neighbour face: its nearest point (a thin neighbour extended further would reach other
+                # faces)
+                bary = np.clip(bary, 0, None)
+                bary /= np.maximum(bary.sum(axis=1, keepdims=True), 1e-30)
+                vals, c_ = read(np.repeat(src[sel], L * L), bary)
+                n_cl_pad += c_
+                out[pj[sel], pi[sel]] = vals.reshape(len(sel), L * L).mean(axis=1)
     info = dict(k_min=k, k_max=kmax, k_levels={int(L): int((lvl == L).sum()) for L in np.unique(lvl)},
                 px_at_k_cap=capped_px, footprint_px_median=float(np.median(sig)), footprint_px_max=float(sig.max()),
                 inside_px=int(len(ii)), padding_px=int(len(pi)), clamped_inside_points=n_cl_in,
@@ -910,7 +960,7 @@ def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode=
 # The tool's settings: the prototype as measured in Sessions 8, 11 and 14 (decision 9)
 # ---------------------------------------------------------------------------------------------------------------------
 
-SCHEMA = 1  # index.json and the npz layout
+SCHEMA = 2  # index.json and the master's files (2: the per-pixel data in <stem>.ao.map, Session 23; 1 still read)
 METHOD = 1  # what a master is (the settings below); a change makes every master's surroundings stale
 DENSITY_FACTOR = 4.0  # master density = 4 x the object's median density in its layout at bake time (Session 12)
 GUTTER = 2
@@ -924,7 +974,6 @@ K_MAX = 16
 SEEDS = (11, 12)  # core and skirt bakes
 EXTRUSION = 2e-5  # m, selected-to-active from the target (step3_master.py)
 RAY_DISTANCE = 4e-5
-MASTER_KEYS = ('muv', 'island', 'rects', 'filled', 'face_map', 'tri_src')
 
 
 def method_settings():
@@ -962,13 +1011,14 @@ TILE_MIN = 512
 TILE_SIZES = (2048, 1024, 512)
 
 
-# The memory model of the bake in tiles (Session 20, measured on the floor at 54 and 214 Mpx and on the cap): per
-# master pixel the uint16 image, the flags and the int32 face map with the composition's and the files' temporaries
-# (about 10 bytes: 2.3 GB peak at 214 Mpx with small tiles); per tile pixel Cycles' bake data and the tile's float
-# image and buffers (measured 240 to 280 bytes).
-BYTES_PER_MASTER_PX = 10.0
+# The memory model of the bake in tiles and pages (Sessions 20 and 23): per tile pixel Cycles' bake data and the tile's
+# float image and buffers (measured 240 to 280 bytes); per pixel of a band (one row of tiles, the master's width x the
+# tile size) the band being baked, its uint16 values and baked flags: 3 bytes, 4 with the rows of the band above that
+# wait for its halo and the strips being written. Nothing is held for the whole master (decision 33).
+BYTES_PER_BAND_PX = 4.0
 BYTES_PER_TILE_PX = 280.0
-TILE_OVERHEAD = 0.25 * 2 ** 30  # bytes beyond the pixels (the scene's copies, Cycles' BVH, a composition window)
+TILE_OVERHEAD = 0.25 * 2 ** 30  # bytes beyond the pixels (the scene's copies, Cycles' BVH, a composition strip)
+COMPOSE_STRIP = 256  # rows of a band composed and written at a time
 BUDGET_SHARE = 0.6  # of the physical memory free when the bake starts
 BUDGET_MAX = 32 * 2 ** 30  # decision 32: never more than 32 GB
 
@@ -1043,19 +1093,26 @@ def memory_budget(override_gb=None):
     return int(min(BUDGET_MAX, BUDGET_SHARE * avail))
 
 
+def estimate(W, H, size, in_use):
+    """The peak working set of a bake in tiles of `size` px (Session 23's model): in_use (Blender, the scene, the
+    layout) + the overhead + one tile + one band of the master's width."""
+    return (in_use + TILE_OVERHEAD + BYTES_PER_TILE_PX * min(size, W) * min(size, H)
+            + BYTES_PER_BAND_PX * W * min(size, H))
+
+
 def choose_tile(W, H, budget, in_use):
     """The largest tile size whose bake fits the budget: the whole master when it is not larger than the largest of
     TILE_SIZES and fits, else the largest of TILE_SIZES that fits; in_use: the process's working set before the
-    master (Blender, the scene). Returns (size, estimate of the peak in bytes, fits)."""
-    fixed = in_use + BYTES_PER_MASTER_PX * W * H
+    master (Blender, the scene). The tile size is also the band's height (decision 33). Returns (size, estimate of the
+    peak in bytes, fits)."""
     longest = max(W, H)
     sizes = ([longest] if longest <= TILE_SIZES[0] else []) + [s for s in TILE_SIZES if s < longest]
     for s in sizes:
-        est = fixed + TILE_OVERHEAD + BYTES_PER_TILE_PX * min(s, W) * min(s, H)
+        est = estimate(W, H, s, in_use)
         if est <= budget:
             return int(s), est, True
     s = min(TILE_MIN, longest)
-    return int(s), fixed + TILE_OVERHEAD + BYTES_PER_TILE_PX * min(s, W) * min(s, H), False
+    return int(s), estimate(W, H, s, in_use), False
 
 
 def tile_grid(W, H, size):
@@ -1101,24 +1158,22 @@ def quantize16(values):
     return np.round(np.clip(np.asarray(values, dtype=np.float64), 0.0, 1.0) * 65535.0).astype(np.uint16)
 
 
-def compose_window(m, M16, flags, face_map, win):
-    """The composition of a master (step3_master.py) for one window of the whole master, after every tile is baked.
+def compose_block(m, M16e, baked_e, ex0, ey0, win):
+    """The composition of a master (step3_master.py) for one window, after the tiles around it are baked.
 
-    M16 (H, W) uint16: the core and skirt values; flags (H, W) uint8: bit 1 = baked (core or skirt), set by the bake;
-    this sets bit 2 = filled (baked or nearest fill) and fills, inside each island's rectangle, the pixels within
-    FILL steps of a baked pixel of the same rectangle with that pixel's value; face_map (H, W) int32 gets the window's
-    face per pixel (core faces, then skirt faces inside rectangles, grown FILL steps inside rectangles).
-    The window is read with a halo of FILL pixels, so the result equals the composition of the whole image at once.
-    Returns the window's counts."""
-    W, H = m['W'], m['H']
+    M16e (eh, ew) uint16 and baked_e (eh, ew) bool: the core and skirt values and the baked flags (core or skirt) over
+    the window and its halo of FILL pixels (clamped to the master), whose bottom-left pixel is (ex0, ey0). Inside each
+    island's rectangle, the pixels within FILL steps of a baked pixel of the same rectangle get that pixel's value; the
+    face map holds the face per pixel (core faces, then skirt faces inside rectangles, grown FILL steps inside
+    rectangles). With the halo the result equals the composition of the whole image at once (Session 20), so a master
+    is composed a strip at a time (Session 23). Returns (counts, values (h, w) uint16, filled (h, w) bool, face map
+    (h, w) int32) of the window."""
     x0, y0, w, h = win
-    ex0, ey0 = max(0, x0 - FILL), max(0, y0 - FILL)
-    ex1, ey1 = min(W, x0 + w + FILL), min(H, y0 + h + FILL)
-    ew, eh = ex1 - ex0, ey1 - ey0
+    eh, ew = M16e.shape
     sub = (slice(y0 - ey0, y0 - ey0 + h), slice(x0 - ex0, x0 - ex0 + w))
     rid = rect_window(m['rects'], ex0, ey0, ew, eh)
     in_rect = rid >= 0
-    baked = (flags[ey0:ey1, ex0:ex1] & 1) != 0
+    baked = baked_e
     idx = np.where(baked, np.arange(eh * ew, dtype=np.int32).reshape(eh, ew), np.int32(-1))
     grown, _steps = dilate_ids(idx, FILL, mask_allowed=in_rect)
     del idx, _steps
@@ -1128,15 +1183,14 @@ def compose_window(m, M16, flags, face_map, win):
     fm &= same
     del same
     fmi = fm[sub]
+    vals = M16e[sub].copy()
     if fmi.any():
-        src = M16[ey0:ey1, ex0:ex1].ravel()[grown[sub][fmi]]  # sources are baked pixels: never written by a fill
-        M16[y0:y0 + h, x0:x0 + w][fmi] = src
+        vals[fmi] = M16e.ravel()[grown[sub][fmi]]  # sources are baked pixels
     del grown
     filled = baked[sub] | fmi
-    flags[y0:y0 + h, x0:x0 + w] |= np.where(filled, np.uint8(2), np.uint8(0))
     counts = dict(nearest_fill_px=int(fmi.sum()), rect_px_unfilled=int((in_rect[sub] & ~filled).sum()),
                   rect_px=int(in_rect[sub].sum()))
-    del fm, baked
+    del fm
     # the face map
     core = m['core_tris']
     cuv = m['muv'][core]
@@ -1159,41 +1213,531 @@ def compose_window(m, M16, flags, face_map, win):
     del fidx, _steps
     fm2 = (fmap < 0) & (fgrown >= 0)
     fmap[fm2] = fmap.ravel()[fgrown[fm2]]
-    face_map[y0:y0 + h, x0:x0 + w] = fmap[sub]
-    return counts
+    return counts, vals, filled, fmap[sub].copy()
+
+
+def compose_whole(m, M16, baked, window=2048):
+    """The composition of a whole master held in memory (tests and small masters): (counts, values, filled, face map),
+    window by window with compose_block."""
+    H, W = M16.shape
+    vals = np.zeros_like(M16)
+    filled = np.zeros((H, W), bool)
+    face = np.full((H, W), -1, np.int32)
+    counts = {}
+    for win in tile_grid(W, H, window):
+        x0, y0, w, h = win
+        ex0, ey0 = max(0, x0 - FILL), max(0, y0 - FILL)
+        ex1, ey1 = min(W, x0 + w + FILL), min(H, y0 + h + FILL)
+        c, v, f, fm = compose_block(m, M16[ey0:ey1, ex0:ex1], baked[ey0:ey1, ex0:ex1], ex0, ey0, win)
+        vals[y0:y0 + h, x0:x0 + w] = v
+        filled[y0:y0 + h, x0:x0 + w] = f
+        face[y0:y0 + h, x0:x0 + w] = fm
+        for k, n in c.items():
+            counts[k] = counts.get(k, 0) + n
+    return counts, vals, filled, face
+
+
+COMPOSE_WINDOW = 2048  # a composition strip is composed in windows of at most this width
+
+
+class Bands:
+    """The bands (rows of tiles) of a master held in memory while it is baked (decision 33): the one being baked, the
+    bottom rows of the one above it (its last strips, composed once the band below gives their halo) and the halo rows
+    of the one above that. Each holds the uint16 values and the baked flags of its rows."""
+
+    def __init__(self, W):
+        self.W = W
+        self.rows = {}  # band index: [y0, values (h, W) uint16, baked (h, W) bool], the bottom rows only once trimmed
+        self.height = {}  # band index: its full height
+
+    def add(self, kb, y0, h):
+        self.rows[kb] = [y0, np.zeros((h, self.W), np.uint16), np.zeros((h, self.W), bool)]
+        self.height[kb] = h
+        return self.rows[kb]
+
+    def trim(self, kb, n):
+        """Keeps only the bottom n rows of band kb (those strips still to come will read)."""
+        y0, v, b = self.rows[kb]
+        if n < v.shape[0]:
+            self.rows[kb] = [y0, v[:n].copy(), b[:n].copy()]
+
+    def drop(self, kb):
+        self.rows.pop(kb, None)
+        self.height.pop(kb, None)
+
+    def block(self, ey0, ey1, ex0, ex1):
+        """(values, baked) of rows ey0..ey1 and columns ex0..ex1, from the bands that hold them."""
+        vs, bs = [], []
+        for y0, v, b in sorted(self.rows.values(), key=lambda r: r[0]):
+            a0, a1 = max(ey0, y0), min(ey1, y0 + v.shape[0])
+            if a1 > a0:
+                vs.append(v[a0 - y0:a1 - y0, ex0:ex1])
+                bs.append(b[a0 - y0:a1 - y0, ex0:ex1])
+        v = vs[0] if len(vs) == 1 else np.concatenate(vs, axis=0)
+        b = bs[0] if len(bs) == 1 else np.concatenate(bs, axis=0)
+        if v.shape[0] != ey1 - ey0:
+            raise RuntimeError(f'rows {ey0} to {ey1} not held ({v.shape[0]} rows)')
+        return v, b
+
+
+def compose_band(m, bands, kb, write_rows, counts, on_strip=None, ys1=None, stop=None):
+    """Composes band kb a strip of COMPOSE_STRIP rows at a time from the top (or from row ys1, where an earlier call
+    stopped); write_rows(values, codes) gets each strip's rows in file order (the top first), on_strip(y0, values) each
+    strip as composed (the preview). stop: the first row of the band below when that band is not baked yet: the strips
+    whose halo reaches below it wait. Returns the top of the strips not composed (the band's first row when done)."""
+    W, H = m['W'], m['H']
+    y0, v, _b = bands.rows[kb]
+    yb1 = y0 + bands.height[kb]
+    ys1 = yb1 if ys1 is None else ys1
+    while ys1 > y0:
+        ys0 = max(y0, ys1 - COMPOSE_STRIP)
+        if stop is not None and ys0 - FILL < stop:
+            break
+        hs = ys1 - ys0
+        vals = np.empty((hs, W), np.uint16)
+        codes = np.empty((hs, W), np.int32)
+        ey0, ey1 = max(0, ys0 - FILL), min(H, ys1 + FILL)
+        for x0 in range(0, W, COMPOSE_WINDOW):
+            w = min(COMPOSE_WINDOW, W - x0)
+            ex0, ex1 = max(0, x0 - FILL), min(W, x0 + w + FILL)
+            Me, Be = bands.block(ey0, ey1, ex0, ex1)
+            c, wv, wf, wm = compose_block(m, Me, Be, ex0, ey0, (x0, ys0, w, hs))
+            vals[:, x0:x0 + w] = wv
+            codes[:, x0:x0 + w] = map_code(wm, wf)
+            for k, n in c.items():
+                counts[k] = counts.get(k, 0) + n
+        write_rows(vals[::-1], codes[::-1])
+        if on_strip is not None:
+            on_strip(ys0, vals)
+        ys1 = ys0
+    return ys1
+
+
+def bake_paged(m, tile, bake_tile, write_rows, counts, on_strip=None):
+    """A master baked and composed band by band (decision 33): the bands from the top (the files are written from the
+    top), each band's tiles from the left. bake_tile(i, (x0, y0, w, h), values, baked) bakes tile i of tile_grid (its
+    place gives its seed) into the band's views of that tile and is a generator (the runner yields between tiles).
+    Once a band is baked, the last strips of the band above it (they needed its top rows) are composed and written,
+    then this band's strips that do not reach the band below; only the rows the next strips still read are kept. So
+    one band and a strip are held, whatever the master's height. Yields after each tile."""
+    W, H = m['W'], m['H']
+    tiles = tile_grid(W, H, tile)
+    ntx, nb = -(-W // tile), -(-H // tile)
+    bands = Bands(W)
+    rest = {}  # band index: the top of its strips not composed yet
+    for kb in range(nb - 1, -1, -1):
+        yb0 = kb * tile
+        _y0, band_v, band_b = bands.add(kb, yb0, min(tile, H - yb0))
+        for tx in range(ntx):
+            i = kb * ntx + tx
+            x0, y0, w, h = tiles[i]
+            yield from bake_tile(i, tiles[i], band_v[:, x0:x0 + w], band_b[:, x0:x0 + w])
+        del band_v, band_b
+        if kb + 1 in rest:
+            compose_band(m, bands, kb + 1, write_rows, counts, on_strip, ys1=rest.pop(kb + 1))
+            bands.trim(kb + 1, FILL)  # the halo of this band's top strip
+        bands.drop(kb + 2)
+        ys1 = compose_band(m, bands, kb, write_rows, counts, on_strip, stop=yb0 if kb else None)
+        if ys1 > yb0:
+            rest[kb] = ys1
+            bands.trim(kb, ys1 + FILL - yb0)  # the rows the band's last strips read
+
+# ---------------------------------------------------------------------------------------------------------------------
+# A master's files (decisions 18 and 33): <stem>.ao.png, <stem>.ao.map, <stem>.ao.npz
+# ---------------------------------------------------------------------------------------------------------------------
+#
+# <stem>.ao.png: the AO, 16-bit grey (decision 18), written row by row from the top as a band is composed.
+# <stem>.ao.map: the per-pixel data Apply reads besides the AO (Session 23; schema 1 kept them as `filled` and
+#   `face_map` in the .npz): MAP_MAGIC, then the version, W and H as little-endian uint32, then one zlib stream of the
+#   rows from the top, each W little-endian int32 codes: (face + 1) * 2 + filled, face -1 for none.
+# <stem>.ao.npz: the layout, its size set by the triangles and islands, not by the pixels: muv, island, density, W, H,
+#   rects, gutter, degenerate, tri_src, meta.
+
+MAP_MAGIC = b'FSSAOMAP'
+MAP_VERSION = 1
+
+
+def master_paths(folder, stem):
+    """(png, map, npz) of a master."""
+    base = os.path.join(folder, stem)
+    return base + '.ao.png', base + '.ao.map', base + '.ao.npz'
+
+
+def map_code(face, filled):
+    """The .ao.map code of each pixel: (face + 1) * 2 + filled."""
+    return ((np.asarray(face, dtype=np.int64) + 1) * 2 + np.asarray(filled, dtype=np.int64)).astype(np.int32)
+
+
+def code_filled(code):
+    return (np.asarray(code) & 1) != 0
+
+
+def code_face(code):
+    return (np.asarray(code, dtype=np.int32) >> 1) - 1
+
+
+class MapRowWriter:
+    """<stem>.ao.map written row by row from the top (blocks of rows in file order)."""
+
+    def __init__(self, path, W, H, level=1):
+        self.path, self.W, self.H, self.rows = path, int(W), int(H), 0
+        self.f = open(path, 'wb')
+        self.f.write(MAP_MAGIC + struct.pack('<IIII', MAP_VERSION, self.W, self.H, 0))
+        self.comp = zlib.compressobj(level)
+
+    def write(self, block):
+        block = np.ascontiguousarray(block, dtype='<i4')
+        self.rows += block.shape[0]
+        data = self.comp.compress(block.tobytes())
+        if data:
+            self.f.write(data)
+
+    def close(self):
+        if self.rows != self.H:
+            raise ValueError(f'{self.path}: {self.rows} of {self.H} rows written')
+        self.f.write(self.comp.flush())
+        self.f.close()
+
+    def abort(self):
+        self.f.close()
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass
+
+
+def map_rows(path, rows=256):
+    """(W, H, generator of int32 blocks (n, W) of the .ao.map's rows, from the top)."""
+    f = open(path, 'rb')
+    head = f.read(len(MAP_MAGIC) + 16)
+    if head[:len(MAP_MAGIC)] != MAP_MAGIC:
+        f.close()
+        raise ValueError(f'{path}: not an AO map')
+    _v, W, H, _r = struct.unpack('<IIII', head[len(MAP_MAGIC):])
+    rowlen = 4 * W
+
+    def gen():
+        d = zlib.decompressobj()
+        pending = bytearray()
+        done = 0
+        try:
+            while True:
+                data = f.read(1 << 22)
+                if not data:
+                    break
+                buf = d.decompress(data, 1 << 24)
+                while True:
+                    pending.extend(buf)
+                    n = len(pending) // rowlen
+                    while n:
+                        k = min(n, rows, H - done)
+                        if k <= 0:
+                            break
+                        yield np.frombuffer(bytes(pending[:k * rowlen]), dtype='<i4').reshape(k, W).astype(np.int32)
+                        del pending[:k * rowlen]
+                        done += k
+                        n -= k
+                    if not d.unconsumed_tail:
+                        break
+                    buf = d.decompress(d.unconsumed_tail, 1 << 24)
+            pending.extend(d.flush())
+            while done < H and len(pending) >= rowlen:
+                k = min(len(pending) // rowlen, rows, H - done)
+                yield np.frombuffer(bytes(pending[:k * rowlen]), dtype='<i4').reshape(k, W).astype(np.int32)
+                del pending[:k * rowlen]
+                done += k
+            if done != H:
+                raise ValueError(f'{path}: {done} of {H} rows')
+        finally:
+            f.close()
+    return W, H, gen()
 
 
 def save_master(folder, stem, M16, m, filled, face_map, tri_src, meta):
-    """<stem>.ao.png (16-bit grey, written row by row from the uint16 master) and <stem>.ao.npz (the layout).
-    Written to temporary names, then replaced, so a bake that stops on the way keeps the old master."""
-    png = os.path.join(folder, stem + '.ao.png')
-    npz = os.path.join(folder, stem + '.ao.npz')
-    write_png_int(png + '.tmp', M16, bits=16)
-    with open(npz + '.tmp', 'wb') as f:
-        np.savez_compressed(f, muv=m['muv'], island=m['island'], density=m['density'], W=m['W'], H=m['H'],
-                            rects=m['rects'], gutter=m['gutter'], degenerate=m['degenerate'], filled=filled,
-                            face_map=face_map, tri_src=np.asarray(tri_src, dtype=np.int64),
-                            meta=json.dumps(meta))
-    os.replace(png + '.tmp', png)
-    os.replace(npz + '.tmp', npz)
-    return png, npz
+    """A whole master held in memory (tests and small masters) as its three files; the runner writes them band by band
+    instead (MasterWriter)."""
+    H, W = M16.shape
+    w = MasterWriter(folder, stem, W, H)
+    try:
+        for top in range(0, H, 256):
+            bot = min(H, top + 256)
+            w.write_rows(M16[H - bot:H - top][::-1], map_code(face_map, filled)[H - bot:H - top][::-1])
+        return w.finish(m, tri_src, meta)
+    except BaseException:
+        w.abort()
+        raise
+
+
+class MasterWriter:
+    """The files of one master, written to temporary names row by row from the top (the AO and the map), then the
+    layout; finish() replaces the old files, abort() removes the temporary ones (a cancelled bake keeps the old
+    master)."""
+
+    def __init__(self, folder, stem, W, H):
+        self.paths = master_paths(folder, stem)
+        self.png = PngRowWriter(self.paths[0] + '.tmp', W, H, bits=16, channels=1)
+        try:
+            self.map = MapRowWriter(self.paths[1] + '.tmp', W, H)
+        except BaseException:
+            self.png.abort()
+            raise
+
+    def write_rows(self, values, codes):
+        """values (n, W) uint16 and codes (n, W) int32: rows in file order (the top first)."""
+        self.png.write(values)
+        self.map.write(codes)
+
+    def finish(self, m, tri_src, meta):
+        png, mp, npz = self.paths
+        self.png.close()
+        self.map.close()
+        with open(npz + '.tmp', 'wb') as f:
+            np.savez_compressed(f, muv=m['muv'], island=m['island'], density=m['density'], W=m['W'], H=m['H'],
+                                rects=m['rects'], gutter=m['gutter'], degenerate=m['degenerate'],
+                                tri_src=np.asarray(tri_src, dtype=np.int64), meta=json.dumps(meta))
+        os.replace(png + '.tmp', png)
+        os.replace(mp + '.tmp', mp)
+        os.replace(npz + '.tmp', npz)
+        return png, npz
+
+    def abort(self):
+        self.png.abort()
+        self.map.abort()
+        try:
+            os.remove(self.paths[2] + '.tmp')
+        except OSError:
+            pass
+
+
+def _layout(z):
+    return dict(muv=z['muv'], rects=z['rects'], island=z['island'], density=float(z['density']), tri_src=z['tri_src'],
+                W=int(z['W']), H=int(z['H']), meta=json.loads(str(z['meta'])))
+
+
+def has_maps_in_npz(npz):
+    """True for a master of schema 1 (filled and face map in the .npz, no .ao.map)."""
+    try:
+        with np.load(npz) as z:
+            return 'filled' in z.files
+    except (OSError, ValueError):
+        return False
 
 
 def load_master(folder, stem):
-    """The master as copy_master reads it (the image as uint16, 0..65535; the island rectangles instead of a per-pixel
-    map), or None when a file is missing."""
-    png = os.path.join(folder, stem + '.ao.png')
-    npz = os.path.join(folder, stem + '.ao.npz')
+    """The whole master in memory as copy_master reads it (the image as uint16, 0..65535; filled, the face map; the
+    island rectangles instead of a per-pixel map), or None when a file is missing. For tests and small masters: Apply
+    reads a master paged (open_master)."""
+    png, mp, npz = master_paths(folder, stem)
     if not (os.path.isfile(png) and os.path.isfile(npz)):
         return None
-    z = np.load(npz)
+    with np.load(npz) as z:
+        out = _layout(z)
+        old = 'filled' in z.files
+        if old:
+            out.update(filled=z['filled'], face_map=z['face_map'])
     img = read_png(png)[0]
     if img.ndim == 3:
         img = img[:, :, 0]
     H, W = img.shape
-    return dict(muv=z['muv'], image=img, rects=z['rects'], filled=z['filled'], island=z['island'],
-                face_map=z['face_map'], density=float(z['density']), tri_src=z['tri_src'], W=W, H=H,
-                meta=json.loads(str(z['meta'])))
+    out.update(image=img, W=W, H=H)
+    if not old:
+        if not os.path.isfile(mp):
+            return None
+        mW, mH, rows = map_rows(mp)
+        code = np.empty((mH, mW), np.int32)
+        y = 0
+        for block in rows:
+            n = block.shape[0]
+            code[mH - y - n:mH - y] = block[::-1]
+            y += n
+        out.update(filled=code_filled(code), face_map=code_face(code))
+    return out
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# A master paged for Apply (decision 33): decoded once into tiled scratch files, read through a cache of tiles
+# ---------------------------------------------------------------------------------------------------------------------
+
+PAGE_TILE = 256  # px, a power of two
+PAGE_CACHE_BYTES = 384 * 2 ** 20  # the cache of one master's tiles: a third for the AO, two thirds for the map codes
+
+
+class _TiledWriter:
+    """A tiled scratch file of an (H, W) array, filled with rows in file order (the top first)."""
+
+    def __init__(self, path, H, W, dtype, T=PAGE_TILE):
+        self.path, self.H, self.W, self.T = path, H, W, T
+        self.dtype = np.dtype(dtype)
+        self.ntx, self.nty = -(-W // T), -(-H // T)
+        self.buf = np.zeros((T, self.ntx * T), self.dtype)
+        self.ty = None
+        self.r = 0  # file rows received
+        self.f = open(path, 'wb')
+
+    def _flush(self):
+        if self.ty is None:
+            return
+        T = self.T
+        tiles = np.ascontiguousarray(self.buf.reshape(T, self.ntx, T).transpose(1, 0, 2))
+        self.f.seek(self.ty * self.ntx * T * T * self.dtype.itemsize)
+        self.f.write(tiles.tobytes())
+        self.buf.fill(0)
+
+    def write(self, block):
+        block = np.asarray(block)
+        n = block.shape[0]
+        j = self.H - 1 - (self.r + np.arange(n))  # array rows, descending
+        ty = j // self.T
+        for t in np.unique(ty)[::-1]:
+            sel = ty == t
+            if self.ty != t:
+                self._flush()
+                self.ty = int(t)
+            self.buf[j[sel] - t * self.T, :self.W] = block[sel]
+        self.r += n
+
+    def close(self):
+        self._flush()
+        self.f.truncate(self.ntx * self.nty * self.T * self.T * self.dtype.itemsize)
+        self.f.close()
+
+
+class PagedArray:
+    """An (H, W) array in a tiled scratch file, read as a[yi, xi] with index arrays through a cache of at most
+    cache_bytes of tiles (least recently used tiles dropped first), so reading it never holds the whole array."""
+
+    def __init__(self, path, H, W, dtype, cache_bytes, T=PAGE_TILE):
+        self.path, self.shape, self.T = path, (int(H), int(W)), T
+        self.dtype = np.dtype(dtype)
+        self.sh = T.bit_length() - 1
+        self.mask = T - 1
+        self.ntx, nty = -(-W // T), -(-H // T)
+        self.cap = int(max(4, cache_bytes // (T * T * self.dtype.itemsize)))
+        self.cache = np.empty((self.cap, T * T), self.dtype)
+        self.slot_of = np.full(self.ntx * nty, -1, np.int64)
+        self.tile_in = np.full(self.cap, -1, np.int64)
+        self.used = np.zeros(self.cap, np.int64)
+        self.clock = 0
+        self.loads = 0
+        self.f = open(path, 'rb')
+
+    def view(self, decode, dtype):
+        return _PagedView(self, decode, dtype)
+
+    def __getitem__(self, key):
+        yi, xi = key
+        yi, xi = np.broadcast_arrays(np.asarray(yi, np.int64), np.asarray(xi, np.int64))
+        shape = yi.shape
+        yi, xi = yi.ravel(), xi.ravel()
+        t = (yi >> self.sh) * self.ntx + (xi >> self.sh)
+        local = ((yi & self.mask) << self.sh) | (xi & self.mask)
+        return self._gather(t, local).reshape(shape)
+
+    def _gather(self, t, local):
+        if not len(t):
+            return np.zeros(0, self.dtype)
+        need_mask = np.zeros(len(self.slot_of), bool)
+        need_mask[t] = True
+        need = np.flatnonzero(need_mask)
+        if len(need) > self.cap:
+            half = len(t) // 2
+            return np.concatenate([self._gather(t[:half], local[:half]), self._gather(t[half:], local[half:])])
+        self._ensure(need)
+        return self.cache.reshape(-1)[self.slot_of[t] * (self.T * self.T) + local]
+
+    def _ensure(self, need):
+        self.clock += 1
+        slots = self.slot_of[need]
+        missing = need[slots < 0]
+        if len(missing):
+            busy = np.zeros(self.cap, bool)
+            busy[slots[slots >= 0]] = True
+            free = np.flatnonzero(~busy)
+            free = free[np.argsort(self.used[free], kind='stable')][:len(missing)]
+            size = self.T * self.T * self.dtype.itemsize
+            for tid, s in zip(missing.tolist(), free.tolist()):
+                old = self.tile_in[s]
+                if old >= 0:
+                    self.slot_of[old] = -1
+                self.f.seek(tid * size)
+                self.f.readinto(memoryview(self.cache[s]).cast('B'))
+                self.tile_in[s] = tid
+                self.slot_of[tid] = s
+                self.loads += 1
+        self.used[self.slot_of[need]] = self.clock
+
+    def close(self):
+        self.f.close()
+
+
+class _PagedView:
+    """A decoded view of a PagedArray (the map codes as filled or as faces)."""
+
+    def __init__(self, base, decode, dtype):
+        self.base, self.decode, self.dtype, self.shape = base, decode, np.dtype(dtype), base.shape
+
+    def __getitem__(self, key):
+        return self.decode(self.base[key])
+
+
+def open_master(folder, stem, cache_bytes=PAGE_CACHE_BYTES):
+    """The master paged (decision 33), or None when a file is missing: the PNG and the map decoded once, row by row,
+    into two tiled scratch files in the bake folder (<stem>.ao.page and <stem>.ao.mappage), read through a cache of
+    tiles; close() closes and deletes them. A master of schema 1 (filled and the face map in the .npz) is loaded whole
+    (load_master)."""
+    png, mp, npz = master_paths(folder, stem)
+    if not (os.path.isfile(png) and os.path.isfile(npz)):
+        return None
+    if has_maps_in_npz(npz):
+        out = load_master(folder, stem)
+        out['close'] = lambda: None
+        return out
+    if not os.path.isfile(mp):
+        return None
+    with np.load(npz) as z:
+        out = _layout(z)
+    W, H = out['W'], out['H']
+    base = os.path.join(folder, stem)
+    page_img, page_map = base + '.ao.page', base + '.ao.mappage'
+    made = []
+    try:
+        reader = PngRows(png)
+        if (reader.w, reader.h) != (W, H):
+            reader.close()
+            raise ValueError(f'{png}: {reader.w} x {reader.h} px, the layout says {W} x {H}')
+        tw = _TiledWriter(page_img, H, W, np.uint16)
+        made.append(page_img)
+        for block in reader:
+            tw.write(block[:, :, 0])
+        tw.close()
+        mW, mH, rows = map_rows(mp)
+        if (mW, mH) != (W, H):
+            raise ValueError(f'{mp}: {mW} x {mH} px, the layout says {W} x {H}')
+        tw = _TiledWriter(page_map, H, W, np.int32)
+        made.append(page_map)
+        for block in rows:
+            tw.write(block)
+        tw.close()
+        img = PagedArray(page_img, H, W, np.uint16, cache_bytes // 3)
+        code = PagedArray(page_map, H, W, np.int32, cache_bytes - cache_bytes // 3)
+    except BaseException:
+        for p in made:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        raise
+
+    def close():
+        for arr, p in ((img, page_img), (code, page_map)):
+            arr.close()
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+    out.update(image=img, filled=code.view(code_filled, bool), face_map=code.view(code_face, np.int32),
+               close=close, pages=(img, code))
+    return out
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -1288,28 +1832,77 @@ COLOUR_TYPE = {1: 0, 2: 4, 3: 2, 4: 6}  # channels: PNG colour type
 CHANNELS = {0: 1, 4: 2, 2: 3, 6: 4}
 
 
+class PngRowWriter:
+    """A PNG written row by row: blocks of rows in file order (the top first), (n, w) or (n, w, C) integers in the
+    file's depth. Filter 0, zlib level 6, one IDAT chunk per compressed block of `rows` rows, so the file is the same
+    whatever the blocks handed in (Session 23: the same bytes as Session 20's write_png_int)."""
+
+    def __init__(self, path, w, h, bits=16, channels=1, rows=256):
+        self.path, self.w, self.h, self.bits, self.ch, self.rows = path, int(w), int(h), bits, int(channels), rows
+        self.dtype = '>u2' if bits == 16 else np.uint8
+        self.pending = []
+        self.n_pending = 0
+        self.done = 0
+        self.comp = zlib.compressobj(6)
+        self.f = open(path, 'wb')
+        self.f.write(b'\x89PNG\r\n\x1a\n')
+        self.f.write(_png_chunk(b'IHDR', struct.pack('>IIBBBBB', self.w, self.h, bits, COLOUR_TYPE[self.ch], 0, 0, 0)))
+
+    def write(self, block):
+        block = np.asarray(block)
+        if not block.shape[0]:
+            return
+        self.pending.append(block)
+        self.n_pending += block.shape[0]
+        while self.n_pending >= self.rows:
+            self._emit(self.rows)
+
+    def _emit(self, n):
+        rows = self.pending[0] if len(self.pending) == 1 else np.concatenate(self.pending, axis=0)
+        take, rest = rows[:n], rows[n:]
+        self.pending = [rest] if rest.shape[0] else []
+        self.n_pending = rest.shape[0]
+        block = np.ascontiguousarray(take.astype(self.dtype)).reshape(n, -1)
+        raw = np.zeros((n, block.shape[1] * block.itemsize + 1), dtype=np.uint8)
+        raw[:, 1:] = block.view(np.uint8).reshape(n, -1)
+        data = self.comp.compress(raw.tobytes())
+        if data:
+            self.f.write(_png_chunk(b'IDAT', data))
+        self.done += n
+
+    def close(self):
+        if self.n_pending:
+            self._emit(self.n_pending)
+        if self.done != self.h:
+            self.f.close()
+            raise ValueError(f'{self.path}: {self.done} of {self.h} rows written')
+        self.f.write(_png_chunk(b'IDAT', self.comp.flush()))
+        self.f.write(_png_chunk(b'IEND', b''))
+        self.f.close()
+
+    def abort(self):
+        self.f.close()
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass
+
+
 def write_png_int(path, q, bits=16, rows=256):
     """q: (H, W) or (H, W, C) integers in the file's depth, row 0 = bottom. Filter 0, zlib level 6. Written row by
     row (`rows` at a time, one IDAT chunk per compressed block), so no copy of the whole image is made."""
     q = np.asarray(q)
     h, w = q.shape[:2]
     ch = 1 if q.ndim == 2 else q.shape[2]
-    dtype = '>u2' if bits == 16 else np.uint8
-    ihdr = struct.pack('>IIBBBBB', w, h, bits, COLOUR_TYPE[ch], 0, 0, 0)
-    comp = zlib.compressobj(6)
-    with open(path, 'wb') as f:
-        f.write(b'\x89PNG\r\n\x1a\n')
-        f.write(_png_chunk(b'IHDR', ihdr))
+    writer = PngRowWriter(path, w, h, bits, ch, rows)
+    try:
         for top in range(0, h, rows):
             bot = min(h, top + rows)
-            block = np.ascontiguousarray(q[h - bot:h - top][::-1].astype(dtype)).reshape(bot - top, -1)
-            raw = np.zeros((bot - top, block.shape[1] * block.itemsize + 1), dtype=np.uint8)
-            raw[:, 1:] = block.view(np.uint8).reshape(bot - top, -1)
-            data = comp.compress(raw.tobytes())
-            if data:
-                f.write(_png_chunk(b'IDAT', data))
-        f.write(_png_chunk(b'IDAT', comp.flush()))
-        f.write(_png_chunk(b'IEND', b''))
+            writer.write(q[h - bot:h - top][::-1])
+        writer.close()
+    except BaseException:
+        writer.abort()
+        raise
 
 
 def write_png(path, arr, bits=16):
@@ -1336,82 +1929,112 @@ class PngNotDecoded(Exception):
     """A PNG this reader does not decode (palette, interlace, filters Average or Paeth): read it through Blender."""
 
 
+class PngRows:
+    """A PNG read row by row: iterating gives blocks (n, w, C) uint16 in the file's depth, in file order (the top
+    first). Grey, grey + alpha, RGB and RGBA at 8 or 16 bits, filters None, Sub and Up; PngNotDecoded otherwise. The
+    file is read a chunk at a time (Session 23), never whole."""
+
+    def __init__(self, path, rows=256):
+        self.path, self.rows = path, rows
+        self.f = open(path, 'rb')
+        try:
+            if self.f.read(8) != b'\x89PNG\r\n\x1a\n':
+                raise PngNotDecoded('not a PNG')
+            tag, chunk = self._chunk()
+            if tag != b'IHDR':
+                raise PngNotDecoded('no IHDR')
+            self.w, self.h, self.bits, self.ct, _c, _f, il = struct.unpack('>IIBBBBB', chunk[:13])
+            if self.ct not in CHANNELS or self.bits not in (8, 16) or il:
+                raise PngNotDecoded(f'colour type {self.ct}, {self.bits} bits, interlace {il}')
+        except BaseException:
+            self.f.close()
+            raise
+        self.ch = CHANNELS[self.ct]
+
+    def _chunk(self):
+        head = self.f.read(8)
+        if len(head) < 8:
+            return None, b''
+        n = struct.unpack('>I', head[:4])[0]
+        data = self.f.read(n)
+        self.f.read(4)
+        return head[4:8], data
+
+    def close(self):
+        self.f.close()
+
+    def __iter__(self):
+        w, h, bits, ch = self.w, self.h, self.bits, self.ch
+        bpp = ch * bits // 8
+        rowlen = 1 + w * bpp
+        d = zlib.decompressobj()
+        pending = bytearray()
+        state = dict(y=0, prev=None)
+
+        def rows_out(n):
+            block = np.frombuffer(bytes(pending[:n * rowlen]), dtype=np.uint8).reshape(n, rowlen)
+            del pending[:n * rowlen]
+            filters = block[:, 0]
+            if np.any(filters > 2):
+                raise PngNotDecoded('filter Average or Paeth')
+            rows = block[:, 1:].copy()
+            if np.any(filters != 0):
+                for k in range(n):
+                    f = filters[k]
+                    if f == 1:
+                        r = rows[k].reshape(w, bpp).astype(np.uint32)
+                        rows[k] = (np.cumsum(r, axis=0) % 256).astype(np.uint8).ravel()
+                    elif f == 2:
+                        prev = rows[k - 1] if k > 0 else state['prev']
+                        if prev is not None:
+                            rows[k] = (rows[k].astype(np.uint16) + prev) % 256
+            state['prev'] = rows[-1].copy()
+            state['y'] += n
+            if bits == 16:
+                return rows.view('>u2').reshape(n, w, ch).astype(np.uint16)
+            return rows.reshape(n, w, ch).astype(np.uint16)
+
+        def ready():
+            while True:
+                n = min(len(pending) // rowlen, h - state['y'], self.rows)
+                if n <= 0:
+                    return
+                yield rows_out(n)
+
+        try:
+            while True:
+                tag, chunk = self._chunk()
+                if tag is None or tag == b'IEND':
+                    break
+                if tag != b'IDAT':
+                    continue
+                data = d.decompress(chunk, 1 << 24)
+                while True:
+                    pending.extend(data)
+                    yield from ready()
+                    if not d.unconsumed_tail:
+                        break
+                    data = d.decompress(d.unconsumed_tail, 1 << 24)
+            pending.extend(d.flush())
+            yield from ready()
+            if state['y'] != h:
+                raise PngNotDecoded(f'{state["y"]} of {h} rows decoded')
+        finally:
+            self.f.close()
+
+
 def read_png(path):
     """(values (H, W) or (H, W, C) uint16 in the file's depth, row 0 = bottom, bits, colour type). Grey, grey + alpha,
     RGB and RGBA at 8 or 16 bits, filters None, Sub and Up; raises PngNotDecoded otherwise."""
-    with open(path, 'rb') as f:
-        data = f.read()
-    if data[:8] != b'\x89PNG\r\n\x1a\n':
-        raise PngNotDecoded('not a PNG')
-    pos = 8
-    idat = []
-    w = h = bits = ct = il = 0
-    while pos < len(data):
-        n = struct.unpack('>I', data[pos:pos + 4])[0]
-        tag = data[pos + 4:pos + 8]
-        chunk = data[pos + 8:pos + 8 + n]
-        if tag == b'IHDR':
-            w, h, bits, ct, _c, _f, il = struct.unpack('>IIBBBBB', chunk[:13])
-        elif tag == b'IDAT':
-            idat.append(chunk)
-        elif tag == b'IEND':
-            break
-        pos += 12 + n
-    if ct not in CHANNELS or bits not in (8, 16) or il:
-        raise PngNotDecoded(f'colour type {ct}, {bits} bits, interlace {il}')
-    ch = CHANNELS[ct]
-    bpp = ch * bits // 8
-    stride = w * bpp
-    rowlen = 1 + stride
-    vals = np.empty((h, w, ch), dtype=np.uint16)
-    # decoded in blocks of rows (no copy of the whole raw image); file row y is vals row h - 1 - y
-    d = zlib.decompressobj()
-    pending = bytearray()
-    state = dict(y=0, prev=None)
-
-    def rows_out(n):
-        block = np.frombuffer(bytes(pending[:n * rowlen]), dtype=np.uint8).reshape(n, rowlen)
-        del pending[:n * rowlen]
-        filters = block[:, 0]
-        if np.any(filters > 2):
-            raise PngNotDecoded('filter Average or Paeth')
-        rows = block[:, 1:].copy()
-        if np.any(filters != 0):
-            for k in range(n):
-                f = filters[k]
-                if f == 1:
-                    r = rows[k].reshape(w, bpp).astype(np.uint32)
-                    rows[k] = (np.cumsum(r, axis=0) % 256).astype(np.uint8).ravel()
-                elif f == 2:
-                    prev = rows[k - 1] if k > 0 else state['prev']
-                    if prev is not None:
-                        rows[k] = (rows[k].astype(np.uint16) + prev) % 256
-        state['prev'] = rows[-1].copy()
-        y = state['y']
-        if bits == 16:
-            v = rows.view('>u2').reshape(n, w, ch)
-        else:
-            v = rows.reshape(n, w, ch)
-        vals[h - y - n:h - y] = v[::-1]
-        state['y'] = y + n
-
-    for chunk in idat:
-        data = d.decompress(chunk, 1 << 24)
-        while True:
-            pending.extend(data)
-            n = len(pending) // rowlen
-            if n:
-                rows_out(min(n, h - state['y']))
-            if not d.unconsumed_tail:
-                break
-            data = d.decompress(d.unconsumed_tail, 1 << 24)
-    pending.extend(d.flush())
-    n = min(len(pending) // rowlen, h - state['y'])
-    if n:
-        rows_out(n)
-    if state['y'] != h:
-        raise PngNotDecoded(f'{state["y"]} of {h} rows decoded')
-    return (vals[:, :, 0] if ch == 1 else vals), bits, ct
+    reader = PngRows(path)
+    h, ch = reader.h, reader.ch
+    vals = np.empty((h, reader.w, ch), dtype=np.uint16)
+    y = 0
+    for block in reader:
+        n = block.shape[0]
+        vals[h - y - n:h - y] = block[::-1]
+        y += n
+    return (vals[:, :, 0] if ch == 1 else vals), reader.bits, reader.ct
 
 
 # ---------------------------------------------------------------------------------------------------------------------

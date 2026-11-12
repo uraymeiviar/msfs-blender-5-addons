@@ -2,7 +2,8 @@
 decisions 12 to 18, 21 and 27; P32 to P35).
 
 - Storage (decisions 13, 18, 21): `<blend_name>.bake/` beside the .blend holds index.json (schema, settings, each
-  master's keys) and per master `<stem>.ao.png` (16-bit grey) and `<stem>.ao.npz` (the layout). A master belongs to an
+  master's keys) and per master `<stem>.ao.png` (16-bit grey), `<stem>.ao.map` (filled pixels and the face map, written
+  row by row; Session 23) and `<stem>.ao.npz` (the layout). A master belongs to an
   object, or to a mesh that several objects share (self-shading only, P35). Its stem is the name made safe for the file
   system plus a short hash of the name (ao_bake_core.safe_stem).
 - Staleness (decision 17, P33): mesh changed when the hash of the evaluated triangles, positions and corner normals
@@ -90,11 +91,17 @@ def write_index(folder, index):
 
 
 def master_files(folder, stem):
+    """(png, npz) of a master; its third file, <stem>.ao.map (schema 2), is in core.master_paths."""
     return os.path.join(folder, stem + '.ao.png'), os.path.join(folder, stem + '.ao.npz')
 
 
 def has_files(folder, stem):
-    return all(os.path.isfile(p) for p in master_files(folder, stem))
+    """The master's files are there: the PNG, the .npz and the .ao.map (a master of schema 1 has its per-pixel data in
+    the .npz instead)."""
+    png, mp, npz = core.master_paths(folder, stem)
+    if not (os.path.isfile(png) and os.path.isfile(npz)):
+        return False
+    return os.path.isfile(mp) or core.has_maps_in_npz(npz)
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -290,7 +297,7 @@ def refresh(context, relink=True):
                 continue
             old = match[0]
             entry = orphans.pop(old)
-            for src, dst in zip(master_files(folder, old), master_files(folder, stem)):
+            for src, dst in zip(core.master_paths(folder, old), core.master_paths(folder, stem)):
                 if os.path.isfile(src):
                     os.replace(src, dst)
             entry.update(key=stem, name=item['name'], object=item['object'], mesh=item['mesh'],

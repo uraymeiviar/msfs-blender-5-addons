@@ -15,9 +15,11 @@ the occluders the job lists (evaluated, skip faces dropped, moved the same way);
 rendering. The master layout at 4 x the target's median density. The bake in tiles (decisions 31, 32): the master's
 pixel area is cut into square tiles whose size fits the memory budget (ao_bake_core.choose_tile); each tile is one
 Cycles bake of the core triangles that overlap it, then one of the skirt's, with UVs relative to the tile, into a
-tile-sized image (Cycles clips a triangle at the image's edges: Session 20), each tile with its own seed; the results go
-straight into one uint16 array. Then the composition in windows, and <stem>.ao.png (written row by row) and
-<stem>.ao.npz; index.json gets the master's entry with the tile size and the peak working set.
+tile-sized image (Cycles clips a triangle at the image's edges: Session 20), each tile with its own seed. The master is
+paged (decision 33, Session 23): a row of tiles is a band; the bands are baked from the top, and once a band is baked
+the band above it is composed (it now has its halo) and written to <stem>.ao.png and <stem>.ao.map row by row, then
+dropped; only two bands are held, never the whole master. Then <stem>.ao.npz (the layout); index.json gets the
+master's entry with the tile size and the peak working set.
 """
 import importlib.util
 import json
@@ -251,39 +253,59 @@ def occluder_mesh(obj, depsgraph, skip_slots, shift):
 # ---------------------------------------------------------------------------------------------------------------------
 
 PREVIEW_MAX = 2048  # the long side of the preview in the window
-COMPOSE_WINDOW = 2048  # the composition after the bake works in windows of at most this size
+
+
+class Preview:
+    """A reduced copy of the master being baked (every f-th pixel, at most PREVIEW_MAX px on the long side), updated
+    from each tile and each composed strip, shown in the window's Image Editor (the largest area turned into one if
+    there is none). Only with a window; its size does not depend on the master's."""
+
+    def __init__(self, W, H):
+        self.on = not bpy.app.background
+        self.f = max(1, -(-max(W, H) // PREVIEW_MAX))
+        self.pv = np.zeros((-(-H // self.f), -(-W // self.f)), np.uint16) if self.on else None
+
+    def put(self, x0, y0, block):
+        """block (h, w) uint16 at (x0, y0) of the master."""
+        if not self.on:
+            return
+        f = self.f
+        h, w = block.shape
+        ax, ay = -x0 % f, -y0 % f
+        if ax >= w or ay >= h:
+            return
+        part = block[ay::f, ax::f]
+        px, py = (x0 + ax) // f, (y0 + ay) // f
+        self.pv[py:py + part.shape[0], px:px + part.shape[1]] = part
+
+    def show(self):
+        if not self.on:
+            return
+        pv = self.pv
+        ph, pw = pv.shape
+        img = _shown.get('img')
+        if img is None or img.name not in bpy.data.images or tuple(img.size) != (pw, ph):
+            if img is not None and img.name in bpy.data.images:
+                bpy.data.images.remove(img)
+            img = bpy.data.images.new('AO master', pw, ph, alpha=False, float_buffer=True, is_data=True)
+            _shown['img'] = img
+        px = np.ones((ph, pw, 4), dtype=np.float32)
+        px[:, :, :3] = (pv.astype(np.float32) / 65535.0)[:, :, None]
+        img.pixels.foreach_set(px.ravel())
+        img.update()
+        wm = bpy.context.window_manager
+        for window in wm.windows:
+            areas = sorted(window.screen.areas, key=lambda a: -a.width * a.height)
+            area = next((a for a in areas if a.type == 'IMAGE_EDITOR'), None)
+            if area is None and areas:
+                area = areas[0]
+                area.type = 'IMAGE_EDITOR'
+            if area is not None:
+                area.spaces.active.image = img
+                area.tag_redraw()
+
+
 _shown = {}
-
-
-def show_preview(M16):
-    """A reduced preview of the master being baked (at most PREVIEW_MAX px on the long side) in the window's Image
-    Editor (the largest area turned into one if there is none); updated after each tile."""
-    if bpy.app.background:
-        return
-    H, W = M16.shape
-    f = max(1, -(-max(W, H) // PREVIEW_MAX))
-    pv = M16[::f, ::f]
-    ph, pw = pv.shape
-    img = _shown.get('img')
-    if img is None or img.name not in bpy.data.images or tuple(img.size) != (pw, ph):
-        if img is not None and img.name in bpy.data.images:
-            bpy.data.images.remove(img)
-        img = bpy.data.images.new('AO master', pw, ph, alpha=False, float_buffer=True, is_data=True)
-        _shown['img'] = img
-    px = np.ones((ph, pw, 4), dtype=np.float32)
-    px[:, :, :3] = (pv.astype(np.float32) / 65535.0)[:, :, None]
-    img.pixels.foreach_set(px.ravel())
-    img.update()
-    wm = bpy.context.window_manager
-    for window in wm.windows:
-        areas = sorted(window.screen.areas, key=lambda a: -a.width * a.height)
-        area = next((a for a in areas if a.type == 'IMAGE_EDITOR'), None)
-        if area is None and areas:
-            area = areas[0]
-            area.type = 'IMAGE_EDITOR'
-        if area is not None:
-            area.spaces.active.image = img
-            area.tag_redraw()
 
 
 def _remove(objs):
@@ -313,7 +335,11 @@ def _bake_piece(coll, name, positions, normals, uv, img, px, seed, target):
 
 def bake_item(item, coll):
     """Bakes one master; a generator that yields after each tile (the caller checks Cancel between tiles and, with a
-    window, lets it redraw), and returns the result. Closing it between tiles leaves the old master as it was."""
+    window, lets it redraw), and returns the result. Closing it between tiles leaves the old master as it was.
+
+    Paged (decision 33): the bands are baked from the top (the PNG is written from the top), each band's tiles from the
+    left; once a band is baked, the band above it has its halo and is composed and written; nothing is held for the
+    whole master. Each tile keeps the seed of its place in core.tile_grid, so the result is Session 20's."""
     t0 = time.time()
     obj = bpy.data.objects.get(item['object'])
     if obj is None or obj.type != 'MESH':
@@ -348,7 +374,7 @@ def bake_item(item, coll):
                           fold_split=core.FOLD_SPLIT)
     t_build = time.time() - tb
     W, H = m['W'], m['H']
-    # the tile size (decision 32): forced by a test, else the largest that fits the memory budget
+    # the tile size, which is also the band's height (decisions 32, 33): forced by a test, else the largest that fits
     ws0, _peak0 = core.process_memory()
     forced = int(JOB.get('tile_px') or 0)
     if forced:
@@ -357,20 +383,72 @@ def bake_item(item, coll):
         tile, est, fits = core.choose_tile(W, H, BUDGET, ws0 or 0)
     tiles = core.tile_grid(W, H, tile)
     n = len(tiles)
+    nb = -(-H // tile)  # bands
     gb = 2 ** 30
-    log(f"  {item['name']}: master {W} x {H} px ({W * H / 1e6:.1f} Mpx), tile {tile} px, {n} tile(s); budget "
-        f"{BUDGET / gb:.1f} GB" + (f", estimate {est / gb:.1f} GB" if est else ' (tile forced)')
+    log(f"  {item['name']}: master {W} x {H} px ({W * H / 1e6:.1f} Mpx), tile {tile} px, {n} tile(s) in {nb} band(s); "
+        f"budget {BUDGET / gb:.1f} GB" + (f", estimate {est / gb:.2f} GB" if est else ' (tile forced)')
         + ('' if fits else ', the smallest tile exceeds the budget'))
     state.update(tile=0, n_tiles=n, size=[int(W), int(H)], tile_px=int(tile))
     write_status()
     temps = []
-    M16 = np.zeros((H, W), dtype=np.uint16)
-    flags = np.zeros((H, W), dtype=np.uint8)
     counts = dict(core_px=0, skirt_px=0)
-    t_core = t_skirt = 0.0
+    times = dict(core=0.0, skirt=0.0, tiles=0.0)
     core_tris = m['core_tris']
     cuv = m['muv'][core_tris]
     ns = len(m['skirt_pos'])
+    preview = Preview(W, H)
+    files = core.MasterWriter(FOLDER, item['key'], W, H)
+    finished = False
+    done = [0]
+
+    def bake_tile(i, rect, win, baked):
+        """Tile i of tile_grid (its place gives its seed) into the band's views of it; yields once it is baked."""
+        x0, y0, w, h = rect
+        done[0] += 1
+        state['tile'] = done[0]
+        write_status()
+        tt = time.time()
+        off = np.array([x0, y0], dtype=np.float64)
+        wh = np.array([w, h], dtype=np.float64)
+        csel = core.tris_in_window(cuv, x0, y0, w, h)
+        ssel = core.tris_in_window(m['skirt_uv'], x0, y0, w, h) if ns else np.zeros(0, dtype=np.int64)
+        if len(csel) or len(ssel):
+            img = new_float_image('FSS_AO_TILE', w, h)
+            px = np.empty(w * h * 4, dtype=np.float32)
+            try:
+                cm = np.zeros((h, w), dtype=bool)
+                if len(csel):
+                    ct = core_tris[csel]
+                    A, dt = _bake_piece(coll, 'FSS_AO_CORE', pos[tris[ct]], cnm[ct], (cuv[csel] - off) / wh, img, px,
+                                        core.tile_seed(core.SEEDS[0] + SEED_OFFSET, i, n), target)
+                    times['core'] += dt
+                    cm = A >= 0
+                    win[cm] = core.quantize16(A[cm])
+                    counts['core_px'] += int(cm.sum())
+                    del A
+                sm = np.zeros((h, w), dtype=bool)
+                if len(ssel):
+                    B, dt = _bake_piece(coll, 'FSS_AO_SKIRT', m['skirt_pos'][ssel], m['skirt_n'][ssel],
+                                        (m['skirt_uv'][ssel] - off) / wh, img, px,
+                                        core.tile_seed(core.SEEDS[1] + SEED_OFFSET, i, n), target)
+                    times['skirt'] += dt
+                    sm = (~cm) & (B >= 0) & (core.rect_window(m['rects'], x0, y0, w, h) >= 0)
+                    win[sm] = core.quantize16(B[sm])
+                    counts['skirt_px'] += int(sm.sum())
+                    del B
+                baked |= cm | sm
+                del cm, sm
+            finally:
+                bpy.data.images.remove(img)
+                del px
+        if n > 1:
+            log(f"    tile {done[0]}/{n} at ({x0}, {y0}) {w} x {h}: {len(csel)} core and {len(ssel)} skirt "
+                f"triangles, {time.time() - tt:.2f} s")
+        preview.put(x0, y0, win)
+        preview.show()
+        times['tiles'] += time.time() - tt
+        yield done[0]
+
     try:
         # the target (selected) and the occluders, moved by -shift; every original object is hidden from rendering
         distinct = np.array([len(set(r)) == 3 for r in tris.tolist()])
@@ -383,77 +461,35 @@ def bake_item(item, coll):
             if o is None or o.type != 'MESH' or o == obj:
                 continue
             temps.append(temp_object(coll, 'FSS_AO_OCC', occluder_mesh(o, dg, set(occ['skip_slots']), shift)))
-        for i, (x0, y0, w, h) in enumerate(tiles):
-            state['tile'] = i + 1
-            write_status()
-            tt = time.time()
-            off = np.array([x0, y0], dtype=np.float64)
-            wh = np.array([w, h], dtype=np.float64)
-            csel = core.tris_in_window(cuv, x0, y0, w, h)
-            ssel = core.tris_in_window(m['skirt_uv'], x0, y0, w, h) if ns else np.zeros(0, dtype=np.int64)
-            if len(csel) or len(ssel):
-                img = new_float_image('FSS_AO_TILE', w, h)
-                px = np.empty(w * h * 4, dtype=np.float32)
-                try:
-                    cm = np.zeros((h, w), dtype=bool)
-                    win = M16[y0:y0 + h, x0:x0 + w]
-                    if len(csel):
-                        ct = core_tris[csel]
-                        A, dt = _bake_piece(coll, 'FSS_AO_CORE', pos[tris[ct]], cnm[ct], (cuv[csel] - off) / wh, img,
-                                            px, core.tile_seed(core.SEEDS[0] + SEED_OFFSET, i, n), target)
-                        t_core += dt
-                        cm = A >= 0
-                        win[cm] = core.quantize16(A[cm])
-                        counts['core_px'] += int(cm.sum())
-                        del A
-                    sm = np.zeros((h, w), dtype=bool)
-                    if len(ssel):
-                        B, dt = _bake_piece(coll, 'FSS_AO_SKIRT', m['skirt_pos'][ssel], m['skirt_n'][ssel],
-                                            (m['skirt_uv'][ssel] - off) / wh, img, px,
-                                            core.tile_seed(core.SEEDS[1] + SEED_OFFSET, i, n), target)
-                        t_skirt += dt
-                        sm = (~cm) & (B >= 0) & (core.rect_window(m['rects'], x0, y0, w, h) >= 0)
-                        win[sm] = core.quantize16(B[sm])
-                        counts['skirt_px'] += int(sm.sum())
-                        del B
-                    flags[y0:y0 + h, x0:x0 + w] |= (cm | sm).astype(np.uint8)
-                    del cm, sm
-                finally:
-                    bpy.data.images.remove(img)
-                    del px
-            if n > 1:
-                log(f"    tile {i + 1}/{n} at ({x0}, {y0}) {w} x {h}: {len(csel)} core and {len(ssel)} skirt "
-                    f"triangles, {time.time() - tt:.2f} s")
-            show_preview(M16)
-            yield i
+        # paged (decision 33): bands from the top, each composed and written once the band below it is baked
+        tp = time.time()
+        times['tiles'] = 0.0
+        yield from core.bake_paged(m, tile, bake_tile, files.write_rows, counts,
+                                   lambda y, v: preview.put(0, y, v))
+        t_compose = time.time() - tp - times['tiles']
+        t_core, t_skirt = times['core'], times['skirt']
+        counts['image_px'] = int(W * H)
+        meta = dict(schema=core.SCHEMA, key=item['key'], kind=item['kind'], name=item['name'], object=obj.name,
+                    mesh_hash=mh, ao_distance=SET['ao_distance'], samples=SET['samples'], **core.method_settings())
+        ts = time.time()
+        files.finish(m, tri_src, meta)
+        finished = True
+        t_save = time.time() - ts
     finally:
         _remove(temps)
-    # the composition, in windows (no full-size float array)
-    tc = time.time()
-    face_map = np.full((H, W), -1, dtype=np.int32)
-    for win in core.tile_grid(W, H, min(tile, COMPOSE_WINDOW)):
-        for k, v in core.compose_window(m, M16, flags, face_map, win).items():
-            counts[k] = counts.get(k, 0) + v
-    counts['image_px'] = int(W * H)
-    filled = (flags & 2) != 0
-    del flags
-    t_compose = time.time() - tc
-    meta = dict(schema=core.SCHEMA, key=item['key'], kind=item['kind'], name=item['name'], object=obj.name,
-                mesh_hash=mh, ao_distance=SET['ao_distance'], samples=SET['samples'], **core.method_settings())
-    ts = time.time()
-    core.save_master(FOLDER, item['key'], M16, m, filled, face_map, tri_src, meta)
-    t_save = time.time() - ts
-    show_preview(M16)
-    del M16, filled, face_map
+        if not finished:
+            files.abort()
+    preview.show()
     _ws, peak = core.process_memory()
     entry = dict(key=item['key'], kind=item['kind'], name=item['name'], object=obj.name, mesh=obj.data.name,
                  mesh_hash=mh, mesh_hash_at_job=item.get('mesh_hash'), surround_hash=item['surround_hash'],
                  density=float(D), W=int(W), H=int(H), tris=int(len(tri_src)), islands=int(m['n_islands']),
                  samples=int(SET['samples']), ao_distance=float(SET['ao_distance']), method=core.METHOD,
                  uv=uv_name, occluders=[o['name'] for o in item['occluders']], mover=bool(item.get('mover')),
-                 frame=item.get('frame'), baked_at=time.strftime('%Y-%m-%d %H:%M:%S'),
-                 tiles=dict(size=int(tile), n=int(n), forced=bool(forced), budget_gb=round(BUDGET / gb, 2),
-                            estimate_gb=round(est / gb, 2) if est else None,
+                 frame=item.get('frame'), baked_at=time.strftime('%Y-%m-%d %H:%M:%S'), schema=core.SCHEMA,
+                 tiles=dict(size=int(tile), n=int(n), bands=int(nb), forced=bool(forced),
+                            budget_gb=round(BUDGET / gb, 2), estimate_gb=round(est / gb, 2) if est else None,
+                            in_use_gb=round(ws0 / gb, 3) if ws0 else None,
                             peak_working_set_gb=round(peak / gb, 3) if peak else None),
                  times=dict(build_s=round(t_build, 3), core_s=round(t_core, 3), skirt_s=round(t_skirt, 3),
                             bake_s=round(t_core + t_skirt, 3), compose_s=round(t_compose, 3),

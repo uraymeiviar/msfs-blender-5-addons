@@ -2,6 +2,7 @@
 
 Run (CPU cap; the tool's second Blender inherits it), one bake per run:
     blender -b --factory-startup --python s20_floor.py -- obj=floor tex=4096 [tile=2048] [budget=4] [limit=8]
+        [samples=64] [sub=s20]
 
 obj=floor: OCC_@MERGE_COCKPIT_SHELL_FLOOR in tests/_work/ao_bake/s20/floor_base.blend (a copy of the prototype's
 panel scene), given a test material whose texture set size is `tex` (4096: a master of about 214 Mpx, 2048: about
@@ -9,10 +10,12 @@ panel scene), given a test material whose texture set size is `tex` (4096: a mas
 tile: force the tile size (0: the tool's choice); budget: the memory budget in GB (FSS_AO_BAKE_MEMORY_GB, inherited
 by the second Blender; none: the machine's default). limit: a watchdog in GB: when the second Blender's working set
 exceeds it, the `cancel` file is written (the bake stops at the next tile) and the run is reported as over the limit.
+samples: Cycles samples (Session 23 lowers them to 1 for the ~850 Mpx master only); sub: the folder in
+tests/_work/ao_bake/ for the .blend, its bake folder and memory_runs.jsonl (the source scene stays s20/floor_base.blend).
 
 The second Blender reports its own peak working set (GetProcessMemoryInfo) in index.json; this script also polls the
 second Blender's working set every 0.25 s (GetProcessMemoryInfo on its process handle) and reads its peak at the end.
-Appends one JSON line per run to tests/_work/ao_bake/s20/memory_runs.jsonl.
+Appends one JSON line per run to tests/_work/ao_bake/<sub>/memory_runs.jsonl.
 """
 import ctypes
 import json
@@ -45,14 +48,16 @@ TEX = int(args.get('tex', 4096))
 TILE = int(args.get('tile', 0))
 BUDGET = args.get('budget')
 LIMIT = float(args.get('limit', 8)) * 2 ** 30
-WORK = REPO / 'tests' / '_work' / 'ao_bake' / 's20'
+SAMPLES = int(args.get('samples', 64))
+SRC = REPO / 'tests' / '_work' / 'ao_bake' / 's20'
+WORK = REPO / 'tests' / '_work' / 'ao_bake' / args.get('sub', 's20')
 if BUDGET:
     os.environ['FSS_AO_BAKE_MEMORY_GB'] = BUDGET
 else:
     os.environ.pop('FSS_AO_BAKE_MEMORY_GB', None)
 
 if OBJ == 'floor':
-    bpy.ops.wm.open_mainfile(filepath=str(WORK / 'floor_base.blend'))
+    bpy.ops.wm.open_mainfile(filepath=str(SRC / 'floor_base.blend'))
     name = 'OCC_@MERGE_COCKPIT_SHELL_FLOOR'
     target = bpy.data.objects[name]
     mat = bpy.data.materials.new('S20_FLOOR')
@@ -68,7 +73,7 @@ addon_utils.enable('fss_blender_tools', default_set=True)
 assert Path(sys.modules['fss_blender_tools'].__file__).resolve().is_relative_to(REPO)
 mat.fss_uv_texture_size = str(TEX)
 s = bpy.context.scene.fss_ao_bake
-s.distance, s.samples, s.threads, s.device = 0.1, 64, 12, 'CPU'
+s.distance, s.samples, s.threads, s.device = 0.1, SAMPLES, 12, 'CPU'
 blend.parent.mkdir(parents=True, exist_ok=True)
 folder = store.bake_folder(str(blend))
 if os.path.isdir(folder):
@@ -128,7 +133,7 @@ index = store.read_index(folder, use_cache=False)
 item = store._state['items'][store._state['by_object'][target.name]]
 entry = index['masters'].get(item['key'], {})
 res = (status.get('results') or [{}])[0]
-row = dict(obj=OBJ, tex=TEX, tile_forced=TILE, budget_arg=BUDGET, state=status.get('state'), result=res.get('status'),
+row = dict(obj=OBJ, tex=TEX, samples=SAMPLES, tile_forced=TILE, budget_arg=BUDGET, state=status.get('state'), result=res.get('status'),
            reason=res.get('reason'), W=entry.get('W'), H=entry.get('H'),
            mpx=round(entry['W'] * entry['H'] / 1e6, 1) if entry else None, tiles=entry.get('tiles'),
            times=entry.get('times'), second_blender_s=round(wall, 1), budget_gb=status.get('budget_gb'),

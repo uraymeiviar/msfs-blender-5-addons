@@ -12,7 +12,10 @@ Per texture set (a material, as UV Auto Packing groups them), for all texture se
   other face of the texture set; every other pixel stays as it was. A separate file that does not exist yet is
   created white, green and blue as above;
 - faces without an up-to-date master (missing, or the mesh changed) are written white and listed; faces whose master
-  is under 4 x their density at the target's size are counted.
+  is under 4 x their density at the target's size are counted;
+- paged (decision 33): a master is read through scratch files in the bake folder (deleted afterwards), the copy runs a
+  band of target rows at a time, and the file is written row by row, so Apply needs no memory in proportion to a
+  master.
 Apply writes files only: no datablock is added to the .blend and no material is changed.
 """
 
@@ -85,7 +88,7 @@ def read_texture(path):
 
 
 class Target:
-    """Where Apply writes for one texture set: the file, its size, its pixels before (uint16, 16-bit scale)."""
+    """Where Apply writes for one texture set: the file, its size, its pixels before (uint16, 16-bit scale; None for a new`n    file, white)."""
 
     def __init__(self, scene, material, settings, per_object, folder):
         self.material = material
@@ -102,7 +105,7 @@ class Target:
             needs = self.kind == 'ORM' or (settings.layout == 'ORM' and settings.green_blue == 'COPY')
             if needs:
                 vals, bits, _ct = read_texture(self.orm_path)
-                self.orm = (vals.astype(np.uint32) * (257 if bits == 8 else 1), bits)
+                self.orm = (vals * np.uint16(257 if bits == 8 else 1), bits)
         if self.kind == 'ORM':
             if self.orm is None:
                 raise ValueError(f'{material.name}: no texture file in the ORM slot')
@@ -111,7 +114,7 @@ class Target:
                 raise ValueError(f'{material.name}: the ORM texture has {vals.shape[2]} channel(s), not RGB')
             self.path = self.orm_path
             self.H, self.W = vals.shape[:2]
-            self.base = vals.copy()
+            self.base = vals
             if bits == 8:
                 self.warnings.append('the ORM file is 8-bit: written as 16-bit, green and blue kept')
             self.warnings.append('the next ORM export from Substance Painter replaces the red channel again')
@@ -144,13 +147,13 @@ class Target:
             if vals.shape[:2] != (self.H, self.W):
                 raise ValueError(f'{self.path}: {vals.shape[1]} x {vals.shape[0]} px, the setting says '
                                  f'{self.W} x {self.H}')
-            vals = vals.astype(np.uint32) * (257 if bits == 8 else 1)
+            vals = vals * np.uint16(257 if bits == 8 else 1)
             if vals.shape[2] == 1:
                 vals = np.repeat(vals, 3, axis=2)
             self.base = vals[:, :, :3] if vals.shape[2] != 4 else vals[:, :, :3]
             self.fresh = False
         else:
-            self.base = np.full((self.H, self.W, 3), 65535, dtype=np.uint32)
+            self.base = None  # white, made a band at a time
             self.fresh = True
 
     def green_blue(self, labels):
@@ -164,7 +167,7 @@ class Target:
                              f'px ({self.sampling.lower()}): the artist\'s roughness and metallic change')
         src_lab, dst_lab = labels()
         out = core.resample(src.astype(np.float64) / 65535.0, src_lab, dst_lab, self.sampling)
-        return np.rint(np.clip(out, 0, 1) * 65535.0).astype(np.uint32)
+        return np.rint(np.clip(out, 0, 1) * 65535.0).astype(np.uint16)
 
 
 def _set_tris(item, material, depsgraph):
@@ -185,9 +188,21 @@ def _crop(uvpx, W, H, border):
     return x0, y0, max(0, x1 - x0), max(0, y1 - y0)
 
 
-def apply_set(context, material, objects=None, settings=None):
+APPLY_BAND = 256  # target rows copied at a time (Session 23); the result does not depend on it
+
+
+def _quantize(values):
+    return np.rint(np.clip(values, 0, 1) * 65535.0).astype(np.uint16)
+
+
+def apply_set(context, material, objects=None, settings=None, band_rows=APPLY_BAND):
     """Apply for one texture set; objects: the selected objects (per-object Apply, P47) or None for the whole set.
-    settings: the material's fss_ao_apply or an object with the same attributes. Returns the report."""
+    settings: the material's fss_ao_apply or an object with the same attributes. Returns the report.
+
+    Paged (decision 33, Session 23): one master at a time is open, paged (ao_bake_core.open_master: decoded once into
+    scratch files in the bake folder, deleted afterwards, read through a cache of tiles); the copy runs a band of
+    band_rows target rows at a time (with a halo for the padding); the file is written row by row. Held for the whole
+    target: the AO (uint16) and three masks, 8 bytes per target pixel; nothing in proportion to a master."""
     t0 = time.time()
     scene = context.scene
     folder = store.bake_folder()
@@ -206,13 +221,20 @@ def apply_set(context, material, objects=None, settings=None):
     depsgraph = context.evaluated_depsgraph_get()
     report = dict(material=material.name, path=target.path, size=[W, H], target=target.kind, layout=target.layout,
                   copied=[], white=[], outdated=[], faces_under_4x=0, faces=0, stacked_px=0, warnings=target.warnings,
-                  backup=target.backup, per_object=objects is not None)
-    pending = []  # padding, written once every face of the set is known
+                  backup=target.backup, per_object=objects is not None, band_rows=int(band_rows))
+    pending = []  # padding (flat index, value, step), written once every face of the set is known
     written = np.zeros((H, W), bool)
     cover = np.zeros((H, W), bool)
-    pad_step = np.full((H, W), 1 << 30, np.int64)
-    Rbuf = np.full((H, W), -1.0)
+    pad_step = np.full((H, W), 1 << 30, np.int32)
+    Q = np.zeros((H, W), np.uint16)  # the AO where written
     label_parts = []
+    halo = pad + 2  # the padding grows `pad` px: a band copied with this halo equals the whole crop's copy
+
+    def bands(crop):
+        x0, y0, w, h = crop
+        for yb in range(y0, y0 + h, band_rows):
+            yield yb, min(y0 + h, yb + band_rows), max(y0, yb - halo), min(y0 + h, yb + band_rows + halo)
+
     for stem in stems:
         item = store._state['items'][stem]
         obj, ev, uv, in_set = _set_tris(item, material, depsgraph)
@@ -225,52 +247,76 @@ def apply_set(context, material, objects=None, settings=None):
         x0, y0, w, h = crop
         if w <= 0 or h <= 0:
             continue
-        own, cnt = core.rasterize_ids(uvpx_all[tri_ids], w, h, 1, x0, y0)
-        cover[y0:y0 + h, x0:x0 + w] |= own >= 0
-        if stem not in chosen:
-            continue
-        report['faces'] += int(len(np.unique(ev['poly'][tri_ids])))
-        entry = masters.get(stem)
-        mh = core.mesh_hash(ev)
-        usable = entry is not None and entry.get('mesh_hash') == mh and store.has_files(folder, stem)
-        if not usable:
-            why = 'missing' if entry is None or not store.has_files(folder, stem) else 'mesh changed'
-            report['white'].append((item['name'], why, int(len(np.unique(ev['poly'][tri_ids])))))
+        mine = stem in chosen
+        if mine:
+            report['faces'] += int(len(np.unique(ev['poly'][tri_ids])))
+            entry = masters.get(stem)
+            mh = core.mesh_hash(ev)
+            usable = entry is not None and entry.get('mesh_hash') == mh and store.has_files(folder, stem)
+            if not usable:
+                why = 'missing' if entry is None or not store.has_files(folder, stem) else 'mesh changed'
+                report['white'].append((item['name'], why, int(len(np.unique(ev['poly'][tri_ids])))))
+        # the faces of the set (also of the objects not chosen): no padding goes there
+        for yb, yb1, _h0, _h1 in bands(crop):
+            own, _cnt = core.raster_window(uvpx_all[tri_ids], w, yb1 - yb, 1, x0, yb)
             inside = own >= 0
-            Rbuf[y0:y0 + h, x0:x0 + w][inside] = 1.0
-            written[y0:y0 + h, x0:x0 + w] |= inside
+            cover[yb:yb1, x0:x0 + w] |= inside
+            if mine and not usable:
+                Q[yb:yb1, x0:x0 + w][inside] = 65535
+                written[yb:yb1, x0:x0 + w] |= inside
+            del own, _cnt
+        if not mine or not usable:
             continue
         if entry.get('surround_hash') != item['surround_hash']:
             report['outdated'].append(item['name'])
-        master = core.load_master(folder, stem)
-        src = master['tri_src']
-        pos_w, _cn = core.to_world(ev)
-        tris = ev['tris'][src]
-        uvpx = uvpx_all[src]
-        sel = in_set[src]
-        uvpx = np.where(sel[:, None, None], uvpx, -1e6)
-        out, info, owner_c, steps, count_c = core.copy_master(
-            pos_w, tris, uvpx, np.zeros(len(tris), np.int64), master, crop, core.K_MIN, pad, outside_mode='tri',
-            kmax=core.K_MAX, surface_cos=core.SURFACE_COS, same_face=False)
-        report['copied'].append(item['name'])
-        report['stacked_px'] += info['stacked_px']
-        inside = (owner_c >= 0) & (out >= 0)
-        Rbuf[y0:y0 + h, x0:x0 + w][inside] = out[inside]
-        written[y0:y0 + h, x0:x0 + w] |= inside
-        padm = (owner_c < 0) & (steps > 0) & (steps <= pad) & (out >= 0)
-        pending.append((y0, x0, h, w, out, padm, steps))
-        # faces under 4 x: the master's density against each face's density at the target's size
-        d = core.densities(pos_w, tris[sel], uvpx[sel])
-        low = (d > 0) & (master['density'] < 4.0 * d * (1 - UNDER_TOLERANCE))
-        report['faces_under_4x'] += int(len(np.unique(ev['poly'][src[sel][low]])))
+        master = core.open_master(folder, stem)
+        if master is None:  # the files went away since Refresh: white, as a missing master
+            report['white'].append((item['name'], 'missing', int(len(np.unique(ev['poly'][tri_ids])))))
+            for yb, yb1, _h0, _h1 in bands(crop):
+                own, _cnt = core.raster_window(uvpx_all[tri_ids], w, yb1 - yb, 1, x0, yb)
+                Q[yb:yb1, x0:x0 + w][own >= 0] = 65535
+                written[yb:yb1, x0:x0 + w] |= own >= 0
+            continue
+        try:
+            src = master['tri_src']
+            pos_w, _cn = core.to_world(ev)
+            tris = ev['tris'][src]
+            uvpx = uvpx_all[src]
+            sel = in_set[src]
+            uvpx = np.where(sel[:, None, None], uvpx, -1e6)
+            tisl = np.zeros(len(tris), np.int64)
+            ctx = core.copy_context(pos_w, tris, uvpx, master, core.K_MIN, core.K_MAX)
+            for yb, yb1, hy0, hy1 in bands(crop):
+                out, info, owner_c, steps, count_c = core.copy_master(
+                    pos_w, tris, uvpx, tisl, master, (x0, hy0, w, hy1 - hy0), core.K_MIN, pad, outside_mode='tri',
+                    kmax=core.K_MAX, surface_cos=core.SURFACE_COS, same_face=False, ctx=ctx)
+                r = slice(yb - hy0, yb1 - hy0)
+                out, owner_c, steps = out[r], owner_c[r], steps[r]
+                report['stacked_px'] += int((count_c[r] > 1).sum())
+                inside = (owner_c >= 0) & (out >= 0)
+                Q[yb:yb1, x0:x0 + w][inside] = _quantize(out[inside])
+                written[yb:yb1, x0:x0 + w] |= inside
+                padm = (owner_c < 0) & (steps > 0) & (steps <= pad) & (out >= 0)
+                jj, ii = np.nonzero(padm)
+                if len(jj):
+                    pending.append(((jj + yb) * W + ii + x0, _quantize(out[jj, ii]), steps[jj, ii].astype(np.int32)))
+                del out, owner_c, steps, count_c, padm
+            report['copied'].append(item['name'])
+            # faces under 4 x: the master's density against each face's density at the target's size
+            d = core.densities(pos_w, tris[sel], uvpx[sel])
+            low = (d > 0) & (master['density'] < 4.0 * d * (1 - UNDER_TOLERANCE))
+            report['faces_under_4x'] += int(len(np.unique(ev['poly'][src[sel][low]])))
+            report.setdefault('page_loads', []).append([int(p.loads) for p in master.get('pages', ())])
+        finally:
+            master['close']()
     # padding only where no face of the set lies (P47), the nearest island's first
-    for y0, x0, h, w, out, padm, steps in pending:
-        sub_cover = cover[y0:y0 + h, x0:x0 + w]
-        sub_step = pad_step[y0:y0 + h, x0:x0 + w]
-        take = padm & ~sub_cover & (steps < sub_step)
-        Rbuf[y0:y0 + h, x0:x0 + w][take] = out[take]
-        sub_step[take] = steps[take]
-        written[y0:y0 + h, x0:x0 + w] |= take
+    flat_cover, flat_step, flat_q, flat_w = cover.ravel(), pad_step.ravel(), Q.ravel(), written.ravel()
+    for idx, val, st in pending:
+        take = ~flat_cover[idx] & (st < flat_step[idx])
+        flat_q[idx[take]] = val[take]
+        flat_step[idx[take]] = st[take]
+        flat_w[idx[take]] = True
+    del pending, cover, pad_step
 
     def labels():
         parts_src, parts_dst = [], []
@@ -282,28 +328,37 @@ def apply_set(context, material, objects=None, settings=None):
             parts_dst.append((uv_t * np.array([W, H]), isl))
         return core.island_labels(parts_src, Ws, Hs, pad * max(Ws / W, 1)), core.island_labels(parts_dst, W, H, pad)
 
-    q = np.rint(np.clip(Rbuf, 0, 1) * 65535.0).astype(np.uint32)
-    if target.kind == 'ORM':
-        vals = target.base.copy()
-        vals[:, :, 0] = np.where(written, q, vals[:, :, 0])
-    else:
-        vals = target.base.copy()
-        if target.fresh and target.layout == 'ORM':
-            gb = target.green_blue(labels)
-            if gb is not None:
-                vals[:, :, 1:3] = gb
-        vals[:, :, 0] = np.where(written, q, vals[:, :, 0])
-        if target.layout == 'GREY':
-            for c in (1, 2):
-                vals[:, :, c] = np.where(written, q, vals[:, :, c])
+    gb = target.green_blue(labels) if target.kind != 'ORM' and target.fresh and target.layout == 'ORM' else None
+    if target.kind != 'ORM':
         os.makedirs(os.path.dirname(target.path), exist_ok=True)
-    core.write_png_int(target.path, vals.astype(np.uint16), 16)
+    channels = target.base.shape[2] if target.base is not None else 3
+    tmp = target.path + '.tmp'
+    writer = core.PngRowWriter(tmp, W, H, 16, channels)
+    try:
+        for top in range(0, H, 256):  # rows from the top
+            r0, r1 = H - min(H, top + 256), H - top
+            if target.base is not None:
+                vals = target.base[r0:r1].copy()
+            else:
+                vals = np.full((r1 - r0, W, 3), 65535, np.uint16)
+                if gb is not None:
+                    vals[:, :, 1:3] = gb[r0:r1]
+            wr = written[r0:r1]
+            vals[:, :, 0] = np.where(wr, Q[r0:r1], vals[:, :, 0])
+            if target.kind != 'ORM' and target.layout == 'GREY':
+                for c in (1, 2):
+                    vals[:, :, c] = np.where(wr, Q[r0:r1], vals[:, :, c])
+            writer.write(vals[::-1])
+        writer.close()
+    except BaseException:
+        writer.abort()
+        raise
+    os.replace(tmp, target.path)
     for image in bpy.data.images:
         if image.source == 'FILE' and image_path(image) == os.path.normpath(target.path) and not image.is_dirty:
             image.reload()
     report.update(written_px=int(written.sum()), seconds=round(time.time() - t0, 2))
     return report
-
 
 
 def apply(context, materials, objects=None):

@@ -8,6 +8,8 @@ Blender). Checked:
 - the bake in tiles (Session 19): a master in tiles of 64 px has the untiled master's layout, filled pixels and face
   map, and differs by noise only; Cancel between tiles stops within one tile and keeps the object's old master; an
   object's faces without a material are not baked, an object without one is excluded and listed (decision 30);
+- the master paged (Session 23): baked and written band by band, no per-pixel array in the .npz, Apply in bands of 5
+  rows, of 256 rows and from the whole master in memory byte-identical, no scratch file left;
 - staleness: a moved vertex, changed custom normals and an added modifier give "mesh changed"; a moved occluder inside
   the AO distance, an occluder tagged Non-AO-Occluder, the AO distance and a moved object give "surroundings changed";
   an occluder moved outside the distance, UVs moved, scaled and re-unwrapped, a material changed leave it up to date;
@@ -327,9 +329,9 @@ class ApplySettings(SimpleNamespace):
         super().__init__(**base)
 
 
-def apply_set(name, objects=None, **kw):
+def apply_set(name, objects=None, band_rows=ao_bake_apply.APPLY_BAND, **kw):
     mat = bpy.data.materials[name]
-    rep = ao_bake_apply.apply_set(bpy.context, mat, objects, ApplySettings(**kw))
+    rep = ao_bake_apply.apply_set(bpy.context, mat, objects, ApplySettings(**kw), band_rows=band_rows)
     assert not rep.get('error'), rep
     return rep
 
@@ -449,9 +451,9 @@ def test_tiles():
     within one tile and keeps the object's old master (finish line 7)."""
     select(['A'])
     stem = store.items_for_objects([bpy.data.objects['A']])[0]
-    png, npz = store.master_files(str(FOLDER), stem)
+    png, mp, npz = core.master_paths(str(FOLDER), stem)
     untiled, _v = master_image('A')
-    old = (os.path.getmtime(png), os.path.getmtime(npz), file_hash(png))
+    old = (os.path.getmtime(png), os.path.getmtime(npz), file_hash(png), file_hash(mp))
     # Cancel between tiles
     res = bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=False, tile=64, test_tile_delay=1.0)
     assert res == {'FINISHED'}
@@ -472,8 +474,8 @@ def test_tiles():
     assert status['state'] == 'cancelled' and status['n_done'] == 0, status
     r = status['results'][0]
     assert r['status'] == 'cancelled', r
-    assert (os.path.getmtime(png), os.path.getmtime(npz), file_hash(png)) == old
-    assert not os.path.exists(png + '.tmp') and not os.path.exists(npz + '.tmp')
+    assert (os.path.getmtime(png), os.path.getmtime(npz), file_hash(png), file_hash(mp)) == old
+    assert not any(os.path.exists(p + '.tmp') for p in (png, mp, npz))
     log_text = (FOLDER / 'bake.log').read_text(encoding='utf-8')
     tile_s = max(float(x.split(', ')[-1].rstrip(' s')) for x in log_text.splitlines()
                  if 'tile ' in x and ' triangles, ' in x)
@@ -496,6 +498,51 @@ def test_tiles():
           f"{n_tiles} tiles of 64 px: the same layout, filled pixels and face map as the untiled master, MAE "
           f"{mae:.4f} at 16 samples)")
 
+
+def test_paged():
+    """Session 23 (decision 33): the master paged. A's master, baked in tiles of 64 px by test_tiles, came in several
+    bands, composed and written band by band; its .npz holds no per-pixel array (they are in the .ao.map). Apply
+    through the paged master (scratch files, a cache of tiles) writes the same file in bands of 5 rows as in bands of
+    256 rows, and the same file as the copy of the whole master held in memory; it leaves no scratch file."""
+    refresh()
+    entry, stem = entry_of('A')
+    tiles = entry['tiles']
+    assert tiles['bands'] > 1 and tiles['n'] > tiles['bands'], tiles
+    png, mp, npz = core.master_paths(str(FOLDER), stem)
+    with np.load(npz) as z:
+        assert not ({'filled', 'face_map'} & set(z.files)), z.files
+    m = core.load_master(str(FOLDER), stem)
+    assert m['image'].shape == (entry['H'], entry['W']) and m['filled'].any() and (m['face_map'] >= 0).any()
+    sizes = {}
+    for objects, tag in ((None, 'set'), ([bpy.data.objects['A']], 'object')):
+        if objects:
+            OUT.mkdir(parents=True, exist_ok=True)
+            base = np.random.default_rng(3).integers(0, 65536, (SIZE, SIZE, 3))
+            for b in ('5', '256', 'whole'):
+                write_png(OUT / f'paged_{tag}_{b}.png', base)
+        rep = apply_set('SET_A', objects, file_name=f'paged_{tag}_256.png')
+        rep5 = apply_set('SET_A', objects, band_rows=5, file_name=f'paged_{tag}_5.png')
+        assert rep['page_loads'] and rep5['page_loads'], (rep.get('page_loads'), rep5.get('page_loads'))
+        opened = core.open_master
+
+        def whole(folder, s, cache_bytes=0):
+            out = core.load_master(folder, s)
+            out['close'] = lambda: None
+            return out
+        core.open_master = whole
+        try:
+            repw = apply_set('SET_A', objects, file_name=f'paged_{tag}_whole.png')
+        finally:
+            core.open_master = opened
+        h256, h5, hw = (file_hash(r['path']) for r in (rep, rep5, repw))
+        assert h256 == h5 == hw, (tag, h256, h5, hw)
+        assert rep['written_px'] == rep5['written_px'] == repw['written_px'] > 0
+        sizes[tag] = rep['written_px']
+    left = [f for f in os.listdir(FOLDER) if f.endswith('.page') or f.endswith('.mappage') or f.endswith('.tmp')]
+    assert not left, left
+    print(f"PASS: test_paged (A's master {entry['W']} x {entry['H']} px in {tiles['n']} tiles, {tiles['bands']} bands; "
+          f"no per-pixel array in the .npz; Apply of the set and of A alone: bands of 5 and 256 rows and the whole "
+          f"master in memory give byte-identical files ({sizes} px written); no scratch file left)")
 
 def test_staleness():
     """FL2: each change gives its grade."""
@@ -749,6 +796,7 @@ if __name__ == '__main__':
     test_bake_all()
     test_cancel()
     test_tiles()
+    test_paged()
     test_staleness()
     test_apply_orm()
     test_apply_per_object()
