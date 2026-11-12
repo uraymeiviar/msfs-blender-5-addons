@@ -42,7 +42,6 @@ ZERO_AREA_PX2 = 1e-6  # UV area in px^2 at or below which an island is a line or
 FLAT_RATIO = 1e-5  # UV area / UV bbox diagonal^2 at or below which an island is a line (Blender rescales those)
 COLLAPSE_Q = 20.0  # UV bbox diagonal / (3D bbox diagonal x density) at the area-based scale: above it, collapsed
 PROXY_ROUNDS = 3  # rounds of packing offending islands through their bounding box before the AABB fallback
-SEARCH_PACKS = 6  # packs of the search for t after the two at t = 1 and t = 0
 PROGRESS_READ, PROGRESS_MEASURE, PROGRESS_WRITE = 0.05, 0.9, 0.95  # of a set's bar: where these stages begin
 FILL_MIN_GAIN = 1e-3  # the raster's layout counts when its side is smaller by this part (a single island: no reason)
 FACE_AREA_MIN_CM2 = 1e-6  # world-space face area in cm^2 at or below which a face has no area (decision 117)
@@ -655,6 +654,7 @@ class TextureSet:
         self.quarter = bool((self.dirs == 'QUARTER').any())
         self.proxy = np.zeros(self.n, bool)  # islands packed through their proxy quad
         self.use_fill = True  # try the raster layout next to Pack Islands' (uv_fill)
+        self.use_repair = True  # move islands outside the texture into its free space (uv_fill.repair, decision 156)
         self.no_area_objects = sorted(set(self.no_area_objects))
 
     def objects(self):
@@ -907,12 +907,27 @@ class TextureSet:
         F = uv_fill.apply(px, self.loop_isl, keep, *placed) / self.size
         return (F, *self._extent(F))
 
+    def repair(self, Q):
+        """The islands of layout Q outside the texture moved into its free space (uv_fill.repair, decision 156). Returns
+        (UVs, islands placed inside, islands left outside (a mask), their area in px^2), or None when none was outside."""
+        keep = ~self.zero_area
+        px = self.px(Q)
+        kt = keep[self.tri_isl]
+        moved, turns, origin, offset, outside, outside_px2 = uv_fill.repair(
+            px[self.TLt][kt], self.tri_isl[kt], self.n, keep, ~self.upright, self.margin_px + MARGIN_EXTRA, self.size)
+        if not moved.any():
+            return None
+        F = uv_fill.apply(px, self.loop_isl, moved, turns, origin, offset) / self.size
+        return F, int((moved & ~outside).sum()), outside, outside_px2
+
 
 def search(ts, shape_method, progress=None):
-    """Decision 113: t = 1 if it fits, else the largest t that fits (secant steps on k(t) - 1, kept inside the
-    bracket), else t = 0 (overflow, k > 1). Returns (the chosen pack, packs, mode)."""
+    """Decision 156 (replacing the search of decision 113): pack at t = 1, the top of every island's range; islands outside
+    the texture go into its free space (repair). Still some outside: pack once more at t = 0, every island at the bottom
+    of its range, and repair again; still some outside: overflow. Never a density between them. Returns (the chosen pack,
+    packs, mode)."""
     packs = []
-    most = 2 + SEARCH_PACKS
+    most = 2
 
     def share(done):
         # of the bar: between reading the islands and measuring; a set that fits at once jumps ahead, as it should
@@ -929,28 +944,35 @@ def search(ts, shape_method, progress=None):
                 progress(f'Placing islands into free space, layout {len(packs)}', share(len(packs) - 0.5))
             filled = ts.fill(Q)
         if filled is not None and filled[1] < k * (1.0 - FILL_MIN_GAIN):
-            return {'t': t, 'Q': filled[0], 'k': filled[1], 'ext': filled[2], 'pre': P, 'filled': True}
-        return {'t': t, 'Q': Q, 'k': k, 'ext': ext, 'pre': P, 'filled': False}
+            r = {'t': t, 'Q': filled[0], 'k': filled[1], 'ext': filled[2], 'pre': P, 'filled': True}
+        else:
+            r = {'t': t, 'Q': Q, 'k': k, 'ext': ext, 'pre': P, 'filled': False}
+        r.update(repaired=False, placed=0, outside=0, outside_px2=0.0, outside_isl=None)
+        if r['k'] > 1.0 and ts.use_repair:
+            if progress is not None:
+                progress(f'Moving islands outside the texture into free space, layout {len(packs)}', share(len(packs) - 0.25))
+            fixed = ts.repair(r['Q'])
+            if fixed is not None:
+                F, placed, outside, outside_px2 = fixed
+                r.update(Q=F, repaired=True, placed=placed)
+                if outside.any():
+                    # k and the extent stay those of the whole layout: the size that would hold it
+                    r.update(outside=int(outside.sum()), outside_px2=outside_px2, outside_isl=outside)
+                else:
+                    k2, ext2 = ts._extent(F)
+                    r.update(k=k2, ext=ext2)
+        return r
+
+    def fits(r):
+        return r['outside'] == 0 and r['k'] <= 1.0 + 1e-9
 
     r1 = run(1.0)
-    if r1['k'] <= 1.0:
+    if fits(r1):
         return r1, len(packs), 'underflow'
+    if np.allclose(ts.lo, ts.hi):  # no range: t = 0 is the same layout
+        return r1, len(packs), 'overflow'
     r0 = run(0.0)
-    if r0['k'] > 1.0:
-        return r0, len(packs), 'overflow'
-    lo, hi = r0, r1
-    for _ in range(SEARCH_PACKS):
-        if hi['t'] - lo['t'] < 0.01:
-            break
-        # k is close to linear in the density scale: interpolate where k crosses 1 (aim a little below it)
-        tt = lo['t'] + (hi['t'] - lo['t']) * (0.995 - lo['k']) / max(hi['k'] - lo['k'], 1e-9)
-        span = hi['t'] - lo['t']
-        r = run(min(max(tt, lo['t'] + 0.1 * span), hi['t'] - 0.1 * span))
-        if r['k'] <= 1.0:
-            lo = r
-        else:
-            hi = r
-    return lo, len(packs), 'fit'
+    return r0, len(packs), 'fit' if fits(r0) else 'overflow'
 
 
 def pack_set(ts, progress=None):
@@ -970,17 +992,20 @@ def pack_set(ts, progress=None):
             progress('Measuring the layout', PROGRESS_MEASURE)
         row, offenders = evaluate(ts, res)
         clean = row['margin_violations'] == 0 and row['overlap_tri_pairs'] == 0
-        if clean or (shape == 'AABB' and not res['filled']):
+        if clean or (shape == 'AABB' and not res['filled'] and not res['repaired']):
             break
-        if res['filled']:  # the raster's footprints should rule this out; Pack Islands alone from here on
-            ts.use_fill = False
+        if res['filled'] or res['repaired']:  # the raster's footprints should rule this out; Pack Islands alone from here on
+            ts.use_fill = ts.use_fill and not res['filled']
+            ts.use_repair = ts.use_repair and not res['repaired']
         elif rounds < PROXY_ROUNDS:
             ts.proxy[sorted(offenders)] = True
             rounds += 1
         else:
             ts.proxy[:] = False
             shape = 'AABB'
-    row.update(mode=mode, packs=packs, shape_method=shape, filled=res['filled'],
+    row.update(mode=mode, packs=packs, shape_method=shape, filled=res['filled'], repaired=res['repaired'],
+               placed_islands=res['placed'], outside_islands=res['outside'],
+               outside_area_pct=100.0 * res['outside_px2'] / float(ts.size * ts.size),
                proxy_islands=0 if res['filled'] else int(ts.proxy.sum()))
     return res, mode, row
 
@@ -1028,12 +1053,16 @@ def evaluate(ts, res):
     return m, offenders
 
 
-def aligned_to_corner(ts, Q, corner):
+def aligned_to_corner(ts, Q, corner, outside=None):
     """The layout Q moved as one block to a corner of the texture, by whole pixels, as far from that corner's edges as
     the layout was from the origin's. Islands without UV area keep their UVs (they do not take part in the layout).
-    BOTTOM_LEFT, the layout's own corner, moves nothing."""
+    BOTTOM_LEFT, the layout's own corner, moves nothing. outside: the islands left beyond the edge (decision 156), which
+    move along but do not count for the block's bounds."""
     keep = ~ts.zero_area[ts.loop_isl]
-    lo, hi = Q[keep].min(0), Q[keep].max(0)
+    bounds = keep if outside is None else keep & ~outside[ts.loop_isl]
+    if not bounds.any():  # every island beyond the edge
+        bounds = keep
+    lo, hi = Q[bounds].min(0), Q[bounds].max(0)
     shift = np.zeros(2)
     if corner.endswith('RIGHT'):
         shift[0] = np.floor((1.0 - lo[0] - hi[0]) * ts.size) / ts.size
@@ -1216,7 +1245,7 @@ def _run(material, write, progress=None, vis_cache=None):
             if progress is not None:
                 progress('Writing the UVs', PROGRESS_WRITE)
             corner = uv_marks.pack_corner(context.scene)
-            write_back(ts, dict(res, Q=aligned_to_corner(ts, res['Q'], corner)))
+            write_back(ts, dict(res, Q=aligned_to_corner(ts, res['Q'], corner, res.get('outside_isl'))))
             result.update(written=True, corner=corner)
     finally:
         if ts is not None:
@@ -1254,7 +1283,8 @@ def result_text(result):
         return f"does not fit even at {MAX_SIZE} (x{result['k']:.2f})"
     need = result['needed_size']
     if mode == 'overflow':
-        return f"needs x{result['k']:.2f}: {need} x {need}"
+        outside = result.get('outside_islands', 0)
+        return f"needs x{result['k']:.2f}: {need} x {need}" + (f", {outside} island(s) outside" if outside else '')
     fill = result['fill_current_pct']
     text = f"fits {fill:.0f} %" if fill >= 9.5 else f"fits {fill:.1f} %"
     return text + (f', {need} x {need} would do' if need != result['size'] else '')
@@ -1333,6 +1363,10 @@ def _set_block(r, selected=None):
         + (f", {r['upright_islands']} upright" if r['upright_islands'] else '')
         + (', quarter turns only' if r['quarter'] else ''),
     ]
+    if r.get('repaired'):
+        lines.append(f"  Islands outside the texture moved into its free space: {r['placed_islands']}"
+                     + (f"; {r['outside_islands']} fit nowhere and lie beyond the right edge "
+                        f"({r['outside_area_pct']:.1f} % of the texture's area)" if r['outside_islands'] else ''))
     if r.get('corner', 'BOTTOM_LEFT') != 'BOTTOM_LEFT':
         lines.append(f"  Layout moved to the corner {uv_marks.corner_label(r['corner'])}")
     if r['zero_area_islands']:

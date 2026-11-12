@@ -353,6 +353,95 @@ def place(tri, tri_isl, n, active, can_turn, gap):
     return None
 
 
+def repair(tri, tri_isl, n, active, can_turn, gap, limit):
+    """Islands of a layout that lie outside the texture (0 to limit pixels), wholly or in part, moved into its free space
+    (decision 156). The islands inside stay where they are; the others go, largest first, into the best free place
+    inside, a quarter turn allowed where can_turn, keeping the gap to every island and half of it to the texture's
+    edges; an island that fits nowhere is skipped. The ones left go into columns beyond the right edge, wholly
+    outside, so that none covers part of the texture. Their scale never changes.
+
+    tri (m, 3, 2) in pixels with tri_isl per triangle. Returns (moved, turns, origin, offset, outside, outside area in
+    px^2): moved and outside per island; turns, origin and offset as apply takes them."""
+    order_t = np.argsort(tri_isl, kind='stable')
+    start_t = np.searchsorted(tri_isl[order_t], np.arange(n + 1))
+    lo = np.full((n, 2), np.inf)
+    hi = np.full((n, 2), -np.inf)
+    ids = np.repeat(tri_isl, 3)
+    flat = tri.reshape(-1, 2)
+    np.minimum.at(lo, ids, flat)
+    np.maximum.at(hi, ids, flat)
+    lo = np.where(np.isfinite(lo), lo, 0.0)
+    hi = np.where(np.isfinite(hi), hi, 0.0)
+    size = hi - lo
+    e1, e2 = tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]
+    area = np.bincount(tri_isl, weights=0.5 * np.abs(e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0]), minlength=n)
+    inside = active & (lo >= 0.0).all(1) & (hi <= limit).all(1)
+    out = active & ~inside
+    moved = np.zeros(n, bool)
+    turns = np.zeros(n, np.int64)
+    offset = lo.copy()
+    if not out.any():
+        return moved, turns, lo, offset, out, 0.0
+    cell = cell_size(limit, gap)
+    reach = reach_table(round(gap / cell, 6))
+    shift = max(len(reach) - 1, reach[0]) + 1
+    half = int(math.ceil(0.5 * gap / cell))
+    first = shift + half  # half the gap to the texture's low edges
+    wall = shift + int(math.floor(limit / cell)) + half  # the first cell beyond the texture and half the gap
+    grid = Grid(wall + shift + BLOCK)
+    cells = grid.cells
+    grid.paint(np.ones((cells, cells - wall), bool), 0, wall)
+    grid.paint(np.ones((cells - wall, wall), bool), wall, 0)
+    for i in np.flatnonzero(inside).tolist():
+        corner = np.floor(lo[i] / cell)
+        local = tri[order_t[start_t[i]:start_t[i + 1]]] - corner * cell
+        solid = solid_mask(*spans(np.maximum(local / cell, 0.0)))
+        grid.paint(solid[:max(cells - int(corner[1]) - shift, 0), :max(cells - int(corner[0]) - shift, 0)],
+                   int(corner[1]) + shift, int(corner[0]) + shift)
+    key = (size[:, 0] * size[:, 1]) ** BOX_POWER * area ** (1.0 - BOX_POWER)
+    out_ids = np.flatnonzero(out)
+    left = []
+    for i in out_ids[np.lexsort((out_ids, -key[out_ids]))].tolist():
+        local = tri[order_t[start_t[i]:start_t[i + 1]]] - lo[i]
+        best = None
+        for t in ((0, 1) if can_turn[i] else (0,)):
+            shape = Shape(local, t, cell, reach)
+            pos = grid.find(shape, wall, first)
+            if pos is None:
+                continue
+            low = np.array([(pos[2] + shape.pad - shift) * cell, (pos[1] + shape.pad - shift) * cell])
+            extent = np.ptp(turned(local, t).reshape(-1, 2), axis=0)
+            if (low < 0.0).any() or (low + extent > limit).any():
+                continue
+            rank = (pos[0], not pos[3], -pos[4] / max(len(shape.ring[0]), 1), pos[1] + pos[2], t)
+            if best is None or rank < best[0]:
+                best = (rank, shape, pos, low)
+        if best is None:
+            left.append(i)
+            continue
+        _rank, shape, (_extent, y, x, _inside, _touch), low = best
+        grid.paint(shape.solid, y + shape.pad, x + shape.pad)
+        moved[i] = True
+        turns[i] = shape.turn
+        offset[i] = low - shape.low
+    # what fits nowhere: in columns beyond the right edge, as they are
+    x = limit + gap
+    y = 0.5 * gap
+    column = 0.0
+    for i in left:
+        if y + size[i, 1] > limit and y > 0.5 * gap:
+            x += column + gap
+            y = 0.5 * gap
+            column = 0.0
+        offset[i] = (x, y)
+        moved[i] = True
+        y += size[i, 1] + gap
+        column = max(column, size[i, 0])
+    outside = np.zeros(n, bool)
+    outside[left] = True
+    return moved, turns, lo, offset, outside, float(area[outside].sum())
+
+
 def apply(points, point_isl, moved, turns, origin, offset):
     """New positions of points (.., 2, the loops of a layout, in pixels) under the result of place: the islands of
     `moved` turn and move, the others stay."""

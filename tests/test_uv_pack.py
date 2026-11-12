@@ -111,6 +111,52 @@ def ok(r):
             and r['fill_pct'] <= 100.0)
 
 
+def test_repair():
+    """Decision 156: islands outside the texture, wholly or in part, go into its free space, largest first; what fits
+    nowhere goes wholly beyond the right edge; the islands inside do not move."""
+    limit, gap = 100.0, 2.0
+    rects = {'A': (1, 1, 60, 98), 'B': (62, 1, 98, 40),  # inside; free: x 62 to 98, y 42 to 98
+             'C': (90, 90, 110, 110),  # half outside, fits the free space
+             'D': (120, 0, 170, 50),  # outside, larger than any free space
+             'E': (-15, 10, -5, 20)}  # outside below the origin, small
+    names = list(rects)
+    tri, tri_isl = [], []
+    for i, name in enumerate(names):
+        x0, y0, x1, y1 = rects[name]
+        tri += [[(x0, y0), (x1, y0), (x1, y1)], [(x0, y0), (x1, y1), (x0, y1)]]
+        tri_isl += [i, i]
+    tri = np.array(tri, np.float64)
+    tri_isl = np.array(tri_isl)
+    n = len(names)
+    moved, turns, origin, offset, outside, outside_px2 = uv_fill.repair(
+        tri, tri_isl, n, np.ones(n, bool), np.ones(n, bool), gap, limit)
+    assert moved.tolist() == [False, False, True, True, True], moved
+    assert outside.tolist() == [False, False, False, True, False] and outside_px2 == 2500.0, (outside, outside_px2)
+    points = uv_fill.apply(tri.reshape(-1, 2), np.repeat(tri_isl, 3), moved, turns, origin, offset).reshape(-1, 3, 2)
+    boxes = {}
+    for i, name in enumerate(names):
+        p = points[tri_isl == i].reshape(-1, 2)
+        boxes[name] = (p.min(0), p.max(0))
+    for name in ('A', 'B'):
+        assert np.allclose(boxes[name][0], rects[name][:2]), (name, boxes[name])
+    for name in ('A', 'B', 'C', 'E'):
+        assert (boxes[name][0] >= 0).all() and (boxes[name][1] <= limit).all(), (name, boxes[name])
+    for name in ('C', 'E'):  # half the gap to the texture's edges
+        assert (boxes[name][0] >= gap / 2 - 1e-9).all() and (boxes[name][1] <= limit - gap / 2 + 1e-9).all(), (name, boxes[name])
+    assert boxes['D'][0][0] >= limit + gap, boxes['D']
+    for a in names:
+        for b in names:
+            if a < b:
+                (alo, ahi), (blo, bhi) = boxes[a], boxes[b]
+                d = np.maximum(np.maximum(blo - ahi, alo - bhi), 0.0)
+                assert np.hypot(*d) >= gap * (1 - 1e-9), (a, b, boxes[a], boxes[b])
+    # Nothing outside: nothing moves
+    inside = tri_isl < 2
+    nothing = uv_fill.repair(tri[inside], tri_isl[inside], 2, np.ones(2, bool), np.ones(2, bool), gap, limit)
+    assert not nothing[0].any() and not nothing[4].any()
+    print("PASS: test_repair (half-outside and below-origin islands placed inside with the gap, the large one beyond the edge)")
+
+
 def test_exact_density():
     reset()
     m = mat('EXACT')
@@ -201,7 +247,8 @@ def test_fit():
     rects = [(i * 0.5, 0, float(s), float(s)) for i, s in enumerate(rng.uniform(0.05, 0.12, 24))]
     quad_obj('MI', rects, mats=[m] * len(rects))
     r = uv_pack.measure(m)
-    assert r['mode'] == 'fit' and 0 < r['t'] < 1 and r['k'] <= 1 and ok(r), r
+    # decision 156: no density between the ends of the range: it fits at the bottom after the top overflowed
+    assert r['mode'] == 'fit' and r['t'] == 0.0 and r['k'] <= 1 and ok(r), r
     assert r['needed_size'] == 1024 and r['fill_pct'] == r['fill_current_pct'], r
     print(f"PASS: test_fit (t={r['t']:.3f}, k={r['k']:.4f}, {r['packs']} packs, fill {r['fill_pct']:.1f} %)")
 
@@ -217,7 +264,8 @@ def test_overflow_and_clamp():
     k_check = max(r['extent_px']) / 1024
     assert r['mode'] == 'overflow' and r['t'] == 0 and r['k'] > 1 and abs(k_check - r['k']) < 1e-6 and ok(r), r
     assert r['needed_size'] == uv_pack.next_pow2(r['k'] * 1024) and r['fits_8192'], r
-    assert uv_pack.result_text(r) == f"needs x{r['k']:.2f}: {r['needed_size']} x {r['needed_size']}"
+    outside = f", {r['outside_islands']} island(s) outside" if r['outside_islands'] else ''
+    assert uv_pack.result_text(r) == f"needs x{r['k']:.2f}: {r['needed_size']} x {r['needed_size']}{outside}", uv_pack.result_text(r)
     k1 = r['k']
     # the same islands at 4096 px for 1024 px of texture: k x 4096 is above 8192
     m.fss_uv_texture_size = '4096'
@@ -1767,6 +1815,7 @@ def main():
     test_fill_ring()
     test_fill_directions()
     test_fill_fallbacks()
+    test_repair()
     test_exact_density()
     test_material_factor()
     test_underflow_and_sizes()
