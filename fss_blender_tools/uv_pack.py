@@ -3,7 +3,8 @@ decisions 112 to 121; the method was measured with tests/uv_prototype/pack_densi
 
 A texture set is every face of one material over all mesh objects of the view layer, selected or not (decisions 100
 and 114), with the mesh's active UV map; a mesh shared by several objects is packed once, with the material slots of
-its first user. Every island is scaled to the density lo + t (hi - lo) in px/cm, where lo = target density x the object's
+its first user by name (shared_differences finds the shared meshes whose users show different materials, for the report
+and the set's warning). Every island is scaled to the density lo + t (hi - lo) in px/cm, where lo = target density x the object's
 minimum factor (uv_marks.density) x the island's visibility (decisions 82 and 111), and hi is the same with the maximum
 factor, moved towards lo by the island's facing (hi = lo + facing x (top - lo)): an island facing the cameras can reach
 the top of the object's range, one facing away stays at its minimum. An island the artist set by hand (the face attribute
@@ -295,12 +296,18 @@ class MeshData:
         """Per face: True where a triangle has 3D area (above FACE_AREA_MIN_CM2) but no UV area, a needle in UV
         (decision 118): at most UV_TRI_AREA_MIN_PX2 on a texture of `size` px, or a line, at most FLAT_RATIO x its
         longest UV edge squared (the islands' rule). A triangle without 3D area is the geometry's fault (Find Faces
-        Without Area); re-unwrapping does not give it UV area."""
+        Without Area); re-unwrapping does not give it UV area. Nor does a triangle that is a line in 3D too (at most
+        FLAT_RATIO x its longest 3D edge squared): an n-gon with a vertex on a straight edge triangulates into one, it
+        covers no pixel and its UVs are right (decision 153)."""
         T = self.UV[self.TL] * size
         a_uv = tri_area(T)
         edge2 = np.max([((T[:, (i + 1) % 3] - T[:, i]) ** 2).sum(1) for i in range(3)], axis=0)
+        a3 = self.tri_areas_world(matrix_world, cm2_per_bu2)
+        M = np.array(matrix_world, dtype=np.float64)
+        P = (self.CO @ M[:3, :3].T + M[:3, 3])[self.tri_verts]
+        edge3 = np.max([((P[:, (i + 1) % 3] - P[:, i]) ** 2).sum(1) for i in range(3)], axis=0) * cm2_per_bu2
         # near zero: also a line whose float32 UVs were rotated (a packed needle is a few 1e-3 px wide, not 0)
-        tri = (self.tri_areas_world(matrix_world, cm2_per_bu2) > FACE_AREA_MIN_CM2) & (
+        tri = (a3 > FACE_AREA_MIN_CM2) & (a3 > FLAT_RATIO * edge3) & (
             (a_uv <= UV_TRI_AREA_MIN_PX2) | (a_uv <= FLAT_RATIO * edge2))
         faces = np.zeros(self.nf, bool)
         faces[self.TP[tri]] = True
@@ -403,6 +410,64 @@ def gather(view_layer, material):
             conflicts += int((_face_material_mask(other, md, material) != mask).sum())
         parts.append((md, users, np.flatnonzero(mask)))
     return parts, conflicts
+
+
+def _shown(obj, mi):
+    """Per face: the material the object shows there (object-linked slots count), None for an empty slot or none."""
+    slots = [slot.material for slot in obj.material_slots] + [None]
+    return [slots[i] for i in np.minimum(mi, len(slots) - 1).tolist()]
+
+
+def shared_differences(view_layer, material):
+    """The shared meshes whose users do not all show `material` on the same faces (object-linked slots). A mesh is
+    packed once, with its first user's materials (gather), so where the first user shows another material the mesh is
+    left out of this set. Per mesh: {'mesh', 'first_user', 'in_set' (packed with this set), 'faces' (faces the users
+    disagree on), 'first_shows' (what the first user shows where others show this set), 'users' [(user, names shown on
+    those faces)] of the users that differ from the first}; names are None for no material. Left out first, by name."""
+    found = []
+    for me, users in _meshes(view_layer).items():
+        if len(users) < 2:
+            continue
+        matches = [_slot_match(u, material) for u in users]
+        if not any(m.any() for m in matches):
+            continue
+        mi = np.zeros(len(me.polygons), np.int64)
+        me.polygons.foreach_get('material_index', mi)
+        masks = [m[np.minimum(mi, len(m) - 1)] for m in matches]
+        first = masks[0]
+        differ = np.zeros(len(mi), bool)
+        for mask in masks[1:]:
+            differ |= mask != first
+        if not differ.any():
+            continue
+        others = np.zeros(len(mi), bool)
+        for mask in masks[1:]:
+            others |= mask
+        faces = np.flatnonzero(differ)
+        shown_first = _shown(users[0], mi)
+
+        def names(shown, where):
+            return sorted({shown[f].name if shown[f] else None for f in where.tolist()}, key=lambda n: (n is not None, n or ''))
+
+        anyone = first | others
+        differing, empty = [], []
+        for u, mask in zip(users, masks):
+            shown = shown_first if u is users[0] else _shown(u, mi)
+            if any(shown[f] is None for f in np.flatnonzero(anyone).tolist()):
+                empty.append(u.name)
+            where = np.flatnonzero(mask != first)
+            if u is not users[0] and len(where):
+                differing.append((u.name, names(shown, where)))
+        found.append({'mesh': me.name, 'first_user': users[0].name, 'in_set': bool(first.any()), 'faces': len(faces),
+                      'first_shows': names(shown_first, np.flatnonzero(others & ~first)), 'users': differing,
+                      'no_material': empty})
+    return sorted(found, key=lambda d: (d['in_set'], d['mesh']))
+
+
+def no_material_users(differences):
+    """The users with no material on faces where another user of their shared mesh shows the set (they export
+    without one there), by name."""
+    return sorted({name for d in differences for name in d['no_material']})
 
 
 def part_islands(md, faces):
@@ -1128,7 +1193,8 @@ def _run(material, write, progress=None, vis_cache=None):
         parts, conflicts = gather(context.view_layer, material)
         ts = TextureSet(material, parts, context.scene, {} if vis_cache is None else vis_cache) if parts else None
         result.update({'islands': ts.n if ts else 0, 'objects': ts.objects() if ts else [],
-                       'linked_material_conflict_faces': conflicts})
+                       'linked_material_conflict_faces': conflicts,
+                       'shared_differences': shared_differences(context.view_layer, material)})
         if ts is None or ts.zero_area.all():
             result['mode'] = 'empty'
             result['zero_area_islands'] = int(ts.zero_area.sum()) if ts else 0
@@ -1206,6 +1272,37 @@ def _names(names, limit=8):
     return ', '.join(names[:limit]) + (f' ... {len(names) - limit} more' if len(names) > limit else '')
 
 
+def _material_text(names):
+    return ', '.join(name if name else 'no material' for name in names)
+
+
+SHARED_LINES = 8  # shared meshes named in a set's block
+
+
+def _shared_lines(r):
+    """The report lines on shared meshes whose users show different materials (shared_differences): the ones left out
+    of the set, the ones packed although some users show another material, and the users without a material."""
+    lines = []
+    diffs = r.get('shared_differences', [])
+    for d in diffs[:SHARED_LINES]:
+        users = '; '.join(f"{user} {_material_text(shown)}" for user, shown in d['users'][:4])
+        users += f" ... {len(d['users']) - 4} more" if len(d['users']) > 4 else ''
+        if d['in_set']:
+            lines.append(f"  Shared mesh {d['mesh']}: packed with the material of its first user {d['first_user']}; "
+                         f"on {d['faces']} face(s) other users show: {users}")
+        else:
+            lines.append(f"  WARNING shared mesh {d['mesh']} left out, its UVs unchanged: the materials of its first "
+                         f"user by name count, and {d['first_user']} shows {_material_text(d['first_shows'])} where "
+                         f"{len(d['users'])} other user(s) show this set: {_names([user for user, _ in d['users']], 4)}")
+    if len(diffs) > SHARED_LINES:
+        lines.append(f"  ... {len(diffs) - SHARED_LINES} more shared mesh(es) whose users show different materials")
+    empty = no_material_users(diffs)
+    if empty:
+        lines.append(f"  WARNING no material on {len(empty)} user(s) of shared meshes, where other users show this "
+                     f"set (they export without a material there): {_names(empty)}. Give them the material")
+    return lines
+
+
 def _set_block(r, selected=None):
     lines = [f"## {r['set']}: {result_text(r)}"]
     if r['mode'] == 'kept':
@@ -1215,7 +1312,7 @@ def _set_block(r, selected=None):
     if r['mode'] == 'empty':
         lines.append(f"  Size {size} x {size}; {r.get('islands', 0)} island(s), "
                      f"{r.get('zero_area_islands', 0)} without UV area (kept unchanged)")
-        return lines
+        return lines + _shared_lines(r)
     need = r['needed_size']
     need_text = f'{need} x {need}' if need else f'more than {MAX_SIZE}'
     gap = r['min_gap_px']
@@ -1261,9 +1358,7 @@ def _set_block(r, selected=None):
         extra = [name for name in r['objects'] if name not in selected]
         if extra:
             lines.append(f"  Included, not selected: {len(extra)} object(s): {_names(extra)}")
-    if r['linked_material_conflict_faces']:
-        lines.append(f"  {r['linked_material_conflict_faces']} face(s) of shared meshes show another material on "
-                     "another user (the first user's material counts)")
+    lines += _shared_lines(r)
     packs = f"{r['packs']} pack{'' if r['packs'] == 1 else 's'}"
     lines.append(f"  Time {r['time_s']:.1f} s ({packs}){'' if r['written'] else ', nothing written'}")
     return lines

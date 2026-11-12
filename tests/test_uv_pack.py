@@ -37,7 +37,8 @@ while repo_root_str in sys.path:
 sys.path.insert(0, repo_root_str)
 
 import fss_blender_tools  # noqa: E402
-from fss_blender_tools import checks, uv_autoseam, uv_fill, uv_islands, uv_marks, uv_pack, visibility_core  # noqa: E402
+from fss_blender_tools import (checks, uv_autoseam, uv_fill, uv_islands, uv_marks, uv_pack,  # noqa: E402
+                               uv_problems, visibility_core)
 
 fss_blender_tools.register()
 assert Path(uv_pack.__file__).resolve().is_relative_to(REPO_ROOT), uv_pack.__file__
@@ -489,7 +490,9 @@ def test_panel_rows():
     material_props = {uv_marks.MATERIAL_TICK_PROP, uv_marks.MATERIAL_FACTOR_PROP}  # the Material rows of the table
     assert not [1 for name, args, _kw in calls if name == 'prop' and isinstance(args[0], bpy.types.Material) and args[1] not in material_props]
     ops = [kw.get('text') for name, _a, kw in calls if name == 'operator' and kw.get('text')]
-    assert ops == ['Check', 'SHARED', 'PRIVATE', 'SEL_A', 'Pack All (2)'], ops  # SHARED and PRIVATE; FUR is Keep UVs
+    # SHARED and PRIVATE; FUR is Keep UVs; no row highlighted, so the Problems list has a hint and no Recheck
+    assert ops == ['Check', 'SHARED', 'PRIVATE', 'SEL_A', 'Pack All (2)'], ops
+    assert "Click a texture set's name to see its problems" in labels, labels
     for material, kept in ((shared, False), (private, False), (fur, True)):
         row = draw_row(material)
         props = [(args[1], kw) for name, args, kw in row if name == 'prop']
@@ -787,6 +790,25 @@ def test_faces_without_uv_area():
     clean = quad_obj('CLEAN', [(1, 0, 0.2, 0.2)], mats=[m])
     # an island with no UV area at all (a line) is left out of packing: its triangles are not needles
     quad_obj('LINE', [(2, 0, 0.2, 0.2)], mats=[m], uv_rects=[(0.5, 0.5, 0.3, 0.0)])
+    # a triangle that is a line in 3D too (its middle vertex 0.01 um off the quad's edge, as an n-gon with a vertex on
+    # a straight edge triangulates), with area above FACE_AREA_MIN_CM2 and UVs as its shape: not a needle (decision 153)
+    sm = bpy.data.meshes.new('SLIVER')
+    sm.from_pydata([(0, 0, 0), (0.2, 0, 0), (0.2, 0.2, 0), (0, 0.2, 0), (0.1, -1e-8, 0)], [],
+                   [(0, 1, 2, 3), (0, 4, 1)])
+    sl = sm.uv_layers.new(name='UVMap')
+    lv = np.zeros(len(sm.loops), np.int64)
+    sm.loops.foreach_get('vertex_index', lv)
+    sl.data.foreach_set('uv', (np.array([(0, 0), (0.2, 0), (0.2, 0.2), (0, 0.2), (0.1, -1e-8)]) * 0.1 + 0.6)[lv].ravel())
+    sm.materials.append(m)
+    sliver = quad_obj('SLIVER', None, mesh=sm)
+    smd = uv_pack.MeshData(sm)
+    cm2 = uv_pack._cm_per_unit(bpy.context.scene) ** 2
+    T = smd.UV[smd.TL] * 1024
+    a_uv = uv_pack.tri_area(T)
+    edge2 = np.max([((T[:, (i + 1) % 3] - T[:, i]) ** 2).sum(1) for i in range(3)], axis=0)
+    thin = np.flatnonzero(a_uv <= uv_pack.FLAT_RATIO * edge2)
+    a3 = smd.tri_areas_world(sliver.matrix_world, cm2)
+    assert smd.TP[thin].tolist() == [1] and a3[thin][0] > uv_pack.FACE_AREA_MIN_CM2, (thin, a3)  # flagged before 153
     found, faces, islands = checks.faces_without_uv_area(bpy.context.view_layer)
     assert list(found) == [needle] and found[needle].tolist() == [1] and (faces, islands) == (1, 1), found
     clean.select_set(True)
@@ -811,10 +833,10 @@ def test_faces_without_uv_area():
         assert f'# {kind}: 1 texture set(s)' in report and warning in block and 'Accept + Unwrap' in block, report
     assert [kw['icon'] for name, _a, kw in draw_row(m) if name == 'operator' and kw.get('text') == 'NEEDLE'] == ['ERROR']
     tip = uv_marks.FSS_OT_UvTextureSetInfo.description(bpy.context, SimpleNamespace(material='NEEDLE'))
-    assert '1 island(s) with triangles without UV area: re-unwrap them' in tip, tip
+    assert 'No UV area: NEEDLE (1 face(s))' in tip, tip
     print(f"PASS: test_faces_without_uv_area (threshold {uv_pack.UV_TRI_AREA_MIN_PX2:g} px2: NEEDLE found and its face "
-          "1 selected, the line island not counted; Pack and Check All reports warn per texture set; the row and "
-          "the details flag it)")
+          "1 selected, the line island not counted, the triangle flat in 3D too not counted; Pack and Check All "
+          "reports warn per texture set; the row and the details flag it)")
 
 
 def test_report_order():
@@ -826,6 +848,163 @@ def test_report_order():
     names = uv_pack.TextureSet.objects_by_layout_size(ts, mask)
     assert names == ['B_CEILING', 'C_BAR', 'A_SCREW'], names
     print("PASS: test_report_order (B_CEILING 1800 px, C_BAR 600 px, A_SCREW 10 px: largest first)")
+
+
+def needle_mesh(name, material):
+    """A quad and a triangle with 3D area whose UVs lie on the quad's edge line (a needle in the quad's island)."""
+    me = bpy.data.meshes.new(name)
+    me.from_pydata([(0, 0, 0), (0.2, 0, 0), (0.2, 0.2, 0), (0, 0.2, 0), (0.5, 0.1, 0)], [],
+                   [(0, 1, 2, 3), (1, 4, 2)])
+    uvl = me.uv_layers.new(name='UVMap')
+    lv = np.zeros(len(me.loops), np.int64)
+    me.loops.foreach_get('vertex_index', lv)
+    uvl.data.foreach_set('uv', (np.array([(0, 0), (0.2, 0), (0.2, 0.2), (0, 0.2), (0.2, 1.0)]) * 0.1)[lv].ravel())
+    me.materials.append(material)
+    return me
+
+
+def problem_rows(context=None):
+    """The Problems box as drawn: [(operator or 'label', text, icon, operator properties)]."""
+    calls = []
+    uv_problems.draw(_Layout(calls), context or bpy.context)
+    out = []
+    for name, args, kw in calls:
+        if name == '_op' and args[0] == 'fss.uv_problem_show':
+            out.append(('row', kw.get('text'), kw.get('icon'), args[1]))
+        elif name == 'label':
+            out.append(('label', kw.get('text'), kw.get('icon'), None))
+    return out
+
+
+def test_problem_list():
+    # each problem of a texture set is a row; a click checks it again, then shows its faces in Edit Mode, or ticks it
+    # as fixed; Recheck collects the rows again; the set's name only has the tooltip
+    reset()
+    ma, mb = mat('NEEDLE_A', 1024), mat('NEEDLE_B', 1024)
+    a = quad_obj('NA', None, mesh=needle_mesh('NA', ma))
+    b = quad_obj('NB', None, mesh=needle_mesh('NB', mb))
+    b.location = (3, 0, 0)
+    found, faces, islands = checks.faces_without_uv_area(bpy.context.view_layer)
+    assert set(found) == {a, b} and (faces, islands) == (2, 2), found
+    found, faces, islands = checks.faces_without_uv_area(bpy.context.view_layer, mb)
+    assert list(found) == [b] and found[b].tolist() == [1] and (faces, islands) == (1, 1), found
+    for obj in bpy.context.view_layer.objects:
+        obj.select_set(obj == a)
+    bpy.context.view_layer.objects.active = a
+    # no row highlighted: a hint; the name of a set highlights its row and the list shows that set, not checked yet
+    bpy.context.window_manager.fss_uv_pack_active_name = ''
+    assert problem_rows() == [('label', "Click a texture set's name to see its problems", 'INFO', None)]
+    tip = uv_marks.FSS_OT_UvTextureSetInfo.description(bpy.context, SimpleNamespace(material='NEEDLE_A'))
+    assert tip.endswith('Click: list its problems below'), tip
+    assert bpy.ops.fss.uv_texture_set_info(material='NEEDLE_A') == {'FINISHED'}
+    assert problem_rows() == [('label', 'Problems: NEEDLE_A', None, None),
+                              ('label', 'Not checked yet: Recheck, Pack or Check All', 'INFO', None)], problem_rows()
+    # only the highlighted row's set: NEEDLE_B is not in the table while only NA is selected
+    assert bpy.ops.fss.uv_problems_recheck(material='NEEDLE_B') == {'FINISHED'}
+    assert problem_rows() == [('label', "Click a texture set's name to see its problems", 'INFO', None)]
+    b.select_set(True)
+    rows = [r for r in problem_rows() if r[0] == 'row']
+    assert [r[1:3] for r in rows] == [('No UV area: NB (1 face(s))', 'UV')], problem_rows()
+    assert rows[0][3].material == 'NEEDLE_B' and rows[0][3].index == 0
+    tip = uv_problems.FSS_OT_UvProblemShow.description(bpy.context, rows[0][3])
+    assert 'Re-unwrap' in tip and 'Click: check it again, then Edit Mode with only those faces selected' in tip, tip
+    assert uv_marks.set_problems(mb) == ['No UV area: NB (1 face(s))'], uv_marks.set_problems(mb)
+    for v in b.data.vertices:
+        v.select = True  # an earlier selection: only the needle face's vertices stay selected
+    assert bpy.ops.fss.uv_problem_show(material='NEEDLE_B', index=0) == {'FINISHED'}
+    assert bpy.context.mode == 'EDIT_MESH', bpy.context.mode
+    assert [o.name for o in bpy.context.selected_objects] == ['NB'] and bpy.context.active_object == b
+    bm = bmesh.from_edit_mesh(b.data)
+    assert [f.select for f in bm.faces] == [False, True]
+    bm.verts.index_update()
+    assert [v.select for v in bm.verts] == [False, True, True, False, True]
+    assert sorted(tuple(sorted(x.index for x in e.verts)) for e in bm.edges if e.select) == [(1, 2), (1, 4), (2, 4)]
+    bpy.ops.object.mode_set(mode='OBJECT')
+    # fixed (the needle gets UV area): the click ticks the row, Recheck drops it
+    uvl = b.data.uv_layers.active.data
+    for loop in b.data.polygons[1].loop_indices:
+        if b.data.loops[loop].vertex_index == 4:
+            uvl[loop].uv = (0.04, 0.01)
+    assert bpy.ops.fss.uv_problem_show(material='NEEDLE_B', index=0) == {'FINISHED'}
+    assert bpy.context.mode == 'OBJECT' and uv_problems.rows(mb)[0]['fixed']
+    assert [r[2] for r in problem_rows() if r[0] == 'row'] == ['CHECKMARK'] and uv_marks.set_problems(mb) == []
+    assert bpy.ops.fss.uv_problems_recheck(material='NEEDLE_B') == {'FINISHED'}
+    assert uv_problems.rows(mb) == [] and ('label', 'No problems found', 'CHECKMARK', None) in problem_rows()
+    # Check All fills the list of every set it checks
+    assert bpy.ops.fss.uv_pack_check_all() == {'FINISHED'}
+    assert [r['text'] for r in uv_problems.rows(ma)] == ['No UV area: NA (1 face(s))'], uv_problems.rows(ma)
+    print("PASS: test_problem_list (not checked, Recheck, a row per mesh, its click shows the face in Edit Mode, "
+          "fixed ticks it, Recheck drops it, Check All fills it)")
+
+
+def test_shared_material_differences():
+    # a shared mesh is packed with its first user's materials: where that user shows another material (here none),
+    # the mesh is left out of the set; the report and the set's warning name it and the users without a material
+    reset()
+    m, other = mat('SHARED'), mat('OTHER')
+    solo = quad_obj('SOLO', [(0, 0, 0.2, 0.2)], mats=[m])
+    me = quad_obj('A_FIRST', [(0, 0, 0.3, 0.2)]).data
+    me.name = 'MESH_LEFT_OUT'
+    me.materials.append(None)  # one empty slot: the first user (by name) shows no material
+    for name in ('B_USER', 'C_USER'):
+        u = quad_obj(name, None, mesh=me)
+        u.location = (2, 0, 0)
+        u.material_slots[0].link = 'OBJECT'
+        u.material_slots[0].material = m
+    # packed with the set, one user without a material and one with another
+    kept = quad_obj('D_FIRST', [(1, 0, 0.2, 0.2)], mats=[m])
+    kept.data.name = 'MESH_IN_SET'
+    e = quad_obj('E_USER', None, mesh=kept.data)
+    e.material_slots[0].link = 'OBJECT'  # object slot left empty
+    f = quad_obj('F_USER', None, mesh=kept.data)
+    f.material_slots[0].link = 'OBJECT'
+    f.material_slots[0].material = other
+    diffs = uv_pack.shared_differences(bpy.context.view_layer, m)
+    assert [(d['mesh'], d['in_set'], d['first_user']) for d in diffs] == [
+        ('MESH_LEFT_OUT', False, 'A_FIRST'), ('MESH_IN_SET', True, 'D_FIRST')], diffs
+    assert diffs[0]['first_shows'] == [None] and diffs[0]['users'] == [('B_USER', ['SHARED']), ('C_USER', ['SHARED'])]
+    assert diffs[1]['users'] == [('E_USER', [None]), ('F_USER', ['OTHER'])], diffs[1]
+    assert uv_pack.no_material_users(diffs) == ['A_FIRST', 'E_USER'], diffs
+    assert uv_pack.shared_differences(bpy.context.view_layer, other)[0]['in_set'] is False  # F_USER's set: left out
+    for obj in bpy.context.view_layer.objects:
+        obj.select_set(obj == solo)
+    bpy.context.view_layer.objects.active = solo
+    assert bpy.ops.fss.uv_pack_texture_set(material='SHARED') == {'FINISHED'}
+    report = bpy.data.texts[uv_pack.REPORT_TEXT_NAME].as_string()
+    block = report[report.index('## SHARED: '):]
+    assert ("WARNING shared mesh MESH_LEFT_OUT left out, its UVs unchanged: the materials of its first user by name "
+            "count, and A_FIRST shows no material where 2 other user(s) show this set: B_USER, C_USER"
+            in block), block
+    assert ("Shared mesh MESH_IN_SET: packed with the material of its first user D_FIRST; on 1 face(s) other users "
+            "show: E_USER no material; F_USER OTHER" in block), block
+    assert "WARNING no material on 2 user(s) of shared meshes" in block and "A_FIRST, E_USER" in block, block
+    assert 'MESH_LEFT_OUT' not in [p[0].me.name for p in uv_pack.gather(bpy.context.view_layer, m)[0]]
+    # the Problems list: a row for the mesh left out (its first user named there), one for the other user without
+    # a material; the name's tooltip lists them and the row has the warning icon
+    rows = [r for r in problem_rows() if r[0] == 'row']
+    assert [r[1:3] for r in rows] == [('Left out: MESH_LEFT_OUT (A_FIRST)', 'UNLINKED'),
+                                      ('No material: E_USER', 'MATERIAL')], rows
+    tip = uv_marks.FSS_OT_UvTextureSetInfo.description(bpy.context, SimpleNamespace(material='SHARED'))
+    assert 'Left out: MESH_LEFT_OUT (A_FIRST)' in tip and 'No material: E_USER' in tip, tip
+    assert [kw['icon'] for name, _a, kw in draw_row(m) if name == 'operator' and kw.get('text') == 'SHARED'] == ['ERROR']
+    tip = uv_problems.FSS_OT_UvProblemShow.description(bpy.context, rows[0][3])
+    assert 'first user by name, A_FIRST, which shows no material where 2 other user(s)' in tip, tip
+    # a click makes the first user active (Object Mode) and keeps the selection, so the set stays in the table and
+    # its list stays; with the material given, the next click ticks it as fixed
+    assert bpy.ops.fss.uv_problem_show(material='SHARED', index=0) == {'FINISHED'}
+    assert bpy.context.mode == 'OBJECT' and bpy.context.active_object.name == 'A_FIRST'
+    assert sorted(o.name for o in bpy.context.selected_objects) == ['A_FIRST', 'SOLO']
+    assert ('label', 'Problems: SHARED', None, None) in problem_rows(), problem_rows()
+    first = bpy.data.objects['A_FIRST'].material_slots[0]
+    first.link = 'OBJECT'
+    first.material = m
+    assert bpy.ops.fss.uv_problem_show(material='SHARED', index=0) == {'FINISHED'}
+    assert uv_problems.rows(m)[0]['fixed'] and not uv_problems.rows(m)[1]['fixed']
+    assert bpy.ops.fss.uv_problem_show(material='SHARED', index=1) == {'FINISHED'}
+    assert bpy.context.active_object.name == 'E_USER' and not uv_problems.rows(m)[1]['fixed']
+    assert ('label', 'Problems: SHARED', None, None) in problem_rows(), problem_rows()
+    print("PASS: test_shared_material_differences (MESH_LEFT_OUT left out by its first user A_FIRST without a "
+          "material, MESH_IN_SET packed with F_USER showing OTHER; report, warning, Problems rows and their clicks)")
 
 
 def ring_obj(name, m, outer=1.0, inner=0.6, y=0.0):
@@ -1593,6 +1772,8 @@ def main():
     test_texture_set_list()
     test_uv_editor_panel()
     test_report_order()
+    test_problem_list()
+    test_shared_material_differences()
     print("ALL TESTS PASSED")
 
 

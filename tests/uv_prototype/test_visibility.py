@@ -382,6 +382,136 @@ def test_synthetic_cases():
           f"scale {scale:.4f})")
 
 
+def _reference_topology(me, mat_slots):
+    """The per-face loops the array versions replaced (UV journal Session 116): UV islands by union-find over shared
+    UV edges, neighbours and pieces over shared edges of visible faces, areas as triangle fans."""
+    uv = me.uv_layers.active.data
+    parent = list(range(len(me.polygons)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    seen = {}
+    for p in me.polygons:
+        loops = list(p.loop_indices)
+        for i, li in enumerate(loops):
+            lj = loops[(i + 1) % len(loops)]
+            c1 = (me.loops[li].vertex_index, tuple(np.round(np.array(uv[li].uv, dtype=np.float32), 4)))
+            c2 = (me.loops[lj].vertex_index, tuple(np.round(np.array(uv[lj].uv, dtype=np.float32), 4)))
+            edge = (c1, c2) if c1 < c2 else (c2, c1)
+            if edge in seen:
+                parent[find(p.index)] = find(seen[edge])
+            else:
+                seen[edge] = p.index
+    islands = [find(i) for i in range(len(me.polygons))]
+
+    invisible = [mat_slots[p.material_index].material is not None
+                 and visibility_core.classify_material(mat_slots[p.material_index].material) == 'INVISIBLE'
+                 for p in me.polygons]
+    edge_faces = {}
+    for p in me.polygons:
+        if invisible[p.index]:
+            continue
+        vs = list(p.vertices)
+        for i, v in enumerate(vs):
+            edge_faces.setdefault(tuple(sorted((v, vs[(i + 1) % len(vs)]))), []).append(p.index)
+    adj = [set() for _ in me.polygons]
+    for faces in edge_faces.values():
+        for f in faces:
+            adj[f].update(g for g in faces if g != f)
+    comps, done = [], set()
+    for f in range(len(me.polygons)):
+        if invisible[f] or f in done:
+            continue
+        comp, stack = [], [f]
+        done.add(f)
+        while stack:
+            cur = stack.pop()
+            comp.append(cur)
+            for g in adj[cur]:
+                if g not in done:
+                    done.add(g)
+                    stack.append(g)
+        comps.append(sorted(comp))
+
+    areas = []
+    for p in me.polygons:
+        pts = [np.array(me.vertices[v].co, dtype=np.float64) for v in p.vertices]
+        areas.append(sum(0.5 * np.linalg.norm(np.cross(pts[i] - pts[0], pts[i + 1] - pts[0]))
+                         for i in range(1, len(pts) - 1)))
+    return islands, adj, comps, np.array(areas)
+
+
+def _same_partition(a, b):
+    """Two labelings put the same faces together."""
+    pairs = set(zip((int(x) for x in a), (int(y) for y in b)))
+    return len(pairs) == len(set(int(x) for x in a)) == len(set(int(y) for y in b))
+
+
+def test_topology_matches_reference():
+    """The array versions of UV islands, face neighbours, pieces and face areas give what the per-face loops gave, on
+    a mesh with quads, a pentagon, triangles, a UV seam, an edge shared by three faces, a loose piece and faces with
+    an invisible material."""
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    verts, faces = [], []
+    n = 6
+    for y in range(n):
+        for x in range(n):
+            verts.append((x * 0.1, y * 0.13, 0.01 * x * y))
+    for y in range(n - 1):
+        for x in range(n - 1):
+            i = y * n + x
+            faces.append((i, i + 1, i + n + 1, i + n))
+    fin = len(verts)
+    verts += [(0.1, 0.0, 0.2), (0.1, 0.13, 0.2)]
+    faces.append((1, 7, fin + 1, fin))  # a fin on the edge between the grid's first two faces: three faces share it
+    pent = len(verts)
+    verts += [(2.0 + math.cos(a), math.sin(a), 0.0) for a in np.linspace(0.0, 2.0 * math.pi, 6)[:5]]
+    faces.append(tuple(range(pent, pent + 5)))
+    centre = len(verts)
+    verts.append((2.0, 0.0, 0.5))
+    faces += [(pent + i, pent + (i + 1) % 5, centre) for i in range(5)]  # triangles over the pentagon's edges
+    me = bpy.data.meshes.new('TOPOLOGY')
+    me.from_pydata(verts, [], faces)
+    me.update()
+    uv = me.uv_layers.new(name='UVMap')
+    for p in me.polygons:
+        shift = 5.0 if (p.index % 5) >= 3 else 0.0  # a seam down the grid: two islands
+        for li in p.loop_indices:
+            co = me.vertices[me.loops[li].vertex_index].co
+            uv.data[li].uv = (co.x + shift, co.y + co.z)
+    obj = bpy.data.objects.new('TOPOLOGY', me)
+    bpy.context.scene.collection.objects.link(obj)
+    obj.data.materials.append(bpy.data.materials.new('PAINT'))
+    obj.data.materials.append(bpy.data.materials.new('PANEL_COLLISION'))
+    for p in me.polygons:
+        p.material_index = 1 if p.index in (7, 8, 12) else 0  # cuts the grid's neighbours there
+
+    ref_islands, ref_adj, ref_comps, ref_areas = _reference_topology(me, obj.material_slots)
+    islands = visibility_core.extract_mesh_uv_islands(me)
+    (indptr, indices), face_to_comp, comps = visibility_core.extract_mesh_face_adjacency(me, obj.material_slots)
+    areas = visibility_core.polygon_areas(me, obj.matrix_world)
+
+    assert _same_partition(islands, ref_islands) and len(set(islands.tolist())) == 4, (islands, ref_islands)
+    first = [int(np.flatnonzero(islands == k)[0]) for k in range(int(islands.max()) + 1)]
+    assert first == sorted(first), first  # islands numbered by their first face
+    for f, neighbours in enumerate(ref_adj):
+        got = indices[indptr[f]:indptr[f + 1]].tolist()
+        assert got == sorted(neighbours), (f, got, sorted(neighbours))
+    assert {0, 1} <= ref_adj[25] and 25 in ref_adj[0] and 0 in ref_adj[1], ref_adj[25]  # the fin's edge: 3 faces
+    assert [c.tolist() for c in comps] == ref_comps, ([c.tolist() for c in comps], ref_comps)
+    assert all(face_to_comp[f] == -1 for f in (7, 8, 12)) and len(comps) == 2
+    assert np.allclose(areas, ref_areas, rtol=1e-5, atol=1e-9), (areas, ref_areas)
+    ref_pairs = sorted({tuple(sorted((int(islands[f]), int(islands[g])))) for f, ns in enumerate(ref_adj)
+                        for g in ns if islands[f] != islands[g]})
+    assert visibility_core.island_pairs((indptr, indices), islands) == ref_pairs
+    print(f"PASS: test_topology_matches_reference ({len(faces)} faces, {len(comps)} pieces, {len(ref_pairs)} island"
+          f" pairs)")
+
+
 def test_percentile_and_step_limit():
     """The island percentile, the step limit (raise only, decision 134) and Ambient (decision 133), on their own and in
     a run."""
@@ -927,6 +1057,7 @@ def main():
     test_light_term_matches_eevee()
     test_synthetic_cases()
     test_percentile_and_step_limit()
+    test_topology_matches_reference()
     test_spot_and_area_lights()
     test_soft_shadows()
     test_animated_light()

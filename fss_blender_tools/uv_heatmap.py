@@ -155,27 +155,43 @@ def compute_triangle_measures(P3, U, degeneracy_relative=1e-12):
     }
 
 
-def material_references(raw_density, area3, is_degenerate, material_keys):
-    """Area-weighted median of UV area / 3D area per material: the reference density of each texture set."""
+def material_codes(material_keys):
+    """Per triangle, its material as a number, and the names of the numbers."""
+    lookup = {}
+    codes = np.fromiter((lookup.setdefault(key, len(lookup)) for key in material_keys), dtype=np.int64,
+                        count=len(material_keys))
+    return codes, list(lookup)
+
+
+def material_references(raw_density, area3, is_degenerate, material_keys, codes=None):
+    """Area-weighted median of UV area / 3D area per material: the reference density of each texture set. codes:
+    (per triangle its material's number, the names), when known, instead of reading material_keys."""
     refs = {}
     usable = (~is_degenerate) & np.isfinite(raw_density)
-    for mat in set(material_keys):
-        mask = (material_keys == mat) & usable
-        refs[mat] = area_weighted_median(raw_density[mask], area3[mask]) if np.any(mask) else 1.0
+    index, names = codes if codes is not None else material_codes(material_keys)
+    order = np.argsort(index, kind='stable')
+    order = order[usable[order]]
+    bounds = np.searchsorted(index[order], np.arange(len(names) + 1))
+    for k, mat in enumerate(names):
+        tris = order[bounds[k]:bounds[k + 1]]
+        refs[mat] = area_weighted_median(raw_density[tris], area3[tris]) if len(tris) else 1.0
     return refs
 
 
-def compute_relative_density(raw_density, area3, is_degenerate, material_keys, density_ranges, ref_by_material=None):
+def compute_relative_density(raw_density, area3, is_degenerate, material_keys, density_ranges, ref_by_material=None,
+                              codes=None):
     """Compute relative texel density per triangle.
 
     The density of each triangle is divided by its material's reference (the given references, else the
     area-weighted median over these triangles), then read against the object's authored density range:
     inside the range counts as 1.0 (neutral), below the range relative to its minimum, above relative to its maximum.
     """
+    codes = codes if codes is not None else material_codes(material_keys)
     if ref_by_material is None:
-        ref_by_material = material_references(raw_density, area3, is_degenerate, material_keys)
+        ref_by_material = material_references(raw_density, area3, is_degenerate, material_keys, codes)
     density_ranges = np.asarray(density_ranges, dtype=np.float64).reshape(-1, 2)
-    ref = np.array([ref_by_material.get(m, 1.0) for m in material_keys], dtype=np.float64)
+    index, names = codes
+    ref = np.array([ref_by_material.get(m, 1.0) for m in names], dtype=np.float64)[index]
     low, high = density_ranges[:, 0], density_ranges[:, 1]
     with np.errstate(divide='ignore', invalid='ignore'):
         norm_d = np.where(ref > 0, raw_density / ref, 1.0)
@@ -230,6 +246,30 @@ def calculated_density_colors(ratio):
     return colors
 
 
+def _uv_edge_pairs(edge, uvs, owner):
+    """The pairs of triangles that weld: their edge (two vertices) and its UVs at both ends (four integers) are the
+    same, and no other triangle has that edge with those UVs (as uvmetrics: a non-manifold edge does not weld)."""
+    order = np.argsort(edge, kind='stable')
+    e, u, o = edge[order], uvs[order], owner[order]
+    run = np.r_[True, e[1:] != e[:-1]]
+    run_id = np.cumsum(run) - 1
+    run_size = np.bincount(run_id)[run_id]
+    # an edge of exactly two triangles: they weld when their UVs agree
+    two = (run_size[:-1] == 2) & ~run[1:] & np.all(u[1:] == u[:-1], axis=1)
+    pa, pb = [o[:-1][two]], [o[1:][two]]
+    many = np.flatnonzero(run_size > 2)
+    if len(many):  # an edge of three or more triangles: those with the same UVs, when exactly two
+        keys = np.column_stack([e[many], u[many]])
+        _, group, counts = np.unique(keys, axis=0, return_inverse=True, return_counts=True)
+        group = group.ravel()
+        sub = np.argsort(group, kind='stable')
+        g = group[sub]
+        same = (g[1:] == g[:-1]) & (counts[g[1:]] == 2)
+        pa.append(o[many][sub][:-1][same])
+        pb.append(o[many][sub][1:][same])
+    return np.concatenate(pa), np.concatenate(pb)
+
+
 def uv_islands(tri_verts, U):
     """Island index per triangle: triangles that share an edge with equal UVs at both ends belong together."""
     n = len(tri_verts)
@@ -241,24 +281,10 @@ def uv_islands(tri_verts, U):
     swap = va > vb
     va, vb = np.where(swap, vb, va), np.where(swap, va, vb)
     ua, ub = np.where(swap[:, None], ub, ua), np.where(swap[:, None], ua, ub)
-    keys = np.column_stack([va, vb, np.round(np.hstack([ua, ub]) * 1e6).astype(np.int64)])
-    _, inverse = np.unique(keys, axis=0, return_inverse=True)
-    inverse = inverse.ravel()
-    order = np.argsort(inverse, kind='stable')
-    # only edges with exactly two faces join (as uvmetrics): a non-manifold edge does not weld islands
-    same = (inverse[order][1:] == inverse[order][:-1]) & (np.bincount(inverse)[inverse[order][1:]] == 2)
-    owner = np.repeat(np.arange(n), 3)[order]
-    pa, pb = owner[:-1][same], owner[1:][same]
-    labels = np.arange(n)
-    while True:  # label propagation with pointer jumping; a few passes even on large shells
-        low = np.minimum(labels[pa], labels[pb])
-        new = labels.copy()
-        np.minimum.at(new, pa, low)
-        np.minimum.at(new, pb, low)
-        new = new[new]
-        if np.array_equal(new, labels):
-            return np.unique(labels, return_inverse=True)[1].ravel()
-        labels = new
+    uvs = np.round(np.hstack([ua, ub]) * 1e6).astype(np.int64)
+    pa, pb = _uv_edge_pairs(va.astype(np.int64) * (int(max(vb.max(), 0)) + 1) + vb, uvs, np.repeat(np.arange(n), 3))
+    labels = visibility_core.connected_labels(n, pa, pb)  # per triangle, the first triangle of its island
+    return np.unique(labels, return_inverse=True)[1].ravel()
 
 
 def area_distortion(uv_area, area3, islands, valid):
@@ -317,19 +343,16 @@ class ObjectHeatmapCache:
         self.nor = np.repeat(nor, 3, axis=0).astype(np.float32)  # flat shading: the face normal at every corner
         # UVs per corner, for the optional UV grid and cell labels
         self.uv = (uv.reshape(-1, 2) if uv is not None else np.zeros((len(self.pos), 2))).astype(np.float32)
+        # Colours per triangle; per corner (what a batch takes) only when a mode is drawn: see _corners
         # Distortion mode: colours per view; colors_shape is the shear view, or a dict of all three views
         if isinstance(colors_shape, dict):
-            self.colors_distortion = {view: np.repeat(c, 3, axis=0).astype(np.float32) for view, c in colors_shape.items()}
+            self._tri_colors = {view: c for view, c in colors_shape.items()}
         else:
-            self.colors_distortion = {view: np.repeat(colors_shape, 3, axis=0).astype(np.float32) for view in DISTORTION_VIEWS}
-        self.colors_shape = self.colors_distortion['SHEAR']
-        self.colors_density = np.repeat(colors_density, 3, axis=0).astype(np.float32)
-        if colors_visibility is not None:
-            self.colors_visibility = np.repeat(colors_visibility, 3, axis=0).astype(np.float32)
-        else:
-            self.colors_visibility = np.repeat(np.tile(COLOR_NO_DATA, (len(P_local), 1)), 3, axis=0).astype(np.float32)
-        self.colors_visibility_island = (np.repeat(colors_visibility_island, 3, axis=0).astype(np.float32)
-                                         if colors_visibility_island is not None else self.colors_visibility)
+            self._tri_colors = {view: colors_shape for view in DISTORTION_VIEWS}
+        self._tri_colors['DENSITY'] = colors_density
+        self._corner_colors = {}
+        self.vis_pending = False  # the visibility values are not read yet (set_visibility)
+        self._set_visibility_colors(colors_visibility, colors_visibility_island)
         self.area3 = tri_measures['area3']
         self.is_degenerate = tri_measures['is_degenerate']
         self.shape = tri_measures['shape']
@@ -343,6 +366,48 @@ class ObjectHeatmapCache:
         self.calc_unmeasured = set()  # texture sets shown at the top of their range: no Pack or Check All yet
         self.calc_failed = False
         self.batches = {}  # mode -> GPUBatch
+
+    def _set_visibility_colors(self, colors_visibility, colors_visibility_island):
+        face = colors_visibility if colors_visibility is not None else np.tile(COLOR_NO_DATA, (self.n_tris, 1))
+        self._tri_colors['VIS_FACE'] = face
+        self._tri_colors['VIS_ISLAND'] = colors_visibility_island if colors_visibility_island is not None else face
+        for key in ('VIS_FACE', 'VIS_ISLAND'):
+            self._corner_colors.pop(key, None)
+
+    def set_visibility(self, colors_visibility, colors_visibility_island, vis_data):
+        """The visibility values, read from the file when the Visibility mode first needs them."""
+        self._set_visibility_colors(colors_visibility, colors_visibility_island)
+        self.vis_data = vis_data
+        self.vis_pending = False
+        for key in [k for k in self.batches if k[0] == 'VISIBILITY']:
+            del self.batches[key]
+
+    def _corners(self, key):
+        """A triangle colour set repeated for its three corners, made once."""
+        colors = self._corner_colors.get(key)
+        if colors is None:
+            colors = self._corner_colors[key] = np.repeat(self._tri_colors[key], 3, axis=0).astype(np.float32)
+        return colors
+
+    @property
+    def colors_distortion(self):
+        return {view: self._corners(view) for view in DISTORTION_VIEWS}
+
+    @property
+    def colors_shape(self):
+        return self._corners('SHEAR')
+
+    @property
+    def colors_density(self):
+        return self._corners('DENSITY')
+
+    @property
+    def colors_visibility(self):
+        return self._corners('VIS_FACE')
+
+    @property
+    def colors_visibility_island(self):
+        return self._corners('VIS_ISLAND')
 
     def set_calculated_density(self, ratio, unmeasured=(), failed=False):
         self.density_calc = ratio
@@ -365,7 +430,7 @@ class ObjectHeatmapCache:
             ('DENSITY', 'CALCULATED') if calculated else mode))
         if key not in self.batches:
             if mode == 'SHAPE':
-                colors = self.colors_distortion.get(view, self.colors_shape)
+                colors = self._corners(view if view in DISTORTION_VIEWS else 'SHEAR')
             elif calculated:
                 colors = self.colors_density_calc
             elif mode == 'DENSITY':
@@ -791,8 +856,9 @@ def _object_triangles(obj, depsgraph, allow_no_uvs=False):
         U = uv_data[tri_loops]
     else:
         U = np.zeros((n_tris, 3, 2), dtype=np.float64)
-    slot_names = [slot.material.name if slot.material else '' for slot in obj.material_slots]
-    mat_keys = np.array([slot_names[i] if 0 <= i < len(slot_names) else '' for i in tri_mat], dtype=object)
+    slot_names = np.array([slot.material.name if slot.material else '' for slot in obj.material_slots] + [''],
+                          dtype=object)
+    mat_keys = slot_names[np.where((tri_mat >= 0) & (tri_mat < len(slot_names) - 1), tri_mat, len(slot_names) - 1)]
     return {
         'P3': (V @ M[:3, :3].T + M[:3, 3])[tri_verts],  # world space: measures include the object's scale
         'P_local': V[tri_verts],
@@ -804,6 +870,8 @@ def _object_triangles(obj, depsgraph, allow_no_uvs=False):
         'eval_face_count': len(me.polygons),
         'mesh_faces': len(obj.data.polygons),
         'mat_keys': mat_keys,
+        'mat_slot': np.where((tri_mat >= 0) & (tri_mat < len(slot_names) - 1), tri_mat, len(slot_names) - 1),
+        'slot_names': list(slot_names),
     }
 
 
@@ -842,7 +910,7 @@ def _texture_set_references(context, depsgraph, materials, known):
     One texture set per material (decision 8): a part is compared with everything sharing its texture,
     not only with the current selection. `known` maps object names to already computed triangle data.
     """
-    raw, area, degen, keys = [], [], [], []
+    raw, area, degen, keys, used = [], [], [], [], []
     for obj in context.view_layer.objects:
         if obj.type != 'MESH' or not obj.data:
             continue
@@ -859,11 +927,119 @@ def _texture_set_references(context, depsgraph, materials, known):
         area.append(m['area3'])
         degen.append(m['is_degenerate'])
         keys.append(item['mat_keys'])
+        used.append(item)
     if not raw:
         return {mat: 1.0 for mat in materials}
     refs = material_references(np.concatenate(raw), np.concatenate(area), np.concatenate(degen),
-                               np.concatenate(keys))
+                               np.concatenate(keys), _joined_codes(used))
     return {mat: refs.get(mat, 1.0) for mat in materials}
+
+
+def _joined_codes(items):
+    """Materials as numbers over all items' triangles, joined in item order: (codes, names)."""
+    lookup, parts = {}, []
+    for item in items:
+        own = np.array([lookup.setdefault(name, len(lookup)) for name in item['slot_names']], dtype=np.int64)
+        parts.append(own[item['mat_slot']])
+    return (np.concatenate(parts) if parts else np.zeros(0, dtype=np.int64)), list(lookup)
+
+
+def _measure_together(items):
+    """Measures, UV islands and area distortion of all items' triangles in one pass (each is a triangle's own, or
+    its island's, and islands never span two objects), stored per item as 'measures', 'islands' (numbered from 0 per
+    object, by its first triangle) and 'area'. Returns the slices of each item in the joined arrays."""
+    if not items:
+        return {}
+    names = list(items)
+    counts = np.array([len(items[n]['P3']) for n in names], dtype=np.int64)
+    starts = np.concatenate([[0], np.cumsum(counts)])
+    U = np.concatenate([items[n]['U'] for n in names])
+    m = compute_triangle_measures(np.concatenate([items[n]['P3'] for n in names]), U)
+    vertex_offsets = np.concatenate([[0], np.cumsum([int(items[n]['tri_verts'].max()) + 1 for n in names])])
+    islands = uv_islands(np.concatenate([items[n]['tri_verts'].astype(np.int64) + vertex_offsets[k]
+                                         for k, n in enumerate(names)]), U)
+    area = area_distortion(m['uv_area'], m['area3'], islands, m['valid'] & ~m['is_degenerate'])
+    spans = {}
+    for k, name in enumerate(names):
+        a, b = int(starts[k]), int(starts[k + 1])
+        spans[name] = (a, b)
+        own = islands[a:b]
+        items[name]['measures'] = {key: value[a:b].copy() for key, value in m.items()}
+        items[name]['islands'] = own - own.min() if len(own) else own.copy()
+        items[name]['area'] = area[a:b].copy()
+    return {'spans': spans, 'measures': m, 'area': area}
+
+
+def _colour_together(items, together, references):
+    """Relative density and the Distortion and Density colours of all items' triangles in one pass, stored per item
+    as 'rel_density', 'colors_distortion' (per view) and 'colors_density'."""
+    if not items:
+        return
+    names = list(items)
+    m, area = together['measures'], together['area']
+    keys = np.concatenate([items[n]['mat_keys'] for n in names])
+    ranges = np.concatenate([np.tile(np.asarray(items[n]['density_range'], dtype=np.float64), (len(items[n]['P3']), 1))
+                             for n in names])
+    rel_d, _ = compute_relative_density(m['raw_density'], m['area3'], m['is_degenerate'], keys, ranges, references,
+                                        _joined_codes([items[n] for n in names]))
+    distortion = {view: distortion_colors(m['shape'], area, m['is_degenerate'], view) for view in DISTORTION_VIEWS}
+    density_colors = measures_to_colors(m['shape'], rel_d, m['is_degenerate'], 'DENSITY')
+    for name in names:
+        a, b = together['spans'][name]
+        items[name]['rel_density'] = rel_d[a:b].copy()
+        items[name]['colors_distortion'] = {view: c[a:b] for view, c in distortion.items()}
+        items[name]['colors_density'] = density_colors[a:b]
+
+
+def _visibility_of(name, entry, vis_meta, vis_data_arrays, stale_meshes):
+    """An object's Visibility colours per triangle (per face, per island) and values from the `.visibility` file;
+    no-data colours when the file has nothing current for it."""
+    colors_vis = None
+    colors_vis_island = None
+    vis_item_data = {'has_data': False}
+    if vis_meta and vis_data_arrays:
+        m_name = entry.mesh_name
+        safe_name = m_name.replace('/', '_').replace('\\', '_')
+        safe_obj_name = name.replace('/', '_').replace('\\', '_')
+        sc_key = f"{safe_name}__face_scores"
+        eval_map_key = f"eval_map__{safe_obj_name}"
+        stored_counts = vis_meta.get('object_eval_face_counts', {})
+        stored_eval_count = stored_counts.get(name)
+        current_eval_count = entry.eval_face_count
+
+        if (m_name and m_name not in stale_meshes and sc_key in vis_data_arrays and
+                eval_map_key in vis_data_arrays and stored_eval_count is not None and
+                stored_eval_count == current_eval_count):
+            eval_map = vis_data_arrays[eval_map_key]
+            if len(eval_map) == current_eval_count:
+                face_sc = vis_data_arrays[sc_key]
+                face_ud = vis_data_arrays.get(f"{safe_name}__face_undetermined", np.zeros(len(face_sc), dtype=bool))
+                face_nv = vis_data_arrays.get(f"{safe_name}__face_never_seen", np.zeros(len(face_sc), dtype=bool))
+                face_isl = vis_data_arrays.get(f"{safe_name}__face_island_values", face_sc)
+                # the scores themselves, on the one scale that starts at the Ambient: the never-seen and
+                # undetermined flags stay in the statistics and do not colour the surface
+                tri_orig = eval_map[entry.tri_poly]
+                colors_vis = visibility_core.compute_heatmap_colors(face_sc, alpha=ALPHA)[tri_orig]
+                colors_vis_island = visibility_core.compute_heatmap_colors(face_isl, alpha=ALPHA)[tri_orig]
+                vis_item_data = {
+                    'has_data': True,
+                    'scores': face_sc[tri_orig],
+                    'island_scores': face_isl[tri_orig],
+                    'undetermined': face_ud[tri_orig],
+                    'never_seen': face_nv[tri_orig],
+                }
+
+    if colors_vis is None:
+        colors_vis = np.tile(COLOR_NO_DATA, (entry.n_tris, 1))
+        vis_item_data = {
+            'has_data': False,
+            'scores': np.zeros(entry.n_tris, dtype=np.float32),
+            'island_scores': np.zeros(entry.n_tris, dtype=np.float32),
+            'undetermined': np.zeros(entry.n_tris, dtype=bool),
+            'never_seen': np.zeros(entry.n_tris, dtype=bool),
+        }
+
+    return colors_vis, colors_vis_island, vis_item_data
 
 
 def update_heatmap_cache(context, refresh=True):
@@ -907,72 +1083,32 @@ def update_heatmap_cache(context, refresh=True):
             continue
         # without the material's factor: it is the same on the whole texture set, so the set's reference cancels it
         (low, high), _ = density(obj)
-        new_items[obj.name] = dict(tris, measures=compute_triangle_measures(tris['P3'], tris['U']),
-                                   density_range=(low, high), mesh_name=obj.data.name if obj.data else "")
+        new_items[obj.name] = dict(tris, density_range=(low, high), mesh_name=obj.data.name if obj.data else "")
+    together = _measure_together(new_items)
 
     needed = {m for item in new_items.values() for m in item['mat_keys']} - set(_ref_cache)
     if needed:
         _ref_cache.update(_texture_set_references(context, depsgraph, needed, new_items))
+    _colour_together(new_items, together, _ref_cache)
 
     for name, item in new_items.items():
         m = item['measures']
-        rel_d, _ = compute_relative_density(m['raw_density'], m['area3'], m['is_degenerate'], item['mat_keys'],
-                                            [item['density_range']] * len(item['mat_keys']), _ref_cache)
+        rel_d = item['rel_density']
 
-        colors_vis = None
-        colors_vis_island = None
-        vis_item_data = {'has_data': False}
-        if vis_meta and vis_data_arrays:
-            m_name = item['mesh_name']
-            safe_name = m_name.replace('/', '_').replace('\\', '_')
-            safe_obj_name = name.replace('/', '_').replace('\\', '_')
-            sc_key = f"{safe_name}__face_scores"
-            eval_map_key = f"eval_map__{safe_obj_name}"
-            stored_counts = vis_meta.get('object_eval_face_counts', {})
-            stored_eval_count = stored_counts.get(name)
-            current_eval_count = item.get('eval_face_count', -1)
-
-            if (m_name and m_name not in stale_meshes and sc_key in vis_data_arrays and
-                    eval_map_key in vis_data_arrays and stored_eval_count is not None and
-                    stored_eval_count == current_eval_count):
-                eval_map = vis_data_arrays[eval_map_key]
-                if len(eval_map) == current_eval_count:
-                    face_sc = vis_data_arrays[sc_key]
-                    face_ud = vis_data_arrays.get(f"{safe_name}__face_undetermined", np.zeros(len(face_sc), dtype=bool))
-                    face_nv = vis_data_arrays.get(f"{safe_name}__face_never_seen", np.zeros(len(face_sc), dtype=bool))
-                    face_isl = vis_data_arrays.get(f"{safe_name}__face_island_values", face_sc)
-                    # the scores themselves, on the one scale that starts at the Ambient: the never-seen and
-                    # undetermined flags stay in the statistics and do not colour the surface
-                    tri_orig = eval_map[item['tri_poly']]
-                    colors_vis = visibility_core.compute_heatmap_colors(face_sc, alpha=ALPHA)[tri_orig]
-                    colors_vis_island = visibility_core.compute_heatmap_colors(face_isl, alpha=ALPHA)[tri_orig]
-                    vis_item_data = {
-                        'has_data': True,
-                        'scores': face_sc[tri_orig],
-                        'island_scores': face_isl[tri_orig],
-                        'undetermined': face_ud[tri_orig],
-                        'never_seen': face_nv[tri_orig],
-                    }
-
-        if colors_vis is None:
-            colors_vis = np.tile(COLOR_NO_DATA, (len(item['P_local']), 1))
-            vis_item_data = {
-                'has_data': False,
-                'scores': np.zeros(len(item['P_local']), dtype=np.float32),
-                'island_scores': np.zeros(len(item['P_local']), dtype=np.float32),
-                'undetermined': np.zeros(len(item['P_local']), dtype=bool),
-                'never_seen': np.zeros(len(item['P_local']), dtype=bool),
-            }
-
-        islands = uv_islands(item['tri_verts'], item['U'])
-        area = area_distortion(m['uv_area'], m['area3'], islands, m['valid'] & ~m['is_degenerate'])
         _cache[name] = ObjectHeatmapCache(
-            name, item['P_local'], m, rel_d,
-            {view: distortion_colors(m['shape'], area, m['is_degenerate'], view) for view in DISTORTION_VIEWS},
-            measures_to_colors(m['shape'], rel_d, m['is_degenerate'], 'DENSITY'),
-            colors_visibility=colors_vis, uv=item['U'], vis_data=vis_item_data, area=area, islands=islands,
-            colors_visibility_island=colors_vis_island, tri_face=_tri_faces(item, name, vis_data_arrays),
-            tri_real=item['tri_real'])
+            name, item['P_local'], m, rel_d, item['colors_distortion'], item['colors_density'],
+            uv=item['U'], area=item['area'], islands=item['islands'],
+            tri_face=_tri_faces(item, name, vis_data_arrays), tri_real=item['tri_real'])
+        entry = _cache[name]
+        entry.mesh_name, entry.tri_poly, entry.eval_face_count = (item['mesh_name'], item['tri_poly'],
+                                                                  item.get('eval_face_count', -1))
+        entry.vis_pending = True
+
+    if is_vis:  # the visibility values of the objects shown, read once per object until Refresh
+        for obj in selected:
+            entry = _cache.get(obj.name)
+            if entry is not None and entry.vis_pending:
+                entry.set_visibility(*_visibility_of(obj.name, entry, vis_meta, vis_data_arrays, stale_meshes))
 
     is_calculated = mode == 'DENSITY' and _density_source(context.scene) == 'CALCULATED'
     if is_calculated:

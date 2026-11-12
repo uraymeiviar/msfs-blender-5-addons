@@ -477,8 +477,10 @@ def _run_migration_timer():
 @persistent
 def _on_load_post(*_dummy):
     global _progress, _cancel_requested
+    from . import uv_problems  # uv_problems imports this module
     _vis_cache.clear()
     _results.clear()
+    uv_problems._problems.clear()
     _progress = None
     _cancel_requested = False
     run_migration()
@@ -560,7 +562,8 @@ class FSS_OT_UvTableHint(bpy.types.Operator):
 
 
 class FSS_OT_UvTextureSetInfo(bpy.types.Operator):
-    """The name in a texture set row: a flat button, for the tooltip with the last run (decision 144)."""
+    """The name in a texture set row: a flat button, for the tooltip with the last run and the set's problems
+    (decision 144); a click highlights the row, and the Problems list below shows that set (uv_problems)."""
     bl_idname = 'fss.uv_texture_set_info'
     bl_label = 'Texture Set'
     bl_options = {'INTERNAL'}
@@ -572,10 +575,15 @@ class FSS_OT_UvTextureSetInfo(bpy.types.Operator):
         material = bpy.data.materials.get(properties.material)
         if material is None:
             return properties.material
-        return chr(10).join([material.name, f'Last run: {last_result_text(material)}'] + set_problems(material))
+        return chr(10).join([material.name, f'Last run: {last_result_text(material)}'] + set_problems(material)
+                            + ['Click: list its problems below'])
 
     def execute(self, context):
-        return {'CANCELLED'}
+        if self.material not in bpy.data.materials:
+            return {'CANCELLED'}
+        context.window_manager.fss_uv_pack_active_name = self.material
+        _redraw_panels()
+        return {'FINISHED'}
 
 
 class FSS_OT_UvSelectObject(bpy.types.Operator):
@@ -935,20 +943,10 @@ def _set_active_index(wm, index):
 
 
 def set_problems(material):
-    """What the artist should know about a texture set, one sentence each (the row's warning icon and tooltip)."""
-    problems = []
-    if margin(material) < BLOCK_PIXELS:
-        problems.append(f'Margin under {BLOCK_PIXELS} px: compressed 4x4 blocks bleed across islands')
-    result = _results.get(material.name)
-    if not result or uv_pack.is_kept(material):
-        return problems
-    if result.get('mode') == 'overflow':
-        problems.append('Does not fit this texture size')
-    if result.get('uv_zero_islands'):
-        problems.append(f"{result['uv_zero_islands']} island(s) with triangles without UV area: re-unwrap them")
-    if result.get('no_area_objects'):
-        problems.append(f"Faces without area in {len(result['no_area_objects'])} object(s)")
-    return problems
+    """What the artist should know about a texture set, one sentence each (the row's warning icon and tooltip): the
+    Problems list's rows (uv_problems), the ones not fixed."""
+    from . import uv_problems  # uv_problems imports this module
+    return uv_problems.summary(material)
 
 
 class FSS_OT_UvCheckSelect(bpy.types.Operator):
@@ -1056,8 +1054,15 @@ def _draw_texture_sets(layout, context):
 
 
 def _store_result(result):
+    from . import uv_problems  # uv_problems imports this module
     result['generation'] = _settings_generation
     _results[result['set']] = result
+    material = bpy.data.materials.get(result['material']) if result.get('material') else None
+    if material is not None:
+        if result.get('mode') == 'kept':
+            uv_problems._problems.pop(material.name, None)
+        else:  # the Problems list, from the scene as the run left it
+            uv_problems.update(material)
     _pack_result_changed()
 
 
@@ -1249,6 +1254,7 @@ class FSS_OT_UvPackTextureSet(bpy.types.Operator):
 
     def _run(self, context):
         result = uv_pack.pack(self._material, progress=None if bpy.app.background else _on_stage)
+        context.window_manager.fss_uv_pack_active_name = self._material.name  # its problems are listed
         _store_result(result)
         uv_pack.write_report([result], 'Pack', result['time_s'], selected=self._selected)
         extra = [name for name in result.get('objects', []) if name not in self._selected]
@@ -1417,8 +1423,10 @@ class _PackingSection:
             return
         if _migration:
             _draw_migration(layout)
+        from . import uv_problems  # uv_problems imports this module
         _draw_table(layout, context, scene, context.active_object)
         _draw_texture_sets(layout, context)
+        uv_problems.draw(layout, context)
 
 
 class _PackingAdvanced:

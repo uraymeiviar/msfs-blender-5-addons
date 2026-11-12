@@ -69,18 +69,26 @@ def faces_without_area(view_layer):
     return found
 
 
-def faces_without_uv_area(view_layer):
+EVERY_SET = object()  # faces_without_uv_area: every texture set
+
+
+def faces_without_uv_area(view_layer, only=EVERY_SET):
     """({object: indices of its faces with a triangle without UV area inside an island that has UV area}, number of
     such faces, number of such islands) over the view layer's local mesh objects with a UV map, per texture set at its
-    size (decision 118). A mesh shared by several objects is read once, with its first user's materials (as the
-    packer does); every user is listed."""
+    size (decision 118); only: one texture set's material (None for the faces without one). A mesh shared by several
+    objects is read once, with its first user's materials (as the packer does); every user is listed."""
     cm2 = uv_pack._cm_per_unit(bpy.context.scene) ** 2
     found = {}
     count = islands = 0
     for me, users in uv_pack._meshes(view_layer).items():
+        materials = {slot.material for slot in users[0].material_slots} | {None}
+        if only is not EVERY_SET:
+            if only not in materials:
+                continue
+            materials = {only}
         md = uv_pack.MeshData(me)
         hit = []
-        for material in {slot.material for slot in users[0].material_slots} | {None}:
+        for material in materials:
             faces = np.flatnonzero(uv_pack._face_material_mask(users[0], md, material))
             if len(faces):
                 f, n = uv_pack.uv_zero_faces(md, users, faces, uv_marks.texture_size(material), cm2)
@@ -92,6 +100,28 @@ def faces_without_uv_area(view_layer):
             for obj in users:
                 found[obj] = faces
     return found, count, islands
+
+
+def _select_faces(me, faces):
+    """Select only `faces` of the mesh, with their vertices and edges, so Edit Mode shows those faces in every
+    selection mode."""
+    face = np.zeros(len(me.polygons), bool)
+    face[faces] = True
+    totals = np.zeros(len(me.polygons), np.int64)
+    me.polygons.foreach_get('loop_total', totals)
+    sel_loops = np.repeat(face, totals)
+    lv = np.zeros(len(me.loops), np.int64)
+    le = np.zeros(len(me.loops), np.int64)
+    me.loops.foreach_get('vertex_index', lv)
+    me.loops.foreach_get('edge_index', le)
+    vert = np.zeros(len(me.vertices), bool)
+    vert[lv[sel_loops]] = True
+    edge = np.zeros(len(me.edges), bool)
+    edge[le[sel_loops]] = True
+    me.polygons.foreach_set('select', face)
+    me.vertices.foreach_set('select', vert)
+    me.edges.foreach_set('select', edge)
+    me.update()
 
 
 def _select_found(context, found):
@@ -107,11 +137,7 @@ def _select_found(context, found):
         if obj.data in meshes or obj.data.library:
             continue
         meshes.add(obj.data)
-        select = [False] * len(obj.data.polygons)
-        for index in found[obj]:
-            select[index] = True
-        obj.data.polygons.foreach_set('select', select)
-        obj.data.update()
+        _select_faces(obj.data, found[obj])
     if shown:
         context.view_layer.objects.active = shown[0]
     return shown
@@ -157,21 +183,31 @@ class FSS_OT_FindFacesWithoutUvArea(bpy.types.Operator):
                       "faces are selected")
     bl_options = {'REGISTER', 'UNDO'}
 
+    # one texture set only (its row's name in UV Auto Packing); empty: every texture set
+    material: bpy.props.StringProperty(options={'HIDDEN', 'SKIP_SAVE'})
+
     @classmethod
     def poll(cls, context):
         return context.mode == 'OBJECT'
 
     def execute(self, context):
         t0 = time.perf_counter()
-        found, faces, islands = faces_without_uv_area(context.view_layer)
+        only, where = EVERY_SET, ''
+        if self.material:
+            only = bpy.data.materials.get(self.material)
+            if only is None:
+                self.report({'ERROR'}, f"No material {self.material}")
+                return {'CANCELLED'}
+            where = f" of {self.material}"
+        found, faces, islands = faces_without_uv_area(context.view_layer, only)
         shown = _select_found(context, found)
         for obj, f in sorted(found.items(), key=lambda item: item[0].name):
-            print(f"FSS checks: {obj.name}: {len(f)} face(s) with triangles without UV area")
+            print(f"FSS checks: {obj.name}: {len(f)} face(s) with triangles without UV area{where}")
         seconds = time.perf_counter() - t0
         if not found:
-            self.report({'INFO'}, f"No faces without UV area ({seconds:.1f} s)")
+            self.report({'INFO'}, f"No faces without UV area{where} ({seconds:.1f} s)")
         else:
-            self.report({'WARNING'}, f"{faces} face(s) with triangles without UV area in {islands} island(s) "
+            self.report({'WARNING'}, f"{faces} face(s) with triangles without UV area{where} in {islands} island(s) "
                                      f"{_found_text(found, shown)} ({seconds:.1f} s)")
         return {'FINISHED'}
 

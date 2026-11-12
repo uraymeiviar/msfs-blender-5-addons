@@ -173,8 +173,8 @@ def perspective_proj(fovy, aspect, near, far):
     ))
 
 
-def compute_scene_extent(view_layer, eye):
-    """Near and far clipping planes from the scene's extent seen from eye (Decision 81, Requirement 4)."""
+def scene_bounds(view_layer):
+    """The world bounding box (min, max) of the visible meshes' bounding boxes, or None without any."""
     min_v = np.array([float('inf'), float('inf'), float('inf')], dtype=np.float32)
     max_v = np.array([float('-inf'), float('-inf'), float('-inf')], dtype=np.float32)
     found = False
@@ -186,9 +186,16 @@ def compute_scene_extent(view_layer, eye):
                 min_v = np.minimum(min_v, w_arr)
                 max_v = np.maximum(max_v, w_arr)
                 found = True
-    if not found:
-        return 0.01, 30.0
+    return (min_v, max_v) if found else None
 
+
+def compute_scene_extent(view_layer, eye, bounds=None):
+    """Near and far clipping planes from the scene's extent seen from eye (Decision 81, Requirement 4); bounds as
+    scene_bounds gives them, read from view_layer when not given."""
+    bounds = scene_bounds(view_layer) if bounds is None else bounds
+    if bounds is False or bounds is None:
+        return 0.01, 30.0
+    min_v, max_v = bounds
     diag = float(np.linalg.norm(max_v - min_v))
     eye_arr = np.array(eye, dtype=np.float32)
     corners = np.array([[x, y, z] for x in (min_v[0], max_v[0]) for y in (min_v[1], max_v[1])
@@ -221,31 +228,38 @@ def precompute_cubemap_weights(cube_res=1024):
 
 
 def batch_triangle_solid_angle(eye, V0, V1, V2):
-    """Vectorized calculation of spherical solid angle for a batch of triangles (Oosterom & Strackee 1983). A triangle
-    turned away from eye gives 0."""
-    eye_arr = np.array(eye, dtype=np.float32).reshape(1, 3)
-    A = V0 - eye_arr
-    B = V1 - eye_arr
-    C = V2 - eye_arr
+    """Vectorized calculation of spherical solid angle for a batch of triangles (n, 3) (Oosterom & Strackee 1983). A
+    triangle turned away from eye gives 0."""
+    return planar_solid_angle(eye, *(np.ascontiguousarray(np.asarray(V, dtype=np.float32).T) for V in (V0, V1, V2)))
 
-    N = np.cross(B - A, C - A)
-    front = np.sum(N * (-A), axis=-1) > 0.0
 
-    normA = np.linalg.norm(A, axis=-1, keepdims=True)
-    normB = np.linalg.norm(B, axis=-1, keepdims=True)
-    normC = np.linalg.norm(C, axis=-1, keepdims=True)
+def planar_solid_angle(eye, P0, P1, P2):
+    """batch_triangle_solid_angle on the corners as rows of x, y and z (3, n), with the same float32 operations in the
+    same order, so the result is the same to the bit: the corners A, B, C seen from eye are made unit length, and
+    tan(omega / 2) = |a . (b x c)| / (1 + a . b + b . c + c . a). The facing is the normal from the edges, (B - A) x
+    (C - A), against -A."""
+    ex, ey, ez = (np.float32(v) for v in eye)
+    ax, ay, az = P0[0] - ex, P0[1] - ey, P0[2] - ez
+    bx, by, bz = P1[0] - ex, P1[1] - ey, P1[2] - ez
+    cx, cy, cz = P2[0] - ex, P2[1] - ey, P2[2] - ez
 
+    def cross(ux, uy, uz, vx, vy, vz):
+        return uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx
+
+    nx, ny, nz = cross(bx - ax, by - ay, bz - az, cx - ax, cy - ay, cz - az)
+    front = (nx * -ax + ny * -ay) + nz * -az > 0.0
     eps = 1e-12
-    valid = (normA[..., 0] > eps) & (normB[..., 0] > eps) & (normC[..., 0] > eps) & front
-
-    a = A / np.maximum(normA, eps)
-    b = B / np.maximum(normB, eps)
-    c = C / np.maximum(normC, eps)
-
-    b_cross_c = np.cross(b, c)
-    num = np.abs(np.sum(a * b_cross_c, axis=-1))
-    den = 1.0 + np.sum(a * b, axis=-1) + np.sum(b * c, axis=-1) + np.sum(c * a, axis=-1)
-
+    la = np.sqrt((ax * ax + ay * ay) + az * az)
+    lb = np.sqrt((bx * bx + by * by) + bz * bz)
+    lc = np.sqrt((cx * cx + cy * cy) + cz * cz)
+    valid = (la > eps) & (lb > eps) & (lc > eps) & front
+    da, db, dc = np.maximum(la, eps), np.maximum(lb, eps), np.maximum(lc, eps)
+    ax, ay, az = ax / da, ay / da, az / da
+    bx, by, bz = bx / db, by / db, bz / db
+    cx, cy, cz = cx / dc, cy / dc, cz / dc
+    kx, ky, kz = cross(bx, by, bz, cx, cy, cz)
+    num = np.abs((ax * kx + ay * ky) + az * kz)
+    den = ((1.0 + ((ax * bx + ay * by) + az * bz)) + ((bx * cx + by * cy) + bz * cz)) + ((cx * ax + cy * ay) + cz * az)
     omega = 2.0 * np.arctan2(num, den)
     omega = np.where(omega < 0.0, omega + 2.0 * np.pi, omega)
     return np.where(valid, omega, 0.0).astype(np.float32)
@@ -426,8 +440,105 @@ def get_id_shader():
 # Mesh Topology, Face Adjacency & UV Islands (Decision 79)
 # ---------------------------------------------------------------------------
 
+MAT_OPAQUE, MAT_DECAL_GLASS, MAT_INVISIBLE = 0, 1, 2
+_MAT_CODES = {'OPAQUE': MAT_OPAQUE, 'DECAL_GLASS': MAT_DECAL_GLASS, 'INVISIBLE': MAT_INVISIBLE}
+
+
+def polygon_material_classes(me, mat_slots):
+    """Per polygon, its material class as a code (MAT_OPAQUE, MAT_DECAL_GLASS, MAT_INVISIBLE), classified once per
+    material slot. A polygon whose index has no slot is opaque."""
+    n_polys = len(me.polygons)
+    if n_polys == 0 or not mat_slots:
+        return np.zeros(n_polys, dtype=np.int8)
+    slot_codes = np.array([_MAT_CODES[classify_material(slot.material)] for slot in mat_slots] + [MAT_OPAQUE],
+                          dtype=np.int8)
+    mat_index = np.empty(n_polys, dtype=np.int32)
+    me.polygons.foreach_get('material_index', mat_index)
+    mat_index = np.where((mat_index >= 0) & (mat_index < len(mat_slots)), mat_index, len(mat_slots))
+    return slot_codes[mat_index]
+
+
+def _polygon_loops(me):
+    """Per polygon, its first loop and loop count; per loop, its vertex; and per corner (each polygon's corners in
+    order), its polygon, its loop and the loop of the next corner around the polygon."""
+    n_polys, n_loops = len(me.polygons), len(me.loops)
+    loop_start = np.empty(n_polys, dtype=np.int64)
+    loop_total = np.empty(n_polys, dtype=np.int64)
+    me.polygons.foreach_get('loop_start', loop_start)
+    me.polygons.foreach_get('loop_total', loop_total)
+    loop_vert = np.empty(n_loops, dtype=np.int64)
+    me.loops.foreach_get('vertex_index', loop_vert)
+    loop_poly = np.repeat(np.arange(n_polys, dtype=np.int64), loop_total)
+    position = np.arange(n_loops, dtype=np.int64) - np.repeat(np.cumsum(loop_total) - loop_total, loop_total)
+    loop_index = np.repeat(loop_start, loop_total) + position
+    next_loop = np.repeat(loop_start, loop_total) + (position + 1) % np.repeat(loop_total, loop_total)
+    return loop_start, loop_total, loop_vert, loop_poly, loop_index, next_loop
+
+
+def polygon_areas(me, matrix_world):
+    """Per polygon, its world-space area: the sum of a fan of triangles from its first corner."""
+    n_polys = len(me.polygons)
+    if n_polys == 0:
+        return np.zeros(0, dtype=np.float32)
+    V = np.empty((len(me.vertices), 3), dtype=np.float32)
+    me.vertices.foreach_get('co', V.ravel())
+    M = np.array(matrix_world, dtype=np.float32)
+    V = V @ M[:3, :3].T + M[:3, 3]
+    loop_start, loop_total, loop_vert, _poly, _index, _next = _polygon_loops(me)
+    n_fan = np.maximum(loop_total - 2, 0)
+    tri_poly = np.repeat(np.arange(n_polys), n_fan)
+    j = np.arange(len(tri_poly)) - np.repeat(np.cumsum(n_fan) - n_fan, n_fan) + 1
+    first = loop_start[tri_poly]
+    p0, p1, p2 = V[loop_vert[first]], V[loop_vert[first + j]], V[loop_vert[first + j + 1]]
+    tri_area = 0.5 * np.linalg.norm(np.cross(p1 - p0, p2 - p0), axis=1)
+    return np.bincount(tri_poly, weights=tri_area, minlength=n_polys).astype(np.float32)
+
+
+def connected_labels(n, a, b):
+    """Connected components of n nodes joined by the pairs (a[i], b[i]): per node, the smallest node of its
+    component (hooking each root under the smaller one, then jumping pointers until every pair agrees)."""
+    label = np.arange(n, dtype=np.int64)
+    a = np.asarray(a, dtype=np.int64)
+    b = np.asarray(b, dtype=np.int64)
+    while len(a):
+        la, lb = label[a], label[b]
+        differ = la != lb
+        if not np.any(differ):
+            break
+        a, b, la, lb = a[differ], b[differ], la[differ], lb[differ]
+        np.minimum.at(label, np.maximum(la, lb), np.minimum(la, lb))
+        while True:
+            jumped = label[label]
+            if np.array_equal(jumped, label):
+                break
+            label = jumped
+    return label
+
+
+def _shared_key_pairs(keys, owners, n_owners):
+    """The pairs of different owners that share a key (each key's owners pairwise), both ways round, unique and
+    sorted."""
+    order = np.argsort(keys, kind='stable')
+    k, o = keys[order], owners[order]
+    found = []
+    d = 1
+    while d < len(k):
+        same = k[d:] == k[:-d]
+        if not np.any(same):
+            break
+        a, b = o[:-d][same], o[d:][same]
+        keep = a != b
+        found += [a[keep] * n_owners + b[keep], b[keep] * n_owners + a[keep]]
+        d += 1
+    if not found:
+        return np.zeros((0, 2), dtype=np.int64)
+    codes = np.unique(np.concatenate(found))
+    return np.stack([codes // n_owners, codes % n_owners], axis=1)
+
+
 def extract_mesh_uv_islands(me, uv_name=None):
-    """Extract UV island ID for each polygon of base mesh."""
+    """Extract UV island ID for each polygon of base mesh: polygons sharing an edge with the same UVs at both ends
+    are one island. Islands are numbered by their first polygon."""
     n_polys = len(me.polygons)
     if n_polys == 0:
         return np.zeros(0, dtype=np.int32)
@@ -440,48 +551,23 @@ def extract_mesh_uv_islands(me, uv_name=None):
     if not uv_layer or len(me.loops) == 0:
         return np.zeros(n_polys, dtype=np.int32)
 
-    loop_vert_indices = np.empty(len(me.loops), dtype=np.int32)
-    me.loops.foreach_get('vertex_index', loop_vert_indices)
-
+    _start, _total, loop_vert, loop_poly, loop_index, next_loop = _polygon_loops(me)
     loop_uvs = np.empty((len(me.loops), 2), dtype=np.float32)
     uv_layer.data.foreach_get('uv', loop_uvs.ravel())
     loop_uvs_quant = np.round(loop_uvs, decimals=4)
 
-    keys, corner_ids = np.unique(
-        np.column_stack((loop_vert_indices, loop_uvs_quant)),
+    _keys, corner_ids = np.unique(
+        np.column_stack((loop_vert, loop_uvs_quant)),
         axis=0,
         return_inverse=True
     )
-
-    parent = np.arange(n_polys, dtype=np.int32)
-
-    def find(i):
-        path = []
-        while parent[i] != i:
-            path.append(i)
-            i = parent[i]
-        for p in path:
-            parent[p] = i
-        return i
-
-    poly_edges = {}
-    for p_idx, p in enumerate(me.polygons):
-        p_loops = list(p.loop_indices)
-        k = len(p_loops)
-        for i in range(k):
-            c1 = corner_ids[p_loops[i]]
-            c2 = corner_ids[p_loops[(i + 1) % k]]
-            edge = (c1, c2) if c1 < c2 else (c2, c1)
-            if edge in poly_edges:
-                pi, pj = find(p_idx), find(poly_edges[edge])
-                if pi != pj:
-                    parent[pi] = pj
-            else:
-                poly_edges[edge] = p_idx
-
-    roots = np.array([find(i) for i in range(n_polys)], dtype=np.int32)
+    corner_ids = corner_ids.reshape(-1).astype(np.int64)
+    c1, c2 = corner_ids[loop_index], corner_ids[next_loop]
+    edge_keys = np.minimum(c1, c2) * (int(corner_ids.max()) + 1) + np.maximum(c1, c2)
+    pairs = _shared_key_pairs(edge_keys, loop_poly, n_polys)
+    roots = connected_labels(n_polys, pairs[:, 0], pairs[:, 1])
     _, island_ids = np.unique(roots, return_inverse=True)
-    return island_ids.astype(np.int32)
+    return island_ids.reshape(-1).astype(np.int32)
 
 
 def extract_mesh_face_adjacency(me, mat_slots=None):
@@ -489,75 +575,44 @@ def extract_mesh_face_adjacency(me, mat_slots=None):
 
     Excludes faces of invisible material classes.
     Returns:
-    - adj: list of lists, where adj[i] contains adjacent visible polygon indices
-    - face_to_comp: np.ndarray (n_polys,) int32 component IDs (-1 for invisible)
-    - components: list of np.ndarray of face indices for each connected piece
+    - adj: (indptr, indices), the neighbours of face i are indices[indptr[i]:indptr[i + 1]], ascending
+    - face_to_comp: np.ndarray (n_polys,) int32 component IDs (-1 for invisible), numbered by their first face
+    - components: list of np.ndarray of face indices for each connected piece, ascending
     """
     n_polys = len(me.polygons)
     if n_polys == 0:
-        return [], np.zeros(0, dtype=np.int32), []
+        return (np.zeros(1, dtype=np.int64), np.zeros(0, dtype=np.int64)), np.zeros(0, dtype=np.int32), []
 
-    # Identify invisible polygons
-    is_invis = np.zeros(n_polys, dtype=bool)
-    if mat_slots:
-        for p in me.polygons:
-            mi = p.material_index
-            m = mat_slots[mi].material if mi < len(mat_slots) else None
-            if classify_material(m) == 'INVISIBLE':
-                is_invis[p.index] = True
+    is_invis = polygon_material_classes(me, mat_slots) == MAT_INVISIBLE
+    _start, _total, loop_vert, loop_poly, loop_index, next_loop = _polygon_loops(me)
+    visible = ~is_invis[loop_poly]
+    v0, v1 = loop_vert[loop_index][visible], loop_vert[next_loop][visible]
+    edge_keys = np.minimum(v0, v1) * (len(me.vertices) + 1) + np.maximum(v0, v1)
+    pairs = _shared_key_pairs(edge_keys, loop_poly[visible], n_polys)
+    indptr = np.zeros(n_polys + 1, dtype=np.int64)
+    np.cumsum(np.bincount(pairs[:, 0], minlength=n_polys), out=indptr[1:])
+    adj = (indptr, pairs[:, 1].copy())
 
-    # Map edges to visible polygons
-    edge_to_faces = {}
-    for p in me.polygons:
-        if is_invis[p.index]:
-            continue
-        p_verts = p.vertices
-        nv = len(p_verts)
-        for i in range(nv):
-            v0 = p_verts[i]
-            v1 = p_verts[(i + 1) % nv]
-            e = (v0, v1) if v0 < v1 else (v1, v0)
-            edge_to_faces.setdefault(e, []).append(p.index)
-
-    # Build adjacency list
-    adj = [[] for _ in range(n_polys)]
-    for e, face_list in edge_to_faces.items():
-        if len(face_list) > 1:
-            for i in range(len(face_list)):
-                fi = face_list[i]
-                for j in range(i + 1, len(face_list)):
-                    fj = face_list[j]
-                    adj[fi].append(fj)
-                    adj[fj].append(fi)
-
-    for i in range(n_polys):
-        if adj[i]:
-            adj[i] = list(set(adj[i]))
-
-    # Connected components among visible faces
+    labels = connected_labels(n_polys, pairs[:, 0], pairs[:, 1])
     face_to_comp = np.full(n_polys, -1, dtype=np.int32)
-    components = []
-    comp_id = 0
-
-    for i in range(n_polys):
-        if is_invis[i] or face_to_comp[i] != -1:
-            continue
-        comp = []
-        queue = [i]
-        face_to_comp[i] = comp_id
-        head = 0
-        while head < len(queue):
-            curr = queue[head]
-            head += 1
-            comp.append(curr)
-            for nbr in adj[curr]:
-                if face_to_comp[nbr] == -1 and not is_invis[nbr]:
-                    face_to_comp[nbr] = comp_id
-                    queue.append(nbr)
-        components.append(np.array(comp, dtype=np.int32))
-        comp_id += 1
-
+    vis_faces = np.flatnonzero(~is_invis)
+    roots, comp_of = np.unique(labels[vis_faces], return_inverse=True)
+    face_to_comp[vis_faces] = comp_of.reshape(-1)
+    order = np.argsort(face_to_comp[vis_faces], kind='stable')
+    bounds = np.searchsorted(face_to_comp[vis_faces][order], np.arange(len(roots) + 1))
+    components = [vis_faces[order[bounds[c]:bounds[c + 1]]].astype(np.int32) for c in range(len(roots))]
     return adj, face_to_comp, components
+
+
+def adjacency_csr(adjacency):
+    """Face adjacency as (indptr, indices), from either that or a list of neighbour lists."""
+    if isinstance(adjacency, tuple):
+        return adjacency
+    counts = np.array([len(n) for n in adjacency], dtype=np.int64)
+    indptr = np.zeros(len(adjacency) + 1, dtype=np.int64)
+    np.cumsum(counts, out=indptr[1:])
+    indices = np.array([g for n in adjacency for g in n], dtype=np.int64)
+    return indptr, indices
 
 
 # ---------------------------------------------------------------------------
@@ -592,26 +647,7 @@ def _discover_pieces(view_layer, report=_no_report):
             continue
 
         if mesh_name not in mesh_meta:
-            V_base = np.empty((len(me_orig.vertices), 3), dtype=np.float32)
-            me_orig.vertices.foreach_get('co', V_base.ravel())
-            M_base = np.array(o.matrix_world, dtype=np.float32)
-            V_world_base = V_base @ M_base[:3, :3].T + M_base[:3, 3]
-
-            orig_areas = np.zeros(n_orig_faces, dtype=np.float32)
-            for i, p in enumerate(me_orig.polygons):
-                p_verts = [V_world_base[vi] for vi in p.vertices]
-                if len(p_verts) == 3:
-                    e1 = p_verts[1] - p_verts[0]
-                    e2 = p_verts[2] - p_verts[0]
-                    orig_areas[i] = 0.5 * np.linalg.norm(np.cross(e1, e2))
-                elif len(p_verts) >= 4:
-                    poly_area = 0.0
-                    for vi in range(1, len(p_verts) - 1):
-                        e1 = p_verts[vi] - p_verts[0]
-                        e2 = p_verts[vi + 1] - p_verts[0]
-                        poly_area += 0.5 * np.linalg.norm(np.cross(e1, e2))
-                    orig_areas[i] = poly_area
-
+            orig_areas = polygon_areas(me_orig, o.matrix_world)
             island_ids = extract_mesh_uv_islands(me_orig)
             adj, face_to_comp, components = extract_mesh_face_adjacency(me_orig, o.material_slots)
 
@@ -661,19 +697,40 @@ def extract_scene_geometry(depsgraph, view_layer, mesh_meta):
     return _drain(_extract_pieces(depsgraph, view_layer, mesh_meta))
 
 
+def _mirror_copies(o, eval_me, me_orig, orig_indices):
+    """Per evaluated polygon of an object with Mirror modifiers, which mirror copy it is: 1, 2 and 4 for flipped in
+    x, y and z, summed; a polygon on the mirror plane counts as flipped where it lies on the negative side."""
+    mirror_mods = [m for m in o.modifiers if m.type == 'MIRROR']
+    copy_idx = np.zeros(len(orig_indices), dtype=np.int64)
+    if not mirror_mods or len(orig_indices) == 0:
+        return copy_idx
+    eval_c = np.empty((len(eval_me.polygons), 3), dtype=np.float32)
+    eval_me.polygons.foreach_get('center', eval_c.ravel())
+    orig_c = np.empty((len(me_orig.polygons), 3), dtype=np.float32)
+    me_orig.polygons.foreach_get('center', orig_c.ravel())
+    eval_c = eval_c.astype(np.float64)
+    orig_c = orig_c.astype(np.float64)[orig_indices]
+    for axis, bit in enumerate((1, 2, 4)):
+        if any(m.use_axis[axis] for m in mirror_mods):
+            e, g = eval_c[:, axis], orig_c[:, axis]
+            flip = (e * g < -1e-6) | ((np.abs(g) < 1e-4) & (e < -1e-4))
+            copy_idx += bit * flip
+    return copy_idx
+
+
 def _extract_pieces(depsgraph, view_layer, mesh_meta, report=_no_report):
-    """Extract evaluated scene geometry split into Opaque and Decal batches."""
+    """Extract evaluated scene geometry split into Opaque and Decal batches. Its value: the batches; per mesh, the
+    evaluated face ids with the instance and original face each lands on (ascending ids); the analytical triangles;
+    the next free id; and per object its evaluated-to-original face map and evaluated face count."""
     opaque_pos = []
     opaque_ids = []
     decal_pos = []
     decal_ids = []
 
-    all_tri_v0 = []
-    all_tri_v1 = []
-    all_tri_v2 = []
+    all_tri = []
     all_tri_ids = []
 
-    eval_poly_info = {}
+    eval_index = {}
     object_eval_face_maps = {}
     object_eval_face_counts = {}
     global_id = 1
@@ -697,7 +754,6 @@ def _extract_pieces(depsgraph, view_layer, mesh_meta, report=_no_report):
             continue
 
         meta = mesh_meta[mesh_name]
-        n_orig_faces = meta['n_orig_faces']
 
         eval_obj = o.evaluated_get(depsgraph)
         eval_me = eval_obj.to_mesh()
@@ -721,13 +777,7 @@ def _extract_pieces(depsgraph, view_layer, mesh_meta, report=_no_report):
 
         n_eval_polys = len(eval_me.polygons)
         base_id = global_id
-
-        # Classify each evaluated polygon by material
-        poly_mat_class = []
-        for p in eval_me.polygons:
-            mat_idx = p.material_index
-            mat = o.material_slots[mat_idx].material if mat_idx < len(o.material_slots) else None
-            poly_mat_class.append(classify_material(mat))
+        poly_mat_class = polygon_material_classes(eval_me, o.material_slots)
 
         # Read original face index attribute transferred through modifiers
         eval_attr = eval_me.attributes.get(ORIG_FACE_ATTR_NAME)
@@ -737,55 +787,22 @@ def _extract_pieces(depsgraph, view_layer, mesh_meta, report=_no_report):
         else:
             raise RuntimeError(f"Attribute {ORIG_FACE_ATTR_NAME} missing on evaluated mesh {mesh_name}")
 
-        # Check Mirror modifier axes for copy classification
-        mirror_mods = [m for m in o.modifiers if m.type == 'MIRROR']
-        use_x = any(m.use_axis[0] for m in mirror_mods)
-        use_y = any(m.use_axis[1] for m in mirror_mods)
-        use_z = any(m.use_axis[2] for m in mirror_mods)
+        copy_idx = _mirror_copies(o, eval_me, me_orig, orig_indices)
+        inst_of_copy = np.array([meta['instance_map'].get((o.name, c), 0) for c in range(8)], dtype=np.int64)
+        eval_index.setdefault(mesh_name, []).append((
+            base_id + np.arange(n_eval_polys, dtype=np.int64), inst_of_copy[copy_idx], orig_indices.astype(np.int64)))
 
-        for ep_idx in range(n_eval_polys):
-            eid = base_id + ep_idx
-            orig_idx = int(orig_indices[ep_idx])
-
-            # Classify mirror copy
-            if mirror_mods:
-                eval_c = eval_me.polygons[ep_idx].center
-                orig_c = me_orig.polygons[orig_idx].center
-                flip_x = int(use_x and ((eval_c.x * orig_c.x < -1e-6) or (abs(orig_c.x) < 1e-4 and eval_c.x < -1e-4)))
-                flip_y = int(use_y and ((eval_c.y * orig_c.y < -1e-6) or (abs(orig_c.y) < 1e-4 and eval_c.y < -1e-4)))
-                flip_z = int(use_z and ((eval_c.z * orig_c.z < -1e-6) or (abs(orig_c.z) < 1e-4 and eval_c.z < -1e-4)))
-                copy_idx = flip_x * 1 + flip_y * 2 + flip_z * 4
-            else:
-                copy_idx = 0
-
-            inst_key = (o.name, copy_idx)
-            inst_idx = meta['instance_map'].get(inst_key, 0)
-            eval_poly_info[eid] = (mesh_name, inst_idx, orig_idx)
-
-        # Split loop triangles into batches
-        tri_ids = base_id + poly_indices
-        tri_mclasses = [poly_mat_class[pi] for pi in poly_indices]
-
-        for tri_idx in range(n_lt):
-            mcls = tri_mclasses[tri_idx]
-            if mcls == 'INVISIBLE':
-                continue  # Excluded from all batches and analytical triangles
-
-            tid = tri_ids[tri_idx]
-            tri_p = P_world[tri_idx]
-            tri_id_expanded = np.array([tid, tid, tid], dtype=np.int32)
-
-            all_tri_v0.append(tri_p[0:1])
-            all_tri_v1.append(tri_p[1:2])
-            all_tri_v2.append(tri_p[2:3])
-            all_tri_ids.append(np.array([tid], dtype=np.int32))
-
-            if mcls == 'DECAL_GLASS':
-                decal_pos.append(tri_p)
-                decal_ids.append(tri_id_expanded)
-            else:
-                opaque_pos.append(tri_p)
-                opaque_ids.append(tri_id_expanded)
+        # Split loop triangles into batches; invisible ones are left out of all batches and analytical triangles
+        tri_ids = (base_id + poly_indices).astype(np.int32)
+        tri_class = poly_mat_class[poly_indices]
+        shown = tri_class != MAT_INVISIBLE
+        all_tri.append(P_world[shown])
+        all_tri_ids.append(tri_ids[shown])
+        for cls, pos, ids in ((MAT_DECAL_GLASS, decal_pos, decal_ids), (MAT_OPAQUE, opaque_pos, opaque_ids)):
+            mask = tri_class == cls
+            if np.any(mask):
+                pos.append(P_world[mask].reshape(-1, 3))
+                ids.append(np.repeat(tri_ids[mask], 3))
 
         global_id += n_eval_polys
         object_eval_face_maps[o.name] = orig_indices.copy().astype(np.int32)
@@ -799,14 +816,16 @@ def _extract_pieces(depsgraph, view_layer, mesh_meta, report=_no_report):
         'decal_ids': np.concatenate(decal_ids, axis=0) if decal_ids else np.zeros(0, dtype=np.int32),
     }
 
+    tri = np.concatenate(all_tri, axis=0) if all_tri else np.zeros((0, 3, 3), dtype=np.float32)
     tri_geometry = {
-        'V0': np.concatenate(all_tri_v0, axis=0) if all_tri_v0 else np.zeros((0, 3), dtype=np.float32),
-        'V1': np.concatenate(all_tri_v1, axis=0) if all_tri_v1 else np.zeros((0, 3), dtype=np.float32),
-        'V2': np.concatenate(all_tri_v2, axis=0) if all_tri_v2 else np.zeros((0, 3), dtype=np.float32),
+        'V0': np.ascontiguousarray(tri[:, 0]),
+        'V1': np.ascontiguousarray(tri[:, 1]),
+        'V2': np.ascontiguousarray(tri[:, 2]),
         'tri_ids': np.concatenate(all_tri_ids, axis=0) if all_tri_ids else np.zeros(0, dtype=np.int32),
     }
+    eval_index = {m: tuple(np.concatenate(part) for part in zip(*entries)) for m, entries in eval_index.items()}
 
-    return batches, eval_poly_info, tri_geometry, global_id, object_eval_face_maps, object_eval_face_counts
+    return batches, eval_index, tri_geometry, global_id, object_eval_face_maps, object_eval_face_counts
 
 
 # ---------------------------------------------------------------------------
@@ -886,6 +905,12 @@ class BatchWrapper:
         return self.batch is not None and self.tri_count > 0
 
 
+def _pixel_ids(fb, width, height):
+    """The face id of every pixel the ID shader drew: red, green and blue are its low, middle and high byte."""
+    px = np.asarray(fb.read_color(0, 0, width, height, 4, 0, 'UBYTE'), dtype=np.uint8)
+    return (np.ascontiguousarray(px).reshape(-1).view('<u4') & np.uint32(0xFFFFFF)).astype(np.intp)
+
+
 def render_camera_view(offscreen, shader, batch_opaque, batch_decal, mvp, weight_map, max_id):
     """Draw opaque pass followed by decal pass with depth_mask=False."""
     W, H = offscreen.width, offscreen.height
@@ -906,12 +931,7 @@ def render_camera_view(offscreen, shader, batch_opaque, batch_decal, mvp, weight
 
         if batch_opaque is not None and batch_opaque.has_triangles():
             batch_opaque.draw(shader)
-            px = np.array(fb.read_color(0, 0, W, H, 4, 0, 'UBYTE'), dtype=np.uint8)
-            ids = (
-                px[..., 0].astype(np.int32)
-                | (px[..., 1].astype(np.int32) << 8)
-                | (px[..., 2].astype(np.int32) << 16)
-            ).ravel()
+            ids = _pixel_ids(fb, W, H)
             counts_opaque = np.bincount(ids, weights=weight_flat, minlength=max_id + 1)
 
         # Pass 2: Decal / Glass
@@ -919,12 +939,7 @@ def render_camera_view(offscreen, shader, batch_opaque, batch_decal, mvp, weight
             fb.clear(color=(0, 0, 0, 1))
             gpu.state.depth_mask_set(False)
             batch_decal.draw(shader)
-            px = np.array(fb.read_color(0, 0, W, H, 4, 0, 'UBYTE'), dtype=np.uint8)
-            ids = (
-                px[..., 0].astype(np.int32)
-                | (px[..., 1].astype(np.int32) << 8)
-                | (px[..., 2].astype(np.int32) << 16)
-            ).ravel()
+            ids = _pixel_ids(fb, W, H)
             counts_decal = np.bincount(ids, weights=weight_flat, minlength=max_id + 1)
 
         gpu.state.depth_test_set('NONE')
@@ -936,6 +951,54 @@ def render_camera_view(offscreen, shader, batch_opaque, batch_decal, mvp, weight
 # Per-Face Patches, Hierarchy Fallback & Island Scoring (Decisions 79 & 82)
 # ---------------------------------------------------------------------------
 
+PATCH_CHUNK = 20000  # small faces whose patches grow together; bounds the memory and the time between yields
+
+
+def _ring_neighbours(indptr, indices, faces):
+    """Per face, its neighbours, flattened: (which face of faces, neighbour)."""
+    begin = indptr[faces]
+    lengths = indptr[faces + 1] - begin
+    total = int(np.sum(lengths))
+    if total == 0:
+        return np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64)
+    owner = np.repeat(np.arange(len(faces)), lengths)
+    offsets = np.repeat(begin - (np.cumsum(lengths) - lengths), lengths)
+    return owner, indices[offsets + np.arange(total)]
+
+
+def _grow_patches(seeds, indptr, indices, unocc_t, vis_t, omega_threshold):
+    """For faces too small to measure (seeds), grow each one's patch ring by ring through its neighbours until its
+    largest unoccluded solid angle over the views reaches omega_threshold, or nothing is left to add (decision 79).
+    All seeds grow together. Returns per seed the patch's unoccluded and visible solid angle per view (S, rows)."""
+    n_faces = unocc_t.shape[0]
+    n_seeds = len(seeds)
+    seed_ids = np.arange(n_seeds, dtype=np.int64)
+    patch_unocc = unocc_t[seeds].copy()
+    member_codes = seed_ids * n_faces + seeds
+    members = [member_codes]
+    ring_seed, ring_face = seed_ids, seeds
+    while len(ring_seed):
+        owner, neighbour = _ring_neighbours(indptr, indices, ring_face)
+        codes = np.unique(ring_seed[owner] * n_faces + neighbour)
+        codes = codes[~np.isin(codes, member_codes, assume_unique=True)]
+        if len(codes) == 0:
+            break
+        member_codes = np.concatenate([member_codes, codes])
+        members.append(codes)
+        grow_seed, grow_face = codes // n_faces, codes % n_faces
+        starts = np.flatnonzero(np.r_[True, grow_seed[1:] != grow_seed[:-1]])
+        grown = grow_seed[starts]
+        patch_unocc[grown] += np.add.reduceat(unocc_t[grow_face], starts, axis=0)
+        still = grown[patch_unocc[grown].max(axis=1) < omega_threshold]
+        keep = np.isin(grow_seed, still, assume_unique=False)
+        ring_seed, ring_face = grow_seed[keep], grow_face[keep]
+    codes = np.sort(np.concatenate(members))
+    member_seed, member_face = codes // n_faces, codes % n_faces
+    starts = np.flatnonzero(np.r_[True, member_seed[1:] != member_seed[:-1]])
+    patch_vis = np.add.reduceat(vis_t[member_face], starts, axis=0)
+    return patch_unocc, patch_vis
+
+
 def _lit_shares(meta, m_data, omega_threshold, d_omega_px, pause, report_fraction):
     """Per view, instance and face, the share of the face the view's sample point reaches, 0 to 1 (V, K, F): visible
     over unoccluded solid angle. A face too small to measure from any view takes the share of a patch of its
@@ -944,12 +1007,13 @@ def _lit_shares(meta, m_data, omega_threshold, d_omega_px, pause, report_fractio
     vis_arr = m_data['vis_omega']
     unocc_arr = m_data['unocc_omega']
     n_faces = meta['n_orig_faces']
-    adj = meta['adjacency']
     lit = np.zeros(vis_arr.shape, dtype=np.float32)
     undetermined = np.zeros(n_faces, dtype=bool)
     patch_px = np.zeros(n_faces, dtype=np.float32)
     if vis_arr.shape[0] == 0 or n_faces == 0:
         return lit, undetermined, patch_px
+    n_views, n_inst = vis_arr.shape[:2]
+    rows = n_views * n_inst
 
     face_max = unocc_arr.max(axis=(0, 1))
     direct = face_max >= omega_threshold
@@ -958,40 +1022,36 @@ def _lit_shares(meta, m_data, omega_threshold, d_omega_px, pause, report_fractio
         lit[:, :, direct] = np.where(u > 1e-12, np.clip(vis_arr[:, :, direct] / np.maximum(u, 1e-12), 0.0, 1.0), 0.0)
     patch_px[direct] = face_max[direct] / d_omega_px
 
-    for comp_faces in meta['components']:
-        if len(comp_faces) == 0:
-            continue
-        comp_max = float(np.max(np.sum(unocc_arr[:, :, comp_faces], axis=-1)))
-        if 0.0 < comp_max < omega_threshold:
-            undetermined[comp_faces] = True
-            patch_px[comp_faces] = comp_max / d_omega_px
+    # A piece (connected component) too small to measure as a whole is undetermined
+    components = [comp for comp in meta['components'] if len(comp)]
+    if components:
+        faces = np.concatenate(components)
+        starts = np.cumsum([0] + [len(comp) for comp in components[:-1]])
+        comp_max = np.add.reduceat(unocc_arr.reshape(rows, n_faces)[:, faces], starts, axis=1).max(axis=0)
+        for comp, size in zip(components, comp_max):
+            if 0.0 < size < omega_threshold:
+                undetermined[comp] = True
+                patch_px[comp] = size / d_omega_px
 
     small = np.flatnonzero((face_max > 0.0) & ~direct & ~undetermined)
-    for count, f in enumerate(small):
+    if len(small) == 0:
+        return lit, undetermined, patch_px
+    indptr, indices = adjacency_csr(meta['adjacency'])
+    unocc_t = np.ascontiguousarray(unocc_arr.reshape(rows, n_faces).T, dtype=np.float64)
+    vis_t = np.ascontiguousarray(vis_arr.reshape(rows, n_faces).T, dtype=np.float64)
+    for begin in range(0, len(small), PATCH_CHUNK):
         if pause.due():
-            report_fraction(count / max(len(small), 1))
+            report_fraction(begin / len(small))
             yield
-        patch_set = {int(f)}
-        cur_ring = [int(f)]
-        patch_unocc = unocc_arr[:, :, f].astype(np.float64)
-        while float(np.max(patch_unocc)) < omega_threshold:
-            nxt_ring = []
-            for u in cur_ring:
-                for v in adj[u]:
-                    if v not in patch_set:
-                        patch_set.add(v)
-                        nxt_ring.append(v)
-            if not nxt_ring:
-                break
-            patch_unocc += np.sum(unocc_arr[:, :, nxt_ring], axis=-1)
-            cur_ring = nxt_ring
-        p_max = float(np.max(patch_unocc))
-        patch_px[f] = p_max / d_omega_px
-        if p_max < omega_threshold:
-            undetermined[f] = True
-            continue
-        patch_vis = np.sum(vis_arr[:, :, list(patch_set)], axis=-1)
-        lit[:, :, f] = np.where(patch_unocc > 1e-12, np.clip(patch_vis / np.maximum(patch_unocc, 1e-12), 0.0, 1.0), 0.0)
+        seeds = small[begin:begin + PATCH_CHUNK].astype(np.int64)
+        patch_unocc, patch_vis = _grow_patches(seeds, indptr, indices, unocc_t, vis_t, omega_threshold)
+        p_max = patch_unocc.max(axis=1)
+        patch_px[seeds] = p_max / d_omega_px
+        measured = p_max >= omega_threshold
+        undetermined[seeds[~measured]] = True
+        u, v = patch_unocc[measured], patch_vis[measured]
+        share = np.where(u > 1e-12, np.clip(v / np.maximum(u, 1e-12), 0.0, 1.0), 0.0)
+        lit[:, :, seeds[measured]] = share.T.reshape(n_views, n_inst, -1)
     return lit, undetermined, patch_px
 
 
@@ -1023,15 +1083,18 @@ def limit_steps(values, pairs, ratio):
 
 
 def island_pairs(adjacency, island_index):
-    """The pairs of islands (indices) that share an edge in 3D: a UV seam between them."""
-    found = set()
-    for f, neighbours in enumerate(adjacency):
-        a = island_index[f]
-        for g in neighbours:
-            b = island_index[g]
-            if a != b:
-                found.add((a, b) if a < b else (b, a))
-    return sorted(found)
+    """The pairs of islands (indices) that share an edge in 3D: a UV seam between them, (smaller, larger), sorted."""
+    indptr, indices = adjacency_csr(adjacency)
+    island_index = np.asarray(island_index, dtype=np.int64)
+    if len(indices) == 0:
+        return []
+    rows = np.repeat(np.arange(len(indptr) - 1), np.diff(indptr))
+    a, b = island_index[rows], island_index[indices]
+    lo, hi = np.minimum(a, b), np.maximum(a, b)
+    keep = lo != hi
+    n = int(island_index.max()) + 1
+    codes = np.unique(lo[keep] * n + hi[keep])
+    return [(int(code // n), int(code % n)) for code in codes]
 
 
 def _score_pieces(mesh_meta, mesh_arrays, view_pairs, pair_states, pair_samples, n_states, min_px_threshold=10.0,
@@ -1116,11 +1179,13 @@ def _score_pieces(mesh_meta, mesh_arrays, view_pairs, pair_states, pair_samples,
         n_faces = meta['n_orig_faces']
         mean_lit = np.zeros((n_pairs, n_inst, n_faces), dtype=np.float64)
         if len(view_pairs):
-            np.add.at(mean_lit, view_pairs, lit)
+            for view, pair in enumerate(view_pairs):
+                mean_lit[pair] += lit[view]
         mean_lit /= pair_samples[:, None, None]
         term = m_data['term_w'] / np.maximum(m_data['term_a'], 1e-30)
         light = np.zeros((n_states, n_inst, n_faces), dtype=np.float64)
-        np.add.at(light, pair_states, mean_lit * term)
+        for pair, state in enumerate(pair_states):
+            light[state] += mean_lit[pair] * term[pair]
         raw = srgb_encode(light).max(axis=(0, 1)) if n_states and n_inst else np.zeros(n_faces)
         del mean_lit, lit
 
@@ -1139,7 +1204,7 @@ def _score_pieces(mesh_meta, mesh_arrays, view_pairs, pair_states, pair_samples,
         m_data['face_never_seen'] = (raw <= 0.0) & ~undetermined
         m_data['face_patch_size_px'] = patch_px
         m_data['face_facing'] = np.ones(n_faces, dtype=np.float32)  # the light holds the facing (decision 126)
-        raw_isl[m_name] = (unique_isls, isl_index, isl_raw, island_pairs(meta['adjacency'], isl_index))
+        raw_isl[m_name] = (unique_isls, isl_index, isl_raw, island_pairs(meta['adjacency'], isl_index), order, starts)
         if pause.due():
             report(0.75 * (index + 1) / max(len(names), 1))
             yield
@@ -1158,7 +1223,7 @@ def _score_pieces(mesh_meta, mesh_arrays, view_pairs, pair_states, pair_samples,
     for index, m_name in enumerate(names):
         meta = mesh_meta[m_name]
         m_data = mesh_arrays[m_name]
-        unique_isls, isl_index, isl_raw, pairs = raw_isl[m_name]
+        unique_isls, isl_index, isl_raw, pairs, order, starts = raw_isl[m_name]
         areas = meta['orig_areas'].astype(np.float64)
         undetermined = m_data['face_undetermined']
         # Ambient lifts every island by the same share of the way to 1 (decision 133), then the step limit raises
@@ -1179,7 +1244,7 @@ def _score_pieces(mesh_meta, mesh_arrays, view_pairs, pair_states, pair_samples,
         m_data['island_scores'] = values.astype(np.float32)
         lit_faces = m_data['face_raw'] > 0.0
         for k, isl_id in enumerate(unique_isls):
-            faces = np.flatnonzero(isl_index == k)
+            faces = order[starts[k]:starts[k + 1]]
             total = float(np.sum(areas[faces]))
             seen = float(np.sum(areas[faces][lit_faces[faces]]))
             island_summaries[f"{m_name}__isl_{isl_id}"] = {
@@ -1357,6 +1422,42 @@ def _stale_mesh_names(meta, scene_meshes):
     return stale_meshes
 
 
+class VisibilityArrays:
+    """The arrays of a `.visibility` file, each unzipped once when first read (an npz file unzips again at every
+    read). Reads like the npz file: `data[key]`, `data.get(key, default)`, `key in data`, `data.files`."""
+
+    def __init__(self, npz):
+        self._npz = npz
+        self.files = list(npz.files)
+        self._names = set(self.files)
+        self._arrays = {}
+
+    def __getitem__(self, key):
+        array = self._arrays.get(key)
+        if array is None:
+            array = self._arrays[key] = self._npz[key]
+        return array
+
+    def __contains__(self, key):
+        return key in self._names
+
+    def get(self, key, default=None):
+        return self[key] if key in self._names else default
+
+    def keys(self):
+        return list(self.files)
+
+    def __iter__(self):
+        return iter(self.files)
+
+    def __len__(self):
+        return len(self.files)
+
+    def close(self):
+        """Release the file (the arrays already read stay readable)."""
+        self._npz.close()
+
+
 def load_visibility_file(vis_path, scene_meshes=None, use_cache=True):
     """Load `.visibility` file and verify staleness against scene meshes."""
     global _vis_file_load_count
@@ -1369,7 +1470,7 @@ def load_visibility_file(vis_path, scene_meshes=None, use_cache=True):
             return cached['meta'], cached['data'], _stale_mesh_names(cached['meta'], scene_meshes)
 
     _vis_file_load_count += 1
-    data = np.load(vis_path)
+    data = VisibilityArrays(np.load(vis_path))
     meta = json.loads(str(data['_meta_json'][0]))
     stale_meshes = _stale_mesh_names(meta, scene_meshes)
 
@@ -1396,6 +1497,11 @@ def compute_heatmap_colors(scores, alpha=0.75):
 # ---------------------------------------------------------------------------
 # Step-by-Step Analysis Runner (Supports synchronous & modal execution)
 # ---------------------------------------------------------------------------
+
+def _add_by_slot(target, slots, values):
+    """Add values into target (instances, faces) at the flat slots (instance x faces + face), repeats summed."""
+    target += np.bincount(slots, weights=values, minlength=target.size).reshape(target.shape)
+
 
 class VisibilityAnalyzer:
     """Visibility analysis from the included probe lights, one view (a light's sample point at an animation state) per
@@ -1448,8 +1554,8 @@ class VisibilityAnalyzer:
         self.current_step = 0
         self.current_state_idx = -1
         self.batches = None
-        self.eval_poly_info = None
         self.eval_index = None
+        self.bounds = None
         self.tri_geom = None
         self.max_id = 0
         self.batch_op = None
@@ -1560,20 +1666,11 @@ class VisibilityAnalyzer:
         """Set the animation state, read the scene's geometry and the lights as they are at that frame."""
         self.anim_ctrl.apply_percentage_state(state_val)
         dg = bpy.context.evaluated_depsgraph_get()
-        (self.batches, self.eval_poly_info, self.tri_geom, self.max_id,
+        (self.batches, self.eval_index, self.tri_geom, self.max_id,
          obj_maps, obj_counts) = yield from _extract_pieces(dg, self.view_layer, self.mesh_meta, self._part)
         self.object_eval_face_maps.update(obj_maps)
         self.object_eval_face_counts.update(obj_counts)
-
-        # Per mesh, which evaluated faces land on which instance and face, for adding a view's sums at once
-        grouped = {}
-        for eid, (m_name, inst_idx, orig_idx) in self.eval_poly_info.items():
-            grouped.setdefault(m_name, ([], [], []))
-            entry = grouped[m_name]
-            entry[0].append(eid)
-            entry[1].append(inst_idx)
-            entry[2].append(orig_idx)
-        self.eval_index = {m: tuple(np.array(part, dtype=np.int64) for part in entry) for m, entry in grouped.items()}
+        self.bounds = scene_bounds(self.view_layer) or False  # the same for every view of this state
 
         self.records = {name: light_record(bpy.data.objects.get(name), self.scene, dg) for name in self.lights}
         self.light_log.append({name: None if r is None else {
@@ -1628,7 +1725,9 @@ class VisibilityAnalyzer:
         offsets = light_sample_offsets(view_cfg['n_samples'])
         eye = record['pos'] + offsets[sample] * record['radius']
         n_ids = self.max_id + 1
-        tri_omega = batch_triangle_solid_angle(eye, self.tri_geom['V0'], self.tri_geom['V1'], self.tri_geom['V2'])
+        if 'planar' not in self.tri_geom:
+            self.tri_geom['planar'] = tuple(np.ascontiguousarray(self.tri_geom[k].T) for k in ('V0', 'V1', 'V2'))
+        tri_omega = planar_solid_angle(eye, *self.tri_geom['planar'])
         eval_unocc = np.bincount(self.tri_geom['tri_ids'], weights=tri_omega, minlength=n_ids)
         term = None
         if sample == 0:
@@ -1637,7 +1736,7 @@ class VisibilityAnalyzer:
         self._part(0.1)
         yield
 
-        near_plane, far_plane = compute_scene_extent(self.view_layer, eye)
+        near_plane, far_plane = compute_scene_extent(self.view_layer, eye, self.bounds)
         eval_vis = np.zeros(n_ids, dtype=np.float64)
         reached = cube_faces_in_cone(record)
         faces = [face for face in cubemap_face_matrices(eye, near=near_plane, far=far_plane) if face[0] in reached]
@@ -1651,11 +1750,12 @@ class VisibilityAnalyzer:
         pair = view_cfg['pair']
         for m_name, (eids, ks, fs) in self.eval_index.items():
             arrays = self.mesh_arrays[m_name]
-            np.add.at(arrays['vis_omega'][step], (ks, fs), eval_vis[eids])
-            np.add.at(arrays['unocc_omega'][step], (ks, fs), eval_unocc[eids])
+            slots = ks * arrays['vis_omega'].shape[2] + fs
+            _add_by_slot(arrays['vis_omega'][step], slots, eval_vis[eids])
+            _add_by_slot(arrays['unocc_omega'][step], slots, eval_unocc[eids])
             if term is not None:
-                np.add.at(arrays['term_w'][pair], (ks, fs), term[0][eids])
-                np.add.at(arrays['term_a'][pair], (ks, fs), term[1][eids])
+                _add_by_slot(arrays['term_w'][pair], slots, term[0][eids])
+                _add_by_slot(arrays['term_a'][pair], slots, term[1][eids])
 
         self.current_step += 1
         return info
@@ -1873,26 +1973,8 @@ def get_object_visibility(obj, uv_name=None, vis_path=None, use_cache=True):
     island_ids = extract_mesh_uv_islands(me, uv_name=uv_name)
     unique_isls = np.unique(island_ids)
 
-    # Face areas in object/world space
-    V_base = np.empty((len(me.vertices), 3), dtype=np.float32)
-    me.vertices.foreach_get('co', V_base.ravel())
-    M_base = np.array(obj.matrix_world, dtype=np.float32)
-    V_world_base = V_base @ M_base[:3, :3].T + M_base[:3, 3]
-
-    orig_areas = np.zeros(n_faces, dtype=np.float32)
-    for i, p in enumerate(me.polygons):
-        p_verts = [V_world_base[vi] for vi in p.vertices]
-        if len(p_verts) == 3:
-            e1 = p_verts[1] - p_verts[0]
-            e2 = p_verts[2] - p_verts[0]
-            orig_areas[i] = 0.5 * np.linalg.norm(np.cross(e1, e2))
-        elif len(p_verts) >= 4:
-            poly_area = 0.0
-            for vi in range(1, len(p_verts) - 1):
-                e1 = p_verts[vi] - p_verts[0]
-                e2 = p_verts[vi + 1] - p_verts[0]
-                poly_area += 0.5 * np.linalg.norm(np.cross(e1, e2))
-            orig_areas[i] = poly_area
+    # Face areas in world space
+    orig_areas = polygon_areas(me, obj.matrix_world)
 
     vis_data_ctx = {
         'stale': False,
@@ -1904,10 +1986,10 @@ def get_object_visibility(obj, uv_name=None, vis_path=None, use_cache=True):
     }
 
     island_values = {}
-    for isl_id in unique_isls:
-        isl_mask = (island_ids == isl_id)
-        isl_faces = np.flatnonzero(isl_mask)
-        island_values[int(isl_id)] = score_face_set(obj, isl_faces, vis_data=vis_data_ctx)
+    order = np.argsort(island_ids, kind='stable')
+    bounds = np.searchsorted(island_ids[order], np.arange(len(unique_isls) + 1))
+    for k, isl_id in enumerate(unique_isls):
+        island_values[int(isl_id)] = score_face_set(obj, order[bounds[k]:bounds[k + 1]], vis_data=vis_data_ctx)
 
     obj_meta = meta.get('object_summaries', {}).get(obj.name, {})
     obj_score = obj_meta.get('score', 1.0)

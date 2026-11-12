@@ -741,6 +741,101 @@ def test_wire_display_takeover():
     print("  -> PASS: wire while shown, restored on deselect, save, switch-off and undo; artist's wire kept.")
 
 
+def _reference_uv_islands(T, UV):
+    """The island labelling the one-pass version replaced (UV journal Session 117): rows sorted whole, an edge with
+    the same UVs on exactly two triangles welds, labels spread until they settle."""
+    n = len(T)
+    i0, i1 = np.array([0, 1, 2]), np.array([1, 2, 0])
+    va, vb = T[:, i0].ravel(), T[:, i1].ravel()
+    ua, ub = UV[:, i0].reshape(-1, 2), UV[:, i1].reshape(-1, 2)
+    swap = va > vb
+    va, vb = np.where(swap, vb, va), np.where(swap, va, vb)
+    ua, ub = np.where(swap[:, None], ub, ua), np.where(swap[:, None], ua, ub)
+    keys = np.column_stack([va, vb, np.round(np.hstack([ua, ub]) * 1e6).astype(np.int64)])
+    _, inverse = np.unique(keys, axis=0, return_inverse=True)
+    inverse = inverse.ravel()
+    order = np.argsort(inverse, kind='stable')
+    same = (inverse[order][1:] == inverse[order][:-1]) & (np.bincount(inverse)[inverse[order][1:]] == 2)
+    owner = np.repeat(np.arange(n), 3)[order]
+    pa, pb = owner[:-1][same], owner[1:][same]
+    labels = np.arange(n)
+    while True:
+        low = np.minimum(labels[pa], labels[pb])
+        new = labels.copy()
+        np.minimum.at(new, pa, low)
+        np.minimum.at(new, pb, low)
+        new = new[new]
+        if np.array_equal(new, labels):
+            return np.unique(labels, return_inverse=True)[1].ravel()
+        labels = new
+
+
+def test_one_pass_matches_per_object():
+    """All selected objects measured in one pass give each object what measuring it alone gives: islands (numbered
+    from 0 per object), area distortion, densities and colours; UV islands as the earlier labelling, also on an edge
+    of three triangles; the Visibility values read when that mode first shows the objects."""
+    print("Test: one pass over all objects against each object alone...")
+    # an edge (0, 1) of three triangles: two with the same UVs weld, a third with other UVs stays apart; an edge of
+    # four triangles whose UVs pair up does not weld (more than two on it); a seam; a loose triangle
+    T = np.array([[0, 1, 2], [1, 0, 3], [0, 1, 4], [5, 6, 7], [6, 5, 8], [5, 6, 9], [6, 5, 10], [2, 1, 11],
+                  [12, 13, 14]])
+    UV = np.zeros((len(T), 3, 2))
+    for t, tri in enumerate(T):
+        for c, v in enumerate(tri):
+            UV[t, c] = (v * 0.1, (v % 3) * 0.2)
+    UV[2] += 5.0  # the third triangle on edge (0, 1) has its own UVs
+    UV[7, 0] += 0.5  # a seam on edge (1, 2) between triangles 0 and 7
+    got, ref = uv_heatmap.uv_islands(T, UV), _reference_uv_islands(T, UV)
+    assert got.tolist() == ref.tolist(), (got, ref)
+    assert got[0] == got[1] != got[2] and len({got[3], got[4], got[5], got[6]}) == 4 and got[7] != got[0], got
+
+    clean_scene()
+    objs = [create_plane(f"OnePass_{k}", size=1.0 + k, uv_scale=(1.0 + 0.5 * k, 1.0), uv_shear=0.1 * k,
+                         location=(3.0 * k, 0, 0)) for k in range(3)]
+    mat = bpy.data.materials.new("OnePass_Mat")
+    for obj in objs:
+        obj.data.materials.append(mat)
+        obj.select_set(True)
+    bpy.context.view_layer.objects.active = objs[0]
+    bpy.context.scene.fss_uv_heatmap_mode = 'SHAPE'
+    uv_heatmap.update_heatmap_cache(bpy.context)
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    refs = uv_heatmap._ref_cache
+    for obj in objs:
+        cache = uv_heatmap._cache[obj.name]
+        tris = uv_heatmap._object_triangles(obj, depsgraph)
+        m = uv_heatmap.compute_triangle_measures(tris['P3'], tris['U'])
+        islands = uv_heatmap.uv_islands(tris['tri_verts'], tris['U'])
+        area = uv_heatmap.area_distortion(m['uv_area'], m['area3'], islands, m['valid'] & ~m['is_degenerate'])
+        (low, high), _ = uv_marks.density(obj)
+        rel, _ = uv_heatmap.compute_relative_density(m['raw_density'], m['area3'], m['is_degenerate'],
+                                                     tris['mat_keys'], [(low, high)] * len(tris['P3']), refs)
+        assert np.array_equal(cache.islands, islands), obj.name
+        assert np.array_equal(cache.area, area, equal_nan=True), obj.name
+        assert np.array_equal(cache.rel_density, rel, equal_nan=True), obj.name
+        for view in uv_heatmap.DISTORTION_VIEWS:
+            want = np.repeat(uv_heatmap.distortion_colors(m['shape'], area, m['is_degenerate'], view), 3, axis=0)
+            assert np.array_equal(cache.colors_distortion[view], want.astype(np.float32)), (obj.name, view)
+        want = np.repeat(uv_heatmap.measures_to_colors(m['shape'], rel, m['is_degenerate'], 'DENSITY'), 3, axis=0)
+        assert np.array_equal(cache.colors_density, want.astype(np.float32)), obj.name
+        assert cache.vis_pending, "Distortion mode does not read the visibility values"
+    refs_alone = uv_heatmap.material_references(
+        *(np.concatenate(parts) for parts in zip(*[
+            (mm['raw_density'], mm['area3'], mm['is_degenerate'], t['mat_keys'])
+            for t in (uv_heatmap._object_triangles(o, depsgraph) for o in objs)
+            for mm in (uv_heatmap.compute_triangle_measures(t['P3'], t['U']),)])))
+    assert refs_alone == {k: v for k, v in refs.items() if k in refs_alone}, (refs_alone, refs)
+
+    bpy.context.scene.fss_uv_heatmap_mode = 'VISIBILITY'
+    uv_heatmap.update_heatmap_cache(bpy.context, refresh=False)
+    for obj in objs:
+        cache = uv_heatmap._cache[obj.name]
+        assert not cache.vis_pending and not cache.vis_data['has_data'], obj.name  # read: no file, so no data
+        assert np.allclose(cache.colors_visibility, uv_heatmap.COLOR_NO_DATA), obj.name
+    bpy.context.scene.fss_uv_heatmap_mode = 'SHAPE'
+    print(f"  -> PASS: islands as before (edges of three and four triangles), {len(objs)} objects match alone.")
+
+
 def test_area_distortion_and_islands():
     """Area distortion per face against its island, island labels, colours and the Both chart."""
     print("Test 14: Area distortion, islands, Both / Shear / Area...")
@@ -901,6 +996,7 @@ def run_all_tests():
     test_updates_after_uv_change()
     test_wire_display_takeover()
     test_area_distortion_and_islands()
+    test_one_pass_matches_per_object()
     test_calculated_density()
     print("=" * 70)
     print("ALL UV HEATMAP TESTS PASSED SUCCESSFULLY.")

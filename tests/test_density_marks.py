@@ -319,6 +319,7 @@ def test_panel():
     assert not any(owner == scene and name == uv_marks.OWN_PROP for owner, name, _text in props)
     texts = [kwargs.get('text') for name, _args, kwargs in calls if name == 'operator' and kwargs.get('text')]
     # top to bottom: scene, zone, marked parent, direct parent, object; then the texture set (EMPTY_ROOT_TEST is above the zone)
+    # no texture set row highlighted: the Problems list has only its hint
     assert texts == ['Check', 'FWD', 'DOOR_L', 'PANEL', 'KNOB_MAT_0', 'KNOB', 'Pack All (7)'], texts
     # every icon of a row is a button with a tooltip
     hints = [kwargs['icon'] for name, _args, kwargs in calls if name == 'operator' and kwargs.get('emboss') is False]
