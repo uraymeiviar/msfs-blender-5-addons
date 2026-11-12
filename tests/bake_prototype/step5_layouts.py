@@ -10,7 +10,8 @@ never changed:
   density, then packed; g layout (a) at a quarter of the texture size.
 Packing: shelf, islands 16 px apart (8 px padding each), no rotation, no scaling.
 For each layout: GT = direct bake with gt_samples, DIRECT = direct bake with `samples` (the master's count), COPY =
-master copied (bake_copy.py: own-triangle sampling, surface-aware bilinear read within 30 degrees), all with 8 px
+master copied (bake_copy.py: own-triangle sampling, surface-aware bilinear read within 30 degrees; same_face=1: the
+sampled face's own texels first, Session 11), all with 8 px
 padding (Cycles: Adjacent Faces margin). Errors against GT over pixels
 inside triangles, in a 2 px band along the layout's island borders, in the rest of the islands, and in the padding.
 Writes tests/_work/ao_bake/layouts/<tag>/results.json and PNGs.
@@ -42,6 +43,7 @@ SURF_COS = None if SURF == 'off' else math.cos(math.radians(float(SURF)))
 KMAX = int(args.get('kmax', 16))
 SUFFIX = args.get('suffix', '')
 MSUF = args.get('master_suffix', '')  # reads master_<tag><master_suffix>.npz / .png
+SAME_FACE = args.get('same_face', '0') == '1'  # Session 11: the copy reads the sampled face's own texels first
 OUT = os.path.join(bc.WORK, 'layouts', tag + SUFFIX)
 os.makedirs(OUT, exist_ok=True)
 LOG = os.path.join(OUT, 'log.txt')
@@ -103,7 +105,7 @@ def ring_band(lab, inside, width=2):
 
 
 results = dict(tag=tag, master_suffix=MSUF, target=info['target'], texture=S, master_density=DM, median_density_a=med_a,
-               samples=N, gt_samples=NGT, padding=PAD, copy_mode=MODE, kmax=KMAX, surface_deg=SURF, layouts={})
+               samples=N, gt_samples=NGT, padding=PAD, copy_mode=MODE, kmax=KMAX, surface_deg=SURF, same_face=SAME_FACE, layouts={})
 for key, (uvpx, size, tisl) in layouts.items():
     t0 = time.time()
     crop = bg.crop_box(uvpx, PAD + 4)
@@ -116,7 +118,8 @@ for key, (uvpx, size, tisl) in layouts.items():
     k = 2  # minimum samples per pixel axis; bake_copy raises it per triangle with the footprint
     tc = time.time()
     copy, cinfo, owner_c, steps, count_c = bcp.copy_master(pos, tris, uvpx, tisl, master, crop, k, PAD,
-                                                                 outside_mode=MODE, kmax=KMAX, surface_cos=SURF_COS)
+                                                                 outside_mode=MODE, kmax=KMAX, surface_cos=SURF_COS,
+                                                                 same_face=SAME_FACE)
     t_copy = time.time() - tc
     imgs = {}
     times = {}

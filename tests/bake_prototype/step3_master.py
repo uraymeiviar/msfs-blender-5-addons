@@ -18,6 +18,7 @@ mirror_open=1 (P15, Session 6): open mesh edges get the face itself mirrored as 
 master_<tag><s>.
 fold_split=30 (P18, Session 8): islands are never joined across folds over 30 degrees, and such split edges get the
 face itself mirrored as skirt (bake_unfold.build_master).
+density=4 (Session 11): the master density as a factor over layout (a)'s median (default 2).
 """
 import hashlib
 import json
@@ -55,7 +56,8 @@ dens = bg.densities(pos, tris, uv_px)
 a3 = bg.tri_areas_3d(pos, tris)
 ok = dens > 0
 median_d = bg.weighted_median(dens[ok], a3[ok])
-D = 2.0 * median_d
+DENSITY = float(args.get('density', 2.0))  # Session 11: factor over layout (a)'s median density
+D = DENSITY * median_d
 bc.log(f'{tag}: {info["target"]}, {len(tris)} tris, layout (a) median density {median_d:.1f} px/m at {S}, '
        f'master density {D:.1f} px/m', LOG)
 
@@ -221,8 +223,10 @@ np.savez_compressed(npz, muv=m['muv'], island=m['island'], density=D, W=W, H=H, 
                     meta=json.dumps(dict(schema=1, tag=tag, target=info['target'], mesh_fingerprint=fp,
                                          ao_distance=bc.AO_DISTANCE, samples=N, seeds=[11, 12],
                                          order=ORDER, mirror_open=MIRROR_OPEN, fold_split=FOLD_SPLIT, bake='selected-to-active from the target, extrusion %g m' % EXTRUSION,
-                                         layout_a_median_density=median_d, texture_size=S)))
+                                         layout_a_median_density=median_d, density_factor=DENSITY,
+                                         texture_size=S)))
 res = dict(tag=tag, order=ORDER, target=info['target'], tris=int(len(tris)), median_density_a=median_d, master_density=D,
+           density_factor=DENSITY,
            W=W, H=H, n_islands=m['n_islands'], skirt_pieces=int(ns), border_edges=m['n_border_edges'],
            border_without_neighbour=m['n_border_without_neighbour'], mirrored=m['n_mirrored'],
            fold_split=FOLD_SPLIT, mirrored_fold=m['n_mirrored_fold'], fold_inner_cut_half_edges=m['n_fold_inner_cut'],

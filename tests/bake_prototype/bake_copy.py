@@ -7,6 +7,9 @@ triangle count, as in a direct Cycles bake whose jitter stays on that triangle; 
 pixel's layout island count; 'extend': every point counts, points off the island using the pixel's triangle extended.
 With surface_cos, the bilinear read uses only master texels whose face (the master's face map) has a normal within
 that cosine of the sampled face, so a read near a sharp fold does not take the other face's AO.
+With same_face (Session 11) as well, a read that has texels of the sampled face itself among its four bilinear texels
+uses only those (weights renormalised), so a step in AO across an edge to a face within the angle is not blurred into
+the face; a read without such texels uses the surface texels as before.
 Padding pixels (up to `padding` px from the layout) take the nearest triangle, cross its nearest edge into the 3D
 neighbour face hinged flat into the layout, and read the nearest point of that face from the master. A master point
 outside its island's baked pixels is clamped into its triangle.
@@ -60,7 +63,8 @@ def _hinged_uv(pos, tris, wt, uvpx, t, k, u):
     return out
 
 
-def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode='tri', kmax=16, surface_cos=None):
+def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode='tri', kmax=16, surface_cos=None,
+                same_face=False):
     """Returns (image (h,w) with -1 where nothing was written, info)."""
     x0, y0, w, h = crop
     muv = master['muv']
@@ -102,6 +106,8 @@ def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode=
         ay = fy - ya
         acc = np.zeros(len(mp))
         wsum = np.zeros(len(mp))
+        acc_f = np.zeros(len(mp))
+        wsum_f = np.zeros(len(mp))
         nt = tri_normal[tri_ids]
         for dx, dy, wgt in ((0, 0, (1 - ax) * (1 - ay)), (1, 0, ax * (1 - ay)), (0, 1, (1 - ax) * ay), (1, 1, ax * ay)):
             xc = np.clip(xa + dx, 0, mW - 1)
@@ -111,8 +117,15 @@ def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode=
             wv = np.where(ok, wgt, 0.0)
             acc += wv * M[yc, xc]
             wsum += wv
+            if same_face:
+                wf = np.where(f == tri_ids, wgt, 0.0)
+                acc_f += wf * M[yc, xc]
+                wsum_f += wf
         plain = bg.bilinear(M, mp[:, 0], mp[:, 1])
-        return np.where(wsum > 1e-9, acc / np.maximum(wsum, 1e-30), plain)
+        out_ = np.where(wsum > 1e-9, acc / np.maximum(wsum, 1e-30), plain)
+        if same_face:
+            out_ = np.where(wsum_f > 1e-9, acc_f / np.maximum(wsum_f, 1e-30), out_)
+        return out_
 
     owner_c, count_c = bg.rasterize_ids(uvpx, w, h, 1, x0, y0)
     out = np.full((h, w), -1.0)
