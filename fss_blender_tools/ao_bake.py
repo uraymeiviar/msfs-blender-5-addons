@@ -72,6 +72,13 @@ class FSS_AOBakeSettings(bpy.types.PropertyGroup):
          'Non-AO-Occluder or Invisible objects)'),
         ('SELF', 'Self Only', 'Each object darkens only itself')],
         description="What darkens an object; an object can override it")
+    shared_combine: bpy.props.EnumProperty(name="Shared Meshes", default='AVERAGE', items=[
+        ('AVERAGE', 'Average', "Each copy is baked in its own surroundings and the copies are averaged: a shadow all "
+         "copies have (the panel under a knob) shows fully, one copy's neighbour only faintly"),
+        ('LIGHTEST', 'Most Lit', "Each pixel takes its lightest copy: only shadows every copy has"),
+        ('DARKEST', 'Darkest', "Each pixel takes its darkest copy: every copy's shadows, also one copy's neighbour")],
+        description="How the copies of a mesh shared by several objects are combined into its one AO; a mesh can "
+        "override it")
     run_mode: bpy.props.EnumProperty(name="Run In", default='HIDDEN', items=[
         ('HIDDEN', 'Background', 'The second Blender bakes in the background, without a window'),
         ('VISIBLE', 'Foreground', 'The second Blender opens a window that shows the master being baked')],
@@ -106,6 +113,26 @@ def _set_pose_mode(self, value):
         self.poses = 0
     elif self.poses <= 0:
         self.poses = int(bpy.context.scene.fss_ao_bake.poses)
+
+
+SHARED_COMBINE_NAMES = {'AVERAGE': 'Average', 'LIGHTEST': 'Most Lit', 'DARKEST': 'Darkest'}
+_combine_items = []  # Blender keeps no reference to a dynamic enum's strings: kept here
+
+
+def mesh_combine_items(self, context):
+    """Decision 47: the shared mesh's choices; Default names the scene's."""
+    scene = getattr(context, 'scene', None) if context is not None else None
+    default = SHARED_COMBINE_NAMES.get(scene.fss_ao_bake.shared_combine, 'Average') if scene is not None else 'Average'
+    items = [('DEFAULT', f'Default ({default})', "The scene's Shared Meshes setting", 0)]
+    items += [(k, n, '', i + 1) for i, (k, n) in enumerate(SHARED_COMBINE_NAMES.items())]
+    _combine_items[:] = items
+    return items
+
+
+class FSS_AOMeshSettings(bpy.types.PropertyGroup):
+    """Decision 47: a shared mesh's override, on the mesh (one master for all its copies, so one choice)."""
+    combine: bpy.props.EnumProperty(name="Copies", items=mesh_combine_items, default=0,
+                                    description="How this shared mesh's copies are combined into its one AO")
 
 
 class FSS_AOOccluderRef(bpy.types.PropertyGroup):
@@ -781,6 +808,11 @@ def _draw_object(layout, context):
     box = layout.box()
     box.label(text=f'Object: {obj.name}', icon='OBJECT_DATA')
     o = obj.fss_ao_bake
+    copies = [u for u in context.view_layer.objects if u.data is obj.data]
+    if len(copies) > 1:  # decision 47: one master for the copies; each copy below bakes in its own surroundings
+        row = box.row(align=True)
+        row.label(text=f'Shared mesh, {len(copies)} copies:', icon='LINKED')
+        row.prop(obj.data.fss_ao_shared, 'combine', text='')
     col = box.column(align=True)
     col.prop(o, 'occluders')
     if store.is_mover(obj, scene):
@@ -876,6 +908,7 @@ class FSS_PT_AOBake(bpy.types.Panel):
             col.prop(s, 'threads')
         col.prop(s, 'poses')
         col.prop(s, 'occluders')
+        col.prop(s, 'shared_combine')
         row = col.row(align=True)
         row.label(text='Run In')
         row.prop(s, 'run_mode', expand=True)
@@ -986,7 +1019,8 @@ def _on_load_post(*_args):
         pass
 
 
-CLASSES = (FSS_AOBakeSettings, FSS_AOOccluderRef, FSS_AOObjectSettings, FSS_AOApplySettings, FSS_AOSetRow,
+CLASSES = (FSS_AOBakeSettings, FSS_AOMeshSettings, FSS_AOOccluderRef, FSS_AOObjectSettings, FSS_AOApplySettings,
+           FSS_AOSetRow,
            FSS_AOBakeState, FSS_OT_AOBakeRefresh, FSS_OT_AOBakeStart, FSS_OT_AOBakeCancel, FSS_OT_AOBakeSelect,
            FSS_OT_AOCustomOccluders, FSS_OT_AOApply, FSS_OT_AOApplyCancel, FSS_UL_AOSets, FSS_UL_AOOccluders, FSS_PT_AOBake)
 
@@ -996,6 +1030,7 @@ def register():
         bpy.utils.register_class(cls)
     bpy.types.Scene.fss_ao_bake = bpy.props.PointerProperty(type=FSS_AOBakeSettings)
     bpy.types.Object.fss_ao_bake = bpy.props.PointerProperty(type=FSS_AOObjectSettings)
+    bpy.types.Mesh.fss_ao_shared = bpy.props.PointerProperty(type=FSS_AOMeshSettings)
     bpy.types.Material.fss_ao_apply = bpy.props.PointerProperty(type=FSS_AOApplySettings)
     bpy.types.WindowManager.fss_ao_bake_state = bpy.props.PointerProperty(type=FSS_AOBakeState)
     if _on_load_post not in bpy.app.handlers.load_post:
@@ -1014,6 +1049,7 @@ def unregister():
     clear_preview()
     del bpy.types.WindowManager.fss_ao_bake_state
     del bpy.types.Object.fss_ao_bake
+    del bpy.types.Mesh.fss_ao_shared
     del bpy.types.Material.fss_ao_apply
     del bpy.types.Scene.fss_ao_bake
     for cls in reversed(CLASSES):

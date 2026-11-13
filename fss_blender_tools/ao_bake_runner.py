@@ -412,6 +412,64 @@ def pose_setup(obj, frames, ref_co, shift, posed_occ):
     return mats, meshes
 
 
+def setup_copies(item, first, dg, shift, coll, temps, poses):
+    """Decision 47: the views of a shared mesh. Per copy (its object in the saved file): the target's placement at the
+    copy (relative to the first copy, whose world positions the target has), each occluder of its list once as a
+    temporary object (shared between copies' lists), and per pose of a moving copy its placement and its posed
+    occluders. Fills poses['views'] ({mat, vis: occluder names shown, copy}), ['occ_all'], ['combine']; returns (number
+    of views, notes)."""
+    from mathutils import Matrix
+    to_bake = np.eye(4)
+    to_bake[:3, 3] = -shift
+    from_bake = np.eye(4)
+    from_bake[:3, 3] = shift
+    inv_first = np.linalg.inv(np.array(first.matrix_world, dtype=np.float64))
+    static = {}
+    views, notes = [], []
+    for ci, c in enumerate(item['copies']):
+        o = bpy.data.objects.get(c['object'])
+        if o is None or o.type != 'MESH':
+            notes.append(f"{c['object']}: not in the saved file, left out")
+            continue
+        X = to_bake @ np.array(o.matrix_world, dtype=np.float64) @ inv_first @ from_bake
+        vis, posed_occ = [], []
+        for occ in c['occluders']:
+            oc = bpy.data.objects.get(occ['name'])
+            if oc is None or oc.type != 'MESH':
+                continue  # another copy of the same mesh nearby does occlude (as a temporary object, like any other)
+            if c.get('poses') and occ.get('posed'):
+                posed_occ.append((oc, set(occ['skip_slots'])))
+                continue
+            if oc.name not in static:
+                t = temp_object(coll, 'FSS_AO_OCC', occluder_mesh(oc, dg, set(occ['skip_slots']), shift))
+                temps.append(t)
+                static[oc.name] = t
+            vis.append(static[oc.name].name)
+        got = None
+        if c.get('poses'):
+            ref_co = core.evaluated_triangles(o, dg)['co']
+            got = pose_setup(o, c['poses'], ref_co, shift, posed_occ)
+            if got is None:
+                notes.append(f"{o.name}: its mesh deforms between poses: baked in the current frame")
+        if got is None:
+            for oc, skip in posed_occ:  # at the current frame
+                t = temp_object(coll, 'FSS_AO_OCC', occluder_mesh(oc, dg, skip, shift))
+                temps.append(t)
+                vis.append(t.name)
+            views.append(dict(mat=Matrix(X.tolist()), vis=set(vis), copy=ci))
+        else:
+            mats, meshes = got
+            for p, mes in enumerate(meshes):
+                objs = [temp_object(coll, 'FSS_AO_OCC_POSE', me) for me in mes]
+                temps.extend(objs)
+                M = np.array(mats[p], dtype=np.float64) @ X
+                views.append(dict(mat=Matrix(M.tolist()), vis=set(vis) | {t.name for t in objs}, copy=ci))
+    poses['views'] = views
+    poses['occ_all'] = [t for t in temps if t.name.startswith('FSS_AO_OCC')]
+    poses['combine'] = item.get('combine') or 'AVERAGE'
+    return len(views), notes
+
+
 def bake_item(item, coll):
     """Bakes one master; a generator that yields after each tile (the caller checks Cancel between tiles and, with a
     window, lets it redraw), and returns the result. Closing it between tiles leaves the old master as it was.
@@ -482,7 +540,8 @@ def bake_item(item, coll):
     files = core.MasterWriter(FOLDER, item['key'], W, H, threads=int(SET['threads']))
     finished = False
     done = [0]
-    poses = dict(mats=None, posed=[])  # decision 34: per pose the target's placement and the posed occluders
+    # decision 34: per pose the target's placement and the posed occluders; decision 47: a shared mesh's views
+    poses = dict(mats=None, posed=[], views=None, occ_all=[], combine=None)
 
     def set_pose(p):
         target.matrix_world = poses['mats'][p]
@@ -530,6 +589,74 @@ def bake_item(item, coll):
         counts['skirt_px'] += int(sm.sum())
         baked |= cm | sm
 
+    def set_view(v):
+        view = poses['views'][v]
+        target.matrix_world = view['mat']
+        for o in poses['occ_all']:
+            o.hide_render = o.name not in view['vis']
+
+    def bake_tile_views(i, rect, win, baked, csel, ssel, img, px, off, wh):
+        """Decision 47: a shared mesh's tile in every view (each copy in its own placement and surroundings, in each
+        of its poses); a copy's poses averaged, then the copies combined per pixel (average, lightest or darkest).
+        Each view with its own seed. Yields between views (Cancel)."""
+        x0, y0, w, h = rect
+        views, combine = poses['views'], poses['combine']
+        nv = len(views)
+
+        def fold(tot, cnt, s, c):
+            ok = c > 0
+            v = np.where(ok, s / np.maximum(c, 1), 0.0)
+            if combine == 'LIGHTEST':
+                tot[ok] = np.maximum(tot[ok], v[ok])
+            elif combine == 'DARKEST':
+                tot[ok] = np.minimum(tot[ok], v[ok])
+            else:
+                tot[ok] += v[ok]
+            cnt[ok] += 1
+        init = -1.0 if combine == 'LIGHTEST' else (2.0 if combine == 'DARKEST' else 0.0)
+        ctot, ccn = np.full((h, w), init), np.zeros((h, w), np.int32)
+        stot, scn = np.full((h, w), init), np.zeros((h, w), np.int32)
+        csum = ccnt = ssum = scnt = None
+        for v in range(nv):
+            if csum is None:  # a copy's first view
+                csum, ccnt = np.zeros((h, w)), np.zeros((h, w), np.int32)
+                ssum, scnt = np.zeros((h, w)), np.zeros((h, w), np.int32)
+            state['pose'] = v + 1
+            write_status()
+            set_view(v)
+            mat = views[v]['mat']
+            if len(csel):
+                ct = core_tris[csel]
+                A, dt = _bake_piece(coll, 'FSS_AO_CORE', pos[tris[ct]], cnm[ct], (cuv[csel] - off) / wh, img, px,
+                                    core.tile_seed(core.pose_seed(core.SEEDS[0] + SEED_OFFSET, v), i, n), target, mat)
+                times['core'] += dt
+                ok = A >= 0
+                csum[ok] += A[ok]
+                ccnt[ok] += 1
+            if len(ssel):
+                B, dt = _bake_piece(coll, 'FSS_AO_SKIRT', m['skirt_pos'][ssel], m['skirt_n'][ssel],
+                                    (m['skirt_uv'][ssel] - off) / wh, img, px,
+                                    core.tile_seed(core.pose_seed(core.SEEDS[1] + SEED_OFFSET, v), i, n), target, mat)
+                times['skirt'] += dt
+                ok = B >= 0
+                ssum[ok] += B[ok]
+                scnt[ok] += 1
+            if v == nv - 1 or views[v + 1]['copy'] != views[v]['copy']:  # the copy's last view
+                fold(ctot, ccn, csum, ccnt)
+                fold(stot, scn, ssum, scnt)
+                csum = None
+            if v < nv - 1:
+                yield done[0]
+        cm = ccn > 0
+        val = ctot if combine in ('LIGHTEST', 'DARKEST') else ctot / np.maximum(ccn, 1)
+        win[cm] = core.quantize16(np.clip(val[cm], 0.0, 1.0))
+        counts['core_px'] += int(cm.sum())
+        sm = (~cm) & (scn > 0) & (core.rect_window(m['rects'], x0, y0, w, h) >= 0)
+        sval = stot if combine in ('LIGHTEST', 'DARKEST') else stot / np.maximum(scn, 1)
+        win[sm] = core.quantize16(np.clip(sval[sm], 0.0, 1.0))
+        counts['skirt_px'] += int(sm.sum())
+        baked |= cm | sm
+
     def bake_tile(i, rect, win, baked):
         """Tile i of tile_grid (its place gives its seed) into the band's views of it; yields once it is baked (and
         between its poses)."""
@@ -542,11 +669,14 @@ def bake_item(item, coll):
         wh = np.array([w, h], dtype=np.float64)
         csel = core.tris_in_window(cuv, x0, y0, w, h)
         ssel = core.tris_in_window(m['skirt_uv'], x0, y0, w, h) if ns else np.zeros(0, dtype=np.int64)
-        if (len(csel) or len(ssel)) and poses['mats']:
+        if (len(csel) or len(ssel)) and (poses['mats'] or poses['views']):
             img = new_float_image('FSS_AO_TILE', w, h)
             px = np.empty(w * h * 4, dtype=np.float32)
             try:
-                yield from bake_tile_poses(i, rect, win, baked, csel, ssel, img, px, off, wh)
+                if poses['views']:
+                    yield from bake_tile_views(i, rect, win, baked, csel, ssel, img, px, off, wh)
+                else:
+                    yield from bake_tile_poses(i, rect, win, baked, csel, ssel, img, px, off, wh)
             finally:
                 bpy.data.images.remove(img)
                 del px
@@ -595,7 +725,12 @@ def bake_item(item, coll):
         target = temp_object(coll, 'FSS_AO_TARGET', tme)
         temps.append(target)
         posed_occ = []
-        for occ in item['occluders']:
+        if item.get('copies'):
+            frames = None  # decision 47: each copy has its own poses, as views
+            n_views, notes = setup_copies(item, obj, dg, shift, coll, temps, poses)
+            pose_note = '; '.join(notes)
+            log(f"    {len(item['copies'])} copies ({item['combine'].lower()}), {n_views} views")
+        for occ in ([] if item.get('copies') else item['occluders']):
             o = bpy.data.objects.get(occ['name'])
             if o is None or o.type != 'MESH' or o == obj:
                 continue
@@ -619,7 +754,7 @@ def bake_item(item, coll):
                     poses['posed'].append(objs)
                 log(f"    {len(frames)} poses at frames {', '.join(f'{f:g}' for f in frames)}"
                     + (f'; {len(posed_occ)} occluder(s) posed with it' if posed_occ else ''))
-        state.update(pose=0, n_poses=len(frames) if frames else 1)
+        state.update(pose=0, n_poses=len(poses['views']) if poses['views'] else (len(frames) if frames else 1))
         # paged (decision 33): bands from the top, each composed and written once the band below it is baked
         tp = time.time()
         times['tiles'] = 0.0
@@ -643,8 +778,10 @@ def bake_item(item, coll):
     _ws, peak = core.process_memory()
     if pose_note:
         log(f"  {item['name']}: {pose_note}")
+    n_poses = len(poses['views']) if poses['views'] else (len(frames) if frames else 1)
     entry = dict(key=item['key'], kind=item['kind'], name=item['name'], object=obj.name, mesh=obj.data.name,
-                 poses=frames, n_poses=len(frames) if frames else 1, pose_note=pose_note,
+                 poses=frames, n_poses=n_poses, pose_note=pose_note,
+                 combine=item.get('combine'), copies=len(item['copies']) if item.get('copies') else None,
                  occluder_mode=item.get('occluder_mode', 'SCENE'),
                  mesh_hash=mh, mesh_hash_at_job=item.get('mesh_hash'), surround_hash=item['surround_hash'],
                  density=float(D), W=int(W), H=int(H), tris=int(len(tri_src)), islands=int(m['n_islands']),

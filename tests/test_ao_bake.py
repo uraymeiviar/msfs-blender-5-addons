@@ -26,7 +26,7 @@ Blender). Checked:
 - separate files: greyscale, ORM layout white and copied, another size with each sampling method, neighbour islands
   of different green never mixed (finish line 6);
 - rules: no master for a Skip-AO-Bake object; decal and glass faces not in the master and not written; a
-  Non-AO-Occluder darkens nothing; a mover darkens no other object; a shared mesh gets its self-shading only; faces
+  Non-AO-Occluder darkens nothing; a mover darkens no other object; a shared mesh's copies are baked in their own surroundings (decision 47); faces
   under 4 x counted (finish line 7);
 - the panel draws without writing;
 - the options of Session 25 (decisions 34 to 36): a Non-AO-Occluder in a custom list shades the target, an object not
@@ -419,7 +419,7 @@ def test_bake_all():
     assert mins['A'] < 0.9 and mins['D'] < 0.9 and mins['E'] < 0.9, mins  # O1, S1/S2, K (skip-bake) darken
     assert mins['B'] > 0.999, mins  # O2 Non-AO-Occluder darkens nothing
     assert mins['C'] > 0.999, mins  # M is a mover: it darkens no other object
-    assert mins['S1'] > 0.999, mins  # the shared mesh: self-shading only (a convex cube)
+    assert mins['S1'] < 0.9, mins  # decision 47: the shared mesh's copies in their surroundings (plane D under them)
     assert mins['O1'] < 0.9 and mins['M'] < 0.9, mins  # an own-mesh cube is darkened by its plane
     times = {r['name']: r['bake_s'] for r in status['results']}
     print(f"PASS: test_bake_all ({m} masters in {time.time() - t:.1f} s, m of m; .blend hash, datablocks, matrices, "
@@ -1012,6 +1012,61 @@ def test_custom_occluders():
           f"nothing)")
 
 
+def test_shared_combine():
+    """Decision 47: a shared mesh's copies (S1, S2 on plane D, 2 cm apart) are each baked in their own surroundings and
+    combined per master pixel. Its -X face looks at S2 from S1 and at open space from S2: darkest < average < most lit
+    there; the top stays lit; the plane's contact shadow is in every mode. The mesh's override and a moved copy make
+    the master "surroundings changed"; the master's entry records the combine and the copies."""
+    refresh()
+    item = store._state['items'][store._state['by_object']['S1']]
+    assert item['combine'] == 'AVERAGE' and [c['object'] for c in item['copies']] == ['S1', 'S2'], item
+    assert {'D', 'S2'} <= set(item['copies'][0]['occluders']), item['copies'][0]['occluders']
+    me = bpy.data.meshes['MESH_SHARED_CUBE']
+    s2 = bpy.data.objects['S2']
+
+    def faces():
+        m = core.load_master(str(FOLDER), store._state['by_object']['S1'])
+        ev = core.evaluated_triangles(bpy.data.objects['S1'], bpy.context.evaluated_depsgraph_get(), [])
+        P = ev['co'][ev['tris'][m['tri_src']]]
+        nrm = np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0])
+        nrm /= np.linalg.norm(nrm, axis=1, keepdims=True)
+        img = m['image'] / 65535.0
+        out = {}
+        for key, axis in (('-X', (-1, 0, 0)), ('+X', (1, 0, 0)), ('+Z', (0, 0, 1))):
+            ids = np.nonzero(nrm @ np.array(axis, float) > 0.99)[0]
+            sel = m['filled'] & np.isin(m['face_map'], ids)
+            out[key] = round(float(img[sel].mean()), 4)
+        out['min'] = round(float(img[m['filled']].min()), 4)
+        return out
+    got = {'AVERAGE': faces()}
+    entry, _stem = entry_of('S1')
+    assert entry['combine'] == 'AVERAGE' and entry['copies'] == 2, entry
+    grades = {}
+    for mode in ('LIGHTEST', 'DARKEST'):
+        me.fss_ao_shared.combine = mode
+        refresh()
+        grades[mode] = grade_of('S1')
+        select(['S1'])
+        assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
+        assert grade_of('S1') == 'UP_TO_DATE', grade_of('S1')
+        got[mode] = faces()
+    me.fss_ao_shared.combine = 'DEFAULT'
+    refresh()
+    grades['back to the default'] = grade_of('S1')
+    s2.location.y += 0.01
+    refresh()
+    grades['S2 moved'] = grade_of('S1')
+    s2.location.y -= 0.01
+    select(['S1'])
+    assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
+    assert grade_of('S1') == 'UP_TO_DATE'
+    assert all(g == 'SURROUNDINGS' for g in grades.values()), grades
+    d, a, li = got['DARKEST']['-X'], got['AVERAGE']['-X'], got['LIGHTEST']['-X']
+    assert d < a - 0.02 and a < li - 0.02, got
+    assert all(v['+Z'] > 0.98 and v['min'] < 0.9 for v in got.values()), got
+    print(f"PASS: test_shared_combine (per face mean / minimum: {got}; {grades})")
+
+
 def test_option_staleness():
     """Session 25, finish line 5 (decisions 34, 35): pose count, occluder mode and custom list each make the master
     "surroundings changed", and restoring them "up to date"; never "mesh changed"."""
@@ -1429,6 +1484,7 @@ elif __name__ == '__main__':
     test_panel_selection()
     test_custom_occluders()
     test_option_staleness()
+    test_shared_combine()
     test_run_mode()
     test_object_preview()
     test_poses()  # last: it replaces the scene with the wheel's

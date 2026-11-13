@@ -310,6 +310,16 @@ def occluder_mode(obj, scene):
     return scene.fss_ao_bake.occluders if mode == 'DEFAULT' else mode
 
 
+SHARED_COMBINES = ('AVERAGE', 'LIGHTEST', 'DARKEST')
+
+
+def shared_combine(mesh, scene):
+    """Decision 47: how a shared mesh's copies are combined into its one master: the mesh's override, else the
+    scene's default ('AVERAGE', 'LIGHTEST' (most lit) or 'DARKEST')."""
+    mode = getattr(getattr(mesh, 'fss_ao_shared', None), 'combine', 'DEFAULT') or 'DEFAULT'
+    return scene.fss_ao_bake.shared_combine if mode == 'DEFAULT' else mode
+
+
 def custom_occluders(obj, view_layer):
     """Decision 35: the objects of the object's custom list that can occlude (meshes with faces in the view layer, not
     the object itself), by name, sorted."""
@@ -420,6 +430,34 @@ def refresh(context, relink=True):
     frame = scene.frame_current
     items = {}
     by_object = {}
+
+    def surroundings(obj, mover):
+        """One object's occluders, poses and surroundings key (decisions 15, 34, 35): (mode, occluder names, pose
+        frames or None, pose note, posed occluder names, key)."""
+        mode = occluder_mode(obj, scene)
+        frames, pose_note, posed = None, '', []
+        if mode == 'SELF':
+            occ = []
+        elif mode == 'CUSTOM':
+            occ = custom_occluders(obj, view_layer)
+            posed = [n for n in occ if is_mover(bpy.data.objects[n], scene)]  # posed with the target
+        else:
+            box = boxes[obj.name]
+            occ = sorted(o.name for o in occluders if o != obj and core.box_gap(box, boxes[o.name]) <= distance)
+        if mover and mode != 'SELF':  # Self only: nothing around it moves with it, so one pose is the same
+            frames, pose_note = pose_frames(obj, scene)
+        key = dict(base, matrix=core.matrix_key(obj.matrix_world), mover=mover,
+                   frame=frame if (mover and not frames) else None,
+                   occluders=[(n, core.matrix_key(bpy.data.objects[n].matrix_world),
+                               geo_hash(bpy.data.objects[n]), sorted(tags.get_tags(bpy.data.objects[n])))
+                              for n in occ])
+        # decisions 34 and 35: keys only when not the 0.57 bake (one pose, the scene rule), so its hashes stay
+        if mode != 'SCENE':
+            key['occluder_mode'] = mode
+        if frames:
+            key['poses'] = frames
+            key['posed'] = posed
+        return mode, occ, frames, pose_note, posed, key
     for me, objs in sorted(users.items(), key=lambda kv: kv[0].name):
         objs = sorted(objs, key=lambda o: o.name)
         shared = len(objs) > 1
@@ -439,41 +477,30 @@ def refresh(context, relink=True):
             continue
         mh = geo_hash(first)
         mover = is_mover(first, scene)
-        mode, frames, pose_note, posed = 'SCENE', None, '', []
+        copies, combine = None, None
         if shared:
-            occ = []
-            scale = [round(float(v), 6) for v in first.matrix_world.to_scale()]
-            sur = _hash(dict(base, shared=True, scale=scale))
+            # decision 47: every copy baked in its own surroundings, its own poses; combined per master pixel
+            combine = shared_combine(me, scene)
+            copies, keys = [], []
+            for o in objs:
+                m_o = is_mover(o, scene)
+                c_mode, c_occ, c_frames, c_note, c_posed, c_key = surroundings(o, m_o)
+                copies.append(dict(object=o.name, occluder_mode=c_mode, occluders=c_occ, poses=c_frames,
+                                   pose_note=c_note, posed=c_posed, mover=m_o))
+                keys.append([o.name, c_key])
+            sur = _hash(dict(base, shared=True, combine=combine, copies=keys))
+            mode = 'COPIES'
+            occ = sorted({n for c in copies for n in c['occluders']})
+            frames, pose_note, posed = None, '', []
         else:
-            mode = occluder_mode(first, scene)
-            if mode == 'SELF':
-                occ = []
-            elif mode == 'CUSTOM':
-                occ = custom_occluders(first, view_layer)
-                posed = [n for n in occ if is_mover(bpy.data.objects[n], scene)]  # posed with the target
-            else:
-                box = boxes[first.name]
-                occ = sorted(o.name for o in occluders if o != first and core.box_gap(box, boxes[o.name]) <= distance)
-            if mover and mode != 'SELF':  # Self only: nothing around it moves with it, so one pose is the same
-                frames, pose_note = pose_frames(first, scene)
-            key = dict(base, matrix=core.matrix_key(first.matrix_world), mover=mover,
-                       frame=frame if (mover and not frames) else None,
-                       occluders=[(n, core.matrix_key(bpy.data.objects[n].matrix_world),
-                                   geo_hash(bpy.data.objects[n]), sorted(tags.get_tags(bpy.data.objects[n])))
-                                  for n in occ])
-            # decisions 34 and 35: keys only when not the 0.57 bake (one pose, the scene rule), so its hashes stay
-            if mode != 'SCENE':
-                key['occluder_mode'] = mode
-            if frames:
-                key['poses'] = frames
-                key['posed'] = posed
+            mode, occ, frames, pose_note, posed, key = surroundings(first, mover)
             sur = _hash(key)
         sets = sorted({slots[m].name for m in set_mats})
         tex = {str(m): int(texture_size(slots[m])) for m in set_mats}  # faces of other indices are not baked
         item = dict(key=stem, kind=kind, name=name, object=first.name, mesh=me.name, users=[o.name for o in objs],
                     uv=uv, mesh_hash=mh, surround_hash=sur, occluders=occ, mover=mover, frame=frame,
                     skip_slots=skip, tex_size=tex, sets=sets, grade='MISSING', occluder_mode=mode, poses=frames,
-                    pose_note=pose_note, posed=posed)
+                    pose_note=pose_note, posed=posed, copies=copies, combine=combine)
         items[stem] = item
         for o in objs:
             by_object[o.name] = stem
@@ -568,11 +595,17 @@ def make_job(context, stems, test_delay_s=0.0, tile_px=0, test_tile_delay_s=0.0)
         item = _state['items'][stem]
         posed = set(item.get('posed') or ())
         occ = [dict(name=n, skip_slots=skip_slots(bpy.data.objects[n]), posed=n in posed) for n in item['occluders']]
-        items.append(dict(key=stem, kind=item['kind'], name=item['name'], object=item['object'], uv=item['uv'],
-                          skip_slots=item['skip_slots'], tex_size=item['tex_size'], occluders=occ,
-                          surround_hash=item['surround_hash'], mesh_hash=item['mesh_hash'], mover=item['mover'],
-                          frame=item['frame'], occluder_mode=item.get('occluder_mode', 'SCENE'),
-                          poses=item.get('poses'), pose_note=item.get('pose_note', '')))
+        job_item = dict(key=stem, kind=item['kind'], name=item['name'], object=item['object'], uv=item['uv'],
+                        skip_slots=item['skip_slots'], tex_size=item['tex_size'], occluders=occ,
+                        surround_hash=item['surround_hash'], mesh_hash=item['mesh_hash'], mover=item['mover'],
+                        frame=item['frame'], occluder_mode=item.get('occluder_mode', 'SCENE'),
+                        poses=item.get('poses'), pose_note=item.get('pose_note', ''))
+        if item.get('copies'):  # decision 47: a shared mesh's copies, each with its own surroundings
+            job_item['combine'] = item['combine']
+            job_item['copies'] = [dict(c, occluders=[dict(name=n, skip_slots=skip_slots(bpy.data.objects[n]),
+                                                          posed=n in c['posed']) for n in c['occluders']])
+                                  for c in item['copies']]
+        items.append(job_item)
     job = dict(schema=core.SCHEMA, blend=bpy.data.filepath, folder=folder, settings=settings_dict(scene),
                items=items, created=time.strftime('%Y-%m-%d %H:%M:%S'), test_delay_s=float(test_delay_s),
                tile_px=int(tile_px), test_tile_delay_s=float(test_tile_delay_s))
