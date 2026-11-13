@@ -1167,16 +1167,17 @@ def pose_seed(base, p):
 PREVIEW_FILE = 'preview.bin'
 PREVIEW_MAGIC = b'FSSAOPV1'
 PREVIEW_FILE_MAX = 256
+THUMB_EXT = '.ao.thumb'  # a master's own thumbnail (<stem>.ao.thumb, the preview file's format), shown for the object
 
 
-def write_preview(folder, pv16, seq):
+def write_preview(folder, pv16, seq, name=PREVIEW_FILE):
     """pv16 (h, w) uint16, rows from the bottom; reduced to PREVIEW_FILE_MAX and written atomically. Returns False when
     the file is held by a reader (the next update writes it)."""
     f = max(1, -(-max(pv16.shape) // PREVIEW_FILE_MAX))
     small = pv16[::f, ::f]
     h, w = small.shape
     data = PREVIEW_MAGIC + struct.pack('<4I', w, h, int(seq), 0) + (small >> 8).astype(np.uint8).tobytes()
-    path = os.path.join(folder, PREVIEW_FILE)
+    path = os.path.join(folder, name)
     tmp = path + '.tmp'
     try:
         with open(tmp, 'wb') as fh:
@@ -1187,10 +1188,10 @@ def write_preview(folder, pv16, seq):
         return False
 
 
-def read_preview(folder):
-    """(seq, (h, w) uint8 rows from the bottom) of the preview file, or None."""
+def read_preview(folder, name=PREVIEW_FILE):
+    """(seq, (h, w) uint8 rows from the bottom) of the preview file (or a master's thumbnail), or None."""
     try:
-        with open(os.path.join(folder, PREVIEW_FILE), 'rb') as fh:
+        with open(os.path.join(folder, name), 'rb') as fh:
             data = fh.read()
     except OSError:
         return None
@@ -1453,7 +1454,7 @@ def master_paths(folder, stem):
 def all_master_files(folder, stem):
     """Every file a master can have (for a rename)."""
     base = os.path.join(folder, stem)
-    return [base + ext for ext in ('.ao.jxl', '.ao.png', '.ao.map', '.ao.npz')]
+    return [base + ext for ext in ('.ao.jxl', '.ao.png', '.ao.map', '.ao.npz', THUMB_EXT)]
 
 
 def read_image(path):

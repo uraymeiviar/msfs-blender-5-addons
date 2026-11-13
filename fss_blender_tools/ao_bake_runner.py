@@ -633,6 +633,7 @@ def bake_item(item, coll):
         ts = time.time()
         files.finish(m, tri_src, meta)
         finished = True
+        core.write_preview(FOLDER, preview.pv, 0, name=item['key'] + core.THUMB_EXT)  # the object's preview
         t_save = time.time() - ts
     finally:
         _remove(temps)

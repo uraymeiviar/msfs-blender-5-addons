@@ -208,6 +208,11 @@ leave them out):
   datablock of the file and does not mark it changed. The panel shows object, tile and pose (`Pose p of N`).
 - **Staleness:** a changed pose count (for a mover), occluder mode or custom list makes the master "surroundings
   changed". At one pose with the scene rule the hashes are those of 0.57, so its masters stay up to date.
+- **Previews** (decision 43): the master being baked only while the bake runs (the bake buttons return when it ends);
+  the Object box shows the active object's own master from its thumbnail `<stem>.ao.thumb` (the preview file's
+  format, at most 256 px), written by the runner with the master and renamed with it. A master without one (baked
+  before 0.60.1) gets one made from the master when it is at most 64 Mpx; larger ones say to bake again. A timer
+  (every 0.5 s, not in a background Blender) loads it when the active object or the thumbnail changes.
 - **Apply box** (decision 40): with objects selected the texture-set list shows only their sets (all when nothing is
   selected); the box names the set it is for (the selection's only set, else the highlighted row). Separate File shows
   the file name, resolution and layout; ORM Texture shows the slot's texture, read only. The set's Apply is disabled

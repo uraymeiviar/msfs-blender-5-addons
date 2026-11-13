@@ -235,11 +235,101 @@ def update_preview(folder=None):
     return True
 
 
+# The active object's master, shown in the Object box (decision 43): its thumbnail (<stem>.ao.thumb, written by the
+# runner with the master), loaded into the same preview collection by a timer when the active object or the file
+# changes, never while drawing. A master baked before 0.60.1 has none: one is made from the master when it is at most
+# THUMB_FROM_MASTER_PX, else the box says to bake it again.
+THUMB_FROM_MASTER_PX = 64 << 20
+THUMB_EVERY_S = 0.5
+_thumb = dict(name=None, stem=None, mtime=None, state='', icon_ok=False)
+
+
+def _active_stem(context):
+    """(object name, its master's stem or None) of the active mesh."""
+    obj = _active_mesh(context)
+    if obj is None:
+        return None, None
+    stem = store._state['by_object'].get(obj.name)
+    if stem is None:
+        folder = store.bake_folder()
+        if folder:
+            for key, entry in store.read_index(folder).get('masters', {}).items():
+                if entry.get('object') == obj.name:
+                    stem = key
+                    break
+    return obj.name, stem
+
+
+def _load_thumb(folder, stem):
+    """The thumbnail's (h, w) uint8, rows from the bottom; made from the master when it has none and is small."""
+    path = os.path.join(folder, stem + core.THUMB_EXT)
+    if not os.path.isfile(path):
+        image = core.master_paths(folder, stem)[0]
+        if not os.path.isfile(image):
+            return None, 'missing'
+        entry = store.read_index(folder).get('masters', {}).get(stem, {})
+        if int(entry.get('W') or 0) * int(entry.get('H') or 0) > THUMB_FROM_MASTER_PX or not entry.get('W'):
+            return None, 'large'
+        core.write_preview(folder, core.read_image(image), 0, name=stem + core.THUMB_EXT)
+    got = core.read_preview(folder, stem + core.THUMB_EXT)
+    return (got[1], '') if got else (None, 'missing')
+
+
+def _thumb_timer():
+    """Keeps the Object box's preview on the active object's master (decision 43)."""
+    try:
+        context = bpy.context
+        name, stem = _active_stem(context)
+        folder = store.bake_folder()
+        path = os.path.join(folder, stem + core.THUMB_EXT) if (folder and stem) else ''
+        mtime = os.path.getmtime(path) if path and os.path.isfile(path) else None
+        if (name, stem, mtime) == (_thumb['name'], _thumb['stem'], _thumb['mtime']) and _thumb['state'] != 'retry':
+            return THUMB_EVERY_S
+        _thumb.update(name=name, stem=stem, mtime=mtime, state='', icon_ok=False)
+        if not (folder and stem):
+            _thumb['state'] = 'missing' if name else ''
+            return THUMB_EVERY_S
+        grey, state = _load_thumb(folder, stem)
+        _thumb['state'] = state
+        if grey is not None:
+            _set_icon('object', grey)
+            _thumb.update(icon_ok=True, mtime=os.path.getmtime(path) if os.path.isfile(path) else None)
+        _redraw()
+    except Exception as e:  # a preview is never worth an error in the artist's Blender
+        print('AO Bake: object preview:', e)
+    return THUMB_EVERY_S
+
+
+def _set_icon(key, grey):
+    if _preview['coll'] is None:
+        import bpy.utils.previews
+        _preview['coll'] = bpy.utils.previews.new()
+    coll = _preview['coll']
+    pv = coll[key] if key in coll else coll.new(key)
+    h, w = grey.shape
+    rgba = np.ones((h, w, 4), np.float32)
+    rgba[:, :, :3] = (grey.astype(np.float32) / 255.0)[:, :, None]
+    pv.image_size = (w, h)
+    pv.image_pixels_float.foreach_set(rgba.ravel())
+
+
+def object_icon(context):
+    """The icon id of the active object's master preview and the state ('', 'missing', 'large'), for drawing."""
+    obj = _active_mesh(context)
+    if obj is None or _thumb['name'] != obj.name:
+        return 0, ''
+    coll = _preview['coll']
+    if _thumb['icon_ok'] and coll is not None and 'object' in coll:
+        return coll['object'].icon_id, ''
+    return 0, _thumb['state']
+
+
 def clear_preview():
     if _preview['coll'] is not None:
         import bpy.utils.previews
         bpy.utils.previews.remove(_preview['coll'])
     _preview.update(coll=None, seq=None, updates=0, size=(0, 0), digest='')
+    _thumb.update(name=None, stem=None, mtime=None, state='', icon_ok=False)  # the timer loads the object's again
 
 
 def read_index_on_open():
@@ -605,6 +695,14 @@ def _draw_object(layout, context):
         row.operator('fss.ao_bake_custom_occluders', text='Add Selected', icon='ADD').action = 'ADD'
         row.operator('fss.ao_bake_custom_occluders', text='Remove', icon='REMOVE').action = 'REMOVE'
         row.operator('fss.ao_bake_custom_occluders', text='Clear', icon='X').action = 'CLEAR'
+    icon, state = object_icon(context)  # decision 43: this object's own master
+    if icon:
+        box.label(text="Its master (as baked):")
+        box.template_icon(icon_value=icon, scale=6.0)
+    elif state == 'missing':
+        box.label(text='No master baked yet', icon='INFO')
+    elif state == 'large':
+        box.label(text='No preview of this master: Bake Selected makes one', icon='INFO')
 
 
 def _lines(layout, text, icon='NONE'):
@@ -671,9 +769,10 @@ class FSS_PT_AOBake(bpy.types.Panel):
             left = _fmt_time(st.left) if st.left >= 0 else '-'
             col.label(text=f'Spent {_fmt_time(st.elapsed)}, left {left}')
             col.operator('fss.ao_bake_cancel', icon='CANCEL')
-        icon = preview_icon()
-        if icon:
-            box.template_icon(icon_value=icon, scale=8.0)
+        icon = preview_icon() if st.running else 0  # the master being baked, only while the bake runs
+        if st.running:
+            if icon:
+                box.template_icon(icon_value=icon, scale=8.0)
         else:
             row = box.row(align=True)
             op = row.operator('fss.ao_bake_start', text='Bake Missing and Stale')
@@ -772,11 +871,15 @@ def register():
     bpy.types.WindowManager.fss_ao_bake_state = bpy.props.PointerProperty(type=FSS_AOBakeState)
     if _on_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_on_load_post)
+    if not bpy.app.background and not bpy.app.timers.is_registered(_thumb_timer):
+        bpy.app.timers.register(_thumb_timer, first_interval=1.0, persistent=True)
 
 
 def unregister():
     if _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
+    if bpy.app.timers.is_registered(_thumb_timer):
+        bpy.app.timers.unregister(_thumb_timer)
     if bpy.app.timers.is_registered(_poll_timer):
         bpy.app.timers.unregister(_poll_timer)
     clear_preview()

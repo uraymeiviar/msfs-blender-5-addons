@@ -1065,6 +1065,38 @@ def test_run_mode():
           + ('' if 'VISIBLE' in out else '; visible not run: FSS_AO_BAKE_TEST_VISIBLE is not 1') + ')')
 
 
+def test_object_preview():
+    """Decision 43: after a bake the panel draws the bake buttons again (the live preview only while it runs); the
+    Object box shows the active object's own master: its thumbnail, written with the master, or made from a master
+    baked without one; it follows the active object."""
+    refresh()
+    calls = []
+    bpy.types.FSS_PT_ao_bake.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+    ops = [args[0] for name, args, _kw in calls if name == 'operator']
+    # a preview from test_run_mode (icon ids are 0 in a background Blender: the count of updates), the buttons back
+    assert ao_bake._preview['updates'] and 'fss.ao_bake_start' in ops, (ao_bake._preview['updates'], ops)
+    stem_a = store._state['by_object']['A']
+    thumb = FOLDER / (stem_a + core.THUMB_EXT)
+    assert thumb.is_file(), thumb  # written by the bake of test_run_mode
+    select(['A'])
+    ao_bake._thumb_timer()
+    first = ao_bake._thumb['mtime']
+    assert ao_bake._thumb['icon_ok'] and ao_bake._thumb['name'] == 'A' and ao_bake._thumb['state'] == '', ao_bake._thumb
+    thumb.unlink()  # as a master of 0.60.0: made from the master
+    ao_bake._thumb_timer()
+    assert thumb.is_file() and ao_bake._thumb['icon_ok'], (thumb, ao_bake._thumb)
+    grey = core.read_preview(str(FOLDER), stem_a + core.THUMB_EXT)[1]
+    others = [n for n, s in store._state['by_object'].items() if s != stem_a and (FOLDER / (s + core.THUMB_EXT)).is_file()]
+    if others:
+        select([others[0]])
+        ao_bake._thumb_timer()
+        assert ao_bake._thumb['name'] == others[0] and ao_bake._thumb['stem'] != stem_a
+    select([])
+    print(f"PASS: test_object_preview (bake buttons drawn after a bake; A's thumbnail {grey.shape[1]} x "
+          f"{grey.shape[0]} px from the bake (mtime {first}) and made again from the master; follows the active "
+          f"object{' (' + others[0] + ')' if others else ''})")
+
+
 # ---------------------------------------------------------------------------------------------------------------------
 # Movers in poses (Session 25, decision 34): a wheel half sunk in a slab
 # ---------------------------------------------------------------------------------------------------------------------
@@ -1296,5 +1328,6 @@ elif __name__ == '__main__':
     test_custom_occluders()
     test_option_staleness()
     test_run_mode()
+    test_object_preview()
     test_poses()  # last: it replaces the scene with the wheel's
     print(f'ALL AO BAKE TESTS PASSED ({time.time() - t0:.1f} s)')
