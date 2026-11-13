@@ -796,11 +796,136 @@ def _chunks(n, per):
     return [(a, min(n, a + per)) for a in range(0, n, per)]
 
 
+def soften_context(pos, tris, uvpx, ctx, width, use=None, sharp_deg=None, max_samples=512):
+    """The convex sharp edges for Apply's edge softening (auto-bake journal, decision 46), computed once per master.
+
+    A sharp edge: two faces (welded neighbours) whose normals differ by more than sharp_deg (the copy's surface angle).
+    Convex: each face's far corner lies behind the other face (a lip, a rim; not an inside corner, whose AO is contact
+    shadow). Per triangle of `use` (the texture set's), the width it softens over: `width` (m), at least one target
+    texel of that triangle; and the edges that can lie within it (the candidates). Returns None without such edges."""
+    from mathutils import Vector
+    from mathutils.kdtree import KDTree
+    sharp_cos = math.cos(math.radians(SURFACE_DEG if sharp_deg is None else sharp_deg))
+    wt, tn = ctx['wt'], ctx['tri_normal']
+    T = len(tris)
+    use = np.ones(T, bool) if use is None else np.asarray(use, bool)
+    rows = []
+    for lst in edge_map(wt).values():
+        if len(lst) != 2:
+            continue
+        (t1, i1, j1), (t2, i2, j2) = lst
+        if not (use[t1] or use[t2]) or float(tn[t1] @ tn[t2]) >= sharp_cos:
+            continue
+        a, b = pos[tris[t1, i1]], pos[tris[t1, j1]]
+        f1, f2 = pos[tris[t1, 3 - i1 - j1]], pos[tris[t2, 3 - i2 - j2]]
+        if not ((f2 - a) @ tn[t1] < 0 and (f1 - a) @ tn[t2] < 0):
+            continue  # concave (or folded): left as baked
+        iy, jy = (i2, j2) if wt[t2, i2] == wt[t1, i1] else (j2, i2)
+        rows.append((t1, i1, j1, t2, iy, jy))
+    if not rows:
+        return None
+    E = np.array(rows, dtype=np.int64)
+    A, B = pos[tris[E[:, 0], E[:, 1]]], pos[tris[E[:, 0], E[:, 2]]]
+    d = B - A
+    L = np.linalg.norm(d, axis=1)
+    dn = d / np.maximum(L, 1e-30)[:, None]
+
+    def inward(t, far):
+        v = pos[tris[t, far]] - A
+        v = v - (v * dn).sum(axis=1, keepdims=True) * dn
+        return v / np.maximum(np.linalg.norm(v, axis=1, keepdims=True), 1e-30)
+    mX = inward(E[:, 0], 3 - E[:, 1] - E[:, 2])
+    mY = inward(E[:, 3], 3 - E[:, 4] - E[:, 5])
+    a3 = tri_areas_3d(pos, tris)
+    with np.errstate(all='ignore'):
+        texel = np.sqrt(a3 / np.abs(tri_areas_2d(uvpx)))
+    texel = np.where(use & np.isfinite(texel), texel, 0.0)
+    Wt = np.maximum(float(width), texel)
+    # the candidates: edge points (spaced at most `step`) near each triangle of `use`
+    step = max(float(width), 1e-6)
+    n_s = np.clip(np.ceil(L / step), 1, max_samples).astype(np.int64)
+    half = float((L / n_s).max()) / 2
+    kd = KDTree(int(n_s.sum()))
+    owner = np.repeat(np.arange(len(E)), n_s)
+    k = 0
+    for e in range(len(E)):
+        for s in range(n_s[e]):
+            kd.insert(Vector(A[e] + d[e] * ((s + 0.5) / n_s[e])), k)
+            k += 1
+    kd.balance()
+    cen = pos[tris].mean(axis=1)
+    rad = np.linalg.norm(pos[tris] - cen[:, None], axis=2).max(axis=1)
+    start = np.zeros(T + 1, np.int64)
+    lists = []
+    for t in np.nonzero(use)[0]:
+        found = kd.find_range(Vector(cen[t]), float(rad[t] + Wt[t] + half))
+        if found:
+            ids = np.unique(owner[[i for _co, i, _d in found]])
+            lists.append((t, ids))
+    for t, ids in lists:
+        start[t + 1] = len(ids)
+    start = np.cumsum(start)
+    cand = np.zeros(int(start[-1]), np.int64)
+    for t, ids in lists:
+        cand[start[t]:start[t + 1]] = ids
+    return dict(E=E, A=A, B=B, mX=mX, mY=mY, Wt=Wt, start=start, cand=cand, width=float(width), edges=len(E))
+
+
+def _soften(sc, tri_ids, P3, vals, read, tn, surface_cos, chunk=COPY_CHUNK):
+    """Edge softening of values at points P3 on triangles tri_ids (decision 46): near a convex sharp edge, the darker
+    side ramps up to the brighter side's value at the edge over the triangle's width (smoothstep); the brighter side
+    keeps its value. A point near several edges takes the largest brightening. Returns (values, points brightened)."""
+    start, cand = sc['start'], sc['cand']
+    nc = start[tri_ids + 1] - start[tri_ids]
+    idx = np.nonzero(nc > 0)[0]
+    add = np.zeros(len(vals))
+    if not len(idx):
+        return vals, 0
+    cnt = nc[idx]
+    total = int(cnt.sum())
+    pix = np.repeat(idx, cnt)
+    first = np.repeat(start[tri_ids[idx]] - np.concatenate([[0], np.cumsum(cnt)[:-1]]), cnt)
+    edge = cand[first + np.arange(total)]
+    E, A, B, mX, mY, Wt = sc['E'], sc['A'], sc['B'], sc['mX'], sc['mY'], sc['Wt']
+    for c0, c1 in _chunks(total, chunk):
+        i, e = pix[c0:c1], edge[c0:c1]
+        p, a, b = P3[i], A[e], B[e]
+        ab = b - a
+        u = np.clip(((p - a) * ab).sum(axis=1) / np.maximum((ab * ab).sum(axis=1), 1e-30), 0.0, 1.0)
+        q = a + ab * u[:, None]
+        dist = np.linalg.norm(p - q, axis=1)
+        s = tri_ids[i]
+        cx = (tn[s] * tn[E[e, 0]]).sum(axis=1)
+        cy = (tn[s] * tn[E[e, 3]]).sum(axis=1)
+        on_x = cx >= cy
+        W = Wt[s]
+        m = np.where(on_x[:, None], mX[e], mY[e])
+        keep = (np.maximum(cx, cy) >= surface_cos) & (((p - q) * m).sum(axis=1) >= -1e-3 * W) & (dist < W)
+        if not keep.any():
+            continue
+        i, e, u, dist, on_x, W = i[keep], e[keep], u[keep], dist[keep], on_x[keep], W[keep]
+        n = len(e)
+
+        def at_edge(t_col, ia_col, ib_col):
+            bc = np.zeros((n, 3))
+            bc[np.arange(n), E[e, ia_col]] = 1.0 - u
+            bc[np.arange(n), E[e, ib_col]] += u
+            return read(E[e, t_col], bc)[0]
+        vx, vy = at_edge(0, 1, 2), at_edge(3, 4, 5)
+        delta = np.where(on_x, vy - vx, vx - vy)
+        x = dist / W
+        gain = np.where(delta > 0, delta * (1.0 - x * x * (3.0 - 2.0 * x)), 0.0)
+        np.maximum.at(add, i, gain)
+    done = add > 1e-9
+    return np.where(done, np.minimum(1.0, vals + add), vals), int(done.sum())
+
+
 def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode='tri', kmax=16, surface_cos=None,
-                same_face=False, ctx=None, chunk=COPY_CHUNK):
+                same_face=False, ctx=None, chunk=COPY_CHUNK, soften=None):
     """Returns (image (h,w) with -1 where nothing was written, info). ctx: copy_context (computed here when None);
     chunk: sub-samples per step (the result does not depend on it). master['image'], ['filled'] and ['face_map'] may be
-    arrays or PagedArray views (read a[yi, xi] with index arrays)."""
+    arrays or PagedArray views (read a[yi, xi] with index arrays). soften: a soften_context, or None (decision 46: the
+    darker side of convex sharp edges brightened toward the edge, inside and padding pixels)."""
     x0, y0, w, h = crop
     if ctx is None:
         ctx = copy_context(pos, tris, uvpx, master, k, kmax)
@@ -929,6 +1054,13 @@ def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode=
         cuts = np.flatnonzero(np.diff(key[order])) + 1
         for grp in np.split(at_level[order], cuts):
             n_cl_in += inside_step(int(L), grp)
+    soft_cos = SURFACE_COS if surface_cos is None else surface_cos
+    n_soft = 0
+    if soften is not None and len(jj):
+        own = owner_c[jj, ii]
+        cb = barycentric_many(np.stack([x0 + ii + 0.5, y0 + jj + 0.5], axis=1), uvpx[own])
+        p3 = np.einsum('nk,nkd->nd', cb, pos[tris[own]])
+        out[jj, ii], n_soft = _soften(soften, own, p3, out[jj, ii], read, tri_normal, soft_cos)
     # padding pixels
     grown, steps = dilate_ids(owner_c, padding)
     pj, pi = np.nonzero((owner_c < 0) & (grown >= 0))
@@ -973,11 +1105,18 @@ def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode=
                 vals, c_ = read(np.repeat(src[sel], L * L), bary)
                 n_cl_pad += c_
                 out[pj[sel], pi[sel]] = vals.reshape(len(sel), L * L).mean(axis=1)
+        if soften is not None:
+            # the padding pixel's point: its centre on the face it copies, clamped onto it
+            bc = np.clip(barycentric_many(cen, tri_uv), 0, None)
+            bc /= np.maximum(bc.sum(axis=1, keepdims=True), 1e-30)
+            p3 = np.einsum('nk,nkd->nd', bc, pos[tris[src]])
+            out[pj, pi], n_pad_soft = _soften(soften, src, p3, out[pj, pi], read, tri_normal, soft_cos)
+            n_soft += n_pad_soft
     info = dict(k_min=k, k_max=kmax, k_levels={int(L): int((lvl == L).sum()) for L in np.unique(lvl)},
                 px_at_k_cap=capped_px, footprint_px_median=float(np.median(sig)), footprint_px_max=float(sig.max()),
                 inside_px=int(len(ii)), padding_px=int(len(pi)), clamped_inside_points=n_cl_in,
                 clamped_padding_points=n_cl_pad, padding_without_neighbour=n_no_nb,
-                stacked_px=int((count_c > 1).sum()))
+                stacked_px=int((count_c > 1).sum()), softened_px=n_soft)
     return out, info, owner_c, steps, count_c
 
 

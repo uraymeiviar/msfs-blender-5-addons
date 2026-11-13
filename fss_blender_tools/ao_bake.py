@@ -51,6 +51,15 @@ class FSS_AOBakeSettings(bpy.types.PropertyGroup):
                                    description="CPU threads of the bake")
     padding: bpy.props.IntProperty(name="Padding", default=8, min=0, max=64, subtype='PIXEL',
                                    description="Pixels written around each island by Apply")
+    soften_edges: bpy.props.BoolProperty(
+        name="Soften Sharp Edges", default=False,
+        description="Apply treats convex sharp edges (a lip, a rim; faces more than 30 degrees apart) as slightly "
+        "rounded: the darker side brightens toward the brighter side's value at the edge, the brighter side keeps its "
+        "AO. Inside corners keep their contact shadow. The masters are not changed")
+    soften_width: bpy.props.FloatProperty(
+        name="Width", default=0.0003, min=0.0, soft_max=0.005, unit='LENGTH', precision=2,
+        description="How far from the edge the darker side brightens; at least one texel of the texture, so a narrow "
+        "width still hides the one-texel step")
     output_folder: bpy.props.StringProperty(name="Output Folder", default='', subtype='DIR_PATH',
                                             description="Where Apply writes separate AO files. Empty: a folder "
                                             "<blend name>_ao beside the .blend")
@@ -899,6 +908,11 @@ class FSS_PT_AOBake(bpy.types.Panel):
         box.label(text='Apply', icon='TEXTURE')
         col = box.column(align=True)
         col.prop(s, 'padding')
+        row = col.row(align=True)
+        row.prop(s, 'soften_edges')
+        sub = row.row(align=True)
+        sub.enabled = s.soften_edges
+        sub.prop(s, 'soften_width', text='Width')
         col.prop(s, 'output_folder')
         if not st.refreshed:
             box.label(text='Refresh first', icon='INFO')

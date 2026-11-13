@@ -35,7 +35,9 @@ Blender). Checked:
   finishes, the panel's preview updates during it, the .blend, its datablocks and is_dirty unchanged (finish line 7);
   last, a wheel half sunk in a slab (wheel.blend): at 1 pose its AO per angle sector varies, at 8 poses over a full
   turn at most a quarter of that, Self only no slab shadow, a custom list's mover posed with it (finish line 1).
-  `-- only=test_poses` runs that test alone.
+  `-- only=test_poses` runs that test alone;
+- Soften Sharp Edges (decision 46) on a master built by hand: the darker side of a convex edge follows the smoothstep
+  to the brighter side's value, a concave corner and the brighter side unchanged, a width under a texel raised to one.
 
 To run (the second Blender inherits the CPU cap):
 C:\\Users\\uray\\.claude\\tools\\cpucap\\cpucap.exe 50 G:\\e-jets-e2\\tools\\blender\\blender.exe -b --factory-startup
@@ -1338,6 +1340,69 @@ def test_poses():
           f"{rb['note']})")
 
 
+def test_soften_edges():
+    """Decision 46: Apply's Soften Sharp Edges, on a master built by hand (no bake): a step of three 10 mm faces with
+    UVs continuous across both edges (64 px per face): top (AO 1.0) over a convex lip to a wall (0.4), the wall over a
+    concave corner to a floor (0.6). The wall brightens toward the lip as the smoothstep from 1.0 at the edge over the
+    width; the top, the floor and the wall at the concave corner keep their values; nothing gets darker; a width under
+    a texel is raised to one texel."""
+    s = 0.01
+    quads = [  # (corners in 3D, u offset): top x -1..0 at z 0, wall z 0..-1 at x 0, floor x 0..1 at z -1
+        ([(-s, 0, 0), (0, 0, 0), (0, s, 0), (-s, s, 0)], 16),
+        ([(0, 0, 0), (0, 0, -s), (0, s, -s), (0, s, 0)], 80),
+        ([(0, 0, -s), (s, 0, -s), (s, s, -s), (0, s, -s)], 144)]
+    pos, tris, uv = [], [], []
+    for corners, u0 in quads:
+        b = len(pos)
+        pos += corners
+        uv += [(u0, 16), (u0 + 64, 16), (u0 + 64, 80), (u0, 80)]
+        tris += [(b, b + 1, b + 2), (b, b + 2, b + 3)]
+    pos, tris, uv = np.array(pos, float), np.array(tris), np.array(uv, float)
+    uvpx = uv[tris]
+    P = pos[tris]
+    fn = np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0])
+    fn /= np.linalg.norm(fn, axis=1, keepdims=True)
+    assert fn[0] @ [0, 0, 1] > 0.99 and fn[2] @ [1, 0, 0] > 0.99 and fn[4] @ [0, 0, 1] > 0.99, fn
+    m = core.build_master(pos, tris, np.repeat(fn[:, None], 3, axis=1), 4 * 64 / s, gutter=core.GUTTER,
+                          order=core.ORDER, mirror_open=core.MIRROR_OPEN, fold_split=core.FOLD_SPLIT)
+    owner, _cnt = core.rasterize_ids(m['muv'], m['W'], m['H'])
+    face_ao = np.repeat([1.0, 0.4, 0.6], 2)
+    img = np.where(owner >= 0, np.rint(face_ao[np.maximum(owner, 0)] * 65535), 0).astype(np.uint16)
+    master = dict(m, image=img, filled=owner >= 0, face_map=owner)
+    W, H = 224, 96
+    kw = dict(padding=4, outside_mode='tri', kmax=core.K_MAX, surface_cos=core.SURFACE_COS)
+    ctx = core.copy_context(pos, tris, uvpx, master, core.K_MIN, core.K_MAX)
+    base = core.copy_master(pos, tris, uvpx, np.zeros(len(tris), np.int64), master, (0, 0, W, H), core.K_MIN, ctx=ctx,
+                            **kw)[0]
+    width = 0.001  # 6.4 texels
+    sc = core.soften_context(pos, tris, uvpx, ctx, width)
+    assert sc is not None and sc['edges'] == 1, sc and sc['edges']  # the lip only: the corner is concave
+    soft, info = core.copy_master(pos, tris, uvpx, np.zeros(len(tris), np.int64), master, (0, 0, W, H), core.K_MIN,
+                                  ctx=ctx, soften=sc, **kw)[:2]
+    row = 48
+    written = base >= 0
+    assert (soft[written] >= base[written] - 1e-9).all(), 'softening darkened a pixel'
+    assert np.allclose(soft[row, 16:80], base[row, 16:80]) and np.allclose(base[row, 16:80], 1.0, atol=1e-3)
+    assert np.allclose(soft[row, 144:208], base[row, 144:208]), 'the floor changed'
+    exp = []
+    for i in range(80, 144):
+        d = (i + 0.5 - 80) / 64 * s
+        x = min(d / width, 1.0)
+        exp.append(0.4 + 0.6 * (1 - x * x * (3 - 2 * x)))
+    exp = np.array(exp)
+    err = float(np.abs(soft[row, 80:144] - exp).max())
+    assert err < 2e-3, (err, soft[row, 80:90], exp[:10])
+    assert np.allclose(soft[row, 120:144], 0.4, atol=1e-3), 'the wall at the concave corner changed'
+    # a width under one texel (0.156 mm here) is raised to one texel: only the first column, its centre half way
+    sc1 = core.soften_context(pos, tris, uvpx, ctx, 1e-6)
+    thin = core.copy_master(pos, tris, uvpx, np.zeros(len(tris), np.int64), master, (0, 0, W, H), core.K_MIN, ctx=ctx,
+                            soften=sc1, **kw)[0]
+    assert abs(thin[row, 80] - 0.7) < 2e-3 and abs(thin[row, 81] - 0.4) < 1e-3, thin[row, 78:84]
+    print(f"PASS: test_soften_edges (1 convex edge of 2; wall vs smoothstep max error {err:.5f}; top, floor and the "
+          f"concave corner unchanged; {info['softened_px']} px brightened; at a width under a texel: one column, "
+          f"{thin[row, 80]:.3f})")
+
+
 if __name__ == '__main__' and '--' in sys.argv and any(a.startswith('only=') for a in sys.argv):
     # a quicker run of single tests that build their own scene: -- only=test_poses
     t0 = time.time()
@@ -1358,6 +1423,7 @@ elif __name__ == '__main__':
     test_apply_separate()
     test_rules_apply()
     test_apply_no_datablock()
+    test_soften_edges()
     test_apply_steps()
     test_draw()
     test_panel_selection()

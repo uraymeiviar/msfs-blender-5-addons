@@ -225,6 +225,8 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
     folder = store.bake_folder()
     settings = settings or material.fss_ao_apply
     pad = int(scene.fss_ao_bake.padding)
+    # decision 46: the darker side of convex sharp edges brightened toward the edge (m; at least a texel), or None
+    soften_width = float(scene.fss_ao_bake.soften_width) if scene.fss_ao_bake.soften_edges else None
     row = store._state['sets'].get(material.name)
     if row is None:
         return dict(material=material.name, error='not in the last Refresh (press Refresh)')
@@ -237,7 +239,8 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
     masters = store.read_index(folder).get('masters', {}) if folder else {}
     depsgraph = context.evaluated_depsgraph_get()
     report = dict(material=material.name, path=target.path, size=[W, H], target=target.kind, layout=target.layout,
-                  copied=[], white=[], outdated=[], faces_under_4x=0, faces=0, stacked_px=0, warnings=target.warnings,
+                  copied=[], white=[], outdated=[], faces_under_4x=0, faces=0, stacked_px=0, softened_px=0,
+                  soften_mm=None if soften_width is None else round(soften_width * 1000, 3), warnings=target.warnings,
                   backup=target.backup, per_object=objects is not None, band_rows=int(band_rows))
     pending = []  # padding (flat index, value, step), written once every face of the set is known
     written = np.zeros((H, W), bool)
@@ -304,14 +307,17 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
             uvpx = np.where(sel[:, None, None], uvpx, -1e6)
             tisl = np.zeros(len(tris), np.int64)
             ctx = core.copy_context(pos_w, tris, uvpx, master, core.K_MIN, core.K_MAX)
+            sctx = (core.soften_context(pos_w, tris, uvpx, ctx, soften_width, use=sel)
+                    if soften_width is not None else None)
             for yb, yb1, hy0, hy1 in bands(crop):
                 yield 'master', k + (yb - y0) / max(h, 1), len(stems), item['name']
                 out, info, owner_c, steps, count_c = core.copy_master(
                     pos_w, tris, uvpx, tisl, master, (x0, hy0, w, hy1 - hy0), core.K_MIN, pad, outside_mode='tri',
-                    kmax=core.K_MAX, surface_cos=core.SURFACE_COS, same_face=False, ctx=ctx)
+                    kmax=core.K_MAX, surface_cos=core.SURFACE_COS, same_face=False, ctx=ctx, soften=sctx)
                 r = slice(yb - hy0, yb1 - hy0)
                 out, owner_c, steps = out[r], owner_c[r], steps[r]
                 report['stacked_px'] += int((count_c[r] > 1).sum())
+                report['softened_px'] += int(info.get('softened_px', 0))
                 inside = (owner_c >= 0) & (out >= 0)
                 Q[yb:yb1, x0:x0 + w][inside] = _quantize(out[inside])
                 written[yb:yb1, x0:x0 + w] |= inside
@@ -423,5 +429,7 @@ def report_lines(rep):
         lines.append('  surroundings changed, re-bake recommended: ' + ', '.join(rep['outdated']))
     if rep['faces_under_4x']:
         lines.append(f"  {rep['faces_under_4x']} of {rep['faces']} faces: master under 4 x their density")
+    if rep.get('soften_mm') is not None:
+        lines.append(f"  sharp edges softened ({rep['soften_mm']:g} mm, at least a texel): {rep['softened_px']} px")
     lines += [f'  {w}' for w in rep['warnings']]
     return lines

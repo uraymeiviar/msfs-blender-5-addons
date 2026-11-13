@@ -218,6 +218,14 @@ leave them out):
   the file name, resolution and layout; ORM Texture shows the slot's texture, read only. The set's Apply is disabled
   (and refused) when its target cannot be written: no ORM texture or its file missing, or an output folder that
   cannot be made.
+- **Soften Sharp Edges** (decision 46; scene setting, off by default, Width 0.3 mm): Apply treats convex sharp edges
+  as slightly rounded. `ao_bake_core.soften_context` finds, once per master, the welded edges whose faces differ by
+  more than 30 degrees (the copy's surface angle) and whose far corners each lie behind the other face, and per
+  triangle of the set its width (the setting, at least one target texel of that triangle) and the edges near it (a
+  KD-tree of points along the edges). `_soften` then raises each inside and padding pixel within the width of such an
+  edge, on the darker side only, toward the brighter side's value at the nearest point of the edge (both read from
+  the master), by a smoothstep that is 1 at the edge and 0 at the width; near several edges the largest raise wins.
+  The brighter side, concave corners and the masters are unchanged; the report counts the pixels raised.
 
 ## AO Bake Masters as JPEG XL
 
