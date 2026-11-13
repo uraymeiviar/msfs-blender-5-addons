@@ -28,7 +28,14 @@ Blender). Checked:
 - rules: no master for a Skip-AO-Bake object; decal and glass faces not in the master and not written; a
   Non-AO-Occluder darkens nothing; a mover darkens no other object; a shared mesh gets its self-shading only; faces
   under 4 x counted (finish line 7);
-- the panel draws without writing.
+- the panel draws without writing;
+- the options of Session 25 (decisions 34 to 36): a Non-AO-Occluder in a custom list shades the target, an object not
+  in the list does not (finish line 4); the pose count, occluder mode and custom list each give "surroundings changed"
+  and back "up to date" (finish line 5); the run mode Hidden (and Visible with FSS_AO_BAKE_TEST_VISIBLE=1): the bake
+  finishes, the panel's preview updates during it, the .blend, its datablocks and is_dirty unchanged (finish line 7);
+  last, a wheel half sunk in a slab (wheel.blend): at 1 pose its AO per angle sector varies, at 8 poses over a full
+  turn at most a quarter of that, Self only no slab shadow, a custom list's mover posed with it (finish line 1).
+  `-- only=test_poses` runs that test alone.
 
 To run (the second Blender inherits the CPU cap):
 C:\\Users\\uray\\.claude\\tools\\cpucap\\cpucap.exe 50 G:\\e-jets-e2\\tools\\blender\\blender.exe -b --factory-startup
@@ -36,6 +43,7 @@ C:\\Users\\uray\\.claude\\tools\\cpucap\\cpucap.exe 50 G:\\e-jets-e2\\tools\\ble
 """
 
 import hashlib
+import math
 import os
 import shutil
 import sys
@@ -877,7 +885,328 @@ def test_apply_no_datablock():
           'and material slots unchanged)')
 
 
-if __name__ == '__main__':
+def wait_bake(poll=0.1, limit=300):
+    """While the second Blender runs: the panel's progress timer step by step (a background Blender runs no timers);
+    returns the states seen: (preview seq, preview digest, tile, pose, n_poses)."""
+    proc = store._run['proc']
+    seen = []
+    t = time.time()
+    while proc.poll() is None and time.time() - t < limit:
+        ao_bake._poll_timer()
+        st = bpy.context.window_manager.fss_ao_bake_state
+        p = ao_bake._preview
+        seen.append((p['seq'], p['digest'], st.tile, st.pose, st.n_poses))
+        time.sleep(poll)
+    proc.wait(timeout=60)
+    ao_bake._poll_timer()  # the last step: the bake ended, finish_bake runs
+    return seen
+
+
+def test_custom_occluders():
+    """Session 25, finish line 4 (decision 35): an object outside the scene rule (Non-AO-Occluder) in a custom list
+    shades the target; an object not in the list does not."""
+    refresh()
+    b, f, o1, o2 = (bpy.data.objects[n] for n in ('B', 'F', 'O1', 'O2'))
+    assert grade_of('B') == 'UP_TO_DATE' and float(master_image('B')[1].min()) > 0.999
+    b.fss_ao_bake.occluders = 'CUSTOM'
+    b.fss_ao_bake.custom.add().object = o2  # tagged Non-AO-Occluder: no occluder under the scene rule
+    f.fss_ao_bake.occluders = 'CUSTOM'
+    f.fss_ao_bake.custom.add().object = o2  # 5 m away: F's own cube O6 is not in the list
+    refresh()
+    assert grade_of('B') == grade_of('F') == 'SURROUNDINGS', (grade_of('B'), grade_of('F'))
+    assert store._state['items'][store._state['by_object']['B']]['occluders'] == ['O2']
+    select(['B', 'F'])
+    assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
+    assert grade_of('B') == grade_of('F') == 'UP_TO_DATE'
+    b_min, f_min = float(master_image('B')[1].min()), float(master_image('F')[1].min())
+    assert b_min < 0.9, b_min
+    assert f_min > 0.999, f_min
+    print(f"PASS: test_custom_occluders (B with O2, tagged Non-AO-Occluder, in its list: minimum {b_min:.3f} (scene "
+          f"rule: 1.0); F with only O2 (5 m away) in its list: minimum {f_min:.3f}, its cube O6 not in the list shades "
+          f"nothing)")
+
+
+def test_option_staleness():
+    """Session 25, finish line 5 (decisions 34, 35): pose count, occluder mode and custom list each make the master
+    "surroundings changed", and restoring them "up to date"; never "mesh changed"."""
+    scene = bpy.context.scene
+    b, m, o1 = bpy.data.objects['B'], bpy.data.objects['M'], bpy.data.objects['O1']
+    refresh()
+    assert grade_of('B') == grade_of('M') == grade_of('A') == 'UP_TO_DATE'
+    results = {}
+
+    def check(label, name, expect):
+        refresh()
+        got = grade_of(name)
+        results[label] = got
+        assert got == expect, (label, name, got, expect)
+
+    m.fss_ao_bake.poses = 3
+    check("M's pose count 3", 'M', 'SURROUNDINGS')
+    m.fss_ao_bake.poses = 0
+    check("M's pose count back to the scene's", 'M', 'UP_TO_DATE')
+    scene.fss_ao_bake.poses = 4
+    check("the scene's pose count 4 (M)", 'M', 'SURROUNDINGS')
+    check("the scene's pose count 4 (A, not a mover)", 'A', 'UP_TO_DATE')
+    scene.fss_ao_bake.poses = 5
+    check("the scene's pose count back", 'M', 'UP_TO_DATE')
+    a = bpy.data.objects['A']
+    a.fss_ao_bake.occluders = 'SELF'
+    check("A's occluders Self only", 'A', 'SURROUNDINGS')
+    a.fss_ao_bake.occluders = 'SCENE'
+    check("A's occluders Scene rule (the default's value)", 'A', 'UP_TO_DATE')
+    a.fss_ao_bake.occluders = 'DEFAULT'
+    scene.fss_ao_bake.occluders = 'SELF'
+    check("the scene's occluders Self only (A)", 'A', 'SURROUNDINGS')
+    scene.fss_ao_bake.occluders = 'SCENE'
+    check("the scene's occluders back", 'A', 'UP_TO_DATE')
+    b.fss_ao_bake.custom.add().object = o1
+    check("O1 added to B's list", 'B', 'SURROUNDINGS')
+    b.fss_ao_bake.custom.remove(len(b.fss_ao_bake.custom) - 1)
+    check("O1 removed", 'B', 'UP_TO_DATE')
+    b.fss_ao_bake.occluders = 'SELF'
+    check("B's occluders Self only", 'B', 'SURROUNDINGS')
+    b.fss_ao_bake.occluders = 'CUSTOM'
+    check("B's occluders Custom again", 'B', 'UP_TO_DATE')
+    # the operators of the panel's list
+    select(['B', 'O1', 'O2'])
+    bpy.context.view_layer.objects.active = b
+    n = len(b.fss_ao_bake.custom)
+    assert bpy.ops.fss.ao_bake_custom_occluders(action='ADD') == {'FINISHED'}
+    assert sorted(r.object.name for r in b.fss_ao_bake.custom) == ['O1', 'O2'], [r.object.name for r in b.fss_ao_bake.custom]
+    check("Add Selected (O1)", 'B', 'SURROUNDINGS')
+    b.fss_ao_bake.custom_index = [r.object.name for r in b.fss_ao_bake.custom].index('O1')
+    assert bpy.ops.fss.ao_bake_custom_occluders(action='REMOVE') == {'FINISHED'} and len(b.fss_ao_bake.custom) == n
+    check("Remove (O1)", 'B', 'UP_TO_DATE')
+    assert bpy.ops.fss.ao_bake_custom_occluders(action='CLEAR') == {'FINISHED'} and not len(b.fss_ao_bake.custom)
+    check("Clear", 'B', 'SURROUNDINGS')
+    b.fss_ao_bake.custom.add().object = bpy.data.objects['O2']
+    check("O2 back", 'B', 'UP_TO_DATE')
+    print(f'PASS: test_option_staleness ({results})')
+
+
+def test_run_mode():
+    """Session 25, finish line 7 (decision 36): the bake hidden (and, with FSS_AO_BAKE_TEST_VISIBLE=1, visible) both
+    finish; in both the panel's preview updates during a bake of several tiles (read at least twice while it runs); the
+    .blend's hash, the datablock counts and is_dirty unchanged by the bake."""
+    scene = bpy.context.scene
+    modes = ['HIDDEN'] + (['VISIBLE'] if os.environ.get('FSS_AO_BAKE_TEST_VISIBLE') == '1' else [])
+    out = {}
+    for mode in modes:
+        scene.fss_ao_bake.run_mode = mode
+        refresh()
+        select(['A'])
+        before_hash, before_counts, before_dirty = file_hash(BLEND), datablocks(), bpy.data.is_dirty
+        res = bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=False, wait=False, tile=64, test_tile_delay=0.3)
+        assert res == {'FINISHED'}
+        hidden_args = '-b' in store._run['proc'].args
+        assert hidden_args == (mode == 'HIDDEN'), (mode, store._run['proc'].args)
+        seen = wait_bake()
+        status = store.read_status(str(FOLDER))
+        assert status['state'] == 'done' and status['results'][0]['status'] == 'baked', status
+        during = sorted({(s[0], s[1]) for s in seen if s[0] is not None})
+        assert len(during) >= 2 and len({d for _s, d in during}) >= 2, during
+        assert file_hash(BLEND) == before_hash and datablocks() == before_counts and bpy.data.is_dirty == before_dirty
+        pv = ao_bake._preview
+        assert pv['size'][0] > 0 and ao_bake.preview_icon() is not None
+        out[mode] = dict(tiles=status['results'][0]['n_tiles'], preview_states_during=len(during),
+                         updates=pv['updates'], size=pv['size'])
+    scene.fss_ao_bake.run_mode = 'HIDDEN'
+    print(f"PASS: test_run_mode ({out}; .blend hash, datablock counts and is_dirty unchanged"
+          + ('' if 'VISIBLE' in out else '; visible not run: FSS_AO_BAKE_TEST_VISIBLE is not 1') + ')')
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Movers in poses (Session 25, decision 34): a wheel half sunk in a slab
+# ---------------------------------------------------------------------------------------------------------------------
+
+WHEEL_R, WHEEL_T = 0.03, 0.012
+
+
+def build_wheel_scene():
+    """HUB (an empty) turns about X from 0 to 315 degrees over frames 0 to 100 (linear), so 8 poses are 45 degrees
+    apart over a full turn; the wheel W (a cylinder about X, radius 3 cm) is its child, centred at the origin, half of
+    it inside SLAB (a static box below z = 0); PEG, a small box also a child of HUB, sits on W's +X face at 90 degrees.
+    The current frame is 37."""
+    for obj in list(bpy.data.objects):
+        bpy.data.objects.remove(obj)
+    scene = bpy.context.scene
+    prefs = bpy.context.preferences.edit
+    old_interp = prefs.keyframe_new_interpolation_type
+    prefs.keyframe_new_interpolation_type = 'LINEAR'
+    hub = link(bpy.data.objects.new('HUB', None))
+    scene.frame_set(0)
+    hub.rotation_euler = (0.0, 0.0, 0.0)
+    hub.keyframe_insert('rotation_euler', index=0, frame=0)
+    hub.rotation_euler = (math.radians(315.0), 0.0, 0.0)
+    hub.keyframe_insert('rotation_euler', index=0, frame=100)
+    prefs.keyframe_new_interpolation_type = old_interp
+    act = hub.animation_data.action
+    for layer in act.layers:  # linear, so that frames spread evenly give angles spread evenly
+        for strip in layer.strips:
+            for bag in strip.channelbags:
+                for fc in bag.fcurves:
+                    for kp in fc.keyframe_points:
+                        kp.interpolation = 'LINEAR'
+    seg = 48
+    verts = []
+    for side in (1, -1):
+        for k in range(seg):
+            a = 2 * math.pi * k / seg
+            verts.append((side * WHEEL_T / 2, WHEEL_R * math.cos(a), WHEEL_R * math.sin(a)))
+    faces = [tuple(range(seg)), tuple(range(2 * seg - 1, seg - 1, -1))]
+    faces += [(k, seg + k, seg + (k + 1) % seg, (k + 1) % seg) for k in range(seg)]
+    me = bpy.data.meshes.new('W')
+    me.from_pydata(verts, [], faces)
+    me.materials.append(material('SET_W', 512))
+    uv = me.uv_layers.new(name='UVMap')
+    for poly in me.polygons:
+        lis = list(poly.loop_indices)
+        if poly.index < 2:
+            u0 = 0.05 if poly.index == 0 else 0.55
+            for li in lis:
+                _x, y, z = verts[me.loops[li].vertex_index]
+                uv.data[li].uv = (u0 + 0.2 + 0.2 * y / WHEEL_R, 0.25 + 0.2 * z / WHEEL_R)
+        else:
+            for li in lis:
+                vi = me.loops[li].vertex_index
+                k = vi % seg
+                if k == 0 and poly.index - 2 == seg - 1:
+                    k = seg
+                uv.data[li].uv = (0.05 + 0.9 * k / seg, 0.6 + (0.06 if vi < seg else 0.0))
+    w = link(bpy.data.objects.new('W', me))
+    w.parent = hub
+    slab = bpy.data.meshes.new('SLAB')
+    sv = [(x, y, z) for z in (-0.1, 0.0) for y in (-0.1, 0.1) for x in (-0.05, 0.05)]
+    slab.from_pydata(sv, [], [(0, 2, 3, 1), (4, 5, 7, 6), (0, 1, 5, 4), (2, 6, 7, 3), (0, 4, 6, 2), (1, 3, 7, 5)])
+    link(bpy.data.objects.new('SLAB', slab))
+    peg = bpy.data.meshes.new('PEG')
+    x0, x1, y0, y1, z0, z1 = WHEEL_T / 2, WHEEL_T / 2 + 0.01, -0.004, 0.004, 0.017, 0.026
+    pv = [(x, y, z) for z in (z0, z1) for y in (y0, y1) for x in (x0, x1)]
+    peg.from_pydata(pv, [], [(0, 2, 3, 1), (4, 5, 7, 6), (0, 1, 5, 4), (2, 6, 7, 3), (0, 4, 6, 2), (1, 3, 7, 5)])
+    link(bpy.data.objects.new('PEG', peg)).parent = hub
+    angles = []
+    for f in (0, 50, 100):
+        scene.frame_set(f)
+        angles.append(round(math.degrees(hub.rotation_euler.x), 3))
+    assert angles == [0.0, 157.5, 315.0], angles
+    scene.frame_set(37)
+    s = scene.fss_ao_bake
+    s.poses, s.samples, s.threads, s.distance = 8, 16, 12, 0.1
+    bpy.ops.wm.save_as_mainfile(filepath=str(WORK / 'wheel.blend'))
+
+
+def sector_profile(name, nsec=16, radius=(0.55, 0.85)):
+    """The AO of the object's master per angle sector about its X axis, at radii between radius x WHEEL_R, on its +X
+    and -X faces (object space): {side: means (nsec,)}. Samples on a barycentric grid of every master triangle."""
+    folder = store.bake_folder()
+    stem = store._state['by_object'][name]
+    m = core.load_master(folder, stem)
+    ev = core.evaluated_triangles(bpy.data.objects[name], bpy.context.evaluated_depsgraph_get(), [])
+    co = ev['co'][ev['tris'][m['tri_src']]]  # (T, 3, 3) object space
+    k = 8
+    g = np.array([(i, j, k - i - j) for i in range(k + 1) for j in range(k + 1 - i)], np.float64) / k
+    g = 0.02 / 3 + 0.98 * g  # inside the triangles
+    P = np.einsum('sk,tkd->tsd', g, co)
+    UV = np.einsum('sk,tkd->tsd', g, m['muv'])
+    n = np.cross(co[:, 1] - co[:, 0], co[:, 2] - co[:, 0])
+    n /= np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-30)
+    ix = np.clip(np.floor(UV[..., 0]).astype(np.int64), 0, m['W'] - 1)
+    iy = np.clip(np.floor(UV[..., 1]).astype(np.int64), 0, m['H'] - 1)
+    val = m['image'][iy, ix] / 65535.0
+    ok = m['filled'][iy, ix]
+    r = np.hypot(P[..., 1], P[..., 2])
+    ang = np.degrees(np.arctan2(P[..., 2], P[..., 1])) % 360.0
+    sec = np.minimum((ang / (360.0 / nsec)).astype(np.int64), nsec - 1)
+    out = {}
+    for side, sign in (('+X', 1), ('-X', -1)):
+        face = (n[:, 0] * sign > 0.95)[:, None] & ok & (r >= radius[0] * WHEEL_R) & (r <= radius[1] * WHEEL_R)
+        out[side] = np.array([float(val[face & (sec == q)].mean()) for q in range(nsec)])
+    return out
+
+
+def bake_wheel(label, poses=None, occluders=None, custom=(), watch=False):
+    w = bpy.data.objects['W']
+    w.fss_ao_bake.poses = poses or 0
+    w.fss_ao_bake.occluders = occluders or 'DEFAULT'
+    w.fss_ao_bake.custom.clear()
+    for n in custom:
+        w.fss_ao_bake.custom.add().object = bpy.data.objects[n]
+    refresh()
+    select(['W'])
+    t = time.time()
+    res = bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=not watch, tile=512 if watch else 0)
+    assert res == {'FINISHED'}
+    seen = wait_bake() if watch else []
+    status = store.read_status()
+    r = status['results'][0]
+    assert status['state'] == 'done' and r['status'] == 'baked', status
+    assert grade_of('W') == 'UP_TO_DATE'
+    prof = sector_profile('W')
+    var = {side: float(v.max() - v.min()) for side, v in prof.items()}
+    print(f"  {label}: {r.get('n_poses', 1)} pose(s), bake {r['bake_s']} s, second Blender {time.time() - t:.1f} s; "
+          f"sector means +X {np.round(prof['+X'], 3).tolist()}, -X {np.round(prof['-X'], 3).tolist()}; "
+          f"variation (max - min) {var}")
+    return prof, var, r, seen
+
+
+def test_poses():
+    """Session 25, finish line 1 (decision 34): the wheel half sunk in the slab. At 1 pose (the current frame) the AO
+    along the ring varies with the angle; at 8 poses over a full turn the variation per angle sector at a fixed radius
+    is at most a quarter of the 1-pose variation; Self only shows no slab shadow; the panel shows "Pose p of N". A
+    custom list's mover (PEG) is posed with the wheel: its shadow stays at its place on the wheel."""
+    build_wheel_scene()
+    refresh()
+    item = store._state['items'][store._state['by_object']['W']]
+    assert item['mover'] and len(item['poses']) == 8 and item['poses'][0] == 0 and item['poses'][-1] == 100, item
+    assert item['occluders'] == ['SLAB'], item['occluders']  # PEG and HUB move: no occluders under the scene rule
+    p1, v1, r1, _ = bake_wheel('1 pose', poses=1)
+    p8, v8, r8, seen = bake_wheel('8 poses', watch=True)
+    ps, vs, _r, _ = bake_wheel('Self only, 8 poses', occluders='SELF')
+    pc, vc, _r, _ = bake_wheel('Custom (SLAB, PEG), 8 poses', occluders='CUSTOM', custom=('SLAB', 'PEG'))
+    for side in ('+X', '-X'):
+        assert v1[side] > 0.3, v1
+        assert v8[side] <= v1[side] / 4, (side, v8[side], v1[side])
+        assert ps[side].min() > 0.99 and vs[side] < 0.01, (side, ps[side])
+    n_poses_seen = {s[4] for s in seen}
+    poses_seen = sorted({s[3] for s in seen if s[4] == 8})
+    assert 8 in n_poses_seen and len(poses_seen) >= 2 and max(poses_seen) > 1, (n_poses_seen, poses_seen)
+    # PEG on the +X face at 90 degrees: sector 4 of 16 (90 to 112.5) and 3 (67.5 to 90) darker than the same sectors
+    # without it (Scene rule: PEG is a mover), and the -X face as without it
+    peg_drop = float(p8['+X'][3:5].mean() - pc['+X'][3:5].mean())
+    other = float(np.abs(pc['-X'] - p8['-X']).max())
+    assert peg_drop > 0.05 and other < 0.05, (peg_drop, other)
+    # a mover whose mesh deforms between poses (bent about a static empty while HUB turns it): the current frame only
+    anchor = link(bpy.data.objects.new('ANCHOR', None))
+    anchor.location = (1.0, 0.0, 0.0)
+    bend = plane('BEND', (1.0, 0.0, 0.05), material('SET_W', 512), 15, size=0.1)
+    bend.parent = bpy.data.objects['HUB']
+    mod = bend.modifiers.new('Bend', 'SIMPLE_DEFORM')
+    mod.deform_method, mod.origin, mod.angle = 'BEND', anchor, math.radians(60)
+    bpy.ops.wm.save_mainfile()
+    refresh()
+    assert store._state['items'][store._state['by_object']['BEND']]['poses'], 'BEND has poses'
+    select(['BEND'])
+    assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
+    rb = store.read_status()['results'][0]
+    report = bpy.context.window_manager.fss_ao_bake_state.report
+    assert rb['status'] == 'baked' and rb['n_poses'] == 1 and 'deforms' in rb.get('note', ''), rb
+    assert 'BEND: its mesh deforms between poses' in report, report
+    ratio = {side: round(v8[side] / v1[side], 3) for side in v1}
+    print(f"PASS: test_poses (variation per sector 1 pose {v1}, 8 poses {v8}: ratio {ratio} (at most 0.25); Self only "
+          f"minimum {min(float(ps[s].min()) for s in ps):.4f}; the panel showed poses {poses_seen} of 8; PEG posed "
+          f"with the wheel darkens its sectors by {peg_drop:.3f}, the -X face within {other:.3f}; bake 1 pose "
+          f"{r1['bake_s']} s, 8 poses {r8['bake_s']} s; a deforming mover baked in the current frame, reported: "
+          f"{rb['note']})")
+
+
+if __name__ == '__main__' and '--' in sys.argv and any(a.startswith('only=') for a in sys.argv):
+    # a quicker run of single tests that build their own scene: -- only=test_poses
+    t0 = time.time()
+    for name in next(a for a in sys.argv if a.startswith('only='))[5:].split(','):
+        globals()[name]()
+    print(f'SELECTED AO BAKE TESTS PASSED ({time.time() - t0:.1f} s)')
+elif __name__ == '__main__':
     t0 = time.time()
     build_scene()
     test_bake_all()
@@ -892,4 +1221,8 @@ if __name__ == '__main__':
     test_rules_apply()
     test_apply_no_datablock()
     test_draw()
+    test_custom_occluders()
+    test_option_staleness()
+    test_run_mode()
+    test_poses()  # last: it replaces the scene with the wheel's
     print(f'ALL AO BAKE TESTS PASSED ({time.time() - t0:.1f} s)')

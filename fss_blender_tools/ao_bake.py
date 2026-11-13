@@ -1,10 +1,13 @@
 """AO Bake panel (auto-bake journal, decision 29 and P46): bake masters in a second Blender, apply them to textures.
 
 FSS MSFS Tools > AO Bake:
-- Bake: AO distance (scene, decision 16), samples, device; the masters' counts (up to date, surroundings changed,
-  mesh changed, missing, excluded); Bake Missing and Stale, Bake Selected, Select Stale, Select Missing; while a bake
-  runs, object n of m, its name, time spent and left, Cancel; a warning when the .blend has unsaved changes (the bake
-  reads the saved file); the report of the last bake.
+- Bake: AO distance (scene, decision 16), samples, device; poses of moving parts and the occluders (scene defaults,
+  decisions 34 and 35), the run mode (Hidden or Visible, decision 36); the active object's overrides (poses, occluders,
+  its custom list of occluders with Add Selected, Remove, Clear); the masters' counts (up to date, surroundings
+  changed, mesh changed, missing, excluded); Bake Missing and Stale, Bake Selected, Select Stale, Select Missing; while
+  a bake runs, object n of m, its name, tile and pose, time spent and left, Cancel, and a preview of the master being
+  baked (bpy.utils.previews: no datablock, the file not marked changed); a warning when the .blend has unsaved changes
+  (the bake reads the saved file); the report of the last bake.
 - Apply: padding and output folder; a row per texture set with its state (masters complete, or the number missing or
   stale; faces under 4 x); for the active row: target (ORM slot texture or separate file) and the separate file's
   name, resolution, layout, green and blue, sampling; the warnings; Apply, Apply All, Apply Selected.
@@ -12,13 +15,16 @@ The panel draws without writing: the hashes are computed by Refresh (and before 
 file opens and after a bake.
 """
 
+import hashlib
 import os
 import time
 
 import bpy
+import numpy as np
 from bpy.app.handlers import persistent
 
 from . import ao_bake_apply as apply_mod
+from . import ao_bake_core as core
 from . import ao_bake_store as store
 
 DEVICES = [('CPU', 'CPU', 'Bake on the CPU'), ('GPU', 'GPU', 'Bake on the first GPU type found (OptiX, CUDA, HIP, oneAPI)')]
@@ -48,6 +54,40 @@ class FSS_AOBakeSettings(bpy.types.PropertyGroup):
     output_folder: bpy.props.StringProperty(name="Output Folder", default='', subtype='DIR_PATH',
                                             description="Where Apply writes separate AO files. Empty: a folder "
                                             "<blend name>_ao beside the .blend")
+    poses: bpy.props.IntProperty(name="Poses", default=5, min=1, max=64,
+                                 description="Moving parts (animated objects) are baked in this many poses spread "
+                                 "evenly over their own animation and averaged, so a shadow that only one pose has "
+                                 "does not stay on the part. 1: the current frame only")
+    occluders: bpy.props.EnumProperty(name="Occluders", default='SCENE', items=[
+        ('SCENE', 'Scene Rule', 'Every visible static mesh near the object darkens it (not moving parts, not '
+         'Non-AO-Occluder or Invisible objects)'),
+        ('SELF', 'Self Only', 'Each object darkens only itself')],
+        description="What darkens an object; an object can override it")
+    run_mode: bpy.props.EnumProperty(name="Run", default='HIDDEN', items=[
+        ('HIDDEN', 'Hidden', 'The second Blender bakes in the background, without a window'),
+        ('VISIBLE', 'Visible', 'The second Blender opens a window that shows the master being baked')],
+        description="How the second Blender that bakes runs; this panel shows the progress and a preview in both")
+
+
+OBJECT_OCCLUDERS = [
+    ('DEFAULT', 'Default', "The scene's setting"),
+    ('SCENE', 'Scene Rule', 'Every visible static mesh near the object darkens it'),
+    ('SELF', 'Self Only', 'Only the object itself'),
+    ('CUSTOM', 'Custom', 'The objects in the list below, posed with this object when it moves')]
+
+
+class FSS_AOOccluderRef(bpy.types.PropertyGroup):
+    object: bpy.props.PointerProperty(type=bpy.types.Object, name="Object")
+
+
+class FSS_AOObjectSettings(bpy.types.PropertyGroup):
+    """Per-object overrides of the bake (decisions 34 and 35); `fss_` on the object, so the glTF extras drop them."""
+    poses: bpy.props.IntProperty(name="Poses", default=0, min=0, max=64,
+                                 description="This object's pose count when it moves. 0: the scene's setting")
+    occluders: bpy.props.EnumProperty(name="Occluders", items=OBJECT_OCCLUDERS, default='DEFAULT',
+                                      description="What darkens this object")
+    custom: bpy.props.CollectionProperty(type=FSS_AOOccluderRef)
+    custom_index: bpy.props.IntProperty()
 
 
 class FSS_AOApplySettings(bpy.types.PropertyGroup):
@@ -88,6 +128,8 @@ class FSS_AOBakeState(bpy.types.PropertyGroup):
     n_total: bpy.props.IntProperty()
     tile: bpy.props.IntProperty()
     n_tiles: bpy.props.IntProperty()
+    pose: bpy.props.IntProperty()
+    n_poses: bpy.props.IntProperty()
     current: bpy.props.StringProperty()
     elapsed: bpy.props.FloatProperty()
     left: bpy.props.FloatProperty(default=-1.0)
@@ -126,6 +168,51 @@ def sync_state(context):
     for i, r in enumerate(st.sets):
         if r.material == active:
             st.active_set = i
+
+
+# The preview of the master being baked (decision 36): read from the runner's preview file by the progress timer (never
+# while drawing) into an image preview of bpy.utils.previews, which is no datablock of the file and does not mark it
+# changed. `updates` counts the images taken, `seq` is the runner's number of the last one.
+_preview = dict(coll=None, seq=None, updates=0, size=(0, 0), digest='')
+
+
+def preview_icon():
+    """The icon id of the preview, or 0 (for drawing)."""
+    coll = _preview['coll']
+    if coll is None or 'master' not in coll or not _preview['updates']:
+        return 0
+    return coll['master'].icon_id
+
+
+def update_preview(folder=None):
+    """Takes a new preview image from the bake folder when the runner wrote one. Returns True when it changed."""
+    folder = folder or store._run.get('folder')
+    if not folder:
+        return False
+    got = core.read_preview(folder)
+    if got is None or got[0] == _preview['seq']:
+        return False
+    seq, grey = got
+    if _preview['coll'] is None:
+        import bpy.utils.previews
+        _preview['coll'] = bpy.utils.previews.new()
+    coll = _preview['coll']
+    pv = coll['master'] if 'master' in coll else coll.new('master')
+    h, w = grey.shape
+    rgba = np.ones((h, w, 4), np.float32)
+    rgba[:, :, :3] = (grey.astype(np.float32) / 255.0)[:, :, None]
+    pv.image_size = (w, h)
+    pv.image_pixels_float.foreach_set(rgba.ravel())
+    _preview.update(seq=seq, updates=_preview['updates'] + 1, size=(w, h),
+                    digest=hashlib.sha1(grey.tobytes()).hexdigest()[:12])
+    return True
+
+
+def clear_preview():
+    if _preview['coll'] is not None:
+        import bpy.utils.previews
+        bpy.utils.previews.remove(_preview['coll'])
+    _preview.update(coll=None, seq=None, updates=0, size=(0, 0), digest='')
 
 
 def read_index_on_open():
@@ -171,6 +258,9 @@ def _poll_timer():
         st.left = status.get('left_s') if status.get('left_s') is not None else -1.0
         st.tile = status.get('tile', 0) or 0
         st.n_tiles = status.get('n_tiles', 0) or 0
+        st.pose = status.get('pose', 0) or 0
+        st.n_poses = status.get('n_poses', 0) or 0
+    update_preview()
     if store.running():
         _redraw()
         return 0.5
@@ -195,6 +285,7 @@ def excluded_lines(limit=8):
 def finish_bake():
     st = _state()
     status = store.finish_run() or {}
+    update_preview()
     st.running = False
     results = status.get('results', [])
     by = {}
@@ -207,6 +298,9 @@ def finish_bake():
     for kind in ('skipped', 'failed', 'cancelled'):
         for r in by.get(kind, []):
             lines.append(f"{kind}: {r['name']} ({r.get('reason', '')})")
+    for r in by.get('baked', []):  # decision 34: a mover not baked in its poses, and why
+        if r.get('note'):
+            lines.append(f"{r['name']}: {r['note']}")
     lines += excluded_lines()
     st.report = '\n'.join(lines)
     sync_state(bpy.context)
@@ -223,7 +317,7 @@ class FSS_OT_AOBakeStart(bpy.types.Operator):
 
     scope: bpy.props.EnumProperty(items=[('STALE', 'Missing and Stale', ''), ('SELECTED', 'Selected', '')],
                                   default='STALE')
-    hidden: bpy.props.BoolProperty(default=False, options={'HIDDEN', 'SKIP_SAVE'})  # tests: no window
+    hidden: bpy.props.BoolProperty(default=False, options={'HIDDEN', 'SKIP_SAVE'})  # tests: hidden, whatever the run mode
     wait: bpy.props.BoolProperty(default=False, options={'HIDDEN', 'SKIP_SAVE'})  # tests: return when done
     test_delay: bpy.props.FloatProperty(default=0.0, options={'HIDDEN', 'SKIP_SAVE'})  # tests: pause per object
     test_tile_delay: bpy.props.FloatProperty(default=0.0, options={'HIDDEN', 'SKIP_SAVE'})  # tests: pause per tile
@@ -245,9 +339,12 @@ class FSS_OT_AOBakeStart(bpy.types.Operator):
             self.report({'INFO'}, 'AO Bake: nothing to bake')
             return {'CANCELLED'}
         job = store.make_job(context, stems, self.test_delay, self.tile, self.test_tile_delay)
-        proc = store.start_bake(job, hidden=self.hidden)
+        hidden = self.hidden or context.scene.fss_ao_bake.run_mode == 'HIDDEN'  # decision 36
+        clear_preview()
+        proc = store.start_bake(job, hidden=hidden)
         st = _state(context)
         st.running, st.n_done, st.n_total, st.current, st.report = True, 0, len(stems), '', ''
+        st.tile = st.n_tiles = st.pose = st.n_poses = 0
         if self.wait:
             proc.wait()
             finish_bake()
@@ -291,6 +388,52 @@ class FSS_OT_AOBakeSelect(bpy.types.Operator):
         for obj in context.view_layer.objects:
             obj.select_set(obj.name in names)
         self.report({'INFO'}, f'{len(names)} objects selected')
+        return {'FINISHED'}
+
+
+def _active_mesh(context):
+    obj = context.active_object
+    return obj if obj is not None and obj.type == 'MESH' else None
+
+
+class FSS_OT_AOCustomOccluders(bpy.types.Operator):
+    bl_idname = 'fss.ao_bake_custom_occluders'
+    bl_label = 'Custom Occluders'
+    bl_description = "Edit the active object's list of occluders"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    action: bpy.props.EnumProperty(items=[
+        ('ADD', 'Add Selected', 'Add the selected objects (but the active one) to the list'),
+        ('REMOVE', 'Remove', 'Remove the highlighted object from the list'),
+        ('CLEAR', 'Clear', 'Empty the list')], default='ADD')
+
+    @classmethod
+    def description(cls, context, properties):
+        return {'ADD': "Add the selected objects (but the active one) to the active object's occluders",
+                'REMOVE': 'Remove the highlighted object from the list',
+                'CLEAR': "Empty the active object's list of occluders"}[properties.action]
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and _active_mesh(context) is not None
+
+    def execute(self, context):
+        obj = _active_mesh(context)
+        s = obj.fss_ao_bake
+        if self.action == 'ADD':
+            have = {r.object for r in s.custom if r.object is not None}
+            added = 0
+            for o in context.selected_objects:
+                if o != obj and o.type == 'MESH' and o not in have:
+                    s.custom.add().object = o
+                    added += 1
+            self.report({'INFO'}, f'{added} added to the occluders of {obj.name}')
+        elif self.action == 'REMOVE':
+            if 0 <= s.custom_index < len(s.custom):
+                s.custom.remove(s.custom_index)
+                s.custom_index = min(s.custom_index, len(s.custom) - 1)
+        else:
+            s.custom.clear()
         return {'FINISHED'}
 
 
@@ -347,6 +490,41 @@ class FSS_UL_AOSets(bpy.types.UIList):
         sub.label(text=item.state, icon='ERROR' if item.warn else 'CHECKMARK')
 
 
+class FSS_UL_AOOccluders(bpy.types.UIList):
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        if item.object is None:
+            layout.label(text='(deleted)', icon='ERROR')
+        else:
+            layout.label(text=item.object.name, icon='OBJECT_DATA')
+
+
+def _draw_object(layout, context):
+    """The active object's overrides (decisions 34 and 35)."""
+    obj = _active_mesh(context)
+    if obj is None:
+        return
+    scene = context.scene
+    box = layout.box()
+    box.label(text=f'Object: {obj.name}', icon='OBJECT_DATA')
+    o = obj.fss_ao_bake
+    col = box.column(align=True)
+    if store.is_mover(obj, scene):
+        rng = store.mover_range(obj)
+        n = store.pose_count(obj, scene)
+        if rng is None:
+            col.label(text='Moves, without keys: baked in the current frame', icon='INFO')
+        else:
+            col.label(text=f'Moves over frames {rng[0]:g} to {rng[1]:g}: {n} pose{"s" if n != 1 else ""}', icon='INFO')
+        col.prop(o, 'poses', text='Poses (0: scene)')
+    col.prop(o, 'occluders')
+    if o.occluders == 'CUSTOM':
+        box.template_list('FSS_UL_AOOccluders', '', o, 'custom', o, 'custom_index', rows=3)
+        row = box.row(align=True)
+        row.operator('fss.ao_bake_custom_occluders', text='Add Selected', icon='ADD').action = 'ADD'
+        row.operator('fss.ao_bake_custom_occluders', text='Remove', icon='REMOVE').action = 'REMOVE'
+        row.operator('fss.ao_bake_custom_occluders', text='Clear', icon='X').action = 'CLEAR'
+
+
 def _lines(layout, text, icon='NONE'):
     for i, line in enumerate(text.splitlines()):
         layout.label(text=line, icon=icon if i == 0 else 'BLANK1')
@@ -379,6 +557,11 @@ class FSS_PT_AOBake(bpy.types.Panel):
         row.prop(s, 'device', expand=True)
         if s.device == 'CPU':
             col.prop(s, 'threads')
+        col.prop(s, 'poses')
+        col.prop(s, 'occluders')
+        row = col.row(align=True)
+        row.prop(s, 'run_mode', expand=True)
+        _draw_object(box, context)
         if not bpy.data.filepath:
             box.label(text='Save the file first: the bake reads the saved file', icon='ERROR')
         elif bpy.data.is_dirty:
@@ -400,9 +583,14 @@ class FSS_PT_AOBake(bpy.types.Panel):
             col.label(text=st.current or '...')
             if st.n_tiles > 1:
                 col.label(text=f'Tile {st.tile} of {st.n_tiles}')
+            if st.n_poses > 1:
+                col.label(text=f'Pose {max(st.pose, 1)} of {st.n_poses}')
             left = _fmt_time(st.left) if st.left >= 0 else '-'
             col.label(text=f'Spent {_fmt_time(st.elapsed)}, left {left}')
             col.operator('fss.ao_bake_cancel', icon='CANCEL')
+        icon = preview_icon()
+        if icon:
+            box.template_icon(icon_value=icon, scale=8.0)
         else:
             row = box.row(align=True)
             op = row.operator('fss.ao_bake_start', text='Bake Missing and Stale')
@@ -474,15 +662,16 @@ def _on_load_post(*_args):
         pass
 
 
-CLASSES = (FSS_AOBakeSettings, FSS_AOApplySettings, FSS_AOSetRow, FSS_AOBakeState, FSS_OT_AOBakeRefresh,
-           FSS_OT_AOBakeStart, FSS_OT_AOBakeCancel, FSS_OT_AOBakeSelect, FSS_OT_AOApply, FSS_UL_AOSets,
-           FSS_PT_AOBake)
+CLASSES = (FSS_AOBakeSettings, FSS_AOOccluderRef, FSS_AOObjectSettings, FSS_AOApplySettings, FSS_AOSetRow,
+           FSS_AOBakeState, FSS_OT_AOBakeRefresh, FSS_OT_AOBakeStart, FSS_OT_AOBakeCancel, FSS_OT_AOBakeSelect,
+           FSS_OT_AOCustomOccluders, FSS_OT_AOApply, FSS_UL_AOSets, FSS_UL_AOOccluders, FSS_PT_AOBake)
 
 
 def register():
     for cls in CLASSES:
         bpy.utils.register_class(cls)
     bpy.types.Scene.fss_ao_bake = bpy.props.PointerProperty(type=FSS_AOBakeSettings)
+    bpy.types.Object.fss_ao_bake = bpy.props.PointerProperty(type=FSS_AOObjectSettings)
     bpy.types.Material.fss_ao_apply = bpy.props.PointerProperty(type=FSS_AOApplySettings)
     bpy.types.WindowManager.fss_ao_bake_state = bpy.props.PointerProperty(type=FSS_AOBakeState)
     if _on_load_post not in bpy.app.handlers.load_post:
@@ -494,7 +683,9 @@ def unregister():
         bpy.app.handlers.load_post.remove(_on_load_post)
     if bpy.app.timers.is_registered(_poll_timer):
         bpy.app.timers.unregister(_poll_timer)
+    clear_preview()
     del bpy.types.WindowManager.fss_ao_bake_state
+    del bpy.types.Object.fss_ao_bake
     del bpy.types.Material.fss_ao_apply
     del bpy.types.Scene.fss_ao_bake
     for cls in reversed(CLASSES):

@@ -1152,6 +1152,56 @@ def tile_seed(base, i, n):
     return int(base) if n == 1 else int(base) + 1009 * (int(i) + 1)
 
 
+POSE_SEED = 7919  # decision 34: pose p of a mover adds p x this to both seeds (a prime: no tile and pose share one)
+
+
+def pose_seed(base, p):
+    """The base seed of pose p (0 for the first pose, so one pose bakes exactly as before)."""
+    return int(base) + POSE_SEED * int(p)
+
+
+# The preview of the master being baked, for the artist's Blender (decision 36): the runner writes it to the bake
+# folder after each tile and composed strip, the panel reads it. PREVIEW_MAGIC, then W, H, a sequence number and 0 as
+# little-endian uint32, then W x H uint8 grey, rows from the bottom (as Blender images). Its size does not depend on the
+# master's: at most PREVIEW_FILE_MAX px on the long side.
+PREVIEW_FILE = 'preview.bin'
+PREVIEW_MAGIC = b'FSSAOPV1'
+PREVIEW_FILE_MAX = 256
+
+
+def write_preview(folder, pv16, seq):
+    """pv16 (h, w) uint16, rows from the bottom; reduced to PREVIEW_FILE_MAX and written atomically. Returns False when
+    the file is held by a reader (the next update writes it)."""
+    f = max(1, -(-max(pv16.shape) // PREVIEW_FILE_MAX))
+    small = pv16[::f, ::f]
+    h, w = small.shape
+    data = PREVIEW_MAGIC + struct.pack('<4I', w, h, int(seq), 0) + (small >> 8).astype(np.uint8).tobytes()
+    path = os.path.join(folder, PREVIEW_FILE)
+    tmp = path + '.tmp'
+    try:
+        with open(tmp, 'wb') as fh:
+            fh.write(data)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
+
+
+def read_preview(folder):
+    """(seq, (h, w) uint8 rows from the bottom) of the preview file, or None."""
+    try:
+        with open(os.path.join(folder, PREVIEW_FILE), 'rb') as fh:
+            data = fh.read()
+    except OSError:
+        return None
+    if len(data) < 24 or data[:8] != PREVIEW_MAGIC:
+        return None
+    w, h, seq, _z = struct.unpack('<4I', data[8:24])
+    if len(data) != 24 + w * h:
+        return None
+    return seq, np.frombuffer(data, np.uint8, w * h, 24).reshape(h, w)
+
+
 def tris_in_window(uvpx, x0, y0, w, h, margin=1.0):
     """Indices of the triangles (N, 3, 2 px) whose bounding box overlaps the window (plus a margin)."""
     if not len(uvpx):
