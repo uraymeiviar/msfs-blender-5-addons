@@ -910,10 +910,10 @@ def test_panel_selection():
     a.target = old
     o = bpy.data.objects['A'].fss_ao_bake
     o.poses = 0
-    assert not o.own_poses
-    o.own_poses = True
+    assert o.pose_mode == 'DEFAULT'
+    o.pose_mode = 'MANUAL'
     assert o.poses == ctx.scene.fss_ao_bake.poses
-    o.own_poses = False
+    o.pose_mode = 'DEFAULT'
     assert o.poses == 0
     names = [i[1] for i in ao_bake.object_occluder_items(o, ctx)]
     assert names[0] == 'Default (Scene Rule)' and o.occluders == 'DEFAULT', (names, o.occluders)
@@ -1242,6 +1242,27 @@ def test_poses():
     report = bpy.context.window_manager.fss_ao_bake_state.report
     assert rb['status'] == 'baked' and rb['n_poses'] == 1 and 'deforms' in rb.get('note', ''), rb
     assert 'BEND: its mesh deforms between poses' in report, report
+    # decision 41 (P59): a full turn (0 to 360 degrees over 0 to 100) is the same pose at both ends: 4 poses at 0, 25,
+    # 50, 75; the wheel's 0 to 315 degrees is not: both ends kept
+    turn = plane('TURN', (2.0, 0.0, 0.05), material('SET_W', 512), 15, size=0.1)
+    turn.rotation_euler = (0.0, 0.0, 0.0)
+    turn.keyframe_insert('rotation_euler', index=2, frame=0)
+    turn.rotation_euler = (0.0, 0.0, 2 * math.pi)
+    turn.keyframe_insert('rotation_euler', index=2, frame=100)
+    turn.rotation_euler = (0.0, 0.0, 0.0)
+    turn.fss_ao_bake.poses = 4
+    refresh()
+    full = store._state['items'][store._state['by_object']['TURN']]['poses']
+    part = store._state['items'][store._state['by_object']['W']]['poses']
+    assert full == [0.0, 25.0, 50.0, 75.0], full
+    assert part[0] == 0 and part[-1] == 100 and len(part) == 8, part
+    ad = turn.animation_data  # the same turn as an NLA strip (as the cockpit's VS selector)
+    act = ad.action
+    ad.nla_tracks.new().strips.new('TURN', 0, act)
+    ad.action = None
+    refresh()
+    nla = store._state['items'][store._state['by_object']['TURN']]['poses']
+    assert nla == full, nla
     ratio = {side: round(v8[side] / v1[side], 3) for side in v1}
     print(f"PASS: test_poses (variation per sector 1 pose {v1}, 8 poses {v8}: ratio {ratio} (at most 0.25); Self only "
           f"minimum {min(float(ps[s].min()) for s in ps):.4f}; the panel showed poses {poses_seen} of 8; PEG posed "

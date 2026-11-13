@@ -190,6 +190,95 @@ def mover_range(obj):
     return (lo, hi) if lo <= hi else None
 
 
+def _fcurves_of(act, slot):
+    """The F-curves of an action for a slot (its channel bag in a layered action)."""
+    if act is None:
+        return []
+    try:
+        from bpy_extras import anim_utils
+        bag = anim_utils.action_get_channelbag_for_slot(act, slot)
+        return list(bag.fcurves) if bag is not None else []
+    except (ImportError, AttributeError):
+        return list(getattr(act, 'fcurves', ()))
+
+
+def _fcurves(ad):
+    """The F-curves of an animation data's action."""
+    return _fcurves_of(getattr(ad, 'action', None), getattr(ad, 'action_slot', None))
+
+
+def _channels(obj, frame):
+    """[(F-curve, the frame to evaluate it at)] of the object's own animation at a scene frame: its action, or its one
+    unmuted NLA strip (time mapped: start, scale, repeat; held outside the strip); [] without animation; None when it
+    cannot be read this way (an action and strips together, several strips)."""
+    ad = obj.animation_data
+    if ad is None:
+        return []
+    strips = [s for t in ad.nla_tracks if not t.mute for s in t.strips if not s.mute]
+    if not strips:
+        return [(fc, frame) for fc in _fcurves(ad)]
+    if ad.action is not None or len(strips) != 1:
+        return None
+    s = strips[0]
+    a0, a1 = float(s.action_frame_start), float(s.action_frame_end)
+    if frame <= s.frame_start:
+        af = a0
+    elif frame >= s.frame_end:
+        af = a1
+    else:
+        local = (frame - s.frame_start) / (s.scale or 1.0)
+        af = a0 + (local % (a1 - a0) if s.repeat > 1 and a1 > a0 else local)
+    return [(fc, af) for fc in _fcurves_of(s.action, getattr(s, 'action_slot', None))]
+
+
+def _basis_at(obj, frame, channels=None):
+    """The object's own transform (matrix_basis) at a frame, from its animation's F-curves over its current values."""
+    from mathutils import Euler, Matrix, Quaternion, Vector
+    loc, scale = Vector(obj.location), Vector(obj.scale)
+    mode = obj.rotation_mode
+    eul = Euler(obj.rotation_euler, mode if mode not in ('QUATERNION', 'AXIS_ANGLE') else 'XYZ')
+    quat, aa = Quaternion(obj.rotation_quaternion), list(obj.rotation_axis_angle)
+    if channels is None:
+        channels = _channels(obj, frame) or []
+    for fc, f in channels:
+        p, i, v = fc.data_path, fc.array_index, fc.evaluate(f)
+        if p == 'location':
+            loc[i] = v
+        elif p == 'scale':
+            scale[i] = v
+        elif p == 'rotation_euler':
+            eul[i] = v
+        elif p == 'rotation_quaternion':
+            quat[i] = v
+        elif p == 'rotation_axis_angle':
+            aa[i] = v
+    if mode == 'QUATERNION':
+        rot = quat.normalized()
+    elif mode == 'AXIS_ANGLE':
+        rot = Quaternion(Vector(aa[1:]), aa[0])
+    else:
+        rot = eul.to_quaternion()
+    return Matrix.LocRotScale(loc, rot, scale)
+
+
+def ends_coincide(obj, lo, hi, tol=1e-5):
+    """P59 (decision 41): the mover is in the same pose at both ends of its range (a full turn): the transforms of the
+    object and of every animated parent equal at lo and hi. Read from an action or one NLA strip per object; anything
+    else (both, several strips) is taken as not coinciding."""
+    o, seen = obj, False
+    while o is not None:
+        c_lo, c_hi = _channels(o, lo), _channels(o, hi)
+        if c_lo is None or c_hi is None:
+            return False
+        if c_lo:
+            a, b = _basis_at(o, lo, c_lo), _basis_at(o, hi, c_hi)
+            if max(abs(a[r][c] - b[r][c]) for r in range(4) for c in range(4)) > tol:
+                return False
+            seen = True
+        o = o.parent
+    return seen
+
+
 def pose_count(obj, scene):
     """Decision 34: the object's pose count (its override, else the scene's default)."""
     n = int(getattr(getattr(obj, 'fss_ao_bake', None), 'poses', 0) or 0)
@@ -198,7 +287,8 @@ def pose_count(obj, scene):
 
 def pose_frames(obj, scene, n=None):
     """Decision 34: (frames, note) of a mover's poses: n frames spread evenly over its animation range, both ends
-    included; (None, note) for the current frame only (n = 1, or no range)."""
+    included; when both ends are the same pose (a full turn, decision 41), n frames spread over the range without its
+    end, so no pose counts twice; (None, note) for the current frame only (n = 1, or no range)."""
     n = pose_count(obj, scene) if n is None else int(n)
     if n <= 1:
         return None, ''
@@ -208,6 +298,8 @@ def pose_frames(obj, scene, n=None):
     lo, hi = r
     if hi <= lo:
         return None, f'its animation range is one frame ({lo:g}): baked in the current frame'
+    if ends_coincide(obj, lo, hi):
+        return [round(lo + (hi - lo) * k / n, 4) for k in range(n)], ''
     return [round(lo + (hi - lo) * k / (n - 1), 4) for k in range(n)], ''
 
 

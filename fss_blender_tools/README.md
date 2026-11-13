@@ -184,9 +184,11 @@ The AO Bake panel's options (auto-bake journal, decisions 34 to 36), each a scen
 per object, under the panel's **Object** box for the active mesh (`fss_ao_bake` on the object, so the glTF extras
 leave them out):
 
-- **Default Poses** (scene, 5; per object **Own Poses** and a count, stored as `poses`, 0 for the default; shown only
-  for a mover whose occluders are not Self Only, which is baked in one pose): a mover (animated, under an animated parent, or
-  tagged Animated) is baked in N poses spread evenly over its own animation range, both ends included (the actions
+- **Default Poses** (scene, 5; per object **Poses** Default or Manual with a number, stored as `poses`, 0 for the
+  default; shown only for a mover whose occluders are not Self Only, which is baked in one pose): a mover (animated, under an animated parent, or
+  tagged Animated) is baked in N poses spread evenly over its own animation range, both ends included, or without
+  its end when both ends are the same pose, as a full turn (decision 41; read from the F-curves of the action or the
+  one NLA strip of the object and each animated parent; anything else keeps both ends) (the actions
   and NLA strips of the object and its animated parents; not the project's 0 to 100 rule), and the poses' AO is
   averaged per pixel. The layout and the mesh are the current frame's; per pose the target is placed by its world
   matrix at that frame relative to the current frame. Each tile is baked in every pose before the next tile, summed in
@@ -199,7 +201,7 @@ leave them out):
   meshes near the object; movers, Non-AO-Occluder, Invisible and No Export objects cast no AO); Self Only bakes the
   object alone; Custom takes the object's own list (Add Selected, Remove, Clear), whatever the objects' tags, and
   poses its movers at the same frame as the target in every pose.
-- **Bake Window** (Hidden, the default, or Visible): Hidden starts the second Blender in the background without a window or
+- **Run In** (Background, the default, or Foreground; stored as `HIDDEN` and `VISIBLE`): Hidden starts the second Blender in the background without a window or
   console; Visible opens its window, whose 3D views are turned into Image Editors showing the master. In both the
   runner writes a reduced preview (`preview.bin` in the bake folder, at most 256 px) after each tile and composed
   strip, at most every 0.25 s; the panel's progress timer loads it into a `bpy.utils.previews` image, which is not a

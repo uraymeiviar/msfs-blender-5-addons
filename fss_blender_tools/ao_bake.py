@@ -63,9 +63,9 @@ class FSS_AOBakeSettings(bpy.types.PropertyGroup):
          'Non-AO-Occluder or Invisible objects)'),
         ('SELF', 'Self Only', 'Each object darkens only itself')],
         description="What darkens an object; an object can override it")
-    run_mode: bpy.props.EnumProperty(name="Bake Window", default='HIDDEN', items=[
-        ('HIDDEN', 'Hidden', 'The second Blender bakes in the background, without a window'),
-        ('VISIBLE', 'Visible', 'The second Blender opens a window that shows the master being baked')],
+    run_mode: bpy.props.EnumProperty(name="Run In", default='HIDDEN', items=[
+        ('HIDDEN', 'Background', 'The second Blender bakes in the background, without a window'),
+        ('VISIBLE', 'Foreground', 'The second Blender opens a window that shows the master being baked')],
         description="How the second Blender that bakes runs; this panel shows the progress and a preview in both")
 
 
@@ -88,11 +88,11 @@ def object_occluder_items(self, context):
     return items
 
 
-def _get_own_poses(self):
-    return self.poses > 0
+def _get_pose_mode(self):
+    return 1 if self.poses > 0 else 0
 
 
-def _set_own_poses(self, value):
+def _set_pose_mode(self, value):
     if not value:
         self.poses = 0
     elif self.poses <= 0:
@@ -107,9 +107,10 @@ class FSS_AOObjectSettings(bpy.types.PropertyGroup):
     """Per-object overrides of the bake (decisions 34 and 35); `fss_` on the object, so the glTF extras drop them."""
     poses: bpy.props.IntProperty(name="Poses", default=0, min=0, max=64,
                                  description="This object's pose count when it moves. 0: the scene's Default Poses")
-    own_poses: bpy.props.BoolProperty(name="Own Poses", get=_get_own_poses, set=_set_own_poses,
-                                      description="Bake this moving object in its own number of poses instead of "
-                                      "the scene's Default Poses")
+    pose_mode: bpy.props.EnumProperty(name="Poses", get=_get_pose_mode, set=_set_pose_mode, items=[
+        ('DEFAULT', 'Default', "The scene's Default Poses", 0),
+        ('MANUAL', 'Manual', 'This object\'s own number of poses', 1)],
+        description="How many poses this moving object is baked in")
     occluders: bpy.props.EnumProperty(name="Occluders", items=object_occluder_items, default=0,
                                       description="What darkens this object")
     custom: bpy.props.CollectionProperty(type=FSS_AOOccluderRef)
@@ -595,12 +596,9 @@ def _draw_object(layout, context):
             col.label(text=f'Moves over frames {rng[0]:g} to {rng[1]:g}; Self Only: one pose', icon='INFO')
         else:
             col.label(text=f'Moves over frames {rng[0]:g} to {rng[1]:g}: {n} pose{"s" if n != 1 else ""}', icon='INFO')
-            row = col.row(align=True)
-            row.prop(o, 'own_poses')
-            if o.own_poses:
-                row.prop(o, 'poses', text='Poses')
-            else:
-                row.label(text=f'Default: {scene.fss_ao_bake.poses}')
+            col.prop(o, 'pose_mode', text='Poses')
+            if o.pose_mode == 'MANUAL':
+                col.prop(o, 'poses', text='Number of Poses')
     if o.occluders == 'CUSTOM':
         box.template_list('FSS_UL_AOOccluders', '', o, 'custom', o, 'custom_index', rows=3)
         row = box.row(align=True)
@@ -644,7 +642,7 @@ class FSS_PT_AOBake(bpy.types.Panel):
         col.prop(s, 'poses')
         col.prop(s, 'occluders')
         row = col.row(align=True)
-        row.label(text='Bake Window')
+        row.label(text='Run In')
         row.prop(s, 'run_mode', expand=True)
         _draw_object(box, context)
         if not bpy.data.filepath:
