@@ -922,6 +922,41 @@ def test_panel_selection():
           f"ORM texture refused: {refused!r}; own poses on and off; occluder choices {names})")
 
 
+def test_apply_steps():
+    """Decision 45: Apply in steps gives the file of Apply in one go; its steps report progress; closed early (Cancel)
+    it leaves the file as it was and no .tmp."""
+    refresh()
+    ctx = bpy.context
+    mat = bpy.data.materials['SET_A']
+    a = mat.fss_ao_apply
+    old = (a.target, a.file_name)
+    a.target, a.file_name = 'FILE', 'steps.png'
+    rep = ao_bake_apply.apply(ctx, [mat])[0]
+    path = rep['path']
+    one_go = file_hash(path)
+    gen = ao_bake_apply.apply_steps(ctx, [mat])
+    steps = []
+    while True:
+        try:
+            steps.append(next(gen))
+        except StopIteration as stop:
+            reports = stop.value
+            break
+    assert file_hash(path) == one_go and not reports[0].get('error'), reports
+    fracs = [s[3] for s in steps]
+    assert len(steps) > 3 and fracs[-1] >= 0.9 and any(s[4].startswith('Writing') for s in steps), steps[:5]
+    os.utime(path, (1, 1))
+    gen = ao_bake_apply.apply_steps(ctx, [mat])
+    for _ in range(len(steps) // 2):
+        next(gen)
+    gen.close()  # Cancel in the middle
+    left = [f for f in os.listdir(os.path.dirname(path)) if f.endswith('.tmp')]
+    assert file_hash(path) == one_go and os.path.getmtime(path) == 1 and not left, left
+    a.target, a.file_name = old
+    print(f"PASS: test_apply_steps ({len(steps)} steps, the file equal to Apply in one go; cancelled after "
+          f"{len(steps) // 2}: the file untouched, no .tmp)")
+
+
 def test_apply_no_datablock():
     refresh()
     before = snapshot()
@@ -1323,6 +1358,7 @@ elif __name__ == '__main__':
     test_apply_separate()
     test_rules_apply()
     test_apply_no_datablock()
+    test_apply_steps()
     test_draw()
     test_panel_selection()
     test_custom_occluders()

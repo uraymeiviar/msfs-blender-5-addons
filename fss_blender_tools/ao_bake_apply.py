@@ -195,9 +195,26 @@ def _quantize(values):
     return np.rint(np.clip(values, 0, 1) * 65535.0).astype(np.uint16)
 
 
+def _finish(gen):
+    """Runs a step generator to its end; its return value."""
+    while True:
+        try:
+            next(gen)
+        except StopIteration as stop:
+            return stop.value
+
+
 def apply_set(context, material, objects=None, settings=None, band_rows=APPLY_BAND):
+    """Apply for one texture set in one go (apply_set_steps run to its end). Returns the report."""
+    return _finish(apply_set_steps(context, material, objects, settings, band_rows))
+
+
+def apply_set_steps(context, material, objects=None, settings=None, band_rows=APPLY_BAND):
     """Apply for one texture set; objects: the selected objects (per-object Apply, P47) or None for the whole set.
-    settings: the material's fss_ao_apply or an object with the same attributes. Returns the report.
+    settings: the material's fss_ao_apply or an object with the same attributes. A generator (decision 45): it yields
+    (phase, done, total, name) between pieces of work (a master, a band of its copy, a strip of the file), so the
+    panel's modal Apply shows progress and can stop; closing it early writes nothing (the file is written to a .tmp
+    and replaced at the end). Returns the report.
 
     Paged (decision 33, Session 23): one master at a time is open, paged (ao_bake_core.open_master: decoded once into
     scratch files in the bake folder, deleted afterwards, read through a cache of tiles); the copy runs a band of
@@ -235,8 +252,9 @@ def apply_set(context, material, objects=None, settings=None, band_rows=APPLY_BA
         for yb in range(y0, y0 + h, band_rows):
             yield yb, min(y0 + h, yb + band_rows), max(y0, yb - halo), min(y0 + h, yb + band_rows + halo)
 
-    for stem in stems:
+    for k, stem in enumerate(stems):
         item = store._state['items'][stem]
+        yield 'master', k, len(stems), item['name']
         obj, ev, uv, in_set = _set_tris(item, material, depsgraph)
         if uv is None or not in_set.any():
             continue
@@ -287,6 +305,7 @@ def apply_set(context, material, objects=None, settings=None, band_rows=APPLY_BA
             tisl = np.zeros(len(tris), np.int64)
             ctx = core.copy_context(pos_w, tris, uvpx, master, core.K_MIN, core.K_MAX)
             for yb, yb1, hy0, hy1 in bands(crop):
+                yield 'master', k + (yb - y0) / max(h, 1), len(stems), item['name']
                 out, info, owner_c, steps, count_c = core.copy_master(
                     pos_w, tris, uvpx, tisl, master, (x0, hy0, w, hy1 - hy0), core.K_MIN, pad, outside_mode='tri',
                     kmax=core.K_MAX, surface_cos=core.SURFACE_COS, same_face=False, ctx=ctx)
@@ -336,6 +355,7 @@ def apply_set(context, material, objects=None, settings=None, band_rows=APPLY_BA
     writer = core.PngRowWriter(tmp, W, H, 16, channels)
     try:
         for top in range(0, H, 256):  # rows from the top
+            yield 'write', top, H, os.path.basename(target.path)
             r0, r1 = H - min(H, top + 256), H - top
             if target.base is not None:
                 vals = target.base[r0:r1].copy()
@@ -362,12 +382,33 @@ def apply_set(context, material, objects=None, settings=None, band_rows=APPLY_BA
 
 
 def apply(context, materials, objects=None):
+    """Apply in one go (apply_steps run to its end). Returns the reports."""
+    return _finish(apply_steps(context, materials, objects))
+
+
+def apply_steps(context, materials, objects=None):
+    """Apply for several texture sets as a generator (decision 45): yields (set index, number of sets, material name,
+    fraction of this set done, what is being done); returns the reports. A set's error becomes its report."""
     reports = []
-    for material in materials:
+    n = len(materials)
+    for i, material in enumerate(materials):
+        gen = apply_set_steps(context, material, objects)
         try:
-            reports.append(apply_set(context, material, objects))
+            while True:
+                try:
+                    phase, done, total, name = next(gen)
+                except StopIteration as stop:
+                    reports.append(stop.value)
+                    break
+                if phase == 'master':
+                    frac, what = 0.9 * done / max(total, 1), f'Master {int(done) + 1} of {total}: {name}'
+                else:
+                    frac, what = 0.9 + 0.1 * done / max(total, 1), f'Writing {name}'
+                yield i, n, material.name, frac, what
         except (ValueError, OSError) as exc:
             reports.append(dict(material=material.name, error=str(exc)))
+        finally:
+            gen.close()  # on Cancel: the set's master and its .tmp file closed and removed now
     return reports
 
 

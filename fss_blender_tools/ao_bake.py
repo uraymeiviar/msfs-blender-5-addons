@@ -162,6 +162,13 @@ class FSS_AOBakeState(bpy.types.PropertyGroup):
     left: bpy.props.FloatProperty(default=-1.0)
     report: bpy.props.StringProperty()
     apply_report: bpy.props.StringProperty()
+    applying: bpy.props.BoolProperty()  # decision 45: Apply in steps, with progress
+    apply_set: bpy.props.IntProperty()
+    apply_sets: bpy.props.IntProperty()
+    apply_material: bpy.props.StringProperty()
+    apply_what: bpy.props.StringProperty()
+    apply_factor: bpy.props.FloatProperty()
+    apply_elapsed: bpy.props.FloatProperty()
     sets: bpy.props.CollectionProperty(type=FSS_AOSetRow)
     active_set: bpy.props.IntProperty()
 
@@ -442,7 +449,8 @@ class FSS_OT_AOBakeStart(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return context.mode == 'OBJECT' and bool(bpy.data.filepath) and not store.running()
+        return (context.mode == 'OBJECT' and bool(bpy.data.filepath) and not store.running()
+                and _apply_run['gen'] is None)
 
     def execute(self, context):
         store.refresh(context)
@@ -554,6 +562,10 @@ class FSS_OT_AOCustomOccluders(bpy.types.Operator):
         return {'FINISHED'}
 
 
+_apply_run = dict(gen=None, cancel=False, t0=0.0)  # the panel's Apply in steps (decision 45)
+APPLY_SLICE_S = 0.1  # work per timer tick before Blender redraws and takes input
+
+
 class FSS_OT_AOApply(bpy.types.Operator):
     bl_idname = 'fss.ao_apply'
     bl_label = 'Apply'
@@ -566,9 +578,11 @@ class FSS_OT_AOApply(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return context.mode == 'OBJECT' and store._state['refreshed'] is not None and bool(bpy.data.filepath)
+        return (context.mode == 'OBJECT' and store._state['refreshed'] is not None and bool(bpy.data.filepath)
+                and _apply_run['gen'] is None and not store.running())
 
-    def execute(self, context):
+    def _materials(self, context):
+        """(materials, objects) to apply, or None (reported)."""
         sets = store._state['sets']
         objects = None
         if self.scope == 'SET':
@@ -577,7 +591,7 @@ class FSS_OT_AOApply(bpy.types.Operator):
                 problem = target_problem(context, bpy.data.materials[self.material])
                 if problem:
                     self.report({'ERROR'}, f'AO Apply: {self.material}: {problem}')
-                    return {'CANCELLED'}
+                    return None
         elif self.scope == 'ALL':
             names = sorted(sets)
         else:
@@ -587,15 +601,98 @@ class FSS_OT_AOApply(bpy.types.Operator):
         materials = [bpy.data.materials[n] for n in names if n in bpy.data.materials]
         if not materials:
             self.report({'WARNING'}, 'AO Apply: no texture set')
-            return {'CANCELLED'}
-        reports = apply_mod.apply(context, materials, objects)
+            return None
+        return materials, objects
+
+    def _done(self, context, reports, extra=''):
         lines = [line for rep in reports for line in apply_mod.report_lines(rep)]
+        if extra:
+            lines.append(extra)
         _state(context).apply_report = '\n'.join(lines)
         self._reports = reports
         for line in lines:
             print('AO Apply:', line)
-        self.report({'WARNING'} if any(r.get('error') for r in reports) else {'INFO'},
-                    f'AO Apply: {len(reports)} texture set(s)')
+        self.report({'WARNING'} if (extra or any(r.get('error') for r in reports)) else {'INFO'},
+                    f'AO Apply: {len(reports)} texture set(s)' + (f'; {extra}' if extra else ''))
+
+    def execute(self, context):
+        """In one go (scripts and tests)."""
+        got = self._materials(context)
+        if got is None:
+            return {'CANCELLED'}
+        self._done(context, apply_mod.apply(context, *got))
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        """From the panel: in steps on a timer, with progress and Cancel (decision 45)."""
+        if context.window is None:
+            return self.execute(context)
+        got = self._materials(context)
+        if got is None:
+            return {'CANCELLED'}
+        st = _state(context)
+        st.applying, st.apply_set, st.apply_sets, st.apply_factor = True, 0, len(got[0]), 0.0
+        st.apply_material, st.apply_what, st.apply_elapsed = got[0][0].name, 'Starting', 0.0
+        # bpy.context, not the invoke's context, which is not valid after invoke returns
+        _apply_run.update(gen=apply_mod.apply_steps(bpy.context, *got), cancel=False, t0=time.time())
+        wm = context.window_manager
+        self._timer = wm.event_timer_add(0.02, window=context.window)
+        wm.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
+    def _end(self, context):
+        context.window_manager.event_timer_remove(self._timer)
+        gen = _apply_run['gen']
+        _apply_run.update(gen=None, cancel=False)
+        _state(context).applying = False
+        _redraw()
+        return gen
+
+    def modal(self, context, event):
+        if event.type != 'TIMER':
+            return {'PASS_THROUGH'}
+        st = _state(context)
+        gen = _apply_run['gen']
+        if _apply_run['cancel']:
+            self._end(context)
+            gen.close()  # the set being applied: its .tmp removed, its file untouched
+            done = st.apply_set
+            self._done(context, [], f'cancelled: {done} of {st.apply_sets} texture set(s) written before, '
+                                    f'{st.apply_material} not written')
+            return {'CANCELLED'}
+        t = time.time()
+        try:
+            while time.time() - t < APPLY_SLICE_S:
+                i, n, name, frac, what = next(gen)
+                st.apply_set, st.apply_sets, st.apply_material, st.apply_what = i, n, name, what
+                st.apply_factor = (i + frac) / max(n, 1)
+        except StopIteration as stop:
+            self._end(context)
+            self._done(context, stop.value or [])
+            return {'FINISHED'}
+        except Exception as exc:
+            self._end(context)
+            gen.close()
+            self._done(context, [], f'stopped by an error: {exc}')
+            return {'CANCELLED'}
+        st.apply_elapsed = time.time() - _apply_run['t0']
+        _redraw()
+        return {'RUNNING_MODAL'}
+
+
+class FSS_OT_AOApplyCancel(bpy.types.Operator):
+    bl_idname = 'fss.ao_apply_cancel'
+    bl_label = 'Cancel'
+    bl_description = ('Stop Apply: the texture set being applied keeps its file as it was; sets already applied '
+                      'stay written')
+    bl_options = {'REGISTER'}
+
+    @classmethod
+    def poll(cls, context):
+        return _apply_run['gen'] is not None
+
+    def execute(self, context):
+        _apply_run['cancel'] = True
         return {'FINISHED'}
 
 
@@ -746,6 +843,19 @@ class FSS_PT_AOBake(bpy.types.Panel):
             if icon:
                 box.template_icon(icon_value=icon, scale=8.0)
             return
+        if st.applying:  # decision 45: while Apply runs, only its progress and Cancel
+            box = layout.box()
+            box.label(text='Applying', icon='TEXTURE')
+            col = box.column(align=True)
+            col.progress(factor=st.apply_factor,
+                         text=f'Texture set {min(st.apply_set + 1, st.apply_sets)} of {st.apply_sets}')
+            col.label(text=st.apply_material)
+            col.label(text=st.apply_what)
+            f = st.apply_factor
+            left = _fmt_time(st.apply_elapsed / f * (1 - f)) if f > 0.02 else '-'
+            col.label(text=f'Spent {_fmt_time(st.apply_elapsed)}, left {left}')
+            col.operator('fss.ao_apply_cancel', icon='CANCEL')
+            return
         box = layout.box()
         box.label(text='Bake', icon='RENDER_STILL')
         col = box.column(align=True)
@@ -851,6 +961,10 @@ def _on_load_post(*_args):
         wm = bpy.context.window_manager
         st = wm.fss_ao_bake_state
         st.refreshed = False
+        st.applying = False  # a file load ends a running Apply's modal operator
+        if _apply_run['gen'] is not None:
+            _apply_run['gen'].close()
+            _apply_run.update(gen=None, cancel=False)
         st.sets.clear()
         st.report = st.apply_report = ''
         read_index_on_open()
@@ -860,7 +974,7 @@ def _on_load_post(*_args):
 
 CLASSES = (FSS_AOBakeSettings, FSS_AOOccluderRef, FSS_AOObjectSettings, FSS_AOApplySettings, FSS_AOSetRow,
            FSS_AOBakeState, FSS_OT_AOBakeRefresh, FSS_OT_AOBakeStart, FSS_OT_AOBakeCancel, FSS_OT_AOBakeSelect,
-           FSS_OT_AOCustomOccluders, FSS_OT_AOApply, FSS_UL_AOSets, FSS_UL_AOOccluders, FSS_PT_AOBake)
+           FSS_OT_AOCustomOccluders, FSS_OT_AOApply, FSS_OT_AOApplyCancel, FSS_UL_AOSets, FSS_UL_AOOccluders, FSS_PT_AOBake)
 
 
 def register():
