@@ -728,6 +728,24 @@ class FSS_PT_AOBake(bpy.types.Panel):
         scene = context.scene
         s = scene.fss_ao_bake
         st = _state(context)
+        if st.running:  # decision 44: while a bake runs, only its progress, Cancel and the preview
+            box = layout.box()
+            box.label(text='Baking', icon='RENDER_STILL')
+            col = box.column(align=True)
+            col.progress(factor=st.n_done / max(st.n_total, 1),
+                         text=f'Object {min(st.n_done + 1, st.n_total)} of {st.n_total}')
+            col.label(text=st.current or '...')
+            if st.n_tiles > 1:
+                col.label(text=f'Tile {st.tile} of {st.n_tiles}')
+            if st.n_poses > 1:
+                col.label(text=f'Pose {max(st.pose, 1)} of {st.n_poses}')
+            left = _fmt_time(st.left) if st.left >= 0 else '-'
+            col.label(text=f'Spent {_fmt_time(st.elapsed)}, left {left}')
+            col.operator('fss.ao_bake_cancel', icon='CANCEL')
+            icon = preview_icon()
+            if icon:
+                box.template_icon(icon_value=icon, scale=8.0)
+            return
         box = layout.box()
         box.label(text='Bake', icon='RENDER_STILL')
         col = box.column(align=True)
@@ -757,31 +775,14 @@ class FSS_PT_AOBake(bpy.types.Panel):
                 r.label(text=str(value))
         else:
             box.label(text=f'{st.index_masters} masters in the bake folder; Refresh to compare', icon='INFO')
-        if st.running:
-            col = box.column(align=True)
-            col.progress(factor=st.n_done / max(st.n_total, 1),
-                         text=f'Object {min(st.n_done + 1, st.n_total)} of {st.n_total}')
-            col.label(text=st.current or '...')
-            if st.n_tiles > 1:
-                col.label(text=f'Tile {st.tile} of {st.n_tiles}')
-            if st.n_poses > 1:
-                col.label(text=f'Pose {max(st.pose, 1)} of {st.n_poses}')
-            left = _fmt_time(st.left) if st.left >= 0 else '-'
-            col.label(text=f'Spent {_fmt_time(st.elapsed)}, left {left}')
-            col.operator('fss.ao_bake_cancel', icon='CANCEL')
-        icon = preview_icon() if st.running else 0  # the master being baked, only while the bake runs
-        if st.running:
-            if icon:
-                box.template_icon(icon_value=icon, scale=8.0)
-        else:
-            row = box.row(align=True)
-            op = row.operator('fss.ao_bake_start', text='Bake Missing and Stale')
-            op.scope = 'STALE'
-            op = row.operator('fss.ao_bake_start', text='Bake Selected')
-            op.scope = 'SELECTED'
-            row = box.row(align=True)
-            row.operator('fss.ao_bake_select', text='Select Stale').which = 'STALE'
-            row.operator('fss.ao_bake_select', text='Select Missing').which = 'MISSING'
+        row = box.row(align=True)
+        op = row.operator('fss.ao_bake_start', text='Bake Missing and Stale')
+        op.scope = 'STALE'
+        op = row.operator('fss.ao_bake_start', text='Bake Selected')
+        op.scope = 'SELECTED'
+        row = box.row(align=True)
+        row.operator('fss.ao_bake_select', text='Select Stale').which = 'STALE'
+        row.operator('fss.ao_bake_select', text='Select Missing').which = 'MISSING'
         if st.report:
             _lines(box.column(align=True), st.report, 'INFO')
         box = layout.box()
