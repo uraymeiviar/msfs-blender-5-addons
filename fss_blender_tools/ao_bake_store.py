@@ -362,7 +362,7 @@ def refresh(context, relink=True):
             else:
                 box = boxes[first.name]
                 occ = sorted(o.name for o in occluders if o != first and core.box_gap(box, boxes[o.name]) <= distance)
-            if mover:
+            if mover and mode != 'SELF':  # Self only: nothing around it moves with it, so one pose is the same
                 frames, pose_note = pose_frames(first, scene)
             key = dict(base, matrix=core.matrix_key(first.matrix_world), mover=mover,
                        frame=frame if (mover and not frames) else None,

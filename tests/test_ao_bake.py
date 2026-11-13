@@ -873,6 +873,55 @@ def test_draw():
           f"{[(r.material, r.state) for r in st.sets]})")
 
 
+def test_panel_selection():
+    """Session 31 (decision 40): the texture-set list shows the selection's sets (all when nothing is selected); the
+    Apply box names its set, and its Apply works only when the target can be written; an object's own pose count; the
+    object's Default occluder names the scene's."""
+    refresh()
+    ctx = bpy.context
+    st = ctx.window_manager.fss_ao_bake_state
+    select([])
+    assert ao_bake.selected_sets(ctx) is None
+    flags = ao_bake.FSS_UL_AOSets.filter_items(SimpleNamespace(bitflag_filter_item=1 << 30), ctx, st, 'sets')[0]
+    assert all(flags) and len(flags) == len(st.sets)
+    select(['A'])
+    sel = ao_bake.selected_sets(ctx)
+    item = store._state['items'][store._state['by_object']['A']]
+    assert sel and sel == set(item['sets']), (sel, item['sets'])
+    flags = ao_bake.FSS_UL_AOSets.filter_items(SimpleNamespace(bitflag_filter_item=1 << 30), ctx, st, 'sets')[0]
+    shown = [r.material for r, f in zip(st.sets, flags) if f]
+    assert sorted(shown) == sorted(sel), (shown, sel)
+    if len(sel) == 1:
+        assert ao_bake.apply_material(ctx, st).name in sel
+    mat = bpy.data.materials[sorted(sel)[0]]
+    a = mat.fss_ao_apply
+    old = a.target
+    a.target = 'FILE'
+    assert ao_bake.target_problem(ctx, mat) == ''
+    a.target = 'ORM'
+    refused = None
+    if ao_bake.apply_mod.orm_image(mat) is None:
+        assert ao_bake.target_problem(ctx, mat) == 'No texture in the ORM slot'
+        try:
+            refused = bpy.ops.fss.ao_apply(scope='SET', material=mat.name)
+        except RuntimeError as e:  # an operator's ERROR report raises in a script
+            refused = str(e)
+        assert refused == {'CANCELLED'} or 'ORM slot' in str(refused), refused
+    a.target = old
+    o = bpy.data.objects['A'].fss_ao_bake
+    o.poses = 0
+    assert not o.own_poses
+    o.own_poses = True
+    assert o.poses == ctx.scene.fss_ao_bake.poses
+    o.own_poses = False
+    assert o.poses == 0
+    names = [i[1] for i in ao_bake.object_occluder_items(o, ctx)]
+    assert names[0] == 'Default (Scene Rule)' and o.occluders == 'DEFAULT', (names, o.occluders)
+    select([])
+    print(f"PASS: test_panel_selection (A selected: {sorted(sel)} of {len(st.sets)} sets shown; Apply into a missing "
+          f"ORM texture refused: {refused!r}; own poses on and off; occluder choices {names})")
+
+
 def test_apply_no_datablock():
     refresh()
     before = snapshot()
@@ -1162,7 +1211,8 @@ def test_poses():
     assert item['occluders'] == ['SLAB'], item['occluders']  # PEG and HUB move: no occluders under the scene rule
     p1, v1, r1, _ = bake_wheel('1 pose', poses=1)
     p8, v8, r8, seen = bake_wheel('8 poses', watch=True)
-    ps, vs, _r, _ = bake_wheel('Self only, 8 poses', occluders='SELF')
+    ps, vs, rs, _ = bake_wheel('Self only (one pose, decision 40)', occluders='SELF')
+    assert rs.get('n_poses', 1) == 1, rs  # Self only: nothing moves with it, one pose
     pc, vc, _r, _ = bake_wheel('Custom (SLAB, PEG), 8 poses', occluders='CUSTOM', custom=('SLAB', 'PEG'))
     for side in ('+X', '-X'):
         assert v1[side] > 0.3, v1
@@ -1221,6 +1271,7 @@ elif __name__ == '__main__':
     test_rules_apply()
     test_apply_no_datablock()
     test_draw()
+    test_panel_selection()
     test_custom_occluders()
     test_option_staleness()
     test_run_mode()

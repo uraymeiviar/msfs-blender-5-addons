@@ -184,7 +184,8 @@ The AO Bake panel's options (auto-bake journal, decisions 34 to 36), each a scen
 per object, under the panel's **Object** box for the active mesh (`fss_ao_bake` on the object, so the glTF extras
 leave them out):
 
-- **Poses** (scene default 5; per object 0 for the scene's value): a mover (animated, under an animated parent, or
+- **Default Poses** (scene, 5; per object **Own Poses** and a count, stored as `poses`, 0 for the default; shown only
+  for a mover whose occluders are not Self Only, which is baked in one pose): a mover (animated, under an animated parent, or
   tagged Animated) is baked in N poses spread evenly over its own animation range, both ends included (the actions
   and NLA strips of the object and its animated parents; not the project's 0 to 100 rule), and the poses' AO is
   averaged per pixel. The layout and the mesh are the current frame's; per pose the target is placed by its world
@@ -193,17 +194,24 @@ leave them out):
   both seeds. N = 1, a mover without a range (a driver only, the Animated tag without keys) and a mover whose mesh
   deforms between poses (shape keys, an armature) are baked in the current frame; the last two are said in the bake
   report.
-- **Occluders** (scene: Scene Rule or Self Only; per object also Custom): Scene Rule is decision 15's (visible static
+- **Default Occluders** (scene: Scene Rule or Self Only; per object Default (naming the scene's), Scene Rule, Self
+  Only or Custom): Scene Rule is decision 15's (visible static
   meshes near the object; movers, Non-AO-Occluder, Invisible and No Export objects cast no AO); Self Only bakes the
   object alone; Custom takes the object's own list (Add Selected, Remove, Clear), whatever the objects' tags, and
   poses its movers at the same frame as the target in every pose.
-- **Run** (Hidden, the default, or Visible): Hidden starts the second Blender in the background without a window or
+- **Bake Window** (Hidden, the default, or Visible): Hidden starts the second Blender in the background without a window or
   console; Visible opens its window, whose 3D views are turned into Image Editors showing the master. In both the
   runner writes a reduced preview (`preview.bin` in the bake folder, at most 256 px) after each tile and composed
   strip, at most every 0.25 s; the panel's progress timer loads it into a `bpy.utils.previews` image, which is not a
   datablock of the file and does not mark it changed. The panel shows object, tile and pose (`Pose p of N`).
 - **Staleness:** a changed pose count (for a mover), occluder mode or custom list makes the master "surroundings
   changed". At one pose with the scene rule the hashes are those of 0.57, so its masters stay up to date.
+- **Apply box** (decision 40): with objects selected the texture-set list shows only their sets (all when nothing is
+  selected); the box names the set it is for (the selection's only set, else the highlighted row). Separate File shows
+  the file name, resolution and layout; ORM Texture shows the slot's texture, read only. The set's Apply is disabled
+  (and refused) when its target cannot be written: no ORM texture or its file missing, or an output folder that
+  cannot be made.
+
 ## AO Bake Masters as JPEG XL
 
 A master's AO image is `<stem>.ao.jxl`, 16-bit grey, lossless JPEG XL (auto-bake journal, decision 37; about 40 %

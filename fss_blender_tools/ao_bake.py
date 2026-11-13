@@ -54,26 +54,49 @@ class FSS_AOBakeSettings(bpy.types.PropertyGroup):
     output_folder: bpy.props.StringProperty(name="Output Folder", default='', subtype='DIR_PATH',
                                             description="Where Apply writes separate AO files. Empty: a folder "
                                             "<blend name>_ao beside the .blend")
-    poses: bpy.props.IntProperty(name="Poses", default=5, min=1, max=64,
+    poses: bpy.props.IntProperty(name="Default Poses", default=5, min=1, max=64,
                                  description="Moving parts (animated objects) are baked in this many poses spread "
                                  "evenly over their own animation and averaged, so a shadow that only one pose has "
-                                 "does not stay on the part. 1: the current frame only")
-    occluders: bpy.props.EnumProperty(name="Occluders", default='SCENE', items=[
+                                 "does not stay on the part. 1: the current frame only. An object can override it")
+    occluders: bpy.props.EnumProperty(name="Default Occluders", default='SCENE', items=[
         ('SCENE', 'Scene Rule', 'Every visible static mesh near the object darkens it (not moving parts, not '
          'Non-AO-Occluder or Invisible objects)'),
         ('SELF', 'Self Only', 'Each object darkens only itself')],
         description="What darkens an object; an object can override it")
-    run_mode: bpy.props.EnumProperty(name="Run", default='HIDDEN', items=[
+    run_mode: bpy.props.EnumProperty(name="Bake Window", default='HIDDEN', items=[
         ('HIDDEN', 'Hidden', 'The second Blender bakes in the background, without a window'),
         ('VISIBLE', 'Visible', 'The second Blender opens a window that shows the master being baked')],
         description="How the second Blender that bakes runs; this panel shows the progress and a preview in both")
 
 
 OBJECT_OCCLUDERS = [
-    ('DEFAULT', 'Default', "The scene's setting"),
+    ('DEFAULT', 'Default', "The scene's Default Occluders"),
     ('SCENE', 'Scene Rule', 'Every visible static mesh near the object darkens it'),
     ('SELF', 'Self Only', 'Only the object itself'),
     ('CUSTOM', 'Custom', 'The objects in the list below, posed with this object when it moves')]
+SCENE_OCCLUDER_NAMES = {'SCENE': 'Scene Rule', 'SELF': 'Self Only'}
+_occluder_items = []  # Blender keeps no reference to a dynamic enum's strings: kept here
+
+
+def object_occluder_items(self, context):
+    """The object's occluder choices; Default names the scene's Default Occluders (values as the static list had)."""
+    scene = getattr(context, 'scene', None) if context is not None else None
+    default = SCENE_OCCLUDER_NAMES.get(scene.fss_ao_bake.occluders, 'Scene Rule') if scene is not None else 'Scene Rule'
+    items = [(k, f'Default ({default})' if k == 'DEFAULT' else name, desc, i)
+             for i, (k, name, desc) in enumerate(OBJECT_OCCLUDERS)]
+    _occluder_items[:] = items
+    return items
+
+
+def _get_own_poses(self):
+    return self.poses > 0
+
+
+def _set_own_poses(self, value):
+    if not value:
+        self.poses = 0
+    elif self.poses <= 0:
+        self.poses = int(bpy.context.scene.fss_ao_bake.poses)
 
 
 class FSS_AOOccluderRef(bpy.types.PropertyGroup):
@@ -83,8 +106,11 @@ class FSS_AOOccluderRef(bpy.types.PropertyGroup):
 class FSS_AOObjectSettings(bpy.types.PropertyGroup):
     """Per-object overrides of the bake (decisions 34 and 35); `fss_` on the object, so the glTF extras drop them."""
     poses: bpy.props.IntProperty(name="Poses", default=0, min=0, max=64,
-                                 description="This object's pose count when it moves. 0: the scene's setting")
-    occluders: bpy.props.EnumProperty(name="Occluders", items=OBJECT_OCCLUDERS, default='DEFAULT',
+                                 description="This object's pose count when it moves. 0: the scene's Default Poses")
+    own_poses: bpy.props.BoolProperty(name="Own Poses", get=_get_own_poses, set=_set_own_poses,
+                                      description="Bake this moving object in its own number of poses instead of "
+                                      "the scene's Default Poses")
+    occluders: bpy.props.EnumProperty(name="Occluders", items=object_occluder_items, default=0,
                                       description="What darkens this object")
     custom: bpy.props.CollectionProperty(type=FSS_AOOccluderRef)
     custom_index: bpy.props.IntProperty()
@@ -456,6 +482,11 @@ class FSS_OT_AOApply(bpy.types.Operator):
         objects = None
         if self.scope == 'SET':
             names = [self.material] if self.material in sets else []
+            if names and self.material in bpy.data.materials:
+                problem = target_problem(context, bpy.data.materials[self.material])
+                if problem:
+                    self.report({'ERROR'}, f'AO Apply: {self.material}: {problem}')
+                    return {'CANCELLED'}
         elif self.scope == 'ALL':
             names = sorted(sets)
         else:
@@ -481,13 +512,59 @@ class FSS_OT_AOApply(bpy.types.Operator):
 # Panel
 # ---------------------------------------------------------------------------------------------------------------------
 
+def selected_sets(context):
+    """The texture sets of the selected objects' masters (from the last Refresh); None when nothing is selected."""
+    objs = list(getattr(context, 'selected_objects', None) or [])
+    if not objs:
+        return None
+    items = store._state['items']
+    return {m for s in store.items_for_objects(objs) if s in items for m in items[s]['sets']}
+
+
+def apply_material(context, st):
+    """The texture set the Apply box is for: the only one of the selection, else the highlighted row when the list
+    shows it; None when there is no such row."""
+    sel = selected_sets(context)
+    shown = [r.material for r in st.sets if sel is None or r.material in sel]
+    if sel is not None and len(shown) == 1:
+        name = shown[0]
+    else:
+        row = st.sets[st.active_set] if 0 <= st.active_set < len(st.sets) else None
+        name = row.material if row is not None and row.material in shown else None
+    return bpy.data.materials.get(name) if name else None
+
+
+def target_problem(context, material):
+    """Why Apply cannot write this texture set's target, or '' (the ORM texture's file, or the output folder)."""
+    a = material.fss_ao_apply
+    if a.target == 'ORM':
+        orm = apply_mod.orm_image(material)
+        if orm is None:
+            return 'No texture in the ORM slot'
+        path = apply_mod.image_path(orm)
+        if not path or not os.path.isfile(path):
+            return f'ORM texture file not found: {path or orm.name}'
+        return ''
+    folder = apply_mod.output_folder(context.scene)
+    if not (os.path.isdir(folder) or os.path.isdir(os.path.dirname(folder.rstrip('\\/')))):
+        return f'Output folder cannot be made: {folder}'
+    return ''
+
+
 class FSS_UL_AOSets(bpy.types.UIList):
+    """The texture sets; with objects selected, only theirs."""
+
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         row = layout.row(align=True)
         row.label(text=item.material, icon='MATERIAL')
         sub = row.row()
         sub.alert = item.warn
         sub.label(text=item.state, icon='ERROR' if item.warn else 'CHECKMARK')
+
+    def filter_items(self, context, data, propname):
+        sel = selected_sets(context)
+        rows = getattr(data, propname)
+        return [self.bitflag_filter_item if (sel is None or r.material in sel) else 0 for r in rows], []
 
 
 class FSS_UL_AOOccluders(bpy.types.UIList):
@@ -508,15 +585,22 @@ def _draw_object(layout, context):
     box.label(text=f'Object: {obj.name}', icon='OBJECT_DATA')
     o = obj.fss_ao_bake
     col = box.column(align=True)
+    col.prop(o, 'occluders')
     if store.is_mover(obj, scene):
         rng = store.mover_range(obj)
         n = store.pose_count(obj, scene)
         if rng is None:
             col.label(text='Moves, without keys: baked in the current frame', icon='INFO')
+        elif store.occluder_mode(obj, scene) == 'SELF':
+            col.label(text=f'Moves over frames {rng[0]:g} to {rng[1]:g}; Self Only: one pose', icon='INFO')
         else:
             col.label(text=f'Moves over frames {rng[0]:g} to {rng[1]:g}: {n} pose{"s" if n != 1 else ""}', icon='INFO')
-        col.prop(o, 'poses', text='Poses (0: scene)')
-    col.prop(o, 'occluders')
+            row = col.row(align=True)
+            row.prop(o, 'own_poses')
+            if o.own_poses:
+                row.prop(o, 'poses', text='Poses')
+            else:
+                row.label(text=f'Default: {scene.fss_ao_bake.poses}')
     if o.occluders == 'CUSTOM':
         box.template_list('FSS_UL_AOOccluders', '', o, 'custom', o, 'custom_index', rows=3)
         row = box.row(align=True)
@@ -560,6 +644,7 @@ class FSS_PT_AOBake(bpy.types.Panel):
         col.prop(s, 'poses')
         col.prop(s, 'occluders')
         row = col.row(align=True)
+        row.label(text='Bake Window')
         row.prop(s, 'run_mode', expand=True)
         _draw_object(box, context)
         if not bpy.data.filepath:
@@ -610,19 +695,28 @@ class FSS_PT_AOBake(bpy.types.Panel):
         if not st.refreshed:
             box.label(text='Refresh first', icon='INFO')
             return
+        sel = selected_sets(context)
+        if sel is not None:
+            box.label(text=f'Texture sets of the selection: {len(sel)} (none selected: all)', icon='RESTRICT_SELECT_OFF')
         box.template_list('FSS_UL_AOSets', '', st, 'sets', st, 'active_set', rows=4)
-        row_set = st.sets[st.active_set] if 0 <= st.active_set < len(st.sets) else None
-        material = bpy.data.materials.get(row_set.material) if row_set else None
-        if material is not None:
+        material = apply_material(context, st)
+        problem = ''
+        if material is None:
+            box.label(text='Pick a texture set in the list', icon='INFO')
+        else:
             a = material.fss_ao_apply
             sub = box.column(align=True)
+            sub.label(text=f'Texture set: {material.name}', icon='MATERIAL')
             sub.prop(a, 'target', expand=True)
             orm = apply_mod.orm_image(material)
+            problem = target_problem(context, material)
             if a.target == 'ORM':
-                if orm is None:
-                    sub.label(text='No texture in the ORM slot', icon='ERROR')
+                if orm is not None:
+                    sub.label(text=f'ORM texture: {orm.name}', icon='IMAGE_DATA')
+                if problem:
+                    sub.label(text=problem, icon='ERROR')
                 else:
-                    sub.label(text=f'{os.path.basename(orm.filepath)}: red only, green and blue kept')
+                    sub.label(text='Red is written; green and blue kept')
                     if orm.depth and orm.depth < 48 and not orm.is_float:
                         sub.label(text='8-bit file: written as 16-bit, green and blue kept', icon='ERROR')
                     sub.label(text='The next ORM export from Substance replaces red again', icon='ERROR')
@@ -638,12 +732,16 @@ class FSS_PT_AOBake(bpy.types.Panel):
                         elif a.resolution != 'ORM' and tuple(orm.size) != (int(a.resolution), int(a.resolution)):
                             sub.label(text="Another size: roughness and metallic are resampled", icon='ERROR')
                             sub.prop(a, 'sampling')
-            row = box.row(align=True)
-            op = row.operator('fss.ao_apply', text='Apply')
-            op.scope = 'SET'
-            op.material = material.name
-            row.operator('fss.ao_apply', text='Apply All').scope = 'ALL'
-            row.operator('fss.ao_apply', text='Apply Selected').scope = 'SELECTED'
+                if problem:
+                    sub.label(text=problem, icon='ERROR')
+        row = box.row(align=True)
+        cell = row.row(align=True)
+        cell.enabled = material is not None and not problem  # the set's Apply only when its target can be written
+        op = cell.operator('fss.ao_apply', text='Apply')
+        op.scope = 'SET'
+        op.material = material.name if material is not None else ''
+        row.operator('fss.ao_apply', text='Apply All').scope = 'ALL'
+        row.operator('fss.ao_apply', text='Apply Selected').scope = 'SELECTED'
         if st.apply_report:
             _lines(box.column(align=True), st.apply_report, 'INFO')
 
