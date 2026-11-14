@@ -855,6 +855,8 @@ class MSFS2024_MaterialUtilsUI:
             prop=MSFS2024_MaterialProperties.OMRTEXTURE.attribute_name(),
             text=text
         )
+        from ... import orm_levels  # FSS
+        orm_levels.draw(layout, material, MSFS2024_MaterialProperties.OMRTEXTURE.attribute_name())  # FSS: Levels under the slot
 
     @staticmethod
     def draw_normal_texture_prop(
@@ -907,6 +909,8 @@ class MSFS2024_MaterialUtilsUI:
             prop=MSFS2024_MaterialProperties.DETAILOMRTEXTURE.attribute_name(),
             text=text
         )
+        from ... import orm_levels  # FSS
+        orm_levels.draw(layout, material, MSFS2024_MaterialProperties.DETAILOMRTEXTURE.attribute_name())  # FSS: Levels under the slot
 
     @staticmethod
     def draw_detail_normal_texture_prop(

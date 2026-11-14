@@ -46,7 +46,7 @@ from ..utils.msfs_material_utils import MSFS2024_MaterialProperties
 from ..utils.msfs_constants import DefaultUV
 
 from .msfs_material_ope import MSFS2024_OT_SetPbrTextureSet
-from ... import material_preview  # FSS
+from ... import material_preview, orm_levels  # FSS
 
 class MSFS2024_Material:
     bl_idname = "MSFS2024_ShaderNodeTree"
@@ -250,6 +250,7 @@ class MSFS2024_Material:
         if detail_omr_tex_node.image:
             link(self.links, detail_omr_tex_node.outputs[0], omr_group_node.inputs[3])
             set_input_value(omr_group_node.inputs[4], 1) #enable detail
+        orm_levels.apply(self)  # FSS: the ORM levels between the textures and their readers
 
     def _update_ao_links(self):
 
@@ -2229,6 +2230,7 @@ class MSFS2024_Material:
         link(group.links, switch_separate_color_node.outputs[1], output_node.inputs[1])
         link(group.links, switch_separate_color_node.outputs[2], output_node.inputs[0])
         # endregion
+        material_preview.apply_omr_occlusion(group)  # FSS: the texture's occlusion without a detail texture
 
     def create_emissive_shadernode_group(self, group):
         input_node = add_node(
@@ -2661,6 +2663,7 @@ class MSFS2024_Material:
         link(group.links, input_node.outputs[0], mix_node.inputs[1])
         link(group.links, multiply_color_node.outputs[0], mix_node.inputs[2])
         # endregion
+        material_preview.apply_ao_always(group)  # FSS: the occlusion always darkens the preview
 
     # region Panel
     @staticmethod

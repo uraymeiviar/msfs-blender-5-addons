@@ -438,7 +438,8 @@ class MSFS_FSS_OT_update_material_nodes(bpy.types.Operator):
     bl_label = "Update Material Nodes"
     bl_description = (
         "Update the preview nodes of every MSFS material in this file: the anisotropic texture of Anisotropic and Hair "
-        "materials, the coat of Clearcoat materials and the Occlusion Strength, in Material Preview and Rendered "
+        "materials, the coat of Clearcoat materials, the Occlusion Strength and the ORM texture Levels, in Material "
+        "Preview and Rendered "
         "views. Materials saved before these previews need it once. Exports do not change"
     )
     bl_options = {"REGISTER", "UNDO"}

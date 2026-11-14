@@ -202,6 +202,7 @@ class glTF2ExportUserExtension:
             self._impl = _ExportMSFS2024()
         self._instancing = []
         self._instanced_names = {}
+        self._levels_images = []  # orm_levels.levels_record of the glTF's images with ORM levels
 
     # Both simulators: shared meshes whose users only have the converted Auto Smooth modifier are exported once
     # (see instancing.py); restored after the export
@@ -231,9 +232,27 @@ class glTF2ExportUserExtension:
         if name is not None:
             gltf2_mesh.name = name
 
+    def gather_image_hook(self, gltf2_image, *args):
+        # Khronos >= 4.5 passes (image, export_image, sockets, export_settings). Both simulators: the ORM levels on
+        # the image bytes the exporter writes (orm_levels.py), after the target's own hook
+        hook = getattr(self._impl, "gather_image_hook", None)
+        if hook:
+            hook(gltf2_image, *args)
+        if len(args) == 3:
+            from . import orm_levels
+            filtered = orm_levels.filter_gltf_image(gltf2_image, args[0], args[2])
+            record = orm_levels.levels_record(gltf2_image, args[0], filtered)
+            if record is not None:
+                self._levels_images.append(record)
+
     def post_export_hook(self, export_settings):
         from . import instancing
         try:
+            # Both simulators: <name>.fss-levels.json beside the glTF lists the texture files with ORM levels and
+            # their values (the FSS deploy filters their sources); none is written, and a stale one removed, without
+            from . import orm_levels
+            orm_levels.write_levels_list(export_settings, self._levels_images)
+            self._levels_images = []
             hook = getattr(self._impl, "post_export_hook", None)
             if hook:
                 hook(export_settings)

@@ -1,8 +1,9 @@
 """Clearcoat and Occlusion Strength preview of MSFS 2024 materials: the coat branch and its outputs, every clearcoat
 parameter reaching its node, Use Uniform Roughness, the coat normal with and without the base normal, alpha and normal
 changes, today's Principled kept as Asobo builds it, the artist's images unchanged, the Occlusion Strength node (not on
-Windshield), a file saved without the preview, the update operator, the coat and its tint rendered in EEVEE and Cycles,
-and exports identical to the tree the add-on built before these previews, for both simulators and the plain dialog.
+Windshield), the AO always applied in the shared Apply AO group, a file saved without the preview, the update operator,
+the coat and its tint rendered in EEVEE and Cycles, the occlusion darkening a sky-lit plane in both engines, and exports
+identical to the tree the add-on built before these previews, for both simulators and the plain dialog.
 
 To run:
 G:\\e-jets-e2\\tools\\blender\\blender.exe -b --factory-startup --python tests/test_material_preview.py
@@ -199,6 +200,46 @@ def test_occlusion_strength():
         check(len([n for n in nodes if n.name.startswith(mp.OCCLUSION_NODE)]) == 1, f'{material_type}: one node only')
     windshield = new_material('ao_windshield', 'msfs_windshield', coat=False, coat_normal=False)
     check(windshield.node_tree.nodes.get(mp.OCCLUSION_NODE) is None, 'Windshield: no Occlusion Strength node')
+    check_ao_always('the shared Apply AO group')
+
+
+def ao_mix(group):
+    output = next(n for n in group.nodes if n.bl_idname == 'NodeGroupOutput')
+    return output.inputs[0].links[0].from_node
+
+
+def check_ao_always(label):
+    group = bpy.data.node_groups['.Apply AO Group']
+    node = group.nodes.get(mp.AO_ALWAYS_NODE)
+    check(node is not None and node.outputs[0].default_value == 1.0, f'{label}: the AO Always node is there, value 1')
+    check(source(ao_mix(group).inputs[0]) == mp.AO_ALWAYS_NODE, f'{label}: it feeds the mix factor (not the light mask)')
+    check(len([n for n in group.nodes if n.name.startswith(mp.AO_ALWAYS_NODE)]) == 1, f'{label}: one node only')
+    group = bpy.data.node_groups['.Occlusion Metallic Roughness Group']
+    output = next(n for n in group.nodes if n.bl_idname == 'NodeGroupOutput')
+    mix = group.nodes.get(mp.OMR_OCCLUSION_NODE)
+    check(mix is not None and source(output.inputs[2]) == mp.OMR_OCCLUSION_NODE, f"{label}: the ORM group's Occlusion output from the FSS mix")
+    a = mix.inputs[2].links[0]
+    check(a.from_socket.name == 'Red' and a.from_node.inputs[0].links[0].from_socket.name == 'Occlusion (R), Roughness (G), Metallic (B)',
+          f"{label}: without a detail texture or blend mode the occlusion is the texture's red")
+    check(source(mix.inputs['Factor']) == mp.OMR_EITHER_NODE and mix.inputs[3].is_linked, f"{label}: Asobo's result otherwise")
+
+
+def strip_ao_always():
+    """The groups as Asobo builds them: the ORM group's red at 1 without a detail texture, the light mask feeding the
+    Apply AO mix factor."""
+    omr = bpy.data.node_groups.get('.Occlusion Metallic Roughness Group')
+    if omr is not None and omr.nodes.get(mp.OMR_OCCLUSION_NODE) is not None:
+        mix = omr.nodes[mp.OMR_OCCLUSION_NODE]
+        output = next(n for n in omr.nodes if n.bl_idname == 'NodeGroupOutput')
+        omr.links.new(mix.inputs[3].links[0].from_socket, output.inputs[2])
+        omr.nodes.remove(mix)
+        omr.nodes.remove(omr.nodes[mp.OMR_EITHER_NODE])
+    group = bpy.data.node_groups.get('.Apply AO Group')
+    if group is None or group.nodes.get(mp.AO_ALWAYS_NODE) is None:
+        return
+    ramp = next(n for n in group.nodes if n.bl_idname == 'ShaderNodeValToRGB')
+    group.links.new(ramp.outputs[0], ao_mix(group).inputs[0])
+    group.nodes.remove(group.nodes[mp.AO_ALWAYS_NODE])
 
 
 def strip_previews(material):
@@ -206,6 +247,7 @@ def strip_previews(material):
     nodes, links = material.node_tree.nodes, material.node_tree.links
     for node in [n for n in nodes if n.name.startswith(P)]:
         nodes.remove(node)
+    strip_ao_always()
     node = nodes.get(mp.OCCLUSION_NODE)
     if node is not None:
         if node.inputs[0].is_linked:
@@ -235,6 +277,7 @@ def test_saved_without_preview():
     reopened = bpy.data.materials['old']
     check(coat_nodes(reopened), 'opening the file adds the coat branch')
     check(reopened.node_tree.nodes.get(mp.OCCLUSION_NODE) is not None, 'opening the file adds the Occlusion Strength node')
+    check_ao_always('opening the file')
     check(len(outputs(reopened)) == 3, 'three outputs')
     bpy.ops.wm.save_as_mainfile(filepath=str(blend))
     bpy.ops.wm.open_mainfile(filepath=str(blend))
@@ -244,6 +287,7 @@ def test_saved_without_preview():
     result = bpy.ops.msfs_fss.update_material_nodes()
     check(result == {'FINISHED'}, 'the operator finishes')
     check(coat_nodes(bpy.data.materials['old']), 'the operator adds the coat branch')
+    check_ao_always('the operator')
     count = len(bpy.data.materials['old'].node_tree.nodes)
     bpy.ops.msfs_fss.update_material_nodes()
     check(len(bpy.data.materials['old'].node_tree.nodes) == count, 'running it again changes nothing')
@@ -309,6 +353,50 @@ def test_render():
     for index, engine in enumerate(('EEVEE', 'Cycles')):
         check(red[index][1] < white[index][1] - 0.15 and red[index][0] > red[index][1] + 0.15,
               f'{engine}: a red tint colours the coat (white {[round(v, 2) for v in white[index]]}, red {[round(v, 2) for v in red[index]]})')
+
+
+def linear(v):
+    return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+
+
+def test_render_ao():
+    """The occlusion darkens a rough white plane under a white sky (all ambient light) in both engines; Asobo's groups
+    (the red at 1, the light mask) showed none of it."""
+    print('--- render AO')
+    bpy.ops.wm.read_homefile(use_empty=True)
+    scene = bpy.context.scene
+    world = bpy.data.worlds.new('world')
+    world.use_nodes = True
+    world.node_tree.nodes['Background'].inputs[0].default_value = (1, 1, 1, 1)
+    scene.world = world
+    bpy.ops.mesh.primitive_plane_add(size=40)
+    plane = bpy.context.active_object
+    camera = bpy.data.objects.new('camera', bpy.data.cameras.new('camera'))
+    scene.collection.objects.link(camera)
+    camera.location = (0, -6, 2)
+    camera.rotation_euler = (1.25, 0, 0)
+    scene.camera = camera
+
+    def setup(name, occlusion):
+        material = bpy.data.materials.new(name)
+        material.msfs_material_type = 'msfs_standard'
+        material.msfs_base_color_factor = (0.8, 0.8, 0.8, 1)
+        material.msfs_occlusion_metallic_roughness_texture = image(f't_comp_ao_{name}', (occlusion, 1, 0, 1), 'Non-Color')
+        plane.data.materials.clear()
+        plane.data.materials.append(material)
+        return [linear(render_rgb(scene, engine)[0]) for engine in ('BLENDER_EEVEE', 'CYCLES')]
+
+    lit = setup('lit', 1.0)
+    dark = setup('dark', 0.25)
+    for index, engine in enumerate(('EEVEE', 'Cycles')):
+        ratio = dark[index] / lit[index]
+        check(ratio < 0.4, f'{engine}: occlusion 0.25 darkens the sky-lit plane to {ratio:.3f} of occlusion 1 '
+                           f'({lit[index]:.3f} -> {dark[index]:.3f} linear)')
+    strip_ao_always()
+    masked = [linear(render_rgb(scene, engine)[0]) for engine in ('BLENDER_EEVEE', 'CYCLES')]
+    print("INFO: with Asobo's groups: occlusion 0.25 gives", [round(m / l, 3) for m, l in zip(masked, lit)],
+          'of occlusion 1 (EEVEE, Cycles)')
+    check(masked[0] / lit[0] > 0.9, f"EEVEE with Asobo's groups: no AO ({masked[0] / lit[0]:.3f})")
 
 
 def export_scene(mode, previews, out_dir):
@@ -387,5 +475,6 @@ test_images()
 test_occlusion_strength()
 test_saved_without_preview()
 test_render()
+test_render_ao()
 test_exports()
 print('ALL MATERIAL PREVIEW TESTS PASSED')

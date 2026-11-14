@@ -14,8 +14,8 @@ texture library groups this slot with the colour textures (base colour, emissive
 (white is a clear varnish), A is the coat roughness. The coat covers the whole material (Coat Weight 1).
 
 - Coat roughness: texture A times Clearcoat Roughness Factor. With Use Uniform Roughness, the coat roughness is the
-  green channel of the Occlusion/Roughness/Metallic texture instead, the clearcoat texture is not used, and the base
-  layer under the coat gets the flat Base Roughness.
+  green channel of the Occlusion/Roughness/Metallic texture instead (after its ORM levels, orm_levels.py), the
+  clearcoat texture is not used, and the base layer under the coat gets the flat Base Roughness.
 - Coat normal: the Clearcoat Normal texture through a Normal Map node of strength Clearcoat Normal Factor. With Base
   Normal Affect Coat, the base normal is added (both normals' offsets from the surface normal, summed; an
   approximation).
@@ -23,10 +23,23 @@ texture library groups this slot with the colour textures (base colour, emissive
 
 Occlusion Strength: glTF's rule, occlusion = 1 + strength * (texture - 1), on the occlusion that Asobo's tree feeds to
 its Apply AO group. Not on Windshield materials, where the same property is the Reflection Mask Strength.
+
+Occlusion from the texture: without a detail texture, Asobo's Occlusion Metallic Roughness group builds its result
+from the texture's green and blue and a constant red of 1, so the texture's occlusion never reached the preview. The
+group's Occlusion output takes the texture's red there (apply_omr_occlusion); with a detail texture or in blend mode
+Asobo's result stays. Linking the red into Asobo's result instead changed what File > Export writes for metallic and
+roughness, so only the Occlusion output is touched.
+
+AO always: Asobo's Apply AO group (one group shared by every MSFS material) multiplies the base colour by the occlusion
+only where a diffuse shader is lit below about 0.475 (a Shader to RGB mask), standing in for the simulator, which
+darkens ambient light but not direct sunlight. Under the viewport's world light (Material Preview's HDRI), which is all
+ambient, the mask removed the AO almost everywhere. A Value node of 1 (AO_ALWAYS_NODE) feeds the group's mix factor
+instead, so the occlusion always darkens the base colour. Exports do not read this group.
 """
 
 import bpy
 
+from . import orm_levels
 from .blender.utils.msfs_material_nodes_utils import (
     add_node,
     get_node_by_name,
@@ -41,6 +54,9 @@ from .blender.utils.msfs_material_utils import MSFS2024_MaterialProperties, MSFS
 
 COAT_PREFIX = "FSS Coat "
 OCCLUSION_NODE = "FSS Occlusion Strength"
+AO_ALWAYS_NODE = "FSS AO Always"
+OMR_OCCLUSION_NODE = "FSS Occlusion"
+OMR_EITHER_NODE = "FSS Occlusion Detail Or Blend"
 _IMAGE_COPY_SUFFIX = ".fss_coat_preview"
 _INPUTS = MSFS2024_PrincipledBSDFInputs
 _P = MSFS2024_MaterialProperties
@@ -52,12 +68,73 @@ def _attr(material, prop):
 
 # region Occlusion Strength
 
+def apply_omr_occlusion(group):
+    """In Asobo's Occlusion Metallic Roughness group `group`: its Occlusion output is the texture's red channel when
+    neither Enable Detail nor Switch To Blend Mode is on (Asobo's result there has a red of 1), else Asobo's result.
+    Only the Occlusion output changes: File > Export traces Metallic and Roughness through the group's other nodes."""
+    if group is None:
+        return
+    group_input = next((n for n in group.nodes if n.bl_idname == "NodeGroupInput"), None)
+    group_output = next((n for n in group.nodes if n.bl_idname == "NodeGroupOutput"), None)
+    if group_input is None or group_output is None or len(group_input.outputs) < 7 or len(group_output.inputs) < 3:
+        return
+    occlusion = group_output.inputs[2]
+    if group.nodes.get(OMR_OCCLUSION_NODE) is not None or not occlusion.is_linked:
+        return
+    separate = next((l.to_node for l in group_input.outputs[2].links if l.to_node.bl_idname == "ShaderNodeSeparateColor"),
+                    None)
+    if separate is None:
+        return
+    asobo = occlusion.links[0].from_socket
+    either = group.nodes.new("ShaderNodeMath")
+    either.name = either.label = OMR_EITHER_NODE
+    either.operation = "MAXIMUM"
+    either.location = (group_output.location.x - 400.0, group_output.location.y - 300.0)
+    mix = group.nodes.new("ShaderNodeMix")
+    mix.name = mix.label = OMR_OCCLUSION_NODE
+    mix.data_type = "FLOAT"
+    mix.location = (group_output.location.x - 200.0, group_output.location.y - 300.0)
+    group.links.new(group_input.outputs[4], either.inputs[0])
+    group.links.new(group_input.outputs[6], either.inputs[1])
+    group.links.new(either.outputs[0], mix.inputs["Factor"])
+    group.links.new(separate.outputs[0], mix.inputs[2])  # A (float): the texture's red
+    group.links.new(asobo, mix.inputs[3])  # B (float): Asobo's result with a detail texture or in blend mode
+    group.links.new(mix.outputs[0], occlusion)
+
+
+def apply_ao_always(group):
+    """In Asobo's Apply AO group `group`: the mix between the plain and the occluded colour fed by AO_ALWAYS_NODE (1,
+    the occluded colour) instead of the lighting mask. The mix is the node that feeds the group's output."""
+    if group is None:
+        return
+    output = next((n for n in group.nodes if n.bl_idname == "NodeGroupOutput"), None)
+    if output is None or not output.inputs or not output.inputs[0].is_linked:
+        return
+    mix = output.inputs[0].links[0].from_node
+    if not mix.inputs:
+        return
+    factor = mix.inputs[0]
+    node = group.nodes.get(AO_ALWAYS_NODE)
+    if node is None:
+        node = group.nodes.new("ShaderNodeValue")
+        node.name = node.label = AO_ALWAYS_NODE
+        node.location = (mix.location.x - 220.0, mix.location.y + 160.0)
+    if node.outputs[0].default_value != 1.0:
+        node.outputs[0].default_value = 1.0
+    if not (factor.is_linked and factor.links[0].from_node == node):
+        group.links.new(node.outputs[0], factor)
+
+
 def apply_occlusion_strength(owner):
     """Put the Occlusion Strength between the occlusion and Asobo's Apply AO group of `owner` (an MSFS2024_Material)."""
     nodes, links = owner.nodes, owner.links
     apply_ao = get_node_by_name(nodes, MSFS2024_GroupNodes.APPLYAOGROUP.value)
     if apply_ao is None:
         return
+    apply_ao_always(apply_ao.node_tree)
+    omr = get_node_by_name(nodes, MSFS2024_GroupNodes.OMRGROUP.value)
+    if omr is not None:
+        apply_omr_occlusion(omr.node_tree)
     node = get_node_by_name(nodes, OCCLUSION_NODE)
     socket = apply_ao.inputs[1]
     source = socket.links[0].from_socket if socket.is_linked else None
@@ -178,7 +255,7 @@ def _build_coat(owner, principled, uv):
         omr = get_node_by_name(nodes, MSFS2024_ShaderNodes.COMPTEX.value)
         if omr is not None and omr.image is not None:
             separate = add("OMR Separate", MSFS2024_ShaderNodeTypes.SHADERNODESEPARATECOLOR.value, 0.0, -300.0)
-            link(links, omr.outputs[0], separate.inputs[0])
+            link(links, orm_levels.output_socket(nodes, omr), separate.inputs[0])  # through the ORM levels
             link(links, separate.outputs[1], roughness_factor.inputs[0])
     elif coat_image is not None:
         texture = add("Color Roughness", MSFS2024_ShaderNodeTypes.SHADERNODETEXIMAGE.value, -300.0, -200.0)
@@ -275,6 +352,7 @@ def update_all(materials):
         msfs_material = MSFS2024_MaterialPropUpdate.get_material(material)
         if msfs_material is None or msfs_material.node_tree is None:
             continue
+        orm_levels.apply(msfs_material)
         apply_occlusion_strength(msfs_material)
         if isinstance(msfs_material, ClearcoatPreviewMixin):
             sync(msfs_material)
