@@ -1,2 +1,5 @@
 # Binary files: never converted or diffed as text
 *.dll binary
+# FSS OptiX's binaries (fss_blender_tools/lib/ao_baker) in Git LFS: OptiX baker journal, decision 32
+fss_blender_tools/lib/ao_baker/**/*.exe filter=lfs diff=lfs merge=lfs -text
+fss_blender_tools/lib/ao_baker/**/*.dll filter=lfs diff=lfs merge=lfs -text

@@ -4,9 +4,9 @@
 Started by ao_bake_store.start_bake on a snapshot of the artist's current state (the bake folder's snapshot.blend):
     blender --factory-startup [-b] <snapshot.blend> --python ao_bake_runner.py -- <job.json>
 Hidden (-b, the default run mode, decision 36) it bakes the tiles one after another; with a window it bakes one tile
-per timer step, so the window keeps updating, and shows a reduced preview of the master in an Image Editor (its 3D
-views are turned into Image Editors, so the scene is not drawn). In both it writes a small preview of the master
-being baked (core.PREVIEW_FILE) for the artist's Blender after each tile and composed strip (at most every 0.25 s). It
+per timer step, so the window keeps updating (its 3D views are turned into empty Image Editors, so the scene is not
+drawn). It shows and writes no picture of the master (OptiX baker decisions 30 and 31: the FSS OptiX window shows the
+only one); a thumbnail an older version wrote (<stem>.ao.thumb) is removed when the master is baked again. It
 loads ao_bake_core.py by its path (the add-on is not enabled in this Blender), prints one line per object (and per
 tile), writes status.json (object n of m, tile i of n) and stops when a file `cancel` appears in the bake folder:
 between objects, or between tiles, in which case the object keeps its old master. It never saves the .blend and quits
@@ -36,6 +36,16 @@ rendering, and the pose's red channel is summed per pixel in the tile's own buff
 per tile pixel); the mean is quantized once. So memory does not grow with N; time grows N times (the Cycles bakes).
 Pose p's seeds add core.POSE_SEED x p (pose 0 keeps the one-pose seeds). A mover whose evaluated mesh deforms between
 poses is baked in the current frame only, said in the log and the report.
+
+FSS OptiX (OptiX baker journal 20261114.optix-baker.md, decisions 21 to 25): with the job's Baker Auto or FSS OptiX the
+runner starts the add-on's aobaker.exe (ao_bake_native.Baker: its window in a Visible run, hidden otherwise) and,
+when its GPU works, every master's scene goes to it once (the target, the occluders as arrays, the views of its poses
+and copies, built as for Cycles) and each tile is one request that returns the core's and the skirt's AO with the
+views already combined; the composition, the bands, Cancel and the writer are the same; the baker
+makes its window's preview from the tiles it bakes (decision 29). The curvature and the OIDN denoise then run in the
+baker too. Its samples are the job's optix_samples (decision 24). When it cannot
+start, or fails on a master, that master and the rest of the job bake with Cycles, and the log says why (decision 22).
+The index entry records the baker that made the master (decision 23).
 """
 import importlib.util
 import json
@@ -53,6 +63,11 @@ _spec = importlib.util.spec_from_file_location('_fss_ao_bake_core', os.path.join
 core = importlib.util.module_from_spec(_spec)
 sys.modules['_fss_ao_bake_core'] = core
 _spec.loader.exec_module(core)
+_nspec = importlib.util.spec_from_file_location('_fss_ao_bake_native', os.path.join(HERE, 'ao_bake_native.py'))
+native = importlib.util.module_from_spec(_nspec)
+sys.modules['_fss_ao_bake_native'] = native
+_nspec.loader.exec_module(native)
+native.CORE = core
 
 JOB_PATH = sys.argv[sys.argv.index('--') + 1]
 with open(JOB_PATH, encoding='utf-8') as _f:
@@ -73,6 +88,14 @@ PROFILE = {} if os.environ.get('FSS_AO_BAKE_PROFILE') else None  # Session 38: p
 SEED_OFFSET = int(os.environ.get('FSS_AO_BAKE_SEED_OFFSET') or 0)  # tests only: a control bake with other noise
 BUDGET_SOURCE = f'override {_override} GB' if _override else (
     f'{core.BUDGET_SHARE:.0%} of the free memory, at most {core.BUDGET_MAX // 2 ** 30} GB')
+BAKER = SET.get('baker', 'CYCLES')  # OptiX baker decision 22: AUTO, OPTIX or CYCLES (a job of an older add-on: Cycles)
+OPTIX_SAMPLES = int(SET.get('optix_samples') or 4096)  # decision 24: FSS OptiX's own samples
+NATIVE = dict(baker=None, why='', failed=False)  # the running FSS OptiX baker, or why Cycles bakes
+STATUS_EVERY_S = 0.5  # status.json during a tile of FSS OptiX at most this often
+
+
+class NativeFailed(RuntimeError):
+    """FSS OptiX failed on a master: it is baked again with Cycles, and so is the rest of the job (decision 22)."""
 
 
 def log(msg):
@@ -124,7 +147,8 @@ def update_index(entry):
         except (OSError, ValueError):
             log('index.json unreadable, written anew')
     index['schema'] = core.SCHEMA
-    index['settings'] = dict(ao_distance=SET['ao_distance'], samples=SET['samples'], **core.method_settings())
+    index['settings'] = dict(ao_distance=SET['ao_distance'], samples=SET['samples'], baker=BAKER,
+                             optix_samples=OPTIX_SAMPLES, **core.method_settings())
     index.setdefault('masters', {})[entry['key']] = entry
     tmp = path + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
@@ -295,83 +319,15 @@ def occluder_mesh(obj, depsgraph, skip_slots, shift):
 # One master, in tiles (decisions 31 and 32)
 # ---------------------------------------------------------------------------------------------------------------------
 
-PREVIEW_MAX = 2048  # the long side of the preview in the window
-PREVIEW_EVERY_S = 0.25  # the preview file at most this often (and at the end of each master)
-
-
-class Preview:
-    """A reduced copy of the master being baked (every f-th pixel, at most PREVIEW_MAX px on the long side with a
-    window, core.PREVIEW_FILE_MAX without), updated from each tile and each composed strip. Written to the bake
-    folder's preview file for the artist's Blender (decision 36), at most every PREVIEW_EVERY_S seconds and at the end;
-    with a window also shown in its Image Editor. Its size does not depend on the master's."""
-
-    seq = 0  # over the whole run, so the artist's Blender sees each update
-
-    def __init__(self, W, H):
-        self.on = not bpy.app.background
-        self.f = max(1, -(-max(W, H) // (PREVIEW_MAX if self.on else core.PREVIEW_FILE_MAX)))
-        self.pv = np.zeros((-(-H // self.f), -(-W // self.f)), np.uint16)
-        self.written = 0.0
-
-    def put(self, x0, y0, block):
-        """block (h, w) uint16 at (x0, y0) of the master."""
-        f = self.f
-        h, w = block.shape
-        ax, ay = -x0 % f, -y0 % f
-        if ax >= w or ay >= h:
-            return
-        part = block[ay::f, ax::f]
-        px, py = (x0 + ax) // f, (y0 + ay) // f
-        self.pv[py:py + part.shape[0], px:px + part.shape[1]] = part
-
-    def put_partial(self, x0, y0, h, w, value):
-        """While a tile (h x w at x0, y0) bakes its poses or views: value(sl) gives the values baked so far (-1: none
-        yet) at the preview's pixels of the tile, sl the slice of the tile that picks them; only those are computed."""
-        f = self.f
-        ax, ay = -x0 % f, -y0 % f
-        if ax >= w or ay >= h:
-            return
-        v = value((slice(ay, None, f), slice(ax, None, f)))
-        px, py = (x0 + ax) // f, (y0 + ay) // f
-        self.pv[py:py + v.shape[0], px:px + v.shape[1]] = np.where(v >= 0, core.quantize16(v), 0)
-
-    def show(self, final=False):
-        now = time.time()
-        if not final and now - self.written < PREVIEW_EVERY_S:
-            return
-        Preview.seq += 1
-        core.write_preview(FOLDER, self.pv, Preview.seq)
-        self.written = now
-        if not self.on:
-            return
-        pv = self.pv
-        ph, pw = pv.shape
-        img = _shown.get('img')
-        if img is None or img.name not in bpy.data.images or tuple(img.size) != (pw, ph):
-            if img is not None and img.name in bpy.data.images:
-                bpy.data.images.remove(img)
-            img = bpy.data.images.new('AO master', pw, ph, alpha=False, float_buffer=True, is_data=True)
-            _shown['img'] = img
-        px = np.ones((ph, pw, 4), dtype=np.float32)
-        px[:, :, :3] = (pv.astype(np.float32) / 65535.0)[:, :, None]
-        img.pixels.foreach_set(px.ravel())
-        img.update()
-        wm = bpy.context.window_manager
-        for window in wm.windows:
-            # decision 36: no 3D view, so the window does not draw the whole scene; the master instead
+def hide_views():
+    """Decision 36: in a window, no 3D view, so the window does not draw the whole scene."""
+    try:
+        for window in bpy.context.window_manager.windows:
             for area in window.screen.areas:
                 if area.type == 'VIEW_3D':
                     area.type = 'IMAGE_EDITOR'
-            areas = sorted(window.screen.areas, key=lambda a: -a.width * a.height)
-            if areas and not any(a.type == 'IMAGE_EDITOR' for a in areas):
-                areas[0].type = 'IMAGE_EDITOR'
-            for area in areas:
-                if area.type == 'IMAGE_EDITOR':
-                    area.spaces.active.image = img
-                    area.tag_redraw()
-
-
-_shown = {}
+    except Exception as exc:  # noqa: BLE001  (only what the window draws; the bake goes on)
+        log(f'the 3D views stay ({type(exc).__name__}: {exc})')
 
 
 def _remove(objs):
@@ -518,6 +474,132 @@ def setup_copies(item, first, dg, shift, coll, temps, poses):
     return len(views), notes
 
 
+def native_scene(item, obj, dg, shift, frames, ref_co, samples):
+    """The FSS OptiX scene of a master: the occluders as arrays in the bake's space (each object's evaluated triangles
+    without its skip faces, moved by -shift, as occluder_mesh) and the views the baker combines per pixel, built as
+    setup_copies and pose_setup build Cycles' (decisions 34, 35, 47, 49): per view the target's placement (4 x 4, bake
+    space), its copy (numbered from 0, a copy's views together), its samples and the occluders it sees. Returns
+    dict(occluders, views, combine, frames, pose_note, log)."""
+    occluders = []
+    lines = []
+    to_bake = np.eye(4)
+    to_bake[:3, 3] = -shift
+    from_bake = np.eye(4)
+    from_bake[:3, 3] = shift
+
+    def add(o, skip, depsgraph=None):
+        ev = core.evaluated_triangles(o, depsgraph or dg)
+        p, _cn = core.to_world(ev, shift)
+        keep = ~np.isin(ev['mat'], list(skip)) if skip else np.ones(len(ev['tris']), dtype=bool)
+        occluders.append((p.astype(np.float32), ev['tris'][keep].astype(np.uint32)))
+        return len(occluders) - 1
+
+    def poses_of(o, frs, ref, posed):
+        """pose_setup: per frame the placement relative to the current frame and the posed occluders' indices; None
+        when the mesh deforms between poses (the occluders added for it dropped)."""
+        scene = bpy.context.scene
+        f0, s0 = scene.frame_current, scene.frame_subframe
+        inv_ref = np.linalg.inv(np.array(o.matrix_world, dtype=np.float64))
+        n0 = len(occluders)
+        out = []
+        try:
+            for f in frs:
+                fi = int(math.floor(f))
+                scene.frame_set(fi, subframe=float(f - fi))
+                d = bpy.context.evaluated_depsgraph_get()
+                co = core.evaluated_triangles(o, d)['co']
+                if co.shape != ref.shape or not np.allclose(co, ref, rtol=0.0, atol=1e-6):
+                    out = None
+                    break
+                M = to_bake @ np.array(o.matrix_world, dtype=np.float64) @ inv_ref @ from_bake
+                out.append((M, [add(oc, skip, d) for oc, skip in posed]))
+        finally:
+            scene.frame_set(f0, subframe=s0)
+        if out is None:
+            del occluders[n0:]
+        return out
+
+    views, notes = [], []
+    combine = 'AVERAGE'
+    pose_note = item.get('pose_note') or ''
+    if item.get('copies'):  # decision 47: each copy in its own placement, surroundings and poses
+        frames = None
+        combine = item.get('combine') or 'AVERAGE'
+        inv_first = np.linalg.inv(np.array(obj.matrix_world, dtype=np.float64))
+        static = {}
+        for ci, c in enumerate(item['copies']):
+            o = bpy.data.objects.get(c['object'])
+            if o is None or o.type != 'MESH':
+                notes.append(f"{c['object']}: not in the baked file, left out")
+                continue
+            X = to_bake @ np.array(o.matrix_world, dtype=np.float64) @ inv_first @ from_bake
+            vis, posed = [], []
+            for occ in c['occluders']:
+                oc = bpy.data.objects.get(occ['name'])
+                if oc is None or oc.type != 'MESH':
+                    continue
+                if c.get('poses') and occ.get('posed'):
+                    posed.append((oc, set(occ['skip_slots'])))
+                    continue
+                if oc.name not in static:
+                    static[oc.name] = add(oc, set(occ['skip_slots']))
+                vis.append(static[oc.name])
+            got = None
+            if c.get('poses'):
+                got = poses_of(o, c['poses'], core.evaluated_triangles(o, dg)['co'], posed)
+                if got is None:
+                    notes.append(f"{o.name}: its mesh deforms between poses: baked in the current frame")
+            if got is None:
+                views.append(dict(transform=X, copy=ci, occluders=vis + [add(oc, skip) for oc, skip in posed],
+                                  cposes=1))
+            else:
+                for M, idx in got:
+                    views.append(dict(transform=M @ X, copy=ci, occluders=vis + idx, cposes=len(got)))
+        order = {c: k for k, c in enumerate(dict.fromkeys(v['copy'] for v in views))}
+        for v in views:
+            v['copy'] = order[v['copy']]
+            share = v['cposes'] * (len(order) if combine in ('AVERAGE', 'ONE') else 1)  # decision 49
+            v['samples'] = core.view_samples(samples, share, SPLIT)
+        pose_note = '; '.join(notes)
+        lines.append(f"    {len(item['copies'])} copies ({combine.lower()}), {len(views)} views")
+    else:
+        static, posed = [], []
+        for occ in item['occluders']:
+            o = bpy.data.objects.get(occ['name'])
+            if o is None or o.type != 'MESH' or o == obj:
+                continue
+            if frames and occ.get('posed'):
+                posed.append((o, set(occ['skip_slots'])))  # decision 35
+                continue
+            static.append(add(o, set(occ['skip_slots'])))
+        got = poses_of(obj, frames, ref_co, posed) if frames else None
+        if frames and got is None:
+            pose_note = 'its mesh deforms between poses (shape keys or an armature): baked in the current frame only'
+            frames = None
+            static += [add(o, skip) for o, skip in posed]
+        if got:
+            vs = core.view_samples(samples, len(got), SPLIT)
+            views = [dict(transform=M, copy=0, samples=vs, occluders=static + idx) for M, idx in got]
+            lines.append(f"    {len(frames)} poses at frames {', '.join(f'{f:g}' for f in frames)}"
+                         + (f'; {len(posed)} occluder(s) posed with it' if posed else ''))
+        else:
+            views = [dict(transform=np.eye(4), copy=0, samples=int(samples), occluders=static)]
+    return dict(occluders=occluders, views=views, combine=combine, frames=frames, pose_note=pose_note, log=lines)
+
+
+def native_failed(what, exc):
+    """Decision 22: FSS OptiX failed; it is closed, and the rest of the job bakes with Cycles (said in the log)."""
+    bk = NATIVE['baker']
+    NATIVE.update(baker=None, why=f'{what}: {type(exc).__name__}: {exc}', failed=True)
+    state.update(baker='Cycles', baker_why=NATIVE['why'])
+    log(f"  {native.NAME} failed ({NATIVE['why']}): Cycles from here on")
+    if bk is not None:
+        try:
+            bk.close()
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+
+
 def bake_item(item, coll):
     """Bakes one master; a generator that yields after each tile (the caller checks Cancel between tiles and, with a
     window, lets it redraw), and returns the result. Closing it between tiles leaves the old master as it was.
@@ -530,6 +612,9 @@ def bake_item(item, coll):
     obj = bpy.data.objects.get(item['object'])
     if obj is None or obj.type != 'MESH':
         return dict(status='skipped', reason='object not in the baked file')
+    bk = NATIVE['baker']  # FSS OptiX, or None: Cycles
+    samples = OPTIX_SAMPLES if bk is not None else int(SET['samples'])
+    nat = None
     dist = float(item.get('ao_distance', SET['ao_distance']))  # decision 51: Auto Distance gives small objects less
     BAKE['scene'].world.light_settings.distance = dist
     nf = int(item.get('falloff') or 0)  # decision 53: each view at dist x 1/n, 2/n ... 1, averaged: linear falloff
@@ -578,6 +663,9 @@ def bake_item(item, coll):
         n_views = (sum(len(c.get('poses') or [0]) for c in item['copies']) if item.get('copies')
                    else len(frames or [0]))
         tile, est, fits = core.choose_tile(W, H, BUDGET, ws0 or 0, views=n_views)
+    if bk is not None:  # the baker's largest tile
+        while tile > core.TILE_MIN and tile * tile > int(bk.ready['max_tile_pixels'] or tile * tile):
+            tile //= 2
     tiles = core.tile_grid(W, H, tile)
     n = len(tiles)
     nb = -(-H // tile)  # bands
@@ -593,11 +681,10 @@ def bake_item(item, coll):
     write_status()
     temps = []
     counts = dict(core_px=0, skirt_px=0)
-    times = dict(core=0.0, skirt=0.0, tiles=0.0)
+    times = dict(core=0.0, skirt=0.0, tiles=0.0, trace=0.0, scene=0.0)
     core_tris = m['core_tris']
     cuv = m['muv'][core_tris]
     ns = len(m['skirt_pos'])
-    preview = Preview(W, H)
     files = core.MasterWriter(FOLDER, item['key'], W, H, threads=int(SET['threads']))
     finished = False
     done = [0]
@@ -664,9 +751,6 @@ def bake_item(item, coll):
                 ssum[ok] += B[ok]
                 scnt[ok] += 1
             del A, B
-            preview.put_partial(x0, y0, h, w, lambda sl: np.where(ccnt[sl] > 0, csum[sl] / np.maximum(ccnt[sl], 1),
-                                                                   -1.0))
-            preview.show()
             if p < npose - 1:
                 yield done[0]
         cm = ccnt > 0
@@ -728,17 +812,6 @@ def bake_item(item, coll):
                 fold(ctot, ccn, csum, ccnt)
                 fold(stot, scn, ssum, scnt)
                 csum = None
-
-            def so_far(sl):  # the copies combined so far; before the first copy is done, its views so far
-                nc = ccn[sl]
-                val = np.where(nc > 0, ctot[sl] if combine in ('LIGHTEST', 'DARKEST') else ctot[sl] / np.maximum(nc, 1),
-                               -1.0)
-                if csum is not None:
-                    cc = ccnt[sl]
-                    val = np.where((nc == 0) & (cc > 0), csum[sl] / np.maximum(cc, 1), val)
-                return val
-            preview.put_partial(x0, y0, h, w, so_far)
-            preview.show()
             if v < nv - 1:
                 yield done[0]
         cm = ccn > 0
@@ -750,6 +823,26 @@ def bake_item(item, coll):
         win[sm] = core.quantize16(np.clip(sval[sm], 0.0, 1.0))
         counts['skirt_px'] += int(sm.sum())
         baked |= cm | sm
+
+    def native_tile(rect):
+        """The tile from FSS OptiX: (A, B, TileDone), the views already combined; None when cancelled in the tile (the
+        job's cancel file, or the baker window's Cancel). NativeFailed when the baker fails."""
+        asked = [False]
+        last = [time.time()]
+
+        def on_progress(p):
+            if not asked[0] and os.path.exists(CANCEL):
+                asked[0] = True
+                bk.cancel_tile()
+            if (p.get('views') or 1) > 1:
+                state['pose'] = min(int(p['view']) + 1, int(p['views']))
+            if time.time() - last[0] >= STATUS_EVERY_S:
+                last[0] = time.time()
+                write_status()
+        try:
+            return bk.bake_tile(rect, tile=done[0], tiles=n, on_progress=on_progress)
+        except Exception as exc:  # noqa: BLE001
+            raise NativeFailed(f'tile {done[0]} of {n}') from exc
 
     def bake_tile(i, rect, win, baked):
         """Tile i of tile_grid (its place gives its seed) into the band's views of it; yields once it is baked (and
@@ -763,7 +856,26 @@ def bake_item(item, coll):
         wh = np.array([w, h], dtype=np.float64)
         csel = core.tris_in_window(cuv, x0, y0, w, h)
         ssel = core.tris_in_window(m['skirt_uv'], x0, y0, w, h) if ns else np.zeros(0, dtype=np.int64)
-        if len(csel) or len(ssel):
+        if bk is not None and (len(csel) or len(ssel)):
+            got = native_tile(rect)
+            if got is None:  # cancelled in the tile: the job stops as after a tile (step closes this master)
+                if not os.path.exists(CANCEL):
+                    with open(CANCEL, 'w', encoding='utf-8') as f:
+                        f.write('cancel\n')
+                while True:
+                    yield done[0]
+            A, B, td = got
+            cm = A >= 0
+            win[cm] = core.quantize16(A[cm])
+            counts['core_px'] += int(cm.sum())
+            sm = (~cm) & (B >= 0) & (core.rect_window(m['rects'], x0, y0, w, h) >= 0)
+            win[sm] = core.quantize16(B[sm])
+            counts['skirt_px'] += int(sm.sum())
+            baked |= cm | sm
+            times['core'] += td['seconds']
+            times['trace'] += td['trace_s']
+            del A, B, cm, sm
+        elif len(csel) or len(ssel):
             ct = core_tris[csel]
             pc = (pos[tris[ct]], cnm[ct], (cuv[csel] - off) / wh) if len(csel) else None
             ps = ((m['skirt_pos'][ssel], m['skirt_n'][ssel], (m['skirt_uv'][ssel] - off) / wh) if len(ssel)
@@ -796,69 +908,83 @@ def bake_item(item, coll):
         if n > 1:
             log(f"    tile {done[0]}/{n} at ({x0}, {y0}) {w} x {h}: {len(csel)} core and {len(ssel)} skirt "
                 f"triangles, {time.time() - tt:.2f} s")
-        preview.put(x0, y0, win)
-        preview.show()
         times['tiles'] += time.time() - tt
         yield done[0]
 
     try:
-        # the target (selected) and the occluders, moved by -shift, in the bake's own scene (decision 52)
-        distinct = np.array([len(set(r)) == 3 for r in tris.tolist()])
-        tme = build_mesh('FSS_AO_TARGET', pos, tris[distinct], cnm[distinct])
-        tme.materials.clear()
-        target = temp_object(coll, 'FSS_AO_TARGET', tme)
-        temps.append(target)
-        posed_occ = []
-        if item.get('copies'):
-            frames = None  # decision 47: each copy has its own poses, as views
-            n_views, notes = setup_copies(item, obj, dg, shift, coll, temps, poses)
-            pose_note = '; '.join(notes)
-            log(f"    {len(item['copies'])} copies ({item['combine'].lower()}), {n_views} views")
-        for occ in ([] if item.get('copies') else item['occluders']):
-            o = bpy.data.objects.get(occ['name'])
-            if o is None or o.type != 'MESH' or o == obj:
-                continue
-            if frames and occ.get('posed'):
-                posed_occ.append((o, set(occ['skip_slots'])))  # decision 35: posed with the target, built per pose
-                continue
-            temps.append(temp_object(coll, 'FSS_AO_OCC', occluder_mesh(o, dg, set(occ['skip_slots']), shift)))
-        if frames:
-            got = pose_setup(obj, frames, ref_co, shift, posed_occ)
-            if got is None:
-                pose_note = ('its mesh deforms between poses (shape keys or an armature): baked in the current '
-                             'frame only')
-                frames = None
-                for o, skip in posed_occ:  # at the current frame, as at one pose
-                    temps.append(temp_object(coll, 'FSS_AO_OCC', occluder_mesh(o, dg, skip, shift)))
-            else:
-                poses['mats'], meshes = got
-                for p, mes in enumerate(meshes):
-                    objs = [temp_object(coll, 'FSS_AO_OCC_POSE', me) for me in mes]
-                    temps.extend(objs)
-                    poses['posed'].append(objs)
-                log(f"    {len(frames)} poses at frames {', '.join(f'{f:g}' for f in frames)}"
-                    + (f'; {len(posed_occ)} occluder(s) posed with it' if posed_occ else ''))
-        state.update(pose=0, n_poses=len(poses['views']) if poses['views'] else (len(frames) if frames else 1))
+        if bk is not None:  # FSS OptiX: the master's scene once, the views combined in the baker
+            nat = native_scene(item, obj, dg, shift, frames, ref_co, samples)
+            frames, pose_note = nat['frames'], nat['pose_note']
+            for line in nat['log']:
+                log(line)
+            try:
+                bk.job_info(_run['i'] + 1, len(ITEMS), item['name'])
+                ready = bk.load_master(pos, tris, cnm, m, dist, samples, views=nat['views'],
+                                       occluders=nat['occluders'], falloff=nf > 1, combine=nat['combine'],
+                                       seed=core.SEEDS[0] + SEED_OFFSET)
+            except Exception as exc:  # noqa: BLE001
+                raise NativeFailed('its scene') from exc
+            times['scene'] = ready['seconds']
+            log(f"    {native.NAME}: {ready['triangles']} triangles, {ready['instances']} instances, {ready['views']} "
+                f"view(s), {samples} samples, {ready['gpu_bytes'] / 2 ** 20:.0f} MB on the GPU, in "
+                f"{ready['seconds']:.2f} s")
+            state.update(pose=0, n_poses=len(nat['views']))
+        else:
+            # the target (selected) and the occluders, moved by -shift, in the bake's own scene (decision 52)
+            distinct = np.array([len(set(r)) == 3 for r in tris.tolist()])
+            tme = build_mesh('FSS_AO_TARGET', pos, tris[distinct], cnm[distinct])
+            tme.materials.clear()
+            target = temp_object(coll, 'FSS_AO_TARGET', tme)
+            temps.append(target)
+            posed_occ = []
+            if item.get('copies'):
+                frames = None  # decision 47: each copy has its own poses, as views
+                n_views, notes = setup_copies(item, obj, dg, shift, coll, temps, poses)
+                pose_note = '; '.join(notes)
+                log(f"    {len(item['copies'])} copies ({item['combine'].lower()}), {n_views} views")
+            for occ in ([] if item.get('copies') else item['occluders']):
+                o = bpy.data.objects.get(occ['name'])
+                if o is None or o.type != 'MESH' or o == obj:
+                    continue
+                if frames and occ.get('posed'):
+                    posed_occ.append((o, set(occ['skip_slots'])))  # decision 35: posed with the target, built per pose
+                    continue
+                temps.append(temp_object(coll, 'FSS_AO_OCC', occluder_mesh(o, dg, set(occ['skip_slots']), shift)))
+            if frames:
+                got = pose_setup(obj, frames, ref_co, shift, posed_occ)
+                if got is None:
+                    pose_note = ('its mesh deforms between poses (shape keys or an armature): baked in the current '
+                                 'frame only')
+                    frames = None
+                    for o, skip in posed_occ:  # at the current frame, as at one pose
+                        temps.append(temp_object(coll, 'FSS_AO_OCC', occluder_mesh(o, dg, skip, shift)))
+                else:
+                    poses['mats'], meshes = got
+                    for p, mes in enumerate(meshes):
+                        objs = [temp_object(coll, 'FSS_AO_OCC_POSE', me) for me in mes]
+                        temps.extend(objs)
+                        poses['posed'].append(objs)
+                    log(f"    {len(frames)} poses at frames {', '.join(f'{f:g}' for f in frames)}"
+                        + (f'; {len(posed_occ)} occluder(s) posed with it' if posed_occ else ''))
+            state.update(pose=0, n_poses=len(poses['views']) if poses['views'] else (len(frames) if frames else 1))
         # paged (decision 33): bands from the top, each composed and written once the band below it is baked
         tp = time.time()
         times['tiles'] = 0.0
-        yield from core.bake_paged(m, tile, bake_tile, files.write_rows, counts,
-                                   lambda y, v: (preview.put(0, y, v), preview.show()))
+        yield from core.bake_paged(m, tile, bake_tile, files.write_rows, counts)
         t_compose = time.time() - tp - times['tiles']
         t_core, t_skirt = times['core'], times['skirt']
         counts['image_px'] = int(W * H)
         meta = dict(schema=core.SCHEMA, key=item['key'], kind=item['kind'], name=item['name'], object=obj.name,
-                    mesh_hash=mh, ao_distance=dist, samples=SET['samples'], **core.method_settings())
+                    mesh_hash=mh, ao_distance=dist, samples=int(samples), **core.method_settings())
         # decision 55: an AO bake without CM keeps the old curvature only when the layout is the same
         keep_curv = None if item.get('cm', SET.get('curvature')) else _same_layout_curvature(item['key'], m, tri_src, mh)
         ts = time.time()
         files.finish(m, tri_src, meta)
         finished = True
-        core.write_preview(FOLDER, preview.pv, 0, name=item['key'] + core.THUMB_EXT)  # the object's preview
+        _remove_files([os.path.join(FOLDER, item['key'] + core.THUMB_EXT)])  # decision 31: no thumbnail any more
         t_save = time.time() - ts
         if item.get('cm', SET.get('curvature')):  # decision 54: the curvature master in this layout, from geometry
-            curv = core.write_curvature(FOLDER, item['key'], m, pos, tris, cnm, float(SET['curv_width']),
-                                        threads=int(SET['threads']))
+            curv = write_curvature(item, m, pos, tris, cnm, float(SET['curv_width']))
             curv['width'] = float(SET['curv_width'])
             log(f"  {item['name']}: curvature ({curv['width'] * 1000:g} mm, {curv['edges']} sharp edges) in "
                 f"{curv['seconds']:.1f} s")
@@ -877,7 +1003,11 @@ def bake_item(item, coll):
         _remove(temps)
         if not finished:
             files.abort()
-    preview.show(final=True)
+        if bk is not None and NATIVE['baker'] is bk:
+            try:
+                bk.release_master()
+            except Exception:  # noqa: BLE001
+                pass
     _ws, peak = core.process_memory()
     if pose_note:
         log(f"  {item['name']}: {pose_note}")
@@ -885,22 +1015,31 @@ def bake_item(item, coll):
         log('  profile: ' + ', '.join(f'{k} {v:.2f}' if isinstance(v, float) else f'{k} {v}'
                                       for k, v in PROFILE.items()))
         PROFILE.clear()
-    n_poses = len(poses['views']) if poses['views'] else (len(frames) if frames else 1)
+    if nat is not None:
+        n_poses = len(nat['views']) if item.get('copies') else (len(frames) if frames else 1)
+        view_samples = sorted({int(v['samples']) for v in nat['views']})
+        baker = dict(name=native.NAME, version=bk.version, device=bk.ready['device'], trace_s=round(times['trace'], 3),
+                     scene_s=round(times['scene'], 3))
+    else:
+        n_poses = len(poses['views']) if poses['views'] else (len(frames) if frames else 1)
+        view_samples = sorted({v['samples'] for v in poses['views']}) if poses['views'] else (
+            [core.view_samples(SET['samples'], len(frames), SPLIT)] if frames else [int(SET['samples'])])
+        baker = dict(name='Cycles', version=bpy.app.version_string, device=SET['device'],
+                     why=NATIVE['why'] or None)
     entry = dict(key=item['key'], kind=item['kind'], name=item['name'], object=obj.name, mesh=obj.data.name,
                  poses=frames, n_poses=n_poses, pose_note=pose_note,
                  combine=item.get('combine'), copies=len(item['copies']) if item.get('copies') else None,
                  falloff=nf if nf > 1 else None,
                  curvature=None if curv is None else dict(width=curv['width'], edges=curv['edges'],
-                                                          seconds=curv['seconds']),
+                                                          seconds=curv['seconds'], baker=curv.get('baker', 'add-on')),
                  denoise=dn,
                  corner_rule=core.CORNER_RULE,
                  sample_split=SPLIT,
-                 view_samples=sorted({v['samples'] for v in poses['views']}) if poses['views'] else (
-                     [core.view_samples(SET['samples'], len(frames), SPLIT)] if frames else [int(SET['samples'])]),
+                 view_samples=view_samples, baker=baker,
                  occluder_mode=item.get('occluder_mode', 'SCENE'),
                  mesh_hash=mh, mesh_hash_at_job=item.get('mesh_hash'), surround_hash=item['surround_hash'],
                  density=float(D), W=int(W), H=int(H), tris=int(len(tri_src)), islands=int(m['n_islands']),
-                 samples=int(SET['samples']), ao_distance=dist, method=core.METHOD,
+                 samples=int(samples), ao_distance=dist, method=core.METHOD,
                  uv=uv_name, occluders=[o['name'] for o in item['occluders']], mover=bool(item.get('mover')),
                  frame=item.get('frame'), baked_at=time.strftime('%Y-%m-%d %H:%M:%S'), schema=core.SCHEMA,
                  tiles=dict(size=int(tile), n=int(n), bands=int(nb), forced=bool(forced),
@@ -915,7 +1054,7 @@ def bake_item(item, coll):
     res = dict(status='baked', W=int(W), H=int(H), tile=int(tile), n_tiles=int(n), bake_s=round(t_core + t_skirt, 3),
                total_s=round(time.time() - t0, 3), peak_working_set_gb=entry['tiles']['peak_working_set_gb'],
                mesh_changed_since_job=bool(item.get('mesh_hash') and item['mesh_hash'] != mh),
-               n_poses=entry['n_poses'])
+               n_poses=entry['n_poses'], baker=baker['name'])
     if pose_note:
         res['note'] = pose_note
     return res
@@ -953,6 +1092,21 @@ def _remove_files(paths):
             pass
 
 
+def write_curvature(item, m, pos, tris, cn, width):
+    """Decision 54: the curvature master, by FSS OptiX when it runs (byte for byte the same file), else here. A failure
+    of the baker writes it here and leaves Cycles for the rest of the job (decision 22)."""
+    bk = NATIVE['baker']
+    if bk is not None:
+        try:
+            curv = bk.write_curvature(FOLDER, item['key'], m, pos, tris, cn, width, threads=int(SET['threads']))
+            curv['baker'] = native.NAME
+            return curv
+        except Exception as exc:  # noqa: BLE001
+            traceback.print_exc()
+            native_failed(f"the curvature of {item['name']}", exc)
+    return core.write_curvature(FOLDER, item['key'], m, pos, tris, cn, width, threads=int(SET['threads']))
+
+
 def denoise(item, pos, tris, cn):
     """Decision 56: the master filtered with the job's options; the master as it is becomes the raw one when there is
     none (just baked, or never denoised). Returns the index entry's denoise (settings and stats). On an error the
@@ -971,10 +1125,17 @@ def denoise(item, pos, tris, cn):
         write_status()
 
     try:
-        if SET['denoise'].get('method') == 'OIDN':
+        st = None
+        if SET['denoise'].get('method') == 'OIDN' and NATIVE['baker'] is not None:  # the baker's OIDN (Session 8)
+            try:
+                st = NATIVE['baker'].denoise_master(FOLDER, key, cn, SET['denoise'], device='GPU', on_band=on_band)
+            except Exception as exc:  # noqa: BLE001
+                traceback.print_exc()
+                native_failed(f"the denoise of {item['name']}", exc)
+        if st is None and SET['denoise'].get('method') == 'OIDN':
             st = core.denoise_master_oidn(FOLDER, key, pos, tris, cn, SET['denoise'], device=SET.get('device', 'GPU'),
                                           on_band=on_band)
-        else:
+        elif st is None:
             st = core.denoise_master(FOLDER, key, pos, tris, cn, SET['denoise'], threads=int(SET['threads']),
                                      on_band=on_band)
     except BaseException:
@@ -984,7 +1145,8 @@ def denoise(item, pos, tris, cn):
     finally:
         state.update(phase='')
     if st.get('method') == 'OIDN':
-        log(f"  {item['name']}: denoised by OIDN ({st['device']}) in {st['seconds']:.1f} s ({st['groups']} island "
+        by = f"{st['baker']}'s OIDN {st['oidn']}" if st.get('baker') else 'OIDN'
+        log(f"  {item['name']}: denoised by {by} ({st['device']}) in {st['seconds']:.1f} s ({st['groups']} island "
             f"groups, {st['windows']} windows, mean change {st['mean_change']:.4f})")
     else:
         log(f"  {item['name']}: denoised in {st['seconds']:.1f} s ({st['levels']} levels, radius {st['radius_px']:g} "
@@ -1034,11 +1196,12 @@ def curvature_item(item, coll=None):
     done = []
     if item.get('cm', True):
         width = float(SET['curv_width'])
-        curv = core.write_curvature(FOLDER, key, dict(muv=muv), pos, tris, cnm, width, threads=int(SET['threads']))
+        curv = write_curvature(item, dict(muv=muv), pos, tris, cnm, width)
         log(f"  {item['name']}: curvature only ({width * 1000:g} mm, {curv['edges']} sharp edges) in "
             f"{curv['seconds']:.1f} s")
         entry = _index_entry(key) or entry
-        entry['curvature'] = dict(width=width, edges=curv['edges'], seconds=curv['seconds'])
+        entry['curvature'] = dict(width=width, edges=curv['edges'], seconds=curv['seconds'],
+                                  baker=curv.get('baker', 'add-on'))
         update_index(entry)
         done.append('curvature')
     if item.get('dn'):
@@ -1069,8 +1232,8 @@ def _record(item, res):
     _ws, peak = core.process_memory()
     state['peak_working_set_gb'] = round(peak / 2 ** 30, 3) if peak else None
     log(f"{i + 1}/{len(ITEMS)} {item['name']}: {res['status']}"
-        + (f" {res.get('W')}x{res.get('H')} px in {res.get('n_tiles')} tile(s) of {res.get('tile')} px, bake "
-           f"{res.get('bake_s')} s" if res['status'] == 'baked' else '')
+        + (f" by {res.get('baker')}, {res.get('W')}x{res.get('H')} px in {res.get('n_tiles')} tile(s) of "
+           f"{res.get('tile')} px, bake {res.get('bake_s')} s" if res['status'] == 'baked' else '')
         + (f", {res['n_poses']} poses" if (res.get('n_poses') or 1) > 1 else '')
         + (f" ({res['reason']})" if res.get('reason') else '') + f", {res['seconds']} s"
         + (f", peak working set {state['peak_working_set_gb']} GB" if peak else ''))
@@ -1110,6 +1273,11 @@ def step():
         return True
     except StopIteration as stop:
         res = stop.value or dict(status='failed', reason='no result')
+    except NativeFailed as exc:  # decision 22: this master again with Cycles, and the rest of the job
+        traceback.print_exc()
+        native_failed(f"{item['name']}, {exc}", exc.__cause__ or exc)
+        _run.update(gen=bake_item(item, _run['coll']), tiles_done=0)
+        return True
     except Exception as exc:  # noqa: BLE001
         traceback.print_exc()
         try:
@@ -1124,7 +1292,46 @@ def step():
     return _run['i'] < len(ITEMS)
 
 
+def start_baker():
+    """Decision 22: FSS OptiX for the job when the Baker setting asks for it and its GPU works, else Cycles, and why."""
+    if BAKER == 'CYCLES':
+        state.update(baker='Cycles')
+        log('baker Cycles (the Baker setting)')
+        return
+    have, why = native.available()
+    if have:
+        try:
+            # its window in a Visible run, and in a Foreground run with FSS OptiX, whose Blender is hidden (decision 28)
+            window = bool(JOB.get('baker_window')) or not bpy.app.background
+            bk = native.Baker(foreground=window, client='ao_bake_runner', tag=str(os.getpid()))
+        except Exception as exc:  # noqa: BLE001
+            traceback.print_exc()
+            why = f'it did not start ({type(exc).__name__}: {exc})'
+        else:
+            if bk.ok:
+                NATIVE['baker'] = bk
+                state.update(baker=native.NAME, baker_version=bk.version, baker_device=bk.ready['device'])
+                log(f"baker {native.NAME} ({bk.ready['device']}; {bk.version}), {OPTIX_SAMPLES} samples")
+                return
+            why = bk.why
+            bk.close()
+    NATIVE['why'] = why
+    state.update(baker='Cycles', baker_why=why)
+    log(f'baker Cycles: {native.NAME} cannot run here ({why})')
+
+
+def close_baker():
+    bk = NATIVE['baker']
+    NATIVE['baker'] = None
+    if bk is not None:
+        try:
+            bk.close()
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+
+
 def finish():
+    close_baker()
     cancelled = os.path.exists(CANCEL) and (state['n_done'] < state['n_total']
                                             or any(r['status'] == 'cancelled' for r in state['results']))
     state['state'] = 'cancelled' if cancelled else 'done'
@@ -1172,12 +1379,14 @@ def main():
         state.update(master_format='png', jxl_error=lib.error())
         log(f'masters as PNG: the JPEG XL library could not be loaded ({lib.error()})')
     _run['coll'] = setup_scene()
+    start_baker()
     write_status()
     if bpy.app.background:
         while step():
             pass
         finish()
     else:
+        hide_views()
         bpy.app.timers.register(timer_step, first_interval=0.5)
 
 
@@ -1185,6 +1394,7 @@ try:
     main()
 except Exception:  # noqa: BLE001
     traceback.print_exc()
+    close_baker()
     state['state'] = 'failed'
     write_status()
     if not bpy.app.background:

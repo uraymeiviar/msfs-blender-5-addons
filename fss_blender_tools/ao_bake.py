@@ -2,13 +2,15 @@
 
 FSS MSFS Tools > AO Bake:
 - Bake: AO distance (scene, decision 16), Auto Distance (decision 51), Distance Falloff (decision 53), Curvature Map
-  (decision 54), samples, device; poses of moving parts and the occluders (scene defaults, decisions 34 and 35),
-  the run mode (Hidden or Visible, decision 36); the active object's overrides (poses, occluders, its custom list of
-  occluders with Add Selected, Remove, Clear); the masters' counts (up to date, surroundings changed, mesh changed,
-  missing, excluded); Bake Missing and Stale, Bake Selected, Select Stale, Select Missing; while a bake runs, object n
-  of m with the share done (tiles and views), its name, tile, copy and pose, time spent and left, Cancel, and a
-  preview of the master being baked (bpy.utils.previews: no datablock, the file not marked changed); the bake reads
-  a snapshot of the current state (unsaved changes included); the report of the last bake.
+  (decision 54), the baker (Auto, FSS OptiX or Cycles: OptiX baker journal decision 22) with FSS OptiX's samples
+  (decision 24) and Cycles' samples and device; poses of moving parts and the occluders (scene defaults, decisions 34
+  and 35), the run mode (Hidden or Visible, decision 36); the active object's overrides (poses, occluders, its custom
+  list of occluders with Add Selected, Remove, Clear) and the baker of its master; the masters' counts (up to date,
+  surroundings changed, mesh changed, missing, excluded); Bake Missing and Stale, Bake Selected, Select Stale, Select
+  Missing; while a bake runs, object n of m with the share done (tiles and views), its name, tile, copy and pose, time
+  spent and left, and Cancel (no preview of the master being baked: the FSS OptiX window shows it, OptiX baker
+  decision 30); the bake reads a snapshot of the current state (unsaved changes included); the report of the last
+  bake.
 - Apply: padding; a row per texture set with its state (masters complete, or the number missing or stale; faces under
   4 x); for the active row: target (ORM slot texture or separate file) and the separate file's output folder,
   name, resolution, layout, green and blue, sampling; the warnings; Apply, Apply All, Apply Selected.
@@ -16,19 +18,22 @@ The panel draws without writing: the hashes are computed by Refresh (and before 
 file opens and after a bake.
 """
 
-import hashlib
 import os
 import time
 
 import bpy
-import numpy as np
 from bpy.app.handlers import persistent
 
 from . import ao_bake_apply as apply_mod
-from . import ao_bake_core as core
+from . import ao_bake_native as native
 from . import ao_bake_store as store
 
 DEVICES = [('CPU', 'CPU', 'Bake on the CPU'), ('GPU', 'GPU', 'Bake on the first GPU type found (OptiX, CUDA, HIP, oneAPI)')]
+BAKERS = [  # OptiX baker journal decision 22
+    ('AUTO', 'Auto', "FSS OptiX when it can run here (an NVIDIA GPU), else Cycles"),
+    ('OPTIX', 'FSS OptiX', "The add-on's own AO baker on the NVIDIA GPU (OptiX), with its own denoiser; where it "
+     "cannot run, or fails, Cycles bakes and the report says why"),
+    ('CYCLES', 'Cycles', "Blender's Cycles bakes every master (CPU or GPU, Device)")]
 _res_items = {}  # Blender keeps no reference to a dynamic enum's strings: kept here, per material
 
 
@@ -122,7 +127,7 @@ class FSS_AOBakeSettings(bpy.types.PropertyGroup):
         "smoother and the bake longer")
     bake_ao: bpy.props.BoolProperty(
         name="AO", default=True,
-        description="The bake buttons bake the AO masters (Cycles); with CM also ticked, each object's curvature is "
+        description="The bake buttons bake the AO masters (Baker); with CM also ticked, each object's curvature is "
         "written with its AO")
     curvature: bpy.props.BoolProperty(
         name="CM", default=False,
@@ -140,8 +145,10 @@ class FSS_AOBakeSettings(bpy.types.PropertyGroup):
         description="Each AO master is denoised after its bake (Method). The raw bake is kept beside it, so changing "
         "these options re-runs only the denoise (Bake Selected with AO ticked), not the rays")
     dn_method: bpy.props.EnumProperty(name="Method", default='OIDN', items=[
-        ('OIDN', 'OIDN', "Intel Open Image Denoise, the denoiser Blender ships, run on each group of islands apart "
-         "(islands do not bleed into one another); on the GPU when the bake runs on the GPU. Fast, only Strength"),
+        ('OIDN', 'OIDN', "Intel Open Image Denoise run on each group of islands apart (islands do not bleed into "
+         "one another). With FSS OptiX its own OIDN on the GPU, which also keeps each area's mean AO and moves no "
+         "pixel further than its noise; with Cycles the one Blender ships, on the GPU when the bake runs on the GPU. "
+         "Fast, only Strength"),
         ('FILTER', 'Surface Filter', "An edge-aware filter of our own: smooths along the surface, keeps sharp edges, "
          "curvature changes and real AO changes (contact shadows); its options below")])
     dn_strength: bpy.props.FloatProperty(
@@ -188,6 +195,11 @@ class FSS_AOBakeSettings(bpy.types.PropertyGroup):
         "grey where no curvature master is)")
     samples: bpy.props.IntProperty(name="Samples", default=256, min=1, soft_max=1024,
                                    description="Cycles samples per master pixel")
+    baker: bpy.props.EnumProperty(name="Baker", items=BAKERS, default='AUTO',
+                                  description="What bakes the AO masters. A master baked by the other baker is not "
+                                  "stale; Bake Selected bakes it again")
+    optix_samples: bpy.props.IntProperty(name="Samples", default=4096, min=1, soft_max=16384,
+                                         description="FSS OptiX samples per master pixel")
     sample_quality: bpy.props.EnumProperty(name="Quality", default='SPLIT', items=[
         ('SPLIT', 'Split Samples', "Views that are averaged (a moving object's poses, a shared mesh's copies) share "
          "the samples, so the average is about as clean as one bake and costs about as much (each view at least 4)"),
@@ -238,8 +250,9 @@ class FSS_AOBakeSettings(bpy.types.PropertyGroup):
         "override it")
     run_mode: bpy.props.EnumProperty(name="Run In", default='HIDDEN', items=[
         ('HIDDEN', 'Background', 'The second Blender bakes in the background, without a window'),
-        ('VISIBLE', 'Foreground', 'The second Blender opens a window that shows the master being baked')],
-        description="How the second Blender that bakes runs; this panel shows the progress and a preview in both")
+        ('VISIBLE', 'Foreground', "With FSS OptiX, FSS OptiX's window shows the bake and a preview of the master, "
+         'and the second Blender runs in the background; with Cycles, the second Blender opens a window')],
+        description="How the bake runs; this panel shows the progress in both")
 
 
 OBJECT_OCCLUDERS = [
@@ -479,139 +492,18 @@ def sync_state(context):
             st.active_set = i
 
 
-# The preview of the master being baked (decision 36): read from the runner's preview file by the progress timer (never
-# while drawing) into an image preview of bpy.utils.previews, which is no datablock of the file and does not mark it
-# changed. `updates` counts the images taken, `seq` is the runner's number of the last one.
-_preview = dict(coll=None, seq=None, updates=0, size=(0, 0), digest='')
-
-
-def preview_icon():
-    """The icon id of the preview, or 0 (for drawing)."""
-    coll = _preview['coll']
-    if coll is None or 'master' not in coll or not _preview['updates']:
-        return 0
-    return coll['master'].icon_id
-
-
-def update_preview(folder=None):
-    """Takes a new preview image from the bake folder when the runner wrote one. Returns True when it changed."""
-    folder = folder or store._run.get('folder')
-    if not folder:
-        return False
-    got = core.read_preview(folder)
-    if got is None or got[0] == _preview['seq']:
-        return False
-    seq, grey = got
-    if _preview['coll'] is None:
-        import bpy.utils.previews
-        _preview['coll'] = bpy.utils.previews.new()
-    coll = _preview['coll']
-    pv = coll['master'] if 'master' in coll else coll.new('master')
-    h, w = grey.shape
-    rgba = np.ones((h, w, 4), np.float32)
-    rgba[:, :, :3] = (grey.astype(np.float32) / 255.0)[:, :, None]
-    pv.image_size = (w, h)
-    pv.image_pixels_float.foreach_set(rgba.ravel())
-    _preview.update(seq=seq, updates=_preview['updates'] + 1, size=(w, h),
-                    digest=hashlib.sha1(grey.tobytes()).hexdigest()[:12])
-    return True
-
-
-# The active object's master, shown in the Object box (decision 43): its thumbnail (<stem>.ao.thumb, written by the
-# runner with the master), loaded into the same preview collection by a timer when the active object or the file
-# changes, never while drawing. A master baked before 0.60.1 has none: one is made from the master when it is at most
-# THUMB_FROM_MASTER_PX, else the box says to bake it again.
-THUMB_FROM_MASTER_PX = 64 << 20
-THUMB_EVERY_S = 0.5
-_thumb = dict(name=None, stem=None, mtime=None, state='', icon_ok=False)
-
-
-def _active_stem(context):
-    """(object name, its master's stem or None) of the active mesh."""
-    obj = _active_mesh(context)
-    if obj is None:
-        return None, None
-    stem = store._state['by_object'].get(obj.name)
-    if stem is None:
-        folder = store.bake_folder()
-        if folder:
-            for key, entry in store.read_index(folder).get('masters', {}).items():
-                if entry.get('object') == obj.name:
-                    stem = key
-                    break
-    return obj.name, stem
-
-
-def _load_thumb(folder, stem):
-    """The thumbnail's (h, w) uint8, rows from the bottom; made from the master when it has none and is small."""
-    path = os.path.join(folder, stem + core.THUMB_EXT)
-    if not os.path.isfile(path):
-        image = core.master_paths(folder, stem)[0]
-        if not os.path.isfile(image):
-            return None, 'missing'
-        entry = store.read_index(folder).get('masters', {}).get(stem, {})
-        if int(entry.get('W') or 0) * int(entry.get('H') or 0) > THUMB_FROM_MASTER_PX or not entry.get('W'):
-            return None, 'large'
-        core.write_preview(folder, core.read_image(image), 0, name=stem + core.THUMB_EXT)
-    got = core.read_preview(folder, stem + core.THUMB_EXT)
-    return (got[1], '') if got else (None, 'missing')
-
-
-def _thumb_timer():
-    """Keeps the Object box's preview on the active object's master (decision 43)."""
-    try:
-        context = bpy.context
-        name, stem = _active_stem(context)
-        folder = store.bake_folder()
-        path = os.path.join(folder, stem + core.THUMB_EXT) if (folder and stem) else ''
-        mtime = os.path.getmtime(path) if path and os.path.isfile(path) else None
-        if (name, stem, mtime) == (_thumb['name'], _thumb['stem'], _thumb['mtime']) and _thumb['state'] != 'retry':
-            return THUMB_EVERY_S
-        _thumb.update(name=name, stem=stem, mtime=mtime, state='', icon_ok=False)
-        if not (folder and stem):
-            _thumb['state'] = 'missing' if name else ''
-            return THUMB_EVERY_S
-        grey, state = _load_thumb(folder, stem)
-        _thumb['state'] = state
-        if grey is not None:
-            _set_icon('object', grey)
-            _thumb.update(icon_ok=True, mtime=os.path.getmtime(path) if os.path.isfile(path) else None)
-        _redraw()
-    except Exception as e:  # a preview is never worth an error in the artist's Blender
-        print('AO Bake: object preview:', e)
-    return THUMB_EVERY_S
-
-
-def _set_icon(key, grey):
-    if _preview['coll'] is None:
-        import bpy.utils.previews
-        _preview['coll'] = bpy.utils.previews.new()
-    coll = _preview['coll']
-    pv = coll[key] if key in coll else coll.new(key)
-    h, w = grey.shape
-    rgba = np.ones((h, w, 4), np.float32)
-    rgba[:, :, :3] = (grey.astype(np.float32) / 255.0)[:, :, None]
-    pv.image_size = (w, h)
-    pv.image_pixels_float.foreach_set(rgba.ravel())
-
-
-def object_icon(context):
-    """The icon id of the active object's master preview and the state ('', 'missing', 'large'), for drawing."""
-    obj = _active_mesh(context)
-    if obj is None or _thumb['name'] != obj.name:
-        return 0, ''
-    coll = _preview['coll']
-    if _thumb['icon_ok'] and coll is not None and 'object' in coll:
-        return coll['object'].icon_id, ''
-    return 0, _thumb['state']
-
-
-def clear_preview():
-    if _preview['coll'] is not None:
-        import bpy.utils.previews
-        bpy.utils.previews.remove(_preview['coll'])
-    _preview.update(coll=None, seq=None, updates=0, size=(0, 0), digest='')
-    _thumb.update(name=None, stem=None, mtime=None, state='', icon_ok=False)  # the timer loads the object's again
+def master_baker(obj):
+    """OptiX baker decision 23: the baker and samples of the object's master as its index entry records them, for
+    drawing ('' without an entry; a master of an add-on before 0.77 was baked by Cycles)."""
+    stem = store._state.get('by_object', {}).get(obj.name)
+    folder = store.bake_folder()
+    if not stem or not folder:
+        return ''
+    e = store.read_index(folder).get('masters', {}).get(stem)
+    if not e:
+        return ''
+    b = e.get('baker') or {}
+    return f"Baked by {b.get('name', 'Cycles')}, {e.get('samples', '?')} samples, {e.get('baked_at', '')}".rstrip(', ')
 
 
 def read_index_on_open():
@@ -666,7 +558,6 @@ def _poll_timer():
         st.copy_name = status.get('copy_name', '') or ''
         st.copy_pose = status.get('copy_pose', 0) or 0
         st.copy_poses = status.get('copy_poses', 0) or 0
-    update_preview()
     if store.running():
         _redraw(sidebar_only=True)
         return 0.5
@@ -691,7 +582,6 @@ def excluded_lines(limit=8):
 def finish_bake():
     st = _state()
     status = store.finish_run() or {}
-    update_preview()
     st.running = False
     results = status.get('results', [])
     by = {}
@@ -700,6 +590,12 @@ def finish_bake():
     lines = [f"{status.get('state', 'ended')}: {status.get('n_done', 0)} of {status.get('n_total', 0)} in "
              f"{status.get('elapsed_s', 0)} s; baked {len(by.get('baked', []))}"
              + (f", updated without rays {len(by['updated'])}" if by.get('updated') else '')]
+    if status.get('baker'):  # OptiX baker decision 22: the baker, and why Cycles when FSS OptiX was asked for
+        n_by = {}
+        for r in by.get('baked', []):
+            n_by[r.get('baker') or 'Cycles'] = n_by.get(r.get('baker') or 'Cycles', 0) + 1
+        lines.append('baked by ' + (', '.join(f'{k} {v}' for k, v in n_by.items()) or status['baker'])
+                     + (f"; Cycles because {status['baker_why']}" if status.get('baker_why') else ''))
     if status.get('master_format') == 'png':  # decision 37: said once per bake
         lines.append(f"masters written as PNG: the JPEG XL library could not be loaded ({status.get('jxl_error')})")
     for kind in ('skipped', 'failed', 'cancelled'):
@@ -763,10 +659,12 @@ class FSS_OT_AOBakeStart(bpy.types.Operator):
             if not needs_ao:
                 self.report({'INFO'}, 'AO Bake: nothing to bake')
             return {'CANCELLED'}
-        job = store.make_job(context, stems, self.test_delay, self.tile, self.test_tile_delay, what=what)
-        hidden = self.hidden or context.scene.fss_ao_bake.run_mode == 'HIDDEN'  # decision 36
-        clear_preview()
-        proc = store.start_bake(job, hidden=hidden)
+        visible = not (self.hidden or s.run_mode == 'HIDDEN')  # decision 36
+        # OptiX baker decision 28: Foreground with FSS OptiX shows its window, the second Blender in the background
+        baker_window = visible and s.baker != 'CYCLES' and native.available()[0]
+        job = store.make_job(context, stems, self.test_delay, self.tile, self.test_tile_delay, what=what,
+                             baker_window=baker_window)
+        proc = store.start_bake(job, hidden=not visible or baker_window)
         st = _state(context)
         st.running, st.n_done, st.n_total, st.current, st.report = True, 0, len(stems), '', ''
         st.progress = 0.0
@@ -1206,14 +1104,9 @@ def _draw_object(layout, context):
         row.operator('fss.ao_bake_custom_occluders', text='Add Selected', icon='ADD').action = 'ADD'
         row.operator('fss.ao_bake_custom_occluders', text='Remove', icon='REMOVE').action = 'REMOVE'
         row.operator('fss.ao_bake_custom_occluders', text='Clear', icon='X').action = 'CLEAR'
-    icon, state = object_icon(context)  # decision 43: this object's own master
-    if icon:
-        box.label(text="Its master (as baked):")
-        box.template_icon(icon_value=icon, scale=6.0)
-    elif state == 'missing':
-        box.label(text='No master baked yet', icon='INFO')
-    elif state == 'large':
-        box.label(text='No preview of this master: Bake Selected makes one', icon='INFO')
+    # OptiX baker decision 31: no picture of the master (its layout is not the artist's UVs), only who baked it
+    by = master_baker(obj)
+    box.label(text=by or 'No master baked yet', icon='INFO')
 
 
 def _lines(layout, text, icon='NONE'):
@@ -1239,7 +1132,7 @@ class FSS_PT_AOBake(bpy.types.Panel):
         scene = context.scene
         s = scene.fss_ao_bake
         st = _state(context)
-        if st.running:  # decision 44: while a bake runs, only its progress, Cancel and the preview
+        if st.running:  # decision 44: while a bake runs, only its progress and Cancel (OptiX baker decision 30)
             box = layout.box()
             box.label(text='Baking', icon='RENDER_STILL')
             col = box.column(align=True)
@@ -1259,9 +1152,6 @@ class FSS_PT_AOBake(bpy.types.Panel):
             left = _fmt_time(st.left) if st.left >= 0 else '-'
             col.label(text=f'Spent {_fmt_time(st.elapsed)}, left {left}')
             col.operator('fss.ao_bake_cancel', icon='CANCEL')
-            icon = preview_icon()
-            if icon:
-                box.template_icon(icon_value=icon, scale=8.0)
             return
         if st.applying:  # decision 45: while Apply runs, only its progress and Cancel
             box = layout.box()
@@ -1322,11 +1212,20 @@ class FSS_PT_AOBake(bpy.types.Panel):
         sub.active = s.falloff
         sub.prop(s, 'falloff_steps')
         col.separator()
-        col.prop(s, 'samples')
-        row = col.row(align=True)
-        row.prop(s, 'device', expand=True)
-        if s.device == 'CPU':
-            col.prop(s, 'threads')
+        row = col.row(align=True)  # OptiX baker decisions 22, 24
+        row.label(text='Baker')
+        row.prop(s, 'baker', expand=True)
+        if s.baker != 'CYCLES':
+            have, why = native.available()
+            col.prop(s, 'optix_samples', text='FSS OptiX Samples')
+            if not have:
+                _lines(col, f'{why}: Cycles bakes', 'INFO')
+        if s.baker != 'OPTIX':
+            col.prop(s, 'samples', text='Cycles Samples' if s.baker == 'AUTO' else 'Samples')
+            row = col.row(align=True)
+            row.prop(s, 'device', expand=True)
+            if s.device == 'CPU':
+                col.prop(s, 'threads')
         col.separator()
         col.prop(s, 'poses')
         col.prop(s, 'shared_combine')
@@ -1495,18 +1394,13 @@ def register():
     bpy.types.WindowManager.fss_ao_bake_state = bpy.props.PointerProperty(type=FSS_AOBakeState)
     if _on_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_on_load_post)
-    if not bpy.app.background and not bpy.app.timers.is_registered(_thumb_timer):
-        bpy.app.timers.register(_thumb_timer, first_interval=1.0, persistent=True)
 
 
 def unregister():
     if _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
-    if bpy.app.timers.is_registered(_thumb_timer):
-        bpy.app.timers.unregister(_thumb_timer)
     if bpy.app.timers.is_registered(_poll_timer):
         bpy.app.timers.unregister(_poll_timer)
-    clear_preview()
     del bpy.types.WindowManager.fss_ao_bake_state
     del bpy.types.Object.fss_ao_bake
     del bpy.types.Mesh.fss_ao_shared

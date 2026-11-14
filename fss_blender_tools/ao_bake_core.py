@@ -2207,47 +2207,10 @@ def pose_seed(base, p):
     return int(base) + POSE_SEED * int(p)
 
 
-# The preview of the master being baked, for the artist's Blender (decision 36): the runner writes it to the bake
-# folder after each tile and composed strip, the panel reads it. PREVIEW_MAGIC, then W, H, a sequence number and 0 as
-# little-endian uint32, then W x H uint8 grey, rows from the bottom (as Blender images). Its size does not depend on the
-# master's: at most PREVIEW_FILE_MAX px on the long side.
-PREVIEW_FILE = 'preview.bin'
-PREVIEW_MAGIC = b'FSSAOPV1'
-PREVIEW_FILE_MAX = 256
-THUMB_EXT = '.ao.thumb'  # a master's own thumbnail (<stem>.ao.thumb, the preview file's format), shown for the object
-
-
-def write_preview(folder, pv16, seq, name=PREVIEW_FILE):
-    """pv16 (h, w) uint16, rows from the bottom; reduced to PREVIEW_FILE_MAX and written atomically. Returns False when
-    the file is held by a reader (the next update writes it)."""
-    f = max(1, -(-max(pv16.shape) // PREVIEW_FILE_MAX))
-    small = pv16[::f, ::f]
-    h, w = small.shape
-    data = PREVIEW_MAGIC + struct.pack('<4I', w, h, int(seq), 0) + (small >> 8).astype(np.uint8).tobytes()
-    path = os.path.join(folder, name)
-    tmp = path + '.tmp'
-    try:
-        with open(tmp, 'wb') as fh:
-            fh.write(data)
-        os.replace(tmp, path)
-        return True
-    except OSError:
-        return False
-
-
-def read_preview(folder, name=PREVIEW_FILE):
-    """(seq, (h, w) uint8 rows from the bottom) of the preview file (or a master's thumbnail), or None."""
-    try:
-        with open(os.path.join(folder, name), 'rb') as fh:
-            data = fh.read()
-    except OSError:
-        return None
-    if len(data) < 24 or data[:8] != PREVIEW_MAGIC:
-        return None
-    w, h, seq, _z = struct.unpack('<4I', data[8:24])
-    if len(data) != 24 + w * h:
-        return None
-    return seq, np.frombuffer(data, np.uint8, w * h, 24).reshape(h, w)
+# A master's thumbnail of 0.60.1 to 0.77.2 (auto-bake decision 43), no longer written or shown (OptiX baker decision
+# 31: the master's layout is not the artist's UVs); still one of a master's files, so a rename moves it and a bake
+# removes it.
+THUMB_EXT = '.ao.thumb'
 
 
 def tris_in_window(uvpx, x0, y0, w, h, margin=1.0):

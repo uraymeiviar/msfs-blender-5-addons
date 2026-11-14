@@ -32,7 +32,8 @@ Blender). Checked:
 - the options of Session 25 (decisions 34 to 36): a Non-AO-Occluder in a custom list shades the target, an object not
   in the list does not (finish line 4); the pose count, occluder mode and custom list each give "surroundings changed"
   and back "up to date" (finish line 5); the run mode Hidden (and Visible with FSS_AO_BAKE_TEST_VISIBLE=1): the bake
-  finishes, the panel's preview updates during it, the .blend, its datablocks and is_dirty unchanged (finish line 7);
+  finishes, the panel's progress updates during it and no preview of the master is written (OptiX baker decision 30),
+  the .blend, its datablocks and is_dirty unchanged (finish line 7);
   last, a wheel half sunk in a slab (wheel.blend): at 1 pose its AO per angle sector varies, at 8 poses over a full
   turn at most a quarter of that, Self only no slab shadow, a custom list's mover posed with it (finish line 1).
   `-- only=test_poses` runs that test alone;
@@ -43,6 +44,9 @@ Blender). Checked:
   ORM slot, per object, curvature; Soften Sharp Edges off and on; the master paged, paged with a cache of 2 tiles,
   and whole) byte-identical with FSS_AO_COPY=numpy, with the DLL at 12 threads and at 1; with the DLL moved away and
   with FSS_AO_COPY=numpy Apply runs the numpy copy and its report says so.
+
+The baker (OptiX baker journal, decision 22): Cycles, or the one FSS_AO_BAKE_TEST_BAKER names (AUTO, OPTIX), with
+FSS OptiX at the suite's 16 samples.
 
 To run (the second Blender inherits the CPU cap):
 C:\\Users\\uray\\.claude\\tools\\cpucap\\cpucap.exe 50 G:\\e-jets-e2\\tools\\blender\\blender.exe -b --factory-startup
@@ -181,6 +185,12 @@ def write_png(path, values, bits=16):
     return str(path)
 
 
+def set_baker(s):
+    """OptiX baker decision 22: Cycles, or the baker FSS_AO_BAKE_TEST_BAKER names, FSS OptiX at the Cycles samples."""
+    s.baker = os.environ.get('FSS_AO_BAKE_TEST_BAKER', 'CYCLES')
+    s.optix_samples = s.samples
+
+
 def build_scene():
     for obj in list(bpy.data.objects):
         bpy.data.objects.remove(obj)
@@ -188,6 +198,7 @@ def build_scene():
     scene.frame_set(1)
     s = scene.fss_ao_bake
     s.distance, s.samples, s.threads, s.padding, s.curv_padding = 0.1, 16, 12, PAD, PAD
+    set_baker(s)
     s.output_folder = str(OUT)
     scene.fss_ao_no_occluder_tags = 'noocc'
     scene.fss_ao_skip_bake_tags = 'skip'
@@ -1062,15 +1073,14 @@ def test_apply_ticked():
 
 def wait_bake(poll=0.1, limit=300):
     """While the second Blender runs: the panel's progress timer step by step (a background Blender runs no timers);
-    returns the states seen: (preview seq, preview digest, tile, pose, n_poses)."""
+    returns the states seen: (tile, pose, n_poses, progress)."""
     proc = store._run['proc']
     seen = []
     t = time.time()
     while proc.poll() is None and time.time() - t < limit:
         ao_bake._poll_timer()
         st = bpy.context.window_manager.fss_ao_bake_state
-        p = ao_bake._preview
-        seen.append((p['seq'], p['digest'], st.tile, st.pose, st.n_poses))
+        seen.append((st.tile, st.pose, st.n_poses, round(st.progress, 4)))
         time.sleep(poll)
     proc.wait(timeout=60)
     ao_bake._poll_timer()  # the last step: the bake ended, finish_bake runs
@@ -1625,8 +1635,9 @@ def test_option_staleness():
 
 def test_run_mode():
     """Session 25, finish line 7 (decision 36): the bake hidden (and, with FSS_AO_BAKE_TEST_VISIBLE=1, visible) both
-    finish; in both the panel's preview updates during a bake of several tiles (read at least twice while it runs); the
-    .blend's hash, the datablock counts and is_dirty unchanged by the bake."""
+    finish; in both the panel's progress updates during a bake of several tiles (two states at least while it runs),
+    and the bake writes no preview of the master into the bake folder (OptiX baker decision 30: the FSS OptiX window
+    shows the only one); the .blend's hash, the datablock counts and is_dirty unchanged by the bake."""
     scene = bpy.context.scene
     modes = ['HIDDEN'] + (['VISIBLE'] if os.environ.get('FSS_AO_BAKE_TEST_VISIBLE') == '1' else [])
     out = {}
@@ -1638,17 +1649,17 @@ def test_run_mode():
         res = bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=False, wait=False, tile=64, test_tile_delay=0.3)
         assert res == {'FINISHED'}
         hidden_args = '-b' in store._run['proc'].args
-        assert hidden_args == (mode == 'HIDDEN'), (mode, store._run['proc'].args)
+        # OptiX baker decision 28: Foreground with FSS OptiX shows its window, the second Blender in the background
+        optix_window = mode == 'VISIBLE' and scene.fss_ao_bake.baker != 'CYCLES' and ao_bake.native.available()[0]
+        assert hidden_args == (mode == 'HIDDEN' or optix_window), (mode, store._run['proc'].args)
         seen = wait_bake()
         status = store.read_status(str(FOLDER))
         assert status['state'] == 'done' and status['results'][0]['status'] == 'baked', status
-        during = sorted({(s[0], s[1]) for s in seen if s[0] is not None})
-        assert len(during) >= 2 and len({d for _s, d in during}) >= 2, during
+        during = sorted({(s[0], s[3]) for s in seen})
+        assert len(during) >= 2, during
+        assert not (FOLDER / 'preview.bin').exists(), 'a preview file was written'
         assert file_hash(BLEND) == before_hash and datablocks() == before_counts and bpy.data.is_dirty == before_dirty
-        pv = ao_bake._preview
-        assert pv['size'][0] > 0 and ao_bake.preview_icon() is not None
-        out[mode] = dict(tiles=status['results'][0]['n_tiles'], preview_states_during=len(during),
-                         updates=pv['updates'], size=pv['size'])
+        out[mode] = dict(tiles=status['results'][0]['n_tiles'], progress_states_during=len(during))
     scene.fss_ao_bake.run_mode = 'HIDDEN'
     print(f"PASS: test_run_mode ({out}; .blend hash, datablock counts and is_dirty unchanged"
           + ('' if 'VISIBLE' in out else '; visible not run: FSS_AO_BAKE_TEST_VISIBLE is not 1') + ')')
@@ -1694,35 +1705,23 @@ def test_unsaved():
 
 
 def test_object_preview():
-    """Decision 43: after a bake the panel draws the bake buttons again (the live preview only while it runs); the
-    Object box shows the active object's own master: its thumbnail, written with the master, or made from a master
-    baked without one; it follows the active object."""
+    """Decision 43 as OptiX baker decision 31 left it: after a bake the panel draws the bake buttons again (only progress
+    and Cancel while it runs); the Object box shows no picture of the master, only who baked it; the bake writes no
+    thumbnail (<stem>.ao.thumb)."""
     refresh()
+    select(['A'])
     calls = []
     bpy.types.FSS_PT_ao_bake.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
     ops = [args[0] for name, args, _kw in calls if name == 'operator']
-    # a preview from test_run_mode (icon ids are 0 in a background Blender: the count of updates), the buttons back
-    assert ao_bake._preview['updates'] and 'fss.ao_bake_start' in ops, (ao_bake._preview['updates'], ops)
-    stem_a = store._state['by_object']['A']
-    thumb = FOLDER / (stem_a + core.THUMB_EXT)
-    assert thumb.is_file(), thumb  # written by the bake of test_run_mode
-    select(['A'])
-    ao_bake._thumb_timer()
-    first = ao_bake._thumb['mtime']
-    assert ao_bake._thumb['icon_ok'] and ao_bake._thumb['name'] == 'A' and ao_bake._thumb['state'] == '', ao_bake._thumb
-    thumb.unlink()  # as a master of 0.60.0: made from the master
-    ao_bake._thumb_timer()
-    assert thumb.is_file() and ao_bake._thumb['icon_ok'], (thumb, ao_bake._thumb)
-    grey = core.read_preview(str(FOLDER), stem_a + core.THUMB_EXT)[1]
-    others = [n for n, s in store._state['by_object'].items() if s != stem_a and (FOLDER / (s + core.THUMB_EXT)).is_file()]
-    if others:
-        select([others[0]])
-        ao_bake._thumb_timer()
-        assert ao_bake._thumb['name'] == others[0] and ao_bake._thumb['stem'] != stem_a
+    assert 'fss.ao_bake_start' in ops, ops  # the buttons back after test_run_mode's bake
+    assert not any(name == 'template_icon' for name, _a, _kw in calls), 'a picture is drawn'
+    labels = [kw.get('text', args[0] if args else '') for name, args, kw in calls if name == 'label']
+    assert any(str(t).startswith('Baked by ') for t in labels), labels
+    thumbs = [n for n in os.listdir(FOLDER) if n.endswith(core.THUMB_EXT)]
+    assert not thumbs, thumbs
     select([])
-    print(f"PASS: test_object_preview (bake buttons drawn after a bake; A's thumbnail {grey.shape[1]} x "
-          f"{grey.shape[0]} px from the bake (mtime {first}) and made again from the master; follows the active "
-          f"object{' (' + others[0] + ')' if others else ''})")
+    print("PASS: test_object_preview (bake buttons drawn after a bake; no picture of A's master, 'Baked by ...' "
+          "shown; no thumbnail written)")
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -1740,6 +1739,7 @@ def build_wheel_scene():
     for obj in list(bpy.data.objects):
         bpy.data.objects.remove(obj)
     scene = bpy.context.scene
+    set_baker(scene.fss_ao_bake)
     prefs = bpy.context.preferences.edit
     old_interp = prefs.keyframe_new_interpolation_type
     prefs.keyframe_new_interpolation_type = 'LINEAR'
@@ -1883,9 +1883,11 @@ def test_poses():
         assert v1[side] > 0.3, v1
         assert vn[side] <= v1[side] / 4, (side, vn[side], v1[side])  # without PEG's own shadow (it stays)
         assert ps[side].min() > 0.99 and vs[side] < 0.01, (side, ps[side])
-    n_poses_seen = {s[4] for s in seen}
-    poses_seen = sorted({s[3] for s in seen if s[4] == 8})
-    assert 8 in n_poses_seen and len(poses_seen) >= 2 and max(poses_seen) > 1, (n_poses_seen, poses_seen)
+    n_poses_seen = {s[2] for s in seen}
+    poses_seen = sorted({s[1] for s in seen if s[2] == 8})
+    # FSS OptiX bakes a tile's 8 poses in one request (0.1 s here): the panel shows N, and the poses it was told
+    many = 2 if bpy.context.scene.fss_ao_bake.baker == 'CYCLES' else 1
+    assert 8 in n_poses_seen and len(poses_seen) >= many and max(poses_seen) > 1, (n_poses_seen, poses_seen)
     # PEG on the +X face at 90 degrees: sector 4 of 16 (90 to 112.5) and 3 (67.5 to 90) darker than the same sectors
     # without it (Custom: SLAB alone), as with the custom list (SLAB, PEG); the -X face as without it
     peg_drop = float(pn['+X'][3:5].mean() - p8['+X'][3:5].mean())

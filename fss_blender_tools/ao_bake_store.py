@@ -45,7 +45,6 @@ from . import ao_bake_core as core
 from . import lod_model, tags
 
 RUNNER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ao_bake_runner.py')
-PREVIEW_FILE = core.PREVIEW_FILE  # the runner's reduced preview of the master being baked (decision 36)
 GRADES = ('UP_TO_DATE', 'SURROUNDINGS', 'MESH', 'MISSING')
 # decision 55: a master's curvature: up to date, baked at another width, missing, or waiting for an AO bake (no AO
 # master or its mesh changed: the curvature is written in the AO master's layout)
@@ -526,7 +525,8 @@ def settings_dict(scene):
     s = scene.fss_ao_bake
     return dict(ao_distance=round(float(s.distance), 6), samples=int(s.samples), device=s.device,
                 threads=int(s.threads), sample_split=s.sample_quality == 'SPLIT', curvature=bool(s.curvature),
-                curv_width=round(float(s.curv_width), 6), denoise=denoise_opts(scene))
+                curv_width=round(float(s.curv_width), 6), denoise=denoise_opts(scene),
+                baker=s.baker, optix_samples=int(s.optix_samples))  # OptiX baker decisions 22, 24
 
 
 def item_distance(obj, scene):
@@ -923,9 +923,10 @@ def write_snapshot(folder):
     return path
 
 
-def make_job(context, stems, test_delay_s=0.0, tile_px=0, test_tile_delay_s=0.0, what=None):
+def make_job(context, stems, test_delay_s=0.0, tile_px=0, test_tile_delay_s=0.0, what=None, baker_window=False):
     """The job file of a bake, and the snapshot of the current state the bake opens. what: {stem: (ao, cm, dn)}
-    (decisions 55, 56), else the AO of each, with the curvature when CM is ticked."""
+    (decisions 55, 56), else the AO of each, with the curvature when CM is ticked. baker_window: FSS OptiX shows its
+    window although the second Blender runs in the background (OptiX baker decision 28)."""
     scene = context.scene
     folder = bake_folder()
     os.makedirs(folder, exist_ok=True)
@@ -951,7 +952,7 @@ def make_job(context, stems, test_delay_s=0.0, tile_px=0, test_tile_delay_s=0.0,
     source = write_snapshot(folder)
     job = dict(schema=core.SCHEMA, blend=bpy.data.filepath, source=source, folder=folder, settings=settings_dict(scene),
                items=items, created=time.strftime('%Y-%m-%d %H:%M:%S'), test_delay_s=float(test_delay_s),
-               tile_px=int(tile_px), test_tile_delay_s=float(test_tile_delay_s))
+               tile_px=int(tile_px), test_tile_delay_s=float(test_tile_delay_s), baker_window=bool(baker_window))
     path = os.path.join(folder, 'job.json')
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(job, f, indent=1)
@@ -964,7 +965,7 @@ def start_bake(job_path, hidden=False):
     folder = os.path.dirname(job_path)
     with open(job_path, encoding='utf-8') as f:
         source = json.load(f).get('source') or bpy.data.filepath
-    for name in ('status.json', 'cancel', PREVIEW_FILE):
+    for name in ('status.json', 'cancel'):
         try:
             os.remove(os.path.join(folder, name))
         except OSError:

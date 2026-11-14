@@ -22,7 +22,7 @@ repository are in [../AGENTS.md](../AGENTS.md).
 | `uv_pack.py` | (core of **UV Auto Packing**) | The packer per texture set (decisions 112 to 121; it takes a material, never the selection): every face of one material in the view layer, islands by exact UV equality and split by material, each scaled to target x `uv_marks.density()` x visibility (`visibility_core.score_face_set`, floor 0.1) at one t per set; Blender's Pack Islands (`scale=False`, ADD margin, ORIGINAL_AABB region set by anchor triangles, CONCAVE with bounding-box proxies and an AABB fallback) on a temporary mesh, so the source selection, modes, pins and UV maps stay; every pack also places the islands on a raster (`uv_fill.py`) and the smaller layout counts; overflow spills into [0, k]^2; square sizes, needed size 256 to 8192 or "does not fit even at 8192"; `measure()`, `pack()`, `texture_sets()`, the **FSS Packing Report** text; `FACE_AREA_MIN_CM2` for faces without area; triangles with 3D area but no UV area (`UV_TRI_AREA_MIN_PX2` 1e-6 px^2, or a line by `FLAT_RATIO`) inside islands with UV area counted per set and warned about (`uv_zero_faces()`, `MeshData.uv_zero_faces()`) |
 | `uv_autoseam.py`, `uv_autoseam_core.py` | **UV Auto Seam** | Proposes UV seams on hard surface meshes keeping the current seams, normal splits, and distortion limits; Accept Proposed, Discard Proposed, Clear Current, Edit Mode selection, and report in Text Editor |
 | `visibility.py`, `visibility_core.py` | **UV Auto Packing > Visibility Scoring** | Probe-light visibility (UV decisions 124 to 130): included point, spot and area lights score each face by the brightness EEVEE shows (power, distance, cone, light threshold), shadows from cube maps rendered at each light, soft shadows from samples over the light's radius, the brightest of 2 to 10 animation steps; an island takes a weighted percentile of its faces, the most visible island is 1.0, every score is lifted by the Ambient (the floor Pack used to apply), and a darker touching island rises to its neighbour over the Step Limit (never lowered; UV decisions 133, 134); writes `<blend_name>.visibility`, Select Never Seen, Select Stale, report in Text Editor |
-| `ao_bake.py`, `ao_bake_store.py`, `ao_bake_apply.py`, `ao_bake_core.py`, `ao_bake_runner.py`, `ao_bake_jxl.py` | **AO Bake** | AO auto-bake (auto-bake journal, decisions 9 to 47): **Bake** writes masters (16-bit grey, lossless JPEG XL through the bundled libjxl, decision 37, see [AO Bake Masters as JPEG XL](#ao-bake-masters-as-jpeg-xl); PNG when the library cannot be loaded; PNG masters of 0.55 are still read; an `.ao.map` of filled pixels and faces, and an `.npz` layout per object, or per shared mesh, at 4 x its median density) into `<blend_name>.bake/` beside the `.blend`, with `index.json`, from a second Blender on the saved file (`ao_bake_runner.py`, hidden or with its window; status, Cancel, a preview in the panel; movers in several poses, the occluders an option: see [AO Bake Options](#ao-bake-options)), baked in tiles whose size fits a memory budget (a share of the free memory, at most 32 GB; Sessions 19, 20) and paged: a row of tiles is a band, composed and written row by row once the band below is baked, so no array of the whole master is held (decision 33, Session 23); only faces of a texture set are baked, an object without one is excluded (decision 30); Refresh grades each master up to date, surroundings changed or mesh changed and links renamed objects again; **Apply** copies the masters into each texture set's ORM texture (red only) or a separate 16-bit file (greyscale or ORM layout), per set, for all sets or for the selected objects, reading a master through tiled scratch files and a cache (paged) and copying a band of target rows at a time. `ao_bake_core.py` is the prototype's master builder and copy (`tests/bake_prototype/`), unchanged |
+| `ao_bake.py`, `ao_bake_store.py`, `ao_bake_apply.py`, `ao_bake_core.py`, `ao_bake_runner.py`, `ao_bake_jxl.py`, `ao_bake_native.py` | **AO Bake** | AO auto-bake (auto-bake journal, decisions 9 to 47): **Bake** writes masters (16-bit grey, lossless JPEG XL through the bundled libjxl, decision 37, see [AO Bake Masters as JPEG XL](#ao-bake-masters-as-jpeg-xl); PNG when the library cannot be loaded; PNG masters of 0.55 are still read; an `.ao.map` of filled pixels and faces, and an `.npz` layout per object, or per shared mesh, at 4 x its median density) into `<blend_name>.bake/` beside the `.blend`, with `index.json`, from a second Blender on the saved file (`ao_bake_runner.py`, hidden or with its window; with Cycles or the add-on's own GPU baker, see [AO Bake with FSS OptiX](#ao-bake-with-fss-optix); status and Cancel in the panel, a preview of the master only in FSS OptiX's window; movers in several poses, the occluders an option: see [AO Bake Options](#ao-bake-options)), baked in tiles whose size fits a memory budget (a share of the free memory, at most 32 GB; Sessions 19, 20) and paged: a row of tiles is a band, composed and written row by row once the band below is baked, so no array of the whole master is held (decision 33, Session 23); only faces of a texture set are baked, an object without one is excluded (decision 30); Refresh grades each master up to date, surroundings changed or mesh changed and links renamed objects again; **Apply** copies the masters into each texture set's ORM texture (red only) or a separate 16-bit file (greyscale or ORM layout), per set, for all sets or for the selected objects, reading a master through tiled scratch files and a cache (paged) and copying a band of target rows at a time. `ao_bake_core.py` is the prototype's master builder and copy (`tests/bake_prototype/`), unchanged |
 | `uv_heatmap.py` | **Heatmap** (tab FSS Tools) | Viewport heatmap: Distortion (conformal singular-value ratio), Density (relative to material median and object range), and Visibility (from `<blend_name>.visibility`), RizomUV-style diverging colours, legend, and evaluated Mirror/Array support |
 | `checks.py`, `name_check.py` | **Checks** (tab FSS Tools) | **Scan Names** (lists object and bone names that break FSS naming rules and renames them in batch; `@MERGE_` / `@NOMERGE_` allowed), **Fix Broken Bone Parents**, **Find Faces Without Area** (selects mesh objects, and their faces, with a world-space face area of at most 1e-6 cm^2) and **Find Faces Without UV Area** (selects mesh objects, and their faces, with a triangle without UV area inside an island with UV area, per texture set at its size: the needles that push islands out in packing) and **Find Animations Not 0 to 100** (selects objects whose action or NLA strips break the project's frame rule, changes nothing) |
 
@@ -202,17 +202,17 @@ leave them out):
   object alone; Custom takes the object's own list (Add Selected, Remove, Clear), whatever the objects' tags, and
   poses its movers at the same frame as the target in every pose.
 - **Run In** (Background, the default, or Foreground; stored as `HIDDEN` and `VISIBLE`): Hidden starts the second Blender in the background without a window or
-  console; Visible opens its window, whose 3D views are turned into Image Editors showing the master. In both the
-  runner writes a reduced preview (`preview.bin` in the bake folder, at most 256 px) after each tile and composed
-  strip, at most every 0.25 s; the panel's progress timer loads it into a `bpy.utils.previews` image, which is not a
-  datablock of the file and does not mark it changed. The panel shows object, tile and pose (`Pose p of N`).
+  console; Foreground with FSS OptiX keeps it in the background and opens FSS OptiX's window (OptiX baker decision 28),
+  with Cycles it opens the second Blender's window, whose 3D views are turned into empty Image Editors so the scene is
+  not drawn. Blender shows no preview of the master being baked (OptiX baker decision 30): the panel shows object,
+  tile and pose (`Pose p of N`), time and Cancel; FSS OptiX's window shows the master as its tiles finish.
 - **Staleness:** a changed pose count (for a mover), occluder mode or custom list makes the master "surroundings
   changed". At one pose with the scene rule the hashes are those of 0.57, so its masters stay up to date.
-- **Previews** (decision 43): the master being baked only while the bake runs (the bake buttons return when it ends);
-  the Object box shows the active object's own master from its thumbnail `<stem>.ao.thumb` (the preview file's
-  format, at most 256 px), written by the runner with the master and renamed with it. A master without one (baked
-  before 0.60.1) gets one made from the master when it is at most 64 Mpx; larger ones say to bake again. A timer
-  (every 0.5 s, not in a background Blender) loads it when the active object or the thumbnail changes.
+- **No picture of a master in Blender** (OptiX baker decisions 30 and 31): while a bake runs the panel shows only its
+  progress (the bake buttons return when it ends); the Object box says who baked the active object's master ("Baked
+  by ...") or "No master baked yet", with no picture: a master's layout is not the artist's UVs, so its image misleads.
+  The thumbnails of 0.60.1 to 0.77.2 (`<stem>.ao.thumb`, auto-bake decision 43) are no longer written or read; a bake
+  removes the master's old one.
 - **Apply box** (decision 40): with objects selected the texture-set list shows only their sets (all when nothing is
   selected); the box names the set it is for (the selection's only set, else the highlighted row). Separate File shows
   the file name, resolution and layout; ORM Texture shows the slot's texture, read only. The set's Apply is disabled
@@ -236,6 +236,33 @@ leave them out):
   edge, on the darker side only, toward the brighter side's value at the nearest point of the edge (both read from
   the master), by a smoothstep that is 1 at the edge and 0 at the width; near several edges the largest raise wins.
   The brighter side, concave corners and the masters are unchanged; the report counts the pixels raised.
+
+## AO Bake with FSS OptiX
+
+The panel's **Baker** (OptiX baker journal `docs/journal/20261114.optix-baker.md`, decisions 21 to 25): Auto (the
+default), FSS OptiX or Cycles. FSS OptiX is Glider's `aobaker.exe` (built in `F:\glider`, module
+`src/modules/ao-baker`), an OptiX 9.1 AO baker on the NVIDIA GPU with its own OIDN 2.5.1:
+
+- **Files:** `lib/ao_baker/windows-x64/`: `aobaker.exe`, `oidn/` (OIDN's DLLs, TBB, the Visual C++ runtime, the
+  licences) and `VERSION.txt` (Glider's commit and the build's time), copied from a Glider Release build by
+  `tools/update-ao-baker.ps1`; the exe and the DLLs are in Git LFS (a clone needs git-lfs, else the baker is missing
+  and Cycles bakes). It needs NVIDIA's driver (CUDA, OptiX, and `vulkan-1.dll` for its window).
+- **Client:** `ao_bake_native.py` (no `bpy`): the channel (shared memory with two rings, named events, messages
+  1 to 25 of Glider's `AoBakeProtocol.h`), the scene, curvature and denoise blocks, and `Baker`, which starts the exe
+  for a job (`--headless`, or with its window in a Foreground run) and says why when its GPU does not work
+  (`FSS_AO_BAKER_NO_CUDA` makes it start without one; `FSS_AO_BAKER_EXE` points at another exe; both for tests).
+- **The runner:** with Auto or FSS OptiX and a working GPU, each master's scene is sent once (the target, the
+  occluders as arrays, the views of its poses and copies, built as for Cycles), and each tile is one request whose
+  answer is the core's and the skirt's AO with the views already combined; the composition, bands, Cancel
+  (also inside a tile) and writer are unchanged. The scene names the master's size, from which the baker makes its
+  window's preview of the finished tiles itself (OptiX baker decision 29; the window and app are titled FSS OptiX). The curvature (byte-identical to `ao_bake_core.write_curvature`) and
+  the OIDN denoise (islands isolated, each area's mean kept, no pixel moved further than its noise) run in the baker.
+  It bakes at **FSS OptiX Samples** (default 4096; Cycles keeps its own Samples). When the exe is missing or its GPU
+  does not work, Cycles bakes the job; when the baker fails on a master, that master and the rest of the job bake with
+  Cycles. The log and the bake report say which baker baked and why Cycles did.
+- **The index:** each entry's `baker` (name, version, device; for FSS OptiX its trace and scene times) and its
+  curvature's and denoise's `baker`; the panel shows it under the active object's master. A master baked by the
+  other baker is not stale.
 
 ## AO Bake Masters as JPEG XL
 
