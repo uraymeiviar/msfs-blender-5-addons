@@ -66,15 +66,25 @@ def context_mode_to_object_mode(mode: str) -> str:
 
 def disable_isolate_mode():
     """Disable isolate (local) mode if active in any 3D Viewport."""
-    for area in bpy.context.screen.areas:
-        if not area.type == "VIEW_3D":
-            continue
-        for space in area.spaces:
-            if not (space.type == "VIEW_3D" and space.local_view):
+    # FSS: every 3D viewport shown in a window, the operator run in that viewport (called without it, it failed its
+    # poll and stopped the export, always in background Blender with a file saved in local view). Screens not shown
+    # in a window keep their local view: without a viewport, object visibility does not depend on it. Never fails
+    # the export.
+    window_manager = bpy.context.window_manager
+    for window in (window_manager.windows if window_manager else ()):
+        screen = window.screen
+        for area in (screen.areas if screen else ()):
+            if area.type != "VIEW_3D" or not getattr(area.spaces.active, "local_view", None):
                 continue
-            bpy.ops.view3d.localview()
-            return
-        
+            region = next((r for r in area.regions if r.type == "WINDOW"), None)
+            if region is None:
+                continue
+            try:
+                with bpy.context.temp_override(window=window, screen=screen, area=area, region=region):
+                    bpy.ops.view3d.localview()
+            except RuntimeError as error:
+                print(f"[MSFS FSS] could not leave local view in a 3D viewport, exported as it is: {error}")
+
 
 def save_context() -> ContextSave:
     """Save current context.
