@@ -2534,6 +2534,7 @@ class MSFS2024_Material:
         link(group.links, detail_switch_node.outputs[0], mode_switch_node.inputs[1])
         link(group.links, blend_mix_normal_node.outputs[0], mode_switch_node.inputs[2])
         link(group.links, mode_switch_node.outputs[0], output_node.inputs[0])
+        material_preview.apply_detail_normal(group)  # FSS: base and detail normals added in tangent space
         # endregion
 
     def create_apply_ao_group(self, group):

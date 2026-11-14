@@ -35,6 +35,17 @@ only where a diffuse shader is lit below about 0.475 (a Shader to RGB mask), sta
 darkens ambient light but not direct sunlight. Under the viewport's world light (Material Preview's HDRI), which is all
 ambient, the mask removed the AO almost everywhere. A Value node of 1 (AO_ALWAYS_NODE) feeds the group's mix factor
 instead, so the occlusion always darkens the base colour. Exports do not read this group.
+
+Detail normal: Asobo's Normal group turns the base and the detail texture each into a world-space normal (Normal Map
+nodes), mixes the detail one with the flat surface normal by the mask (vertex alpha times the detail colour's alpha)
+and adds the two normals. The sum points halfway between them, so the preview showed about half of each texture's
+tilt, and with a flat base half of the detail's. The SDK adds the detail normal to the primary normal's channels; the
+preview now does that in tangent space (apply_detail_normal): each normal's x and y scaled (the base by Normal Scale,
+the detail by Detail Normal Scale times the mask) and normalized, as glTF scales a normal texture; then x and y added
+and z multiplied (the whiteout blend: a flat base gives the detail, a flat detail the base), normalized, through one
+Normal Map node. Only in detail mode
+(Enable Detail on, blend mode off); otherwise Asobo's result stays. Asobo's nodes stay where they are, ahead of the
+FSS mix, which is where the glTF exporter looks for the normal texture and its scale.
 """
 
 import bpy
@@ -57,6 +68,8 @@ OCCLUSION_NODE = "FSS Occlusion Strength"
 AO_ALWAYS_NODE = "FSS AO Always"
 OMR_OCCLUSION_NODE = "FSS Occlusion"
 OMR_EITHER_NODE = "FSS Occlusion Detail Or Blend"
+DETAIL_NORMAL_PREFIX = "FSS Detail Normal "
+DETAIL_NORMAL_MIX = DETAIL_NORMAL_PREFIX + "Mix"
 _IMAGE_COPY_SUFFIX = ".fss_coat_preview"
 _INPUTS = MSFS2024_PrincipledBSDFInputs
 _P = MSFS2024_MaterialProperties
@@ -125,9 +138,111 @@ def apply_ao_always(group):
         group.links.new(node.outputs[0], factor)
 
 
+def apply_detail_normal(group):
+    """In Asobo's Normal group `group` (inputs: 0 Normal Scale, 1 Normal Texture, 2 Detail Normal Scale, 3 Detail
+    Normal Texture, 4 Enable Detail, 5 Mask, 6 Switch To Blend Mode): in detail mode its Normal output is the base and
+    detail normals added in tangent space (the module docstring); else Asobo's result."""
+    if group is None or group.nodes.get(DETAIL_NORMAL_MIX) is not None:
+        return
+    group_input = next((n for n in group.nodes if n.bl_idname == "NodeGroupInput"), None)
+    group_output = next((n for n in group.nodes if n.bl_idname == "NodeGroupOutput"), None)
+    if group_input is None or group_output is None or len(group_input.outputs) < 7 or not group_output.inputs:
+        return
+    normal = group_output.inputs[0]
+    if not normal.is_linked:
+        return
+
+    def curve(index):  # Asobo's Invert Y curve fed by group input `index`
+        return next((l.to_node for l in group_input.outputs[index].links if l.to_node.bl_idname == "ShaderNodeRGBCurve"),
+                    None)
+
+    base_curve, detail_curve = curve(1), curve(3)
+    if base_curve is None or detail_curve is None:
+        return
+    asobo = normal.links[0].from_socket
+    x, y = group_output.location.x, group_output.location.y - 500.0
+    nodes, links = group.nodes, group.links
+
+    def add(name, type_name, dx, dy, operation=None):
+        node = nodes.new(type_name)
+        node.name = node.label = DETAIL_NORMAL_PREFIX + name
+        node.location = (x + dx, y + dy)
+        if operation is not None:
+            node.operation = operation
+        return node
+
+    def decode(name, color, dy):  # colour 0..1 to a vector -1..1
+        node = add(name, "ShaderNodeVectorMath", -1600.0, dy, "MULTIPLY_ADD")
+        links.new(color, node.inputs[0])
+        node.inputs[1].default_value = (2.0, 2.0, 2.0)
+        node.inputs[2].default_value = (-1.0, -1.0, -1.0)
+        return node.outputs[0]
+
+    def scaled(name, vector, factor, z, dy):  # x and y times `factor`, z times `z`
+        combine = add(name + " Factor", "ShaderNodeCombineXYZ", -1400.0, dy - 150.0)
+        links.new(factor, combine.inputs[0])
+        links.new(factor, combine.inputs[1])
+        combine.inputs[2].default_value = z
+        node = add(name, "ShaderNodeVectorMath", -1200.0, dy, "MULTIPLY")
+        links.new(vector, node.inputs[0])
+        links.new(combine.outputs[0], node.inputs[1])
+        return node.outputs[0]
+
+    def unit(name, vector, dy):
+        node = add(name, "ShaderNodeVectorMath", -1050.0, dy, "NORMALIZE")
+        links.new(vector, node.inputs[0])
+        return node.outputs[0]
+
+    base = unit("Base Unit", scaled("Base", decode("Base Decode", base_curve.outputs[0], 0.0), group_input.outputs[0],
+                                    1.0, 0.0), 0.0)
+    strength = add("Strength", "ShaderNodeMath", -1600.0, -500.0, "MULTIPLY")
+    links.new(group_input.outputs[2], strength.inputs[0])
+    links.new(group_input.outputs[5], strength.inputs[1])
+    detail = unit("Detail Unit", scaled("Detail", decode("Detail Decode", detail_curve.outputs[0], -350.0),
+                                        strength.outputs[0], 1.0, -350.0), -350.0)
+    # Whiteout blend: x and y added, z multiplied (a flat base gives the detail, a flat detail the base)
+    total = add("Sum", "ShaderNodeVectorMath", -900.0, -100.0, "ADD")
+    links.new(base, total.inputs[0])
+    links.new(detail, total.inputs[1])
+    product = add("Product", "ShaderNodeVectorMath", -900.0, -250.0, "MULTIPLY")
+    links.new(base, product.inputs[0])
+    links.new(detail, product.inputs[1])
+    split_total = add("Sum XYZ", "ShaderNodeSeparateXYZ", -750.0, -100.0)
+    links.new(total.outputs[0], split_total.inputs[0])
+    split_product = add("Product XYZ", "ShaderNodeSeparateXYZ", -750.0, -250.0)
+    links.new(product.outputs[0], split_product.inputs[0])
+    blended = add("Blend", "ShaderNodeCombineXYZ", -600.0, -150.0)
+    links.new(split_total.outputs[0], blended.inputs[0])
+    links.new(split_total.outputs[1], blended.inputs[1])
+    links.new(split_product.outputs[2], blended.inputs[2])
+    result = unit("Normalize", blended.outputs[0], -150.0)
+    result.node.location = (x - 450.0, y - 150.0)
+    encode = add("Encode", "ShaderNodeVectorMath", -300.0, -150.0, "MULTIPLY_ADD")
+    links.new(result, encode.inputs[0])
+    encode.inputs[1].default_value = (0.5, 0.5, 0.5)
+    encode.inputs[2].default_value = (0.5, 0.5, 0.5)
+    normal_map = add("Map", "ShaderNodeNormalMap", -150.0, -150.0)
+    normal_map.inputs["Strength"].default_value = 1.0
+    links.new(encode.outputs[0], normal_map.inputs["Color"])
+    detail_mode = add("Mode", "ShaderNodeMath", -500.0, 150.0, "SUBTRACT")
+    detail_mode.use_clamp = True
+    links.new(group_input.outputs[4], detail_mode.inputs[0])
+    links.new(group_input.outputs[6], detail_mode.inputs[1])
+    mix = add("Mix", "ShaderNodeMix", -250.0, 0.0)
+    mix.name = mix.label = DETAIL_NORMAL_MIX
+    mix.data_type = "VECTOR"
+    links.new(detail_mode.outputs[0], mix.inputs["Factor"])
+    links.new(asobo, mix.inputs[4])  # A (vector): Asobo's result, the path the glTF exporter follows first
+    links.new(normal_map.outputs[0], mix.inputs[5])  # B (vector): the tangent-space sum
+    links.new(mix.outputs[1], normal)  # Result (vector)
+
+
 def apply_occlusion_strength(owner):
     """Put the Occlusion Strength between the occlusion and Asobo's Apply AO group of `owner` (an MSFS2024_Material)."""
     nodes, links = owner.nodes, owner.links
+    normal_group = get_node_by_name(nodes, MSFS2024_GroupNodes.NORMALGROUP.value)
+    if normal_group is not None:
+        apply_detail_normal(normal_group.node_tree)
     apply_ao = get_node_by_name(nodes, MSFS2024_GroupNodes.APPLYAOGROUP.value)
     if apply_ao is None:
         return

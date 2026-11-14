@@ -2,8 +2,10 @@
 parameter reaching its node, Use Uniform Roughness, the coat normal with and without the base normal, alpha and normal
 changes, today's Principled kept as Asobo builds it, the artist's images unchanged, the Occlusion Strength node (not on
 Windshield), the AO always applied in the shared Apply AO group, a file saved without the preview, the update operator,
-the coat and its tint rendered in EEVEE and Cycles, the occlusion darkening a sky-lit plane in both engines, and exports
-identical to the tree the add-on built before these previews, for both simulators and the plain dialog.
+the coat and its tint rendered in EEVEE and Cycles, the occlusion darkening a sky-lit plane in both engines, the detail
+normal lighting a sun-lit plane as the same texture does as the base normal (Asobo's group showed about 0.6 of it), and
+exports identical to the tree the add-on built before these previews, for both simulators and the plain dialog (a
+material with base and detail normal, one with a detail normal only).
 
 To run:
 G:\\e-jets-e2\\tools\\blender\\blender.exe -b --factory-startup --python tests/test_material_preview.py
@@ -242,12 +244,35 @@ def strip_ao_always():
     group.nodes.remove(group.nodes[mp.AO_ALWAYS_NODE])
 
 
+def check_detail_normal(label):
+    group = bpy.data.node_groups['.Normal Group']
+    output = next(n for n in group.nodes if n.bl_idname == 'NodeGroupOutput')
+    mix = group.nodes.get(mp.DETAIL_NORMAL_MIX)
+    check(mix is not None and source(output.inputs[0]) == mp.DETAIL_NORMAL_MIX,
+          f"{label}: the Normal group's output from the FSS detail normal mix")
+    check(mix.inputs[4].is_linked and mix.inputs[4].links[0].from_node.name == '.Switch.001',
+          f"{label}: Asobo's result on the mix's first input")
+    check(len([n for n in group.nodes if n.name == mp.DETAIL_NORMAL_MIX]) == 1, f'{label}: one detail normal mix only')
+
+
+def strip_detail_normal():
+    """Asobo's Normal group: its own result on the output, no FSS nodes."""
+    group = bpy.data.node_groups.get('.Normal Group')
+    if group is None or group.nodes.get(mp.DETAIL_NORMAL_MIX) is None:
+        return
+    output = next(n for n in group.nodes if n.bl_idname == 'NodeGroupOutput')
+    group.links.new(group.nodes[mp.DETAIL_NORMAL_MIX].inputs[4].links[0].from_socket, output.inputs[0])
+    for node in [n for n in group.nodes if n.name.startswith(mp.DETAIL_NORMAL_PREFIX)]:
+        group.nodes.remove(node)
+
+
 def strip_previews(material):
     """The tree as the add-on built it before these previews."""
     nodes, links = material.node_tree.nodes, material.node_tree.links
     for node in [n for n in nodes if n.name.startswith(P)]:
         nodes.remove(node)
     strip_ao_always()
+    strip_detail_normal()
     node = nodes.get(mp.OCCLUSION_NODE)
     if node is not None:
         if node.inputs[0].is_linked:
@@ -278,6 +303,7 @@ def test_saved_without_preview():
     check(coat_nodes(reopened), 'opening the file adds the coat branch')
     check(reopened.node_tree.nodes.get(mp.OCCLUSION_NODE) is not None, 'opening the file adds the Occlusion Strength node')
     check_ao_always('opening the file')
+    check_detail_normal('opening the file')
     check(len(outputs(reopened)) == 3, 'three outputs')
     bpy.ops.wm.save_as_mainfile(filepath=str(blend))
     bpy.ops.wm.open_mainfile(filepath=str(blend))
@@ -288,6 +314,7 @@ def test_saved_without_preview():
     check(result == {'FINISHED'}, 'the operator finishes')
     check(coat_nodes(bpy.data.materials['old']), 'the operator adds the coat branch')
     check_ao_always('the operator')
+    check_detail_normal('the operator')
     count = len(bpy.data.materials['old'].node_tree.nodes)
     bpy.ops.msfs_fss.update_material_nodes()
     check(len(bpy.data.materials['old'].node_tree.nodes) == count, 'running it again changes nothing')
@@ -399,6 +426,76 @@ def test_render_ao():
     check(masked[0] / lit[0] > 0.9, f"EEVEE with Asobo's groups: no AO ({masked[0] / lit[0]:.3f})")
 
 
+def test_render_detail_normal():
+    """A sun at 45 degrees on a plane seen from above; a uniform normal texture tilted 30 degrees towards the sun.
+    The detail normal (vertex alpha 1) lights the plane as the same texture does as the base normal, a flat detail
+    normal leaves the base at full strength, vertex alpha 0 leaves the plane flat; Asobo's group showed about half."""
+    print('--- render detail normal')
+    bpy.ops.wm.read_homefile(use_empty=True)
+    scene = bpy.context.scene
+    world = bpy.data.worlds.new('world')
+    world.use_nodes = True
+    world.node_tree.nodes['Background'].inputs[0].default_value = (0, 0, 0, 1)
+    scene.world = world
+    bpy.ops.mesh.primitive_plane_add(size=40)
+    plane = bpy.context.active_object
+    attribute = plane.data.color_attributes.new('Col', 'FLOAT_COLOR', 'POINT')
+    plane.data.color_attributes.active_color = attribute
+    plane.data.attributes.render_color_index = plane.data.attributes.active_color_index
+    sun = bpy.data.objects.new('sun', bpy.data.lights.new('sun', 'SUN'))
+    sun.data.energy = 3.0
+    sun.rotation_euler = (0, -0.785398, 0)  # light travelling towards +x and down: it comes from -x at 45 degrees
+    scene.collection.objects.link(sun)
+    camera = bpy.data.objects.new('camera', bpy.data.cameras.new('camera'))
+    scene.collection.objects.link(camera)
+    camera.location = (0, 0, 10)
+    scene.camera = camera
+    tilt = image('t_norm_tilt30', (0.25, 0.5, 0.933, 1), 'Non-Color')  # 30 degrees towards -x
+    flat = image('t_norm_flat', (0.5, 0.5, 1, 1), 'Non-Color')
+
+    def render(name, base=None, detail=None, alpha=1.0):
+        for value in attribute.data:
+            value.color = (1, 1, 1, alpha)
+        material = bpy.data.materials.new(name)
+        material.msfs_material_type = 'msfs_standard'
+        material.msfs_base_color_factor = (0.8, 0.8, 0.8, 1)
+        material.msfs_occlusion_metallic_roughness_texture = image('t_comp_rough', (1, 1, 0, 1), 'Non-Color')
+        if base is not None:
+            material.msfs_normal_texture = base
+        if detail is not None:
+            material.msfs_detail_normal_texture = detail
+        plane.data.materials.clear()
+        plane.data.materials.append(material)
+        return [linear(render_rgb(scene, engine)[0]) for engine in ('BLENDER_EEVEE', 'CYCLES')]
+
+    plain = render('dn_plain')
+    base = render('dn_base', base=tilt)
+    detail = render('dn_detail', detail=tilt)
+    base_flat_detail = render('dn_base_flat_detail', base=tilt, detail=flat)
+    masked = render('dn_detail_alpha0', detail=tilt, alpha=0.0)
+    for index, engine in enumerate(('EEVEE', 'Cycles')):
+        lift = base[index] - plain[index]
+        check(lift > 0.05, f'{engine}: the tilted base normal lights the plane ({plain[index]:.3f} -> {base[index]:.3f})')
+        share = (detail[index] - plain[index]) / lift
+        check(abs(share - 1.0) < 0.05, f'{engine}: the detail normal at vertex alpha 1 gives {share:.3f} of the base normal')
+        share = (base_flat_detail[index] - plain[index]) / lift
+        check(abs(share - 1.0) < 0.05, f'{engine}: a flat detail normal keeps the base at {share:.3f}')
+        check(abs(masked[index] - plain[index]) < 0.01, f'{engine}: vertex alpha 0 leaves the plane flat ({masked[index]:.3f})')
+    strip_detail_normal()
+    for value in attribute.data:
+        value.color = (1, 1, 1, 1)
+    plane.data.materials.clear()
+    plane.data.materials.append(bpy.data.materials['dn_detail'])
+    asobo = [linear(render_rgb(scene, engine)[0]) for engine in ('BLENDER_EEVEE', 'CYCLES')]
+    plane.data.materials.clear()
+    plane.data.materials.append(bpy.data.materials['dn_base_flat_detail'])
+    asobo_base = [linear(render_rgb(scene, engine)[0]) for engine in ('BLENDER_EEVEE', 'CYCLES')]
+    print("INFO: with Asobo's group: the detail normal gives",
+          [round((a - p) / (b - p), 3) for a, p, b in zip(asobo, plain, base)],
+          'and a flat detail keeps the base at', [round((a - p) / (b - p), 3) for a, p, b in zip(asobo_base, plain, base)],
+          'of the base normal (EEVEE, Cycles)')
+
+
 def export_scene(mode, previews, out_dir):
     """A Clearcoat and a Standard material on a grid; returns the glTF's material sections and all file hashes."""
     bpy.ops.wm.read_homefile(use_empty=True)
@@ -411,10 +508,16 @@ def export_scene(mode, previews, out_dir):
     coat.msfs_occlusion_strength = 0.5
     standard = new_material('Metal', 'msfs_standard', coat=False, coat_normal=False)
     standard.msfs_occlusion_strength = 0.5
+    standard.msfs_normal_texture = None  # a detail normal without a base normal, as on the E2 seat leather
+    standard.msfs_detail_normal_texture = image('t_detail_norm', (0.6, 0.45, 0.9, 1), 'Non-Color')
+    standard.msfs_detail_normal_scale = 0.7
+    coat.msfs_detail_normal_texture = image('t_detail_norm', (0.6, 0.45, 0.9, 1), 'Non-Color')  # base and detail
     for material in (coat, standard):
         if not previews:
             strip_previews(material)
         obj.data.materials.append(material)
+    for polygon in obj.data.polygons:  # half the faces Metal, so both materials are exported
+        polygon.material_index = polygon.index % 2
     scene = bpy.context.scene
     shutil.rmtree(out_dir, ignore_errors=True)
     out_dir.mkdir(parents=True)
@@ -459,6 +562,11 @@ def test_exports():
     for mode, label in (('fs24', 'MSFS 2024 multi-exporter'), ('fs20', 'MSFS 2020'), ('plain', 'File > Export, target 2024')):
         before, before_files = export_scene(mode, False, SCRATCH_DIR / f'{mode}_before')
         after, after_files = export_scene(mode, True, SCRATCH_DIR / f'{mode}_after')
+        names = sorted(m['name'] for m in after['materials'])
+        check(names == ['Metal', 'Paint'], f'{label}: both materials exported ({names})')
+        images = sorted(i.get('uri', '') for i in after.get('images') or [])
+        if mode == 'fs24':
+            check(any('t_detail_norm' in u for u in images), f'{label}: the detail normal texture is exported ({images})')
         check(after == before, f'{label}: same glTF as the tree before these previews')
         check(after_files == before_files, f'{label}: same files as the tree before these previews')
         if mode != 'plain':  # File > Export writes Asobo's coat links as KHR_materials_clearcoat, as before
@@ -476,5 +584,6 @@ test_occlusion_strength()
 test_saved_without_preview()
 test_render()
 test_render_ao()
+test_render_detail_normal()
 test_exports()
 print('ALL MATERIAL PREVIEW TESTS PASSED')
