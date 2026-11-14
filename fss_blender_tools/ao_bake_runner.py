@@ -1,8 +1,8 @@
 """AO Bake: the script of the second Blender that bakes the masters (auto-bake journal, decisions 12, 15, 16, 27, 34 to
 36).
 
-Started by ao_bake_store.start_bake on the saved .blend:
-    blender --factory-startup [-b] <file.blend> --python ao_bake_runner.py -- <job.json>
+Started by ao_bake_store.start_bake on a snapshot of the artist's current state (the bake folder's snapshot.blend):
+    blender --factory-startup [-b] <snapshot.blend> --python ao_bake_runner.py -- <job.json>
 Hidden (-b, the default run mode, decision 36) it bakes the tiles one after another; with a window it bakes one tile
 per timer step, so the window keeps updating, and shows a reduced preview of the master in an Image Editor (its 3D
 views are turned into Image Editors, so the scene is not drawn). In both it writes a small preview of the master
@@ -14,11 +14,12 @@ without saving when done.
 
 Per master (P35, decisions 15 and 30; the prototype's step3_master.py): the target's evaluated triangles of a texture
 set (a material that is not a skip material), in world space moved so the target's bounds are centred at the origin;
-the occluders the job lists (evaluated, skip faces dropped, moved the same way); every other object hidden from
-rendering. The master layout at 4 x the target's median density. The bake in tiles (decisions 31, 32): the master's
-pixel area is cut into square tiles whose size fits the memory budget (ao_bake_core.choose_tile); each tile is one
-Cycles bake of the core triangles that overlap it, then one of the skirt's, with UVs relative to the tile, into a
-tile-sized image (Cycles clips a triangle at the image's edges: Session 20), each tile with its own seed. The master is
+the occluders the job lists (evaluated, skip faces dropped, moved the same way), as temporary objects in a scene of
+the bake's own that holds nothing else (decision 52). The master layout at 4 x the target's median density. The bake
+in tiles (decisions 31, 32): the master's pixel area is cut into square tiles whose size fits the memory budget
+(ao_bake_core.choose_tile); each tile is one Cycles bake of the core triangles that overlap it, then one of the
+skirt's, with UVs relative to the tile, into a tile-sized image (Cycles clips a triangle at the image's edges: Session
+20), each tile with its own seed. The master is
 paged (decision 33, Session 23): a row of tiles is a band; the bands are baked from the top, and once a band is baked
 the band above it is composed (it now has its halo) and written to <stem>.ao.map and, for the AO, to a raw scratch file
 row by row, then dropped; only two bands are held, never the whole master. At the end the AO is encoded as lossless
@@ -61,11 +62,14 @@ STATUS = os.path.join(FOLDER, 'status.json')
 CANCEL = os.path.join(FOLDER, 'cancel')
 LOG = os.path.join(FOLDER, 'bake.log')
 SET = JOB['settings']
+SPLIT = bool(SET.get('sample_split'))  # decision 49: averaged views share the sample count
 ITEMS = JOB['items']
+BAKE = {}  # decision 52: the bake's own scene
 TMP = 'FSS_AO_BAKE_TMP'
 # the memory budget (decision 32): FSS_AO_BAKE_MEMORY_GB (tests) or the job's, else a share of the free memory
 _override = os.environ.get('FSS_AO_BAKE_MEMORY_GB') or JOB.get('memory_budget_gb')
 BUDGET = core.memory_budget(_override)
+PROFILE = {} if os.environ.get('FSS_AO_BAKE_PROFILE') else None  # Session 38: per-call times in the log
 SEED_OFFSET = int(os.environ.get('FSS_AO_BAKE_SEED_OFFSET') or 0)  # tests only: a control bake with other noise
 BUDGET_SOURCE = f'override {_override} GB' if _override else (
     f'{core.BUDGET_SHARE:.0%} of the free memory, at most {core.BUDGET_MAX // 2 ** 30} GB')
@@ -96,8 +100,13 @@ def _replace(tmp, path, tries=100):
 
 def write_status():
     state['elapsed_s'] = round(time.time() - state['started'], 2)
+    # done: the objects finished plus the current one's share (its tiles, and its poses or views inside a tile)
     done = state['n_done']
-    if done:
+    nt, npz = state.get('n_tiles') or 0, state.get('n_poses') or 0
+    if nt and done < state['n_total']:
+        done += ((max(state.get('tile') or 1, 1) - 1) + (max(state.get('pose') or 1, 1) - 1) / max(npz, 1)) / nt
+    state['progress'] = round(done / max(state['n_total'], 1), 4)  # the panel's bar moves with tiles and views
+    if done > 0:
         state['left_s'] = round(state['elapsed_s'] / done * (state['n_total'] - done), 1)
     tmp = STATUS + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
@@ -128,9 +137,11 @@ def update_index(entry):
 # ---------------------------------------------------------------------------------------------------------------------
 
 def setup_scene():
-    scene = bpy.context.scene
-    for obj in bpy.data.objects:
-        obj.hide_render = True
+    """Decision 52: the bake runs in a scene of its own that holds only the bake's temporary objects, so Cycles and
+    the depsgraph do not go through the file's objects on every bake call; the file's scene is left as loaded (its
+    frames are still set for the poses). Returns the collection of the temporary objects."""
+    scene = bpy.data.scenes.new('FSS_AO_BAKE_SCENE')
+    BAKE['scene'] = scene
     coll = bpy.data.collections.new(TMP)
     scene.collection.children.link(coll)
     scene.render.engine = 'CYCLES'
@@ -140,8 +151,7 @@ def setup_scene():
     cy.use_animated_seed = False
     scene.render.threads_mode = 'FIXED'
     scene.render.threads = int(SET['threads'])
-    if scene.world is None:
-        scene.world = bpy.data.worlds.new('FSS_AO_BAKE_WORLD')
+    scene.world = bpy.data.worlds.new('FSS_AO_BAKE_WORLD')
     scene.world.light_settings.distance = float(SET['ao_distance'])
     cy.device = 'CPU'
     try:
@@ -210,10 +220,12 @@ def read_red(img, px):
     return px.reshape(h, w, 4)[:, :, 0]
 
 
-def bake(obj, img, seed, from_obj):
-    """The prototype's bake: AO Selected to Active from `from_obj` into img (pre-filled with -1), margin 0."""
-    scene = bpy.context.scene
-    scene.cycles.samples = int(SET['samples'])
+def bake(obj, img, seed, from_obj, samples=None):
+    """The prototype's bake: AO Selected to Active from `from_obj` into img (pre-filled with -1), margin 0; in the
+    bake's own scene (decision 52)."""
+    scene = BAKE['scene']
+    view_layer = scene.view_layers[0]
+    scene.cycles.samples = int(samples or SET['samples'])
     scene.cycles.seed = seed
     mat = bpy.data.materials.new('FSS_AO_BAKE_MAT')
     mat.use_nodes = True
@@ -231,12 +243,12 @@ def bake(obj, img, seed, from_obj):
     uv = obj.data.uv_layers['BAKE_UV']
     obj.data.uv_layers.active = uv
     uv.active_render = True
-    for o in bpy.context.view_layer.objects:
+    for o in view_layer.objects:
         if o is not None:
-            o.select_set(False)
-    from_obj.select_set(True)
-    obj.select_set(True)
-    bpy.context.view_layer.objects.active = obj
+            o.select_set(False, view_layer=view_layer)
+    from_obj.select_set(True, view_layer=view_layer)
+    obj.select_set(True, view_layer=view_layer)
+    view_layer.objects.active = obj
     rb = scene.render.bake
     rb.margin = 0
     rb.use_clear = False
@@ -246,7 +258,10 @@ def bake(obj, img, seed, from_obj):
     kw = dict(type='AO', margin=0, margin_type='ADJACENT_FACES', use_clear=False, use_selected_to_active=True,
               target='IMAGE_TEXTURES', cage_extrusion=core.EXTRUSION, max_ray_distance=core.RAY_DISTANCE,
               use_cage=False)
-    bpy.ops.object.bake(**kw)
+    sel = [from_obj, obj]  # the operator reads these from the context, not from the view layer
+    with bpy.context.temp_override(scene=scene, view_layer=view_layer, active_object=obj, object=obj,
+                                   selected_objects=sel, selected_editable_objects=sel):
+        bpy.ops.object.bake(**kw)
     dt = time.time() - t
     bpy.data.materials.remove(mat)
     return dt
@@ -309,6 +324,17 @@ class Preview:
         px, py = (x0 + ax) // f, (y0 + ay) // f
         self.pv[py:py + part.shape[0], px:px + part.shape[1]] = part
 
+    def put_partial(self, x0, y0, h, w, value):
+        """While a tile (h x w at x0, y0) bakes its poses or views: value(sl) gives the values baked so far (-1: none
+        yet) at the preview's pixels of the tile, sl the slice of the tile that picks them; only those are computed."""
+        f = self.f
+        ax, ay = -x0 % f, -y0 % f
+        if ax >= w or ay >= h:
+            return
+        v = value((slice(ay, None, f), slice(ax, None, f)))
+        px, py = (x0 + ax) // f, (y0 + ay) // f
+        self.pv[py:py + v.shape[0], px:px + v.shape[1]] = np.where(v >= 0, core.quantize16(v), 0)
+
     def show(self, final=False):
         now = time.time()
         if not final and now - self.written < PREVIEW_EVERY_S:
@@ -356,24 +382,36 @@ def _remove(objs):
         bpy.data.objects.remove(o)
         if me is not None and me.users == 0:
             bpy.data.meshes.remove(me)
-    bpy.context.view_layer.update()  # else the view layer's object list keeps the removed objects as None
+    BAKE['scene'].view_layers[0].update()  # else the view layer's object list keeps the removed objects as None
 
 
-def _bake_piece(coll, name, positions, normals, uv, img, px, seed, target, matrix=None):
+def _bake_piece(coll, name, positions, normals, uv, img, px, seed, target, matrix=None, samples=None):
     """One Cycles bake of these triangles (already relative to the tile) into the tile image; returns (red, seconds).
     matrix: the pose's placement of the target (decision 34), None for the current frame."""
+    t0 = time.perf_counter()
     n = len(positions)
     me = build_mesh(name, positions.reshape(-1, 3), np.arange(n * 3).reshape(-1, 3), normals, uv)
     obj = temp_object(coll, name, me)
     if matrix is not None:
         obj.matrix_world = matrix
     set_ray_invisible(obj)
+    t1 = time.perf_counter()
     try:
         clear_image(img, px)
-        dt = bake(obj, img, seed, target)
+        t2 = time.perf_counter()
+        dt = bake(obj, img, seed, target, samples)
+        t3 = time.perf_counter()
     finally:
         _remove([obj])
-    return read_red(img, px), dt
+    t4 = time.perf_counter()
+    red = read_red(img, px)
+    if PROFILE is not None:  # Session 38: where a bake call's time goes
+        for k, v in (('build', t1 - t0), ('clear', t2 - t1), ('bake', t3 - t2), ('remove', t4 - t3),
+                     ('read', time.perf_counter() - t4)):
+            PROFILE[k] = PROFILE.get(k, 0.0) + v
+        PROFILE['calls'] = PROFILE.get('calls', 0) + 1
+        PROFILE['px'] = PROFILE.get('px', 0) + img.size[0] * img.size[1]
+    return red, dt
 
 
 def pose_setup(obj, frames, ref_co, shift, posed_occ):
@@ -413,7 +451,7 @@ def pose_setup(obj, frames, ref_co, shift, posed_occ):
 
 
 def setup_copies(item, first, dg, shift, coll, temps, poses):
-    """Decision 47: the views of a shared mesh. Per copy (its object in the saved file): the target's placement at the
+    """Decision 47: the views of a shared mesh. Per copy (its object in the snapshot): the target's placement at the
     copy (relative to the first copy, whose world positions the target has), each occluder of its list once as a
     temporary object (shared between copies' lists), and per pose of a moving copy its placement and its posed
     occluders. Fills poses['views'] ({mat, vis: occluder names shown, copy}), ['occ_all'], ['combine']; returns (number
@@ -429,7 +467,7 @@ def setup_copies(item, first, dg, shift, coll, temps, poses):
     for ci, c in enumerate(item['copies']):
         o = bpy.data.objects.get(c['object'])
         if o is None or o.type != 'MESH':
-            notes.append(f"{c['object']}: not in the saved file, left out")
+            notes.append(f"{c['object']}: not in the baked file, left out")
             continue
         X = to_bake @ np.array(o.matrix_world, dtype=np.float64) @ inv_first @ from_bake
         vis, posed_occ = [], []
@@ -456,17 +494,27 @@ def setup_copies(item, first, dg, shift, coll, temps, poses):
                 t = temp_object(coll, 'FSS_AO_OCC', occluder_mesh(oc, dg, skip, shift))
                 temps.append(t)
                 vis.append(t.name)
-            views.append(dict(mat=Matrix(X.tolist()), vis=set(vis), copy=ci))
+            views.append(dict(mat=Matrix(X.tolist()), vis=set(vis), copy=ci, name=o.name, cpose=1, cposes=1))
         else:
             mats, meshes = got
             for p, mes in enumerate(meshes):
                 objs = [temp_object(coll, 'FSS_AO_OCC_POSE', me) for me in mes]
                 temps.extend(objs)
                 M = np.array(mats[p], dtype=np.float64) @ X
-                views.append(dict(mat=Matrix(M.tolist()), vis=set(vis) | {t.name for t in objs}, copy=ci))
+                views.append(dict(mat=Matrix(M.tolist()), vis=set(vis) | {t.name for t in objs}, copy=ci, name=o.name,
+                                  cpose=p + 1, cposes=len(meshes)))
+    order = {c: k + 1 for k, c in enumerate(dict.fromkeys(v['copy'] for v in views))}
+    combine = item.get('combine') or 'AVERAGE'
+    for v in views:
+        v['n'] = order[v['copy']]
+        # decision 49: samples in proportion to the view's weight in the result: the average of copies weighs each
+        # view 1 / (copies x its copy's poses); lightest and darkest keep each copy whole, split over its poses only
+        share = v['cposes'] * (len(order) if combine in ('AVERAGE', 'ONE') else 1)
+        v['samples'] = core.view_samples(SET['samples'], share, SPLIT)
+    poses['n_copies'] = len(order)
     poses['views'] = views
     poses['occ_all'] = [t for t in temps if t.name.startswith('FSS_AO_OCC')]
-    poses['combine'] = item.get('combine') or 'AVERAGE'
+    poses['combine'] = combine
     return len(views), notes
 
 
@@ -478,14 +526,19 @@ def bake_item(item, coll):
     left; once a band is baked, the band above it has its halo and is composed and written; nothing is held for the
     whole master. Each tile keeps the seed of its place in core.tile_grid, so the result is Session 20's."""
     t0 = time.time()
+    curv = dn = None
     obj = bpy.data.objects.get(item['object'])
     if obj is None or obj.type != 'MESH':
-        return dict(status='skipped', reason='object not in the saved file')
+        return dict(status='skipped', reason='object not in the baked file')
+    dist = float(item.get('ao_distance', SET['ao_distance']))  # decision 51: Auto Distance gives small objects less
+    BAKE['scene'].world.light_settings.distance = dist
+    nf = int(item.get('falloff') or 0)  # decision 53: each view at dist x 1/n, 2/n ... 1, averaged: linear falloff
+    steps = [dist * (k + 1) / nf for k in range(nf)] if nf > 1 else None
     dg = bpy.context.evaluated_depsgraph_get()
     uv_name = item['uv']
     ev = core.evaluated_triangles(obj, dg, [uv_name])
     if uv_name not in ev['uv']:
-        return dict(status='skipped', reason=f'no UV map {uv_name} in the saved file')
+        return dict(status='skipped', reason=f'no UV map {uv_name} in the baked file')
     mh = core.mesh_hash(ev)
     sizes = item['tex_size']  # per material index of a texture set (decision 30: no other face is baked)
     skip = set(item['skip_slots'])
@@ -512,6 +565,7 @@ def bake_item(item, coll):
     tb = time.time()
     m = core.build_master(pos, tris, cnm, D, gutter=core.GUTTER, order=core.ORDER, mirror_open=core.MIRROR_OPEN,
                           fold_split=core.FOLD_SPLIT)
+    m['corner_pairs'] = core.corner_pairs(m, pos, tris)  # decision 57
     t_build = time.time() - tb
     W, H = m['W'], m['H']
     # the tile size, which is also the band's height (decisions 32, 33): forced by a test, else the largest that fits
@@ -520,11 +574,18 @@ def bake_item(item, coll):
     if forced:
         tile, est, fits = forced, None, True
     else:
-        tile, est, fits = core.choose_tile(W, H, BUDGET, ws0 or 0)
+        # decision 50: the bakes each tile gets (a shared mesh's copies times their poses, or the poses)
+        n_views = (sum(len(c.get('poses') or [0]) for c in item['copies']) if item.get('copies')
+                   else len(frames or [0]))
+        tile, est, fits = core.choose_tile(W, H, BUDGET, ws0 or 0, views=n_views)
     tiles = core.tile_grid(W, H, tile)
     n = len(tiles)
     nb = -(-H // tile)  # bands
     gb = 2 ** 30
+    if dist != float(SET['ao_distance']):
+        log(f"  {item['name']}: AO distance {dist * 1000:g} mm (auto, its longest box axis)")
+    if steps:
+        log(f"  {item['name']}: falloff in {nf} steps, " + ', '.join(f'{d * 1000:.3g}' for d in steps) + ' mm')
     log(f"  {item['name']}: master {W} x {H} px ({W * H / 1e6:.1f} Mpx), tile {tile} px, {n} tile(s) in {nb} band(s); "
         f"budget {BUDGET / gb:.1f} GB" + (f", estimate {est / gb:.2f} GB" if est else ' (tile forced)')
         + ('' if fits else ', the smallest tile exceeds the budget'))
@@ -543,42 +604,69 @@ def bake_item(item, coll):
     # decision 34: per pose the target's placement and the posed occluders; decision 47: a shared mesh's views
     poses = dict(mats=None, posed=[], views=None, occ_all=[], combine=None)
 
+    def bake_both(pcs, img, px, seeds, mat=None, samples=None):
+        """A tile's core and skirt, one Cycles bake each (they may overlap in the tile). pcs: (core, skirt), each
+        (positions, normals, UV in the tile) or None. Returns (A, B): per tile pixel the value or -1, None for a
+        missing piece. Decision 53: with falloff, both at each step's distance (the samples split over the steps with
+        Split Samples), averaged."""
+        if not steps:
+            return bake_pieces(pcs, img, px, seeds, mat, samples)
+        sk = core.view_samples(samples or SET['samples'], len(steps), SPLIT)
+        acc = [None, None]
+        for k, d in enumerate(steps):
+            BAKE['scene'].world.light_settings.distance = d
+            got = bake_pieces(pcs, img, px, [sd + 7919 * (k + 1) for sd in seeds], mat, sk)
+            for j, v in enumerate(got):
+                if v is not None:
+                    acc[j] = v.astype(np.float64) if acc[j] is None else np.where(v >= 0, acc[j] + v, acc[j])
+        BAKE['scene'].world.light_settings.distance = dist
+        return tuple(None if a is None else np.where(a >= 0, a / len(steps), -1.0) for a in acc)
+
+    def bake_pieces(pcs, img, px, seeds, mat=None, samples=None):
+        pc, ps = pcs
+        A = B = None
+        if pc is not None:
+            A, dt = _bake_piece(coll, 'FSS_AO_CORE', *pc, img, px, seeds[0], target, mat, samples)
+            times['core'] += dt
+            if ps is not None:
+                A = A.copy()  # the skirt's bake reuses px
+        if ps is not None:
+            B, dt = _bake_piece(coll, 'FSS_AO_SKIRT', *ps, img, px, seeds[1], target, mat, samples)
+            times['skirt'] += dt
+        return A, B
+
     def set_pose(p):
         target.matrix_world = poses['mats'][p]
         for q, objs in enumerate(poses['posed']):
             for o in objs:
                 o.hide_render = q != p
 
-    def bake_tile_poses(i, rect, win, baked, csel, ssel, img, px, off, wh):
+    def bake_tile_poses(i, rect, win, baked, pcs, img, px):
         """Decision 34: the tile in every pose, summed per pixel in the tile's own buffers and averaged; each pose with
         its own seed. Yields between poses (Cancel)."""
         x0, y0, w, h = rect
         npose = len(poses['mats'])
+        spv = core.view_samples(SET['samples'], npose, SPLIT)  # decision 49
         csum, ccnt = np.zeros((h, w), np.float64), np.zeros((h, w), np.int32)
         ssum, scnt = np.zeros((h, w), np.float64), np.zeros((h, w), np.int32)
         for p in range(npose):
             state['pose'] = p + 1
             write_status()
             set_pose(p)
-            mat = poses['mats'][p]
-            if len(csel):
-                ct = core_tris[csel]
-                A, dt = _bake_piece(coll, 'FSS_AO_CORE', pos[tris[ct]], cnm[ct], (cuv[csel] - off) / wh, img, px,
-                                    core.tile_seed(core.pose_seed(core.SEEDS[0] + SEED_OFFSET, p), i, n), target, mat)
-                times['core'] += dt
+            A, B = bake_both(pcs, img, px, [core.tile_seed(core.pose_seed(sd + SEED_OFFSET, p), i, n)
+                                            for sd in core.SEEDS[:2]], poses['mats'][p], spv)
+            if A is not None:
                 ok = A >= 0
                 csum[ok] += A[ok]
                 ccnt[ok] += 1
-                del A, ok
-            if len(ssel):
-                B, dt = _bake_piece(coll, 'FSS_AO_SKIRT', m['skirt_pos'][ssel], m['skirt_n'][ssel],
-                                    (m['skirt_uv'][ssel] - off) / wh, img, px,
-                                    core.tile_seed(core.pose_seed(core.SEEDS[1] + SEED_OFFSET, p), i, n), target, mat)
-                times['skirt'] += dt
+            if B is not None:
                 ok = B >= 0
                 ssum[ok] += B[ok]
                 scnt[ok] += 1
-                del B, ok
+            del A, B
+            preview.put_partial(x0, y0, h, w, lambda sl: np.where(ccnt[sl] > 0, csum[sl] / np.maximum(ccnt[sl], 1),
+                                                                   -1.0))
+            preview.show()
             if p < npose - 1:
                 yield done[0]
         cm = ccnt > 0
@@ -595,7 +683,7 @@ def bake_item(item, coll):
         for o in poses['occ_all']:
             o.hide_render = o.name not in view['vis']
 
-    def bake_tile_views(i, rect, win, baked, csel, ssel, img, px, off, wh):
+    def bake_tile_views(i, rect, win, baked, pcs, img, px):
         """Decision 47: a shared mesh's tile in every view (each copy in its own placement and surroundings, in each
         of its poses); a copy's poses averaged, then the copies combined per pixel (average, lightest or darkest).
         Each view with its own seed. Yields between views (Cancel)."""
@@ -621,30 +709,36 @@ def bake_item(item, coll):
             if csum is None:  # a copy's first view
                 csum, ccnt = np.zeros((h, w)), np.zeros((h, w), np.int32)
                 ssum, scnt = np.zeros((h, w)), np.zeros((h, w), np.int32)
-            state['pose'] = v + 1
+            state.update(pose=v + 1, copy=views[v]['n'], n_copies=poses['n_copies'], copy_name=views[v]['name'],
+                         copy_pose=views[v]['cpose'], copy_poses=views[v]['cposes'])
             write_status()
             set_view(v)
-            mat = views[v]['mat']
-            if len(csel):
-                ct = core_tris[csel]
-                A, dt = _bake_piece(coll, 'FSS_AO_CORE', pos[tris[ct]], cnm[ct], (cuv[csel] - off) / wh, img, px,
-                                    core.tile_seed(core.pose_seed(core.SEEDS[0] + SEED_OFFSET, v), i, n), target, mat)
-                times['core'] += dt
+            A, B = bake_both(pcs, img, px, [core.tile_seed(core.pose_seed(sd + SEED_OFFSET, v), i, n)
+                                            for sd in core.SEEDS[:2]], views[v]['mat'], views[v]['samples'])
+            if A is not None:
                 ok = A >= 0
                 csum[ok] += A[ok]
                 ccnt[ok] += 1
-            if len(ssel):
-                B, dt = _bake_piece(coll, 'FSS_AO_SKIRT', m['skirt_pos'][ssel], m['skirt_n'][ssel],
-                                    (m['skirt_uv'][ssel] - off) / wh, img, px,
-                                    core.tile_seed(core.pose_seed(core.SEEDS[1] + SEED_OFFSET, v), i, n), target, mat)
-                times['skirt'] += dt
+            if B is not None:
                 ok = B >= 0
                 ssum[ok] += B[ok]
                 scnt[ok] += 1
+            del A, B
             if v == nv - 1 or views[v + 1]['copy'] != views[v]['copy']:  # the copy's last view
                 fold(ctot, ccn, csum, ccnt)
                 fold(stot, scn, ssum, scnt)
                 csum = None
+
+            def so_far(sl):  # the copies combined so far; before the first copy is done, its views so far
+                nc = ccn[sl]
+                val = np.where(nc > 0, ctot[sl] if combine in ('LIGHTEST', 'DARKEST') else ctot[sl] / np.maximum(nc, 1),
+                               -1.0)
+                if csum is not None:
+                    cc = ccnt[sl]
+                    val = np.where((nc == 0) & (cc > 0), csum[sl] / np.maximum(cc, 1), val)
+                return val
+            preview.put_partial(x0, y0, h, w, so_far)
+            preview.show()
             if v < nv - 1:
                 yield done[0]
         cm = ccn > 0
@@ -669,43 +763,33 @@ def bake_item(item, coll):
         wh = np.array([w, h], dtype=np.float64)
         csel = core.tris_in_window(cuv, x0, y0, w, h)
         ssel = core.tris_in_window(m['skirt_uv'], x0, y0, w, h) if ns else np.zeros(0, dtype=np.int64)
-        if (len(csel) or len(ssel)) and (poses['mats'] or poses['views']):
+        if len(csel) or len(ssel):
+            ct = core_tris[csel]
+            pc = (pos[tris[ct]], cnm[ct], (cuv[csel] - off) / wh) if len(csel) else None
+            ps = ((m['skirt_pos'][ssel], m['skirt_n'][ssel], (m['skirt_uv'][ssel] - off) / wh) if len(ssel)
+                  else None)
+            pcs = (pc, ps)
             img = new_float_image('FSS_AO_TILE', w, h)
             px = np.empty(w * h * 4, dtype=np.float32)
             try:
                 if poses['views']:
-                    yield from bake_tile_views(i, rect, win, baked, csel, ssel, img, px, off, wh)
+                    yield from bake_tile_views(i, rect, win, baked, pcs, img, px)
+                elif poses['mats']:
+                    yield from bake_tile_poses(i, rect, win, baked, pcs, img, px)
                 else:
-                    yield from bake_tile_poses(i, rect, win, baked, csel, ssel, img, px, off, wh)
-            finally:
-                bpy.data.images.remove(img)
-                del px
-        elif len(csel) or len(ssel):
-            img = new_float_image('FSS_AO_TILE', w, h)
-            px = np.empty(w * h * 4, dtype=np.float32)
-            try:
-                cm = np.zeros((h, w), dtype=bool)
-                if len(csel):
-                    ct = core_tris[csel]
-                    A, dt = _bake_piece(coll, 'FSS_AO_CORE', pos[tris[ct]], cnm[ct], (cuv[csel] - off) / wh, img, px,
-                                        core.tile_seed(core.SEEDS[0] + SEED_OFFSET, i, n), target)
-                    times['core'] += dt
-                    cm = A >= 0
-                    win[cm] = core.quantize16(A[cm])
-                    counts['core_px'] += int(cm.sum())
-                    del A
-                sm = np.zeros((h, w), dtype=bool)
-                if len(ssel):
-                    B, dt = _bake_piece(coll, 'FSS_AO_SKIRT', m['skirt_pos'][ssel], m['skirt_n'][ssel],
-                                        (m['skirt_uv'][ssel] - off) / wh, img, px,
-                                        core.tile_seed(core.SEEDS[1] + SEED_OFFSET, i, n), target)
-                    times['skirt'] += dt
-                    sm = (~cm) & (B >= 0) & (core.rect_window(m['rects'], x0, y0, w, h) >= 0)
-                    win[sm] = core.quantize16(B[sm])
-                    counts['skirt_px'] += int(sm.sum())
-                    del B
-                baked |= cm | sm
-                del cm, sm
+                    A, B = bake_both(pcs, img, px, [core.tile_seed(sd + SEED_OFFSET, i, n) for sd in core.SEEDS[:2]])
+                    cm = np.zeros((h, w), dtype=bool)
+                    if A is not None:
+                        cm = A >= 0
+                        win[cm] = core.quantize16(A[cm])
+                        counts['core_px'] += int(cm.sum())
+                    sm = np.zeros((h, w), dtype=bool)
+                    if B is not None:
+                        sm = (~cm) & (B >= 0) & (core.rect_window(m['rects'], x0, y0, w, h) >= 0)
+                        win[sm] = core.quantize16(B[sm])
+                        counts['skirt_px'] += int(sm.sum())
+                    baked |= cm | sm
+                    del A, B, cm, sm
             finally:
                 bpy.data.images.remove(img)
                 del px
@@ -718,7 +802,7 @@ def bake_item(item, coll):
         yield done[0]
 
     try:
-        # the target (selected) and the occluders, moved by -shift; every original object is hidden from rendering
+        # the target (selected) and the occluders, moved by -shift, in the bake's own scene (decision 52)
         distinct = np.array([len(set(r)) == 3 for r in tris.tolist()])
         tme = build_mesh('FSS_AO_TARGET', pos, tris[distinct], cnm[distinct])
         tme.materials.clear()
@@ -764,12 +848,31 @@ def bake_item(item, coll):
         t_core, t_skirt = times['core'], times['skirt']
         counts['image_px'] = int(W * H)
         meta = dict(schema=core.SCHEMA, key=item['key'], kind=item['kind'], name=item['name'], object=obj.name,
-                    mesh_hash=mh, ao_distance=SET['ao_distance'], samples=SET['samples'], **core.method_settings())
+                    mesh_hash=mh, ao_distance=dist, samples=SET['samples'], **core.method_settings())
+        # decision 55: an AO bake without CM keeps the old curvature only when the layout is the same
+        keep_curv = None if item.get('cm', SET.get('curvature')) else _same_layout_curvature(item['key'], m, tri_src, mh)
         ts = time.time()
         files.finish(m, tri_src, meta)
         finished = True
         core.write_preview(FOLDER, preview.pv, 0, name=item['key'] + core.THUMB_EXT)  # the object's preview
         t_save = time.time() - ts
+        if item.get('cm', SET.get('curvature')):  # decision 54: the curvature master in this layout, from geometry
+            curv = core.write_curvature(FOLDER, item['key'], m, pos, tris, cnm, float(SET['curv_width']),
+                                        threads=int(SET['threads']))
+            curv['width'] = float(SET['curv_width'])
+            log(f"  {item['name']}: curvature ({curv['width'] * 1000:g} mm, {curv['edges']} sharp edges) in "
+                f"{curv['seconds']:.1f} s")
+        elif keep_curv:
+            curv = dict(keep_curv)
+        else:  # decision 55: a curvature of another layout is removed (the CM grade is then missing)
+            for p in core.image_paths(FOLDER, item['key'], 'curv'):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+        _remove_files(core.image_paths(FOLDER, item['key'], 'ao.raw'))  # decision 56: the new bake is the raw one
+        if SET.get('denoise'):
+            dn = denoise(item, pos, tris, cnm)
     finally:
         _remove(temps)
         if not finished:
@@ -778,14 +881,26 @@ def bake_item(item, coll):
     _ws, peak = core.process_memory()
     if pose_note:
         log(f"  {item['name']}: {pose_note}")
+    if PROFILE:
+        log('  profile: ' + ', '.join(f'{k} {v:.2f}' if isinstance(v, float) else f'{k} {v}'
+                                      for k, v in PROFILE.items()))
+        PROFILE.clear()
     n_poses = len(poses['views']) if poses['views'] else (len(frames) if frames else 1)
     entry = dict(key=item['key'], kind=item['kind'], name=item['name'], object=obj.name, mesh=obj.data.name,
                  poses=frames, n_poses=n_poses, pose_note=pose_note,
                  combine=item.get('combine'), copies=len(item['copies']) if item.get('copies') else None,
+                 falloff=nf if nf > 1 else None,
+                 curvature=None if curv is None else dict(width=curv['width'], edges=curv['edges'],
+                                                          seconds=curv['seconds']),
+                 denoise=dn,
+                 corner_rule=core.CORNER_RULE,
+                 sample_split=SPLIT,
+                 view_samples=sorted({v['samples'] for v in poses['views']}) if poses['views'] else (
+                     [core.view_samples(SET['samples'], len(frames), SPLIT)] if frames else [int(SET['samples'])]),
                  occluder_mode=item.get('occluder_mode', 'SCENE'),
                  mesh_hash=mh, mesh_hash_at_job=item.get('mesh_hash'), surround_hash=item['surround_hash'],
                  density=float(D), W=int(W), H=int(H), tris=int(len(tri_src)), islands=int(m['n_islands']),
-                 samples=int(SET['samples']), ao_distance=float(SET['ao_distance']), method=core.METHOD,
+                 samples=int(SET['samples']), ao_distance=dist, method=core.METHOD,
                  uv=uv_name, occluders=[o['name'] for o in item['occluders']], mover=bool(item.get('mover')),
                  frame=item.get('frame'), baked_at=time.strftime('%Y-%m-%d %H:%M:%S'), schema=core.SCHEMA,
                  tiles=dict(size=int(tile), n=int(n), bands=int(nb), forced=bool(forced),
@@ -804,6 +919,139 @@ def bake_item(item, coll):
     if pose_note:
         res['note'] = pose_note
     return res
+
+
+def _index_entry(key):
+    try:
+        with open(os.path.join(FOLDER, 'index.json'), encoding='utf-8') as f:
+            return json.load(f).get('masters', {}).get(key)
+    except (OSError, ValueError):
+        return None
+
+
+def _same_layout_curvature(key, m, tri_src, mh):
+    """The old entry's curvature when the master's old layout (its .ao.npz) equals the new one, else None."""
+    old = _index_entry(key)
+    c = (old or {}).get('curvature')
+    if not c or old.get('mesh_hash') != mh or not os.path.isfile(core.master_paths(FOLDER, key, 'curv')[0]):
+        return None
+    try:
+        with np.load(core.master_paths(FOLDER, key)[2]) as z:
+            same = (int(z['W']) == int(m['W']) and int(z['H']) == int(m['H'])
+                    and np.array_equal(z['tri_src'], np.asarray(tri_src, dtype=np.int64))
+                    and np.array_equal(z['muv'], m['muv']))
+    except (OSError, ValueError, KeyError):
+        return None
+    return c if same else None
+
+
+def _remove_files(paths):
+    for p in paths:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+
+def denoise(item, pos, tris, cn):
+    """Decision 56: the master filtered with the job's options; the master as it is becomes the raw one when there is
+    none (just baked, or never denoised). Returns the index entry's denoise (settings and stats). On an error the
+    master is left as it was."""
+    key = item['key']
+    img = core.master_paths(FOLDER, key)[0]
+    rjx, rpn = core.image_paths(FOLDER, key, 'ao.raw')
+    raw = rjx if img.endswith('.jxl') else rpn
+    moved = False
+    if not os.path.isfile(raw):
+        os.replace(img, raw)
+        moved = True
+
+    def on_band(i, n):
+        state.update(phase='Denoising', tile=i, n_tiles=n)
+        write_status()
+
+    try:
+        if SET['denoise'].get('method') == 'OIDN':
+            st = core.denoise_master_oidn(FOLDER, key, pos, tris, cn, SET['denoise'], device=SET.get('device', 'GPU'),
+                                          on_band=on_band)
+        else:
+            st = core.denoise_master(FOLDER, key, pos, tris, cn, SET['denoise'], threads=int(SET['threads']),
+                                     on_band=on_band)
+    except BaseException:
+        if moved and not os.path.isfile(img):
+            os.replace(raw, img)
+        raise
+    finally:
+        state.update(phase='')
+    if st.get('method') == 'OIDN':
+        log(f"  {item['name']}: denoised by OIDN ({st['device']}) in {st['seconds']:.1f} s ({st['groups']} island "
+            f"groups, {st['windows']} windows, mean change {st['mean_change']:.4f})")
+    else:
+        log(f"  {item['name']}: denoised in {st['seconds']:.1f} s ({st['levels']} levels, radius {st['radius_px']:g} "
+            f"px, noise {st['noise']:.4f} at 50 %, curvature {st['curvature']}, mean change {st['mean_change']:.4f})")
+    return dict(settings=SET['denoise'], **st)
+
+
+def undenoise(item):
+    """Decision 56: Denoise turned off: the raw bake becomes the master again."""
+    key = item['key']
+    for raw in core.image_paths(FOLDER, key, 'ao.raw'):
+        if os.path.isfile(raw):
+            dst = os.path.join(FOLDER, key) + ('.ao.jxl' if raw.endswith('.jxl') else '.ao.png')
+            _remove_files(core.image_paths(FOLDER, key))
+            os.replace(raw, dst)
+            log(f"  {item['name']}: the raw bake restored (Denoise off)")
+            return True
+    return False
+
+
+def curvature_item(item, coll=None):
+    """Decisions 55, 56: without rays, the curvature master (cm) and the denoise (dn) of a master whose AO master is
+    up to date in mesh: in its layout (its .ao.npz: the master UVs and the triangles), from the baked file's geometry.
+    A generator like bake_item (no steps: it returns its result)."""
+    yield from ()
+    t0 = time.time()
+    obj = bpy.data.objects.get(item['object'])
+    if obj is None or obj.type != 'MESH':
+        return dict(status='skipped', reason='object not in the baked file')
+    key = item['key']
+    entry = _index_entry(key)
+    _img, mp, npz = core.master_paths(FOLDER, key)
+    if entry is None or not (os.path.isfile(npz) and os.path.isfile(mp)):
+        return dict(status='skipped', reason='no AO master: bake its AO first')
+    uv_name = item['uv']
+    ev = core.evaluated_triangles(obj, bpy.context.evaluated_depsgraph_get(), [uv_name])
+    mh = core.mesh_hash(ev)
+    if mh != entry.get('mesh_hash'):
+        return dict(status='skipped', reason='mesh changed since its AO bake: bake its AO')
+    with np.load(npz) as z:
+        muv, tri_src = z['muv'], z['tri_src']
+    pos_w, _ = core.to_world(ev)
+    used = np.unique(ev['tris'][tri_src])
+    shift = (pos_w[used].min(axis=0) + pos_w[used].max(axis=0)) / 2  # as the AO bake moved it
+    pos, cn = core.to_world(ev, shift)
+    tris, cnm = ev['tris'][tri_src], cn[tri_src]
+    done = []
+    if item.get('cm', True):
+        width = float(SET['curv_width'])
+        curv = core.write_curvature(FOLDER, key, dict(muv=muv), pos, tris, cnm, width, threads=int(SET['threads']))
+        log(f"  {item['name']}: curvature only ({width * 1000:g} mm, {curv['edges']} sharp edges) in "
+            f"{curv['seconds']:.1f} s")
+        entry = _index_entry(key) or entry
+        entry['curvature'] = dict(width=width, edges=curv['edges'], seconds=curv['seconds'])
+        update_index(entry)
+        done.append('curvature')
+    if item.get('dn'):
+        if SET.get('denoise'):
+            dn = denoise(item, pos, tris, cnm)
+        else:
+            undenoise(item)
+            dn = None
+        entry = _index_entry(key) or entry
+        entry['denoise'] = dn
+        update_index(entry)
+        done.append('denoise')
+    return dict(status='updated', what=done, total_s=round(time.time() - t0, 3))
 
 
 _run = dict(i=0, coll=None, gen=None, t=None, tiles_done=0)
@@ -826,7 +1074,7 @@ def _record(item, res):
         + (f", {res['n_poses']} poses" if (res.get('n_poses') or 1) > 1 else '')
         + (f" ({res['reason']})" if res.get('reason') else '') + f", {res['seconds']} s"
         + (f", peak working set {state['peak_working_set_gb']} GB" if peak else ''))
-    state.update(tile=0, n_tiles=0, pose=0, n_poses=0)
+    state.update(tile=0, n_tiles=0, pose=0, n_poses=0, copy=0, n_copies=0, copy_pose=0, copy_poses=0, phase='')
     write_status()
     return not cancelled
 
@@ -839,9 +1087,10 @@ def step():
         if i >= len(ITEMS) or os.path.exists(CANCEL):
             return False
         state['current'] = ITEMS[i]['name']
-        state.update(tile=0, n_tiles=0, pose=0, n_poses=0)
+        state.update(tile=0, n_tiles=0, pose=0, n_poses=0, copy=0, n_copies=0, copy_pose=0, copy_poses=0)
         write_status()
-        _run.update(t=time.time(), gen=bake_item(ITEMS[i], _run['coll']), tiles_done=0)
+        run = bake_item if ITEMS[i].get('ao', True) else curvature_item  # decision 55
+        _run.update(t=time.time(), gen=run(ITEMS[i], _run['coll']), tiles_done=0)
     item = ITEMS[_run['i']]
     gen = _run['gen']
     if _run['tiles_done'] and os.path.exists(CANCEL):
@@ -910,7 +1159,7 @@ def timer_step():
 def main():
     total, avail = core.memory_status()
     gb = 2 ** 30
-    log(f"AO bake of {len(ITEMS)} masters from {JOB['blend']}: distance {SET['ao_distance']} m, samples "
+    log(f"AO bake of {len(ITEMS)} masters from {JOB['blend']}{' (its current state)' if JOB.get('source') else ''}: distance {SET['ao_distance']} m, samples "
         f"{SET['samples']}, device {SET['device']}, threads {SET['threads']}; memory budget {BUDGET / gb:.1f} GB"
         + (f" ({BUDGET_SOURCE}; physical {total / gb:.1f} GB, free {avail / gb:.1f} GB)" if total else
            f' ({BUDGET_SOURCE})'))

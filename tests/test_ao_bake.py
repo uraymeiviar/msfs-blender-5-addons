@@ -37,7 +37,12 @@ Blender). Checked:
   turn at most a quarter of that, Self only no slab shadow, a custom list's mover posed with it (finish line 1).
   `-- only=test_poses` runs that test alone;
 - Soften Sharp Edges (decision 46) on a master built by hand: the darker side of a convex edge follows the smoothstep
-  to the brighter side's value, a concave corner and the brighter side unchanged, a width under a texel raised to one.
+  to the brighter side's value, a concave corner and the brighter side unchanged, a width under a texel raised to one;
+  the copy in C++ and in numpy bit-identical there, softened;
+- Apply's copy in C++ (apply-native-copy journal, Session 2): every Apply output (grey, ORM layout, another size, the
+  ORM slot, per object, curvature; Soften Sharp Edges off and on; the master paged, paged with a cache of 2 tiles,
+  and whole) byte-identical with FSS_AO_COPY=numpy, with the DLL at 12 threads and at 1; with the DLL moved away and
+  with FSS_AO_COPY=numpy Apply runs the numpy copy and its report says so.
 
 To run (the second Blender inherits the CPU cap):
 C:\\Users\\uray\\.claude\\tools\\cpucap\\cpucap.exe 50 G:\\e-jets-e2\\tools\\blender\\blender.exe -b --factory-startup
@@ -46,6 +51,7 @@ C:\\Users\\uray\\.claude\\tools\\cpucap\\cpucap.exe 50 G:\\e-jets-e2\\tools\\ble
 
 import hashlib
 import math
+import json
 import os
 import shutil
 import sys
@@ -181,7 +187,7 @@ def build_scene():
     scene = bpy.context.scene
     scene.frame_set(1)
     s = scene.fss_ao_bake
-    s.distance, s.samples, s.threads, s.padding = 0.1, 16, 12, PAD
+    s.distance, s.samples, s.threads, s.padding, s.curv_padding = 0.1, 16, 12, PAD, PAD
     s.output_folder = str(OUT)
     scene.fss_ao_no_occluder_tags = 'noocc'
     scene.fss_ao_skip_bake_tags = 'skip'
@@ -418,7 +424,11 @@ def test_bake_all():
     mins = {n: float(master_image(n)[1].min()) for n in ('A', 'B', 'C', 'D', 'E', 'O1', 'S1', 'M')}
     assert mins['A'] < 0.9 and mins['D'] < 0.9 and mins['E'] < 0.9, mins  # O1, S1/S2, K (skip-bake) darken
     assert mins['B'] > 0.999, mins  # O2 Non-AO-Occluder darkens nothing
-    assert mins['C'] > 0.999, mins  # M is a mover: it darkens no other object
+    # decision 59: M moves against C, so C is baked in the poses of M's motion with M placed in each, and darkened
+    c_item = store._state['items'][store._state['by_object']['C']]
+    assert c_item['against'] == ['M'] and c_item['posed'] == ['M'], c_item
+    assert len(c_item['poses']) == bpy.context.scene.fss_ao_bake.poses, c_item['poses']
+    assert mins['C'] < 0.9, mins
     assert mins['S1'] < 0.9, mins  # decision 47: the shared mesh's copies in their surroundings (plane D under them)
     assert mins['O1'] < 0.9 and mins['M'] < 0.9, mins  # an own-mesh cube is darkened by its plane
     times = {r['name']: r['bake_s'] for r in status['results']}
@@ -538,8 +548,8 @@ def test_paged():
         assert rep['page_loads'] and rep5['page_loads'], (rep.get('page_loads'), rep5.get('page_loads'))
         opened = core.open_master
 
-        def whole(folder, s, cache_bytes=0):
-            out = core.load_master(folder, s)
+        def whole(folder, s, cache_bytes=0, kind='ao'):
+            out = core.load_master(folder, s, kind)
             out['close'] = lambda: None
             return out
         core.open_master = whole
@@ -917,8 +927,34 @@ def test_panel_selection():
     assert o.poses == ctx.scene.fss_ao_bake.poses
     o.pose_mode = 'DEFAULT'
     assert o.poses == 0
+    assert ao_bake.pose_mode_items(o, ctx)[0][1] == f'Default ({ctx.scene.fss_ao_bake.poses})'
     names = [i[1] for i in ao_bake.object_occluder_items(o, ctx)]
     assert names[0] == 'Default (Scene Rule)' and o.occluders == 'DEFAULT', (names, o.occluders)
+    # the set list: "n missing" and "n stale" are buttons that select those objects of the set
+    r = st.sets[0]
+    keep = (r.n_missing, r.n_stale)
+    for nm, ns, want in ((0, 0, []), (2, 0, ['MISSING']), (0, 3, ['STALE']), (2, 3, ['MISSING', 'STALE'])):
+        r.n_missing, r.n_stale = nm, ns
+        calls = []
+        ao_bake.FSS_UL_AOSets.draw_item(None, ctx, _Layout(calls), st, r, 0, st, 'active_set', 0)
+        ops = [kw.get('text') for name, args, kw in calls if name == 'operator']
+        assert len(ops) == len(want) and all(w.lower() in t for w, t in zip(want, ops)), (nm, ns, ops)
+    r.n_missing, r.n_stale = keep
+    items = store._state['items']
+    stem = next(iter(store._state['sets'][r.material]['items']))
+    grade = items[stem]['grade']
+    items[stem]['grade'] = 'MISSING'  # one master of the set missing, as after a deleted file
+    try:
+        assert bpy.ops.fss.ao_bake_select(which='MISSING', material=r.material) == {'FINISHED'}
+        got = {o.name for o in ctx.selected_objects}
+        want = {n for st_ in store._state['sets'][r.material]['items'] if items[st_]['grade'] == 'MISSING'
+                for n in items[st_]['users']}
+        assert got == want and got, (got, want)
+        assert bpy.ops.fss.ao_bake_select(which='STALE', material=r.material) == {'FINISHED'}
+        assert not ctx.selected_objects or all(
+            items[store._state['by_object'][o.name]]['grade'] in ('MESH', 'SURROUNDINGS') for o in ctx.selected_objects)
+    finally:
+        items[stem]['grade'] = grade
     select([])
     print(f"PASS: test_panel_selection (A selected: {sorted(sel)} of {len(st.sets)} sets shown; Apply into a missing "
           f"ORM texture refused: {refused!r}; own poses on and off; occluder choices {names})")
@@ -971,6 +1007,59 @@ def test_apply_no_datablock():
           'and material slots unchanged)')
 
 
+def test_apply_ticked():
+    """Apply Selected writes only the texture sets ticked in the list (each material's fss_ao_apply.use, ticked by
+    default); none ticked: refused."""
+    refresh()
+    ctx = bpy.context
+    # File shows the set's default name in the box; stored empty it follows the material's name
+    fa = bpy.data.materials['SET_A'].fss_ao_apply
+    raw = fa.get('file_name', '')
+    fa['file_name'] = ''
+    assert fa.file_name == 'SET_A_ao.png', fa.file_name
+    fa.file_name = 'own.png'
+    assert fa.file_name == 'own.png' and fa['file_name'] == 'own.png'
+    fa.file_name = 'SET_A_ao.png'
+    assert fa['file_name'] == ''
+    fa.file_name = ''
+    assert fa.file_name == 'SET_A_ao.png' and fa['file_name'] == ''
+    fa['file_name'] = raw
+    items, rows = store._state['items'], store._state['sets']
+    pick = [items[rows[n]['items'][0]]['users'][0] for n in ('SET_A', 'SET_B')]  # an object of each
+    select(pick)
+    sets = sorted({n for stem in store.items_for_objects(ctx.selected_objects) for n in items[stem]['sets']})
+    assert len(sets) >= 2, (pick, sets)
+    mats = [bpy.data.materials[n] for n in sets]
+    assert all(m.fss_ao_apply.use for m in mats)
+    mats[0].fss_ao_apply.use = False
+    st = ctx.window_manager.fss_ao_bake_state
+    assert bpy.ops.fss.ao_apply(scope='SELECTED') == {'FINISHED'}
+    done = {line.split(':')[0] for line in st.apply_report.splitlines() if not line.startswith(' ')}
+    assert sets[0] not in done and set(sets[1:]) <= done, (sets, done)
+    for m in mats:
+        m.fss_ao_apply.use = False
+    assert bpy.ops.fss.ao_apply(scope='SELECTED') == {'CANCELLED'}
+    assert ao_bake.apply_check(ctx) == ([], [])
+    for m in mats:
+        m.fss_ao_apply.use = True
+    # a ticked set whose target cannot be written (ORM without a texture): the button off, the operator refuses
+    a = bpy.data.materials['SET_A'].fss_ao_apply
+    old_target = a.target
+    a.target = 'ORM'
+    assert ao_bake.apply_mod.orm_image(bpy.data.materials['SET_A']) is None
+    ticked, blocked = ao_bake.apply_check(ctx)
+    assert 'SET_A' in ticked and [b[0] for b in blocked] == ['SET_A'], (ticked, blocked)
+    try:
+        refused = bpy.ops.fss.ao_apply(scope='SELECTED')
+    except RuntimeError as e:  # an operator's ERROR report raises in a script
+        refused = str(e)
+    assert refused == {'CANCELLED'} or 'SET_A: No texture in the ORM slot' in str(refused), refused
+    a.target = old_target
+    assert ao_bake.apply_check(ctx)[1] == []
+    print(f'PASS: test_apply_ticked (File shows SET_A_ao.png when empty; {sets[0]} unticked: not written, {sets[1:]} written; none ticked: refused; '
+          f'a ticked set without its ORM texture: {blocked[0][1]!r}, refused)')
+
+
 def wait_bake(poll=0.1, limit=300):
     """While the second Blender runs: the panel's progress timer step by step (a background Blender runs no timers);
     returns the states seen: (preview seq, preview digest, tile, pose, n_poses)."""
@@ -1016,7 +1105,9 @@ def test_shared_combine():
     """Decision 47: a shared mesh's copies (S1, S2 on plane D, 2 cm apart) are each baked in their own surroundings and
     combined per master pixel. Its -X face looks at S2 from S1 and at open space from S2: darkest < average < most lit
     there; the top stays lit; the plane's contact shadow is in every mode. The mesh's override and a moved copy make
-    the master "surroundings changed"; the master's entry records the combine and the copies."""
+    the master "surroundings changed"; the master's entry records the combine and the copies. Decision 48: One
+    Instance chosen with a copy active picks that copy and bakes it alone; without a pick, the first copy by name.
+    Decision 49: Split Samples gives each copy's view half the samples, Full Quality all; the averages agree."""
     refresh()
     item = store._state['items'][store._state['by_object']['S1']]
     assert item['combine'] == 'AVERAGE' and [c['object'] for c in item['copies']] == ['S1', 'S2'], item
@@ -1041,6 +1132,19 @@ def test_shared_combine():
     got = {'AVERAGE': faces()}
     entry, _stem = entry_of('S1')
     assert entry['combine'] == 'AVERAGE' and entry['copies'] == 2, entry
+    # decision 49: Split Samples (the default) gives each of the 2 copies half the samples; Full Quality all of them
+    samples = int(bpy.context.scene.fss_ao_bake.samples)
+    assert entry['sample_split'] and entry['view_samples'] == [samples // 2], entry
+    bpy.context.scene.fss_ao_bake.sample_quality = 'FULL'
+    refresh()
+    split_grade = grade_of('S1')
+    select(['S1'])
+    assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
+    full = entry_of('S1')[0]
+    assert split_grade == 'SURROUNDINGS' and full['view_samples'] == [samples], (split_grade, full)
+    got['AVERAGE full'] = faces()
+    assert abs(got['AVERAGE full']['-X'] - got['AVERAGE']['-X']) < 0.03, got
+    bpy.context.scene.fss_ao_bake.sample_quality = 'SPLIT'
     grades = {}
     for mode in ('LIGHTEST', 'DARKEST'):
         me.fss_ao_shared.combine = mode
@@ -1050,6 +1154,23 @@ def test_shared_combine():
         assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
         assert grade_of('S1') == 'UP_TO_DATE', grade_of('S1')
         got[mode] = faces()
+    # decision 48: One Instance, chosen with S2 active, bakes S2 alone for both (its -X face open, as Most Lit's);
+    # without a picked copy, the first by name (S1: -X faces S2, as Darkest's)
+    select(['S2'])
+    bpy.context.view_layer.objects.active = s2
+    me.fss_ao_shared.combine = 'ONE'
+    assert me.fss_ao_shared.instance == s2, me.fss_ao_shared.instance
+    for pick in ('S2', None):
+        me.fss_ao_shared.instance = bpy.data.objects[pick] if pick else None
+        refresh()
+        item = store._state['items'][store._state['by_object']['S1']]
+        assert [c['object'] for c in item['copies']] == [pick or 'S1'], item['copies']
+        grades[f'one instance {pick or "first by name"}'] = grade_of('S1')
+        select(['S1'])
+        assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
+        got[f'ONE {pick or "first"}'] = faces()
+    assert abs(got['ONE S2']['-X'] - got['LIGHTEST']['-X']) < 0.03, got
+    assert abs(got['ONE first']['-X'] - got['DARKEST']['-X']) < 0.03, got
     me.fss_ao_shared.combine = 'DEFAULT'
     refresh()
     grades['back to the default'] = grade_of('S1')
@@ -1065,6 +1186,382 @@ def test_shared_combine():
     assert d < a - 0.02 and a < li - 0.02, got
     assert all(v['+Z'] > 0.98 and v['min'] < 0.9 for v in got.values()), got
     print(f"PASS: test_shared_combine (per face mean / minimum: {got}; {grades})")
+
+
+def test_auto_distance():
+    """Decision 51: Auto Distance gives the 6 cm cube O1 a 6 cm AO distance (its longest box axis, factor 1) and leaves
+    the 20 cm plane A at the scene's 10 cm; only O1 becomes "surroundings changed". Baked, its entry records 6 cm and it
+    is no darker than at 10 cm; factor 0.5 gives 3 cm; turned off, the scene's distance again."""
+    scene = bpy.context.scene
+    s = scene.fss_ao_bake
+    refresh()
+    assert grade_of('O1') == grade_of('A') == 'UP_TO_DATE', (grade_of('O1'), grade_of('A'))
+    before = float(master_image('O1')[1].mean())
+    s.auto_distance = True
+    refresh()
+    items, by = store._state['items'], store._state['by_object']
+    d_o1, d_a = items[by['O1']]['ao_distance'], items[by['A']]['ao_distance']
+    assert abs(d_o1 - 0.06) < 1e-6 and abs(d_a - 0.1) < 1e-6, (d_o1, d_a)
+    assert grade_of('O1') == 'SURROUNDINGS' and grade_of('A') == 'UP_TO_DATE', (grade_of('O1'), grade_of('A'))
+    select(['O1'])
+    assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
+    refresh()
+    entry = entry_of('O1')[0]
+    after = float(master_image('O1')[1].mean())
+    assert abs(entry['ao_distance'] - 0.06) < 1e-6 and grade_of('O1') == 'UP_TO_DATE', (entry['ao_distance'],)
+    assert after >= before - 0.01, (before, after)
+    s.auto_distance_factor = 0.5
+    refresh()
+    d_half = store._state['items'][store._state['by_object']['O1']]['ao_distance']
+    assert abs(d_half - 0.03) < 1e-6 and grade_of('O1') == 'SURROUNDINGS', (d_half, grade_of('O1'))
+    s.auto_distance_factor = 1.0
+    s.auto_distance = False
+    refresh()
+    assert grade_of('O1') == 'SURROUNDINGS' and grade_of('A') == 'UP_TO_DATE'
+    select(['O1'])
+    assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
+    refresh()
+    assert grade_of('O1') == 'UP_TO_DATE' and abs(entry_of('O1')[0]['ao_distance'] - 0.1) < 1e-6
+    print(f'PASS: test_auto_distance (O1 at 10 cm {before:.4f}, at 6 cm {after:.4f})')
+
+
+def test_falloff():
+    """Decision 53: Distance Falloff (3 steps) makes O1 "surroundings changed" and A too (every master's key), the job
+    and the entry carry the steps, and O1 baked with it is lighter than without (the plane's far part darkens less);
+    turned off, the masters are up to date again after O1's re-bake."""
+    s = bpy.context.scene.fss_ao_bake
+    refresh()
+    assert grade_of('O1') == grade_of('A') == 'UP_TO_DATE', (grade_of('O1'), grade_of('A'))
+    before = float(master_image('O1')[1].mean())
+    s.falloff, s.falloff_steps = True, 3
+    refresh()
+    item = store._state['items'][store._state['by_object']['O1']]
+    assert item['falloff'] == 3 and grade_of('O1') == grade_of('A') == 'SURROUNDINGS', (item['falloff'],)
+    select(['O1'])
+    assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
+    refresh()
+    entry = entry_of('O1')[0]
+    after = float(master_image('O1')[1].mean())
+    assert entry['falloff'] == 3 and grade_of('O1') == 'UP_TO_DATE', entry.get('falloff')
+    assert after > before + 0.02, (before, after)
+    s.falloff = False
+    refresh()
+    assert grade_of('A') == 'UP_TO_DATE' and grade_of('O1') == 'SURROUNDINGS'
+    select(['O1'])
+    assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
+    refresh()
+    assert grade_of('O1') == 'UP_TO_DATE' and entry_of('O1')[0].get('falloff') is None
+    print(f'PASS: test_falloff (O1 without {before:.4f}, with 3 steps {after:.4f})')
+
+
+def test_curvature():
+    """Decision 54: Curvature Map (5 mm) does not change the AO masters' keys; a bake of O1 (a flat-shaded cube, 12
+    convex sharp edges) also writes its curvature master: flat grey (0.5) on most of it, none below grey, white at the
+    edges. Apply writes SET_B_curvature.png, grey 16-bit, flat where no face is, with the edges' bright bands."""
+    s = bpy.context.scene.fss_ao_bake
+    refresh()
+    assert grade_of('O1') == 'UP_TO_DATE'
+    s.curvature, s.curv_width = True, 0.005
+    refresh()
+    assert grade_of('O1') == 'UP_TO_DATE'  # not in the AO key
+    select(['O1'])
+    assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
+    refresh()
+    entry, stem = entry_of('O1')
+    assert entry['curvature']['width'] == 0.005 and entry['curvature']['edges'] == 12, entry.get('curvature')
+    m = core.load_master(str(FOLDER), stem, kind='curv')
+    v = m['image'][m['filled']] / 65535.0
+    assert abs(float(np.median(v)) - 0.5) < 0.01 and v.min() > 0.49 and v.max() > 0.95, (np.median(v), v.min(), v.max())
+    band = float((v > 0.55).mean())
+    rep = ao_bake_apply.apply_set(bpy.context, bpy.data.materials['SET_B'], None, ApplySettings(), kind='curv')
+    assert not rep.get('error') and rep['path'].endswith('SET_B_curvature.png'), rep
+    vals, bits, _ct = read(rep['path'])
+    assert bits == 16 and np.array_equal(vals[:, :, 0], vals[:, :, 1]), bits
+    t = vals[:, :, 0] / 65535.0
+    assert t.max() > 0.95 and t.min() > 0.49 and abs(float(np.median(t)) - 0.5) < 0.01, (t.min(), t.max())
+    # the panel's Curvature Map rows: its own folder (empty: the AO's), file (empty: <set>_curvature.png) and size
+    mat = bpy.data.materials['SET_B']
+    a = mat.fss_ao_apply
+    assert s.curv_output_folder == s.output_folder and a.curv_file_name == 'SET_B_curvature.png'
+    own = str(OUT / 'curv_own')
+    s.curv_output_folder, a.curv_file_name, a.curv_resolution = own, 'own_cm', '256'
+    rep2 = ao_bake_apply.apply_set(bpy.context, mat, None, a, kind='curv')
+    assert not rep2.get('error') and rep2['path'] == os.path.join(os.path.normpath(own), 'own_cm.png'), rep2
+    assert tuple(rep2['size']) == (256, 256), rep2['size']
+    s.curv_output_folder, a.curv_file_name = '', ''
+    a['curv_resolution'] = 0  # back to the default (ORM Texture Size; without one, the set's size)
+    assert s.curv_output_folder == s.output_folder and a.curv_file_name == 'SET_B_curvature.png'
+    s.curvature = False
+    print(f'PASS: test_curvature (O1: {entry["curvature"]["edges"]} sharp edges, {band * 100:.0f} % of its master in '
+          f'the edge bands, max {v.max():.3f}; {os.path.basename(rep["path"])} max {t.max():.3f}; the Curvature Map '
+          f'rows: curv_own/own_cm.png at 256 x 256)')
+
+
+def test_curvature_only():
+    """Decision 55: the bake row's AO and CM. CM alone (Bake Selected) writes only O1's curvature, in its AO master's
+    layout, equal to the one an AO bake wrote, and leaves the AO master as it was; a width change makes only the
+    curvature stale (CM grade WIDTH), and Missing and Stale with CM alone bakes it; an AO bake alone keeps a curvature
+    of the same layout; a master without an up-to-date mesh needs its AO first; Apply's report of islands where the
+    width is under 2 px."""
+    s = bpy.context.scene.fss_ao_bake
+    s.curvature, s.curv_width, s.bake_ao = True, 0.005, True
+    refresh()
+    entry, stem = entry_of('O1')
+    item = store._state['items'][stem]
+    assert item['cm_grade'] == 'UP_TO_DATE', item['cm_grade']
+    before = core.load_master(str(FOLDER), stem, kind='curv')['image']
+    ao_path = core.master_paths(str(FOLDER), stem)[0]
+    ao_mtime, baked_at = os.path.getmtime(ao_path), entry['baked_at']
+    s.bake_ao = False
+    select(['O1'])
+    assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
+    refresh()
+    entry, _ = entry_of('O1')
+    assert entry['baked_at'] == baked_at and os.path.getmtime(ao_path) == ao_mtime, 'the AO was baked again'
+    after = core.load_master(str(FOLDER), stem, kind='curv')['image']
+    diff = int(np.abs(after.astype(np.int64) - before).max())
+    assert diff <= 1, f'curvature alone differs from the AO bake by {diff}'
+    s.curv_width = 0.003
+    refresh()
+    item = store._state['items'][stem]
+    assert item['grade'] == 'UP_TO_DATE' and item['cm_grade'] == 'WIDTH', (item['grade'], item['cm_grade'])
+    what, _needs = store.bake_choice([stem], False, True, False)
+    assert what == {stem: (False, True, False)}, what
+    assert store.bake_choice([stem], True, False, False)[0] == {}, 'AO up to date: nothing for Missing and Stale'
+    assert bpy.ops.fss.ao_bake_start(scope='STALE', hidden=True, wait=True) == {'FINISHED'}
+    refresh()
+    entry, _ = entry_of('O1')
+    item = store._state['items'][stem]
+    assert entry['curvature']['width'] == 0.003 and item['cm_grade'] == 'UP_TO_DATE', entry['curvature']
+    assert entry['baked_at'] == baked_at, 'the AO was baked again'
+    # an AO bake alone: the same layout, so the curvature is kept
+    s.bake_ao, s.curvature = True, False
+    select(['O1'])
+    assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
+    refresh()
+    entry, _ = entry_of('O1')
+    item = store._state['items'][stem]
+    assert entry['baked_at'] != baked_at and item['cm_grade'] == 'UP_TO_DATE', (entry['baked_at'], item['cm_grade'])
+    # no up-to-date AO mesh: CM alone cannot, with AO it is written with it
+    saved = item['grade'], item['cm_grade']
+    item['grade'], item['cm_grade'] = 'MESH', 'NEEDS_AO'
+    assert store.bake_choice([stem], False, True, True) == ({}, ['O1'])
+    assert store.bake_choice([stem], True, True, False) == ({stem: (True, True, False)}, [])
+    item['grade'], item['cm_grade'] = saved
+    # Apply's narrow islands: a 1 m square at 100 px/m, 1 cm wide bands are 1 px
+    pos = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], np.float64)
+    tris = np.array([[0, 1, 2], [0, 2, 3]])
+    uvpx = pos[tris][:, :, :2] * 100.0
+    got = ao_bake_apply.narrow_islands(pos, dict(co=pos), tris, uvpx, 1024, 1024, 0.01)
+    assert got is not None and got[:2] == (1, 1) and abs(got[3] - 0.02) < 1e-9, got
+    assert ao_bake_apply.narrow_islands(pos, dict(co=pos), tris, uvpx, 1024, 1024, 0.03) is None
+    s.curvature, s.bake_ao = False, True
+    print(f'PASS: test_curvature_only (alone equal to the AO bake within {diff}, AO untouched; width stale and '
+          f'baked alone; kept by an AO bake of the same layout; narrow islands {got})')
+
+
+def test_corner_rule():
+    """Decision 57, without a bake: a floor meeting a wall (an inside corner) and the wall meeting a cap (a rim), their
+    master with known baked values; the pixels the corner rule checks set brighter than their inward pixel, half by
+    0.1 (over CORNER_EXCESS) and half by 0.01 (under it). Composed, the first half takes the inward value, the second
+    stays, no pixel of the rim's cap is checked, and without the pairs the composition keeps them all."""
+    s = 0.02
+    pos = np.array([(0, 0, 0), (s, 0, 0), (s, s, 0), (0, s, 0),            # floor, z = 0
+                    (0, s, s), (s, s, s),                                   # the wall's top (the wall at y = s)
+                    (0, 2 * s, s), (s, 2 * s, s)], np.float64)              # the cap beyond the wall's top
+    tris = np.array([(0, 1, 2), (0, 2, 3),          # floor (normal +z)
+                     (3, 2, 5), (3, 5, 4),          # wall (normal -y, facing the floor)
+                     (4, 5, 7), (4, 7, 6)], np.int64)  # cap (normal +z)
+    P = pos[tris]
+    tn = np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0])
+    tn /= np.linalg.norm(tn, axis=1, keepdims=True)
+    assert tn[0, 2] > 0.99 and tn[2, 1] < -0.99 and tn[4, 2] > 0.99, tn
+    cn = np.repeat(tn[:, None, :], 3, axis=1)
+    m = core.build_master(pos, tris, cn, 3000.0, gutter=core.GUTTER, order=core.ORDER, mirror_open=core.MIRROR_OPEN,
+                          fold_split=core.FOLD_SPLIT)
+    W, H = m['W'], m['H']
+    pairs = core.corner_pairs(m, pos, tris)
+    cy, cx, iy, ix = pairs
+    assert len(cy) > 20, len(cy)
+    own, _cnt = core.rasterize_ids(m['muv'], W, H)
+    baked = own >= 0
+    owners = set(own[cy, cx].tolist()) - {-1}
+    assert owners and owners <= {0, 1, 2, 3}, owners  # floor and wall only: the rim's cap is never checked
+    rng = np.random.default_rng(3)
+    base = np.where(baked, rng.integers(10000, 40000, (H, W)), 65535).astype(np.uint16)
+    M16 = base.copy()
+    uniq = np.unique(np.stack([cy, cx], 1), axis=0)
+    big = set(map(tuple, uniq[::2].tolist()))
+    for (y, x), (yi, xi) in zip(zip(cy.tolist(), cx.tolist()), zip(iy.tolist(), ix.tolist())):
+        if baked[y, x] and baked[yi, xi]:
+            M16[y, x] = min(65535, int(base[yi, xi]) + (6554 if (y, x) in big else 655))
+    for (y, x), (yi, xi) in zip(zip(cy.tolist(), cx.tolist()), zip(iy.tolist(), ix.tolist())):
+        if baked[y, x] and baked[yi, xi] and (y, x) not in big:
+            assert int(M16[y, x]) - int(M16[yi, xi]) <= int(core.CORNER_EXCESS * 65535), (y, x)
+    m['corner_pairs'] = pairs
+    counts, vals, _filled, _face = core.compose_whole(m, M16, baked)
+    m['corner_pairs'] = None
+    _c0, vals0, _f0, _fm0 = core.compose_whole(m, M16, baked)
+    fixed = kept = 0
+    for (y, x), (yi, xi) in zip(zip(cy.tolist(), cx.tolist()), zip(iy.tolist(), ix.tolist())):
+        if not (baked[y, x] and baked[yi, xi]):
+            continue
+        if (y, x) in big:
+            assert vals[y, x] <= M16[yi, xi] and vals[y, x] < M16[y, x], (y, x, vals[y, x], M16[y, x], M16[yi, xi])
+            fixed += 1
+        else:
+            assert vals[y, x] == M16[y, x], (y, x)
+            kept += 1
+        assert vals0[y, x] == M16[y, x], (y, x)
+    outside = baked.copy()
+    outside[cy, cx] = False
+    assert (vals[outside] == M16[outside]).all()
+    assert counts['corner_px'] == len({(y, x) for y, x in zip(cy.tolist(), cx.tolist())
+                                       if (y, x) in big and baked[y, x]}), counts['corner_px']
+    print(f'PASS: test_corner_rule (master {W} x {H}, {len(uniq)} pixels checked at the inside corner, none on the rim; '
+          f'{fixed} brighter by 0.1 took the inward value, {kept} brighter by 0.01 kept; without the pairs all kept)')
+
+
+def test_denoise():
+    """Decision 56: Denoise with the curvature guide (CM unticked): Bake Selected bakes O1 and filters it, its raw bake
+    kept beside it, the curvature written for the guide; the noise measured on the master drops, pixels without a face
+    keep their raw value; a changed Strength makes only the denoise stale, and Missing and Stale re-runs the filter
+    from the raw bake without rays (Strength 0.5 halfway between raw and filtered); Denoise off restores the raw bake
+    byte for byte; the panel draws its options without writing."""
+    s = bpy.context.scene.fss_ao_bake
+    s.bake_ao, s.curvature, s.denoise, s.dn_curv_mode, s.dn_strength = True, False, True, 'SIMILAR', 1.0
+    s.dn_method = 'FILTER'  # this test: the Surface Filter (test_denoise_oidn: OIDN)
+    refresh()
+    entry, stem = entry_of('O1')
+    assert store._state['items'][stem]['dn_grade'] == 'STALE'
+    assert core.denoise_levels(1.0, 5) == 1 and core.denoise_levels(18.0, 5) == 5 and core.denoise_levels(200, 7) == 7
+    calls = []
+    bpy.types.FSS_PT_ao_bake.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+    drawn = {args[1] for name, args, _kw in calls if name == 'prop' and len(args) > 1}
+    assert {'dn_radius', 'dn_levels', 'dn_detail', 'dn_normal', 'dn_curv_mode', 'dn_curv_threshold', 'dn_noise',
+            'dn_strength'} <= drawn, drawn
+    assert not {p for p in drawn if 'gradient' in p or 'bridge' in p}, drawn  # Follow Gradient and Bridge Seams removed
+    select(['O1'])
+    assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
+    refresh()
+    entry, _ = entry_of('O1')
+    item = store._state['items'][stem]
+    raw_path = core.master_paths(str(FOLDER), stem, 'ao.raw')[0]
+    assert os.path.isfile(raw_path) and entry['denoise']['settings'] == store.denoise_opts(bpy.context.scene), entry
+    assert item['dn_grade'] == 'UP_TO_DATE' and item['cm_grade'] == 'UP_TO_DATE', (item['dn_grade'], item['cm_grade'])
+    assert entry['denoise']['curvature'] == 'SIMILAR', entry['denoise']
+    # a master denoised while Follow Gradient and Bridge Seams existed (both off) stays up to date
+    old = dict(entry, denoise=dict(entry['denoise'], settings=dict(entry['denoise']['settings'], bridge=False,
+                                                                  gradient=False)))
+    want = store.denoise_opts(bpy.context.scene)
+    assert store.dn_grade(item, old, str(FOLDER), want) == 'UP_TO_DATE'
+    old['denoise']['settings']['bridge'] = True
+    assert store.dn_grade(item, old, str(FOLDER), want) == 'STALE'
+    raw = core.load_master(str(FOLDER), stem, kind='ao.raw')
+    den = core.load_master(str(FOLDER), stem)
+    a_raw, a_den = core.noise_alpha(raw, raw['W'], raw['H']), core.noise_alpha(den, den['W'], den['H'])
+    assert a_den < 0.5 * a_raw, (a_raw, a_den)
+    gutter = raw['filled'] & (raw['face_map'] < 0)
+    assert np.array_equal(raw['image'][gutter], den['image'][gutter]), 'gutter changed'
+    baked_at = entry['baked_at']
+    # Strength 0.5: only the denoise is stale; Missing and Stale re-runs it from the raw bake
+    s.dn_strength = 0.5
+    refresh()
+    item = store._state['items'][stem]
+    assert item['grade'] == 'UP_TO_DATE' and item['dn_grade'] == 'STALE', (item['grade'], item['dn_grade'])
+    assert store.bake_choice([stem], True, False, False, store.denoise_opts(bpy.context.scene))[0] == {
+        stem: (False, False, True)}
+    # the panel's flow: Select Missing and Stale, then Bake Selected (AUTO: the denoise alone, without rays)
+    select([])
+    assert bpy.ops.fss.ao_bake_select(which='OUTDATED') == {'FINISHED'}
+    picked = {o.name for o in bpy.context.selected_objects}
+    assert 'O1' in picked, picked
+    assert store.bake_auto([stem], True, False, store.denoise_opts(bpy.context.scene))[0] == {stem: (False, False, True)}
+    assert bpy.ops.fss.ao_bake_start(scope='AUTO', hidden=True, wait=True) == {'FINISHED'}
+    refresh()
+    entry, _ = entry_of('O1')
+    assert entry['baked_at'] == baked_at and store._state['items'][stem]['dn_grade'] == 'UP_TO_DATE'
+    assert store.dn_counts()['STALE'] == 0, store.dn_counts()
+    # nothing out of date: Select Missing and Stale selects none of them, and Bake Selected bakes O1 in full
+    assert bpy.ops.fss.ao_bake_select(which='OUTDATED') == {'FINISHED'}
+    assert not bpy.context.selected_objects, [o.name for o in bpy.context.selected_objects]
+    assert store.bake_auto([stem], True, False, store.denoise_opts(bpy.context.scene))[0][stem][0] is True
+    half = core.load_master(str(FOLDER), stem)['image'].astype(np.int64)
+    want = raw['image'].astype(np.int64) + 0.5 * (den['image'].astype(np.int64) - raw['image'])
+    err = float(np.abs(half - want)[raw['filled'] & (raw['face_map'] >= 0)].max())
+    assert err <= 1.0, err
+    n_dn = sum(1 for e in store.read_index(str(FOLDER), use_cache=False)['masters'].values() if e.get('denoise'))
+    # Denoise off: the raw bake back, byte for byte
+    s.denoise = False
+    refresh()
+    assert store._state['items'][stem]['dn_grade'] == 'STALE'
+    assert bpy.ops.fss.ao_bake_start(scope='STALE', hidden=True, wait=True) == {'FINISHED'}
+    refresh()
+    entry, _ = entry_of('O1')
+    back = core.load_master(str(FOLDER), stem)['image']
+    assert np.array_equal(back, raw['image']) and not os.path.isfile(raw_path) and entry.get('denoise') is None
+    assert store.dn_counts()['STALE'] == 0, store.dn_counts()
+    s.dn_strength = 1.0
+    print(f'PASS: test_denoise (noise alpha {a_raw:.5f} raw, {a_den:.5f} denoised, gutter kept; strength 0.5 from the '
+          f'raw bake without rays within {err:g}; {n_dn} masters denoised by Select Missing and Stale, Bake Selected; '
+          f'Denoise off restored '
+          f'the raw bake byte for byte; the options drawn)')
+
+
+def test_denoise_oidn():
+    """Denoise method OIDN (Open Image Denoise, islands isolated): O1's AO up to date, so Bake Selected only denoises
+    it from its raw bake (no rays); the noise falls, the gutter keeps its raw values, the index records the method;
+    the method or the strength changed makes only the denoise stale; the panel shows only Method and Strength;
+    Denoise off restores the raw bake."""
+    s = bpy.context.scene.fss_ao_bake
+    s.bake_ao, s.curvature, s.denoise, s.dn_method, s.dn_strength = True, False, True, 'OIDN', 1.0
+    refresh()
+    entry, stem = entry_of('O1')
+    item = store._state['items'][stem]
+    assert item['grade'] == 'UP_TO_DATE' and item['dn_grade'] == 'STALE', (item['grade'], item['dn_grade'])
+    assert store.denoise_opts(bpy.context.scene) == dict(method='OIDN', strength=1.0)
+    baked_at = entry['baked_at']
+    select(['O1'])
+    assert bpy.ops.fss.ao_bake_start(scope='AUTO', hidden=True, wait=True) == {'FINISHED'}
+    refresh()
+    entry, _ = entry_of('O1')
+    dn = entry.get('denoise') or {}
+    assert entry['baked_at'] == baked_at, 'rays were cast'
+    assert dn.get('method') == 'OIDN' and dn['settings'] == store.denoise_opts(bpy.context.scene), dn
+    assert store._state['items'][stem]['dn_grade'] == 'UP_TO_DATE'
+    raw = core.load_master(str(FOLDER), stem, kind='ao.raw')
+    den = core.load_master(str(FOLDER), stem)
+    a_raw, a_den = core.noise_alpha(raw, raw['W'], raw['H']), core.noise_alpha(den, den['W'], den['H'])
+    assert a_den < 0.5 * a_raw, (a_raw, a_den)
+    gutter = raw['filled'] & (raw['face_map'] < 0)
+    assert np.array_equal(raw['image'][gutter], den['image'][gutter]), 'gutter changed'
+    # another method or strength: only the denoise is stale
+    for attr, val in (('dn_method', 'FILTER'), ('dn_strength', 0.5)):
+        old = getattr(s, attr)
+        setattr(s, attr, val)
+        refresh()
+        it = store._state['items'][stem]
+        assert it['grade'] == 'UP_TO_DATE' and it['dn_grade'] == 'STALE', (attr, it['grade'], it['dn_grade'])
+        setattr(s, attr, old)
+    refresh()
+    assert store._state['items'][stem]['dn_grade'] == 'UP_TO_DATE'
+    calls = []
+    bpy.types.FSS_PT_ao_bake.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+    drawn = {args[1] for name, args, _kw in calls if name == 'prop' and len(args) > 1}
+    assert {'dn_method', 'dn_strength'} <= drawn and not {'dn_radius', 'dn_levels', 'dn_detail', 'dn_normal',
+                                                         'dn_curv_mode', 'dn_noise'} & drawn, drawn
+    # Denoise off: the raw bake back
+    s.denoise = False
+    refresh()
+    assert bpy.ops.fss.ao_bake_start(scope='STALE', hidden=True, wait=True) == {'FINISHED'}
+    refresh()
+    back = core.load_master(str(FOLDER), stem)['image']
+    assert np.array_equal(back, raw['image']), 'raw bake not restored'
+    s.dn_method = 'OIDN'
+    select([])
+    print(f"PASS: test_denoise_oidn (O1 denoised by OIDN on {dn.get('device')} without rays: noise alpha {a_raw:.5f} raw, "
+          f"{a_den:.5f} denoised, {dn.get('groups')} island groups, gutter kept; method and strength each make only "
+          f"the denoise stale; the panel shows Method and Strength only; Denoise off restored the raw bake)")
 
 
 def test_option_staleness():
@@ -1155,6 +1652,45 @@ def test_run_mode():
     scene.fss_ao_bake.run_mode = 'HIDDEN'
     print(f"PASS: test_run_mode ({out}; .blend hash, datablock counts and is_dirty unchanged"
           + ('' if 'VISIBLE' in out else '; visible not run: FSS_AO_BAKE_TEST_VISIBLE is not 1') + ')')
+
+
+def test_unsaved():
+    """The bake reads a snapshot of the current state: A's vertex moved and not saved, Bake Selected makes A up to date
+    (its master from the moved mesh); the .blend on disk, the datablock counts and is_dirty unchanged; the job names
+    the snapshot, the log says so, and no snapshot is left in the bake folder. The vertex back, re-baked."""
+    a = bpy.data.objects['A']
+    co = a.data.vertices[6].co.copy()
+    a.data.vertices[6].co.z += 0.001
+    a.data.update()
+    refresh()
+    assert grade_of('A') == 'MESH'
+    before_hash, before_counts, before_dirty = file_hash(BLEND), datablocks(), bpy.data.is_dirty
+    select(['A'])
+    assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
+    status = store.read_status(str(FOLDER))
+    assert status['state'] == 'done' and status['results'][0]['status'] == 'baked', status
+    assert not status['results'][0]['mesh_changed_since_job'], status['results'][0]
+    refresh()
+    assert grade_of('A') == 'UP_TO_DATE', grade_of('A')
+    assert file_hash(BLEND) == before_hash and datablocks() == before_counts and bpy.data.is_dirty == before_dirty
+    with open(FOLDER / 'job.json', encoding='utf-8') as f:
+        job = json.load(f)
+    assert os.path.normpath(job['source']) == os.path.normpath(str(FOLDER / store.SNAPSHOT)), job.get('source')
+    assert os.path.normpath(job['blend']) == os.path.normpath(str(BLEND))
+    log_text = (FOLDER / 'bake.log').read_text(encoding='utf-8')
+    assert '(its current state)' in log_text, 'log'
+    left = [n for n in os.listdir(FOLDER) if n.startswith('snapshot.blend')]
+    assert not left, left
+    a.data.vertices[6].co = co
+    a.data.update()
+    refresh()
+    assert grade_of('A') == 'MESH'
+    assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
+    refresh()
+    assert grade_of('A') == 'UP_TO_DATE'
+    select([])
+    print('PASS: test_unsaved (A changed and not saved: baked from the snapshot, up to date; .blend, datablocks and '
+          'is_dirty unchanged; no snapshot left; changed back and re-baked)')
 
 
 def test_object_preview():
@@ -1327,29 +1863,35 @@ def test_poses():
     """Session 25, finish line 1 (decision 34): the wheel half sunk in the slab. At 1 pose (the current frame) the AO
     along the ring varies with the angle; at 8 poses over a full turn the variation per angle sector at a fixed radius
     is at most a quarter of the 1-pose variation; Self only shows no slab shadow; the panel shows "Pose p of N". A
-    custom list's mover (PEG) is posed with the wheel: its shadow stays at its place on the wheel."""
+    part moving with it (PEG, decision 59) shades it under the scene rule, placed in each pose: its shadow stays at its
+    place on the wheel, as with a custom list (SLAB, PEG), and is missing with SLAB alone. Full Quality (decision 49):
+    its limits compare bakes with all the samples in every pose; Split Samples is tested in test_shared_combine."""
     build_wheel_scene()
+    bpy.context.scene.fss_ao_bake.sample_quality = 'FULL'
     refresh()
     item = store._state['items'][store._state['by_object']['W']]
     assert item['mover'] and len(item['poses']) == 8 and item['poses'][0] == 0 and item['poses'][-1] == 100, item
-    assert item['occluders'] == ['SLAB'], item['occluders']  # PEG and HUB move: no occluders under the scene rule
+    # decision 59: PEG moves with W (an occluder placed in each pose), SLAB moves against it (the poses)
+    assert item['occluders'] == ['PEG', 'SLAB'] and item['against'] == ['SLAB'] and item['posed'] == ['PEG'], item
     p1, v1, r1, _ = bake_wheel('1 pose', poses=1)
     p8, v8, r8, seen = bake_wheel('8 poses', watch=True)
     ps, vs, rs, _ = bake_wheel('Self only (one pose, decision 40)', occluders='SELF')
     assert rs.get('n_poses', 1) == 1, rs  # Self only: nothing moves with it, one pose
     pc, vc, _r, _ = bake_wheel('Custom (SLAB, PEG), 8 poses', occluders='CUSTOM', custom=('SLAB', 'PEG'))
+    pn, vn, _r, _ = bake_wheel('Custom (SLAB), 8 poses', occluders='CUSTOM', custom=('SLAB',))
     for side in ('+X', '-X'):
         assert v1[side] > 0.3, v1
-        assert v8[side] <= v1[side] / 4, (side, v8[side], v1[side])
+        assert vn[side] <= v1[side] / 4, (side, vn[side], v1[side])  # without PEG's own shadow (it stays)
         assert ps[side].min() > 0.99 and vs[side] < 0.01, (side, ps[side])
     n_poses_seen = {s[4] for s in seen}
     poses_seen = sorted({s[3] for s in seen if s[4] == 8})
     assert 8 in n_poses_seen and len(poses_seen) >= 2 and max(poses_seen) > 1, (n_poses_seen, poses_seen)
     # PEG on the +X face at 90 degrees: sector 4 of 16 (90 to 112.5) and 3 (67.5 to 90) darker than the same sectors
-    # without it (Scene rule: PEG is a mover), and the -X face as without it
-    peg_drop = float(p8['+X'][3:5].mean() - pc['+X'][3:5].mean())
-    other = float(np.abs(pc['-X'] - p8['-X']).max())
-    assert peg_drop > 0.05 and other < 0.05, (peg_drop, other)
+    # without it (Custom: SLAB alone), as with the custom list (SLAB, PEG); the -X face as without it
+    peg_drop = float(pn['+X'][3:5].mean() - p8['+X'][3:5].mean())
+    as_custom = float(np.abs(pc['+X'] - p8['+X']).max())
+    other = float(np.abs(pn['-X'] - p8['-X']).max())
+    assert peg_drop > 0.05 and as_custom < 0.05 and other < 0.05, (peg_drop, as_custom, other)
     # a mover whose mesh deforms between poses (bent about a static empty while HUB turns it): the current frame only
     anchor = link(bpy.data.objects.new('ANCHOR', None))
     anchor.location = (1.0, 0.0, 0.0)
@@ -1357,6 +1899,7 @@ def test_poses():
     bend.parent = bpy.data.objects['HUB']
     mod = bend.modifiers.new('Bend', 'SIMPLE_DEFORM')
     mod.deform_method, mod.origin, mod.angle = 'BEND', anchor, math.radians(60)
+    cube('BEND_BASE', (1.0, 0.0, -0.2), material('SET_W', 512), 14)  # static, so something moves against BEND
     bpy.ops.wm.save_mainfile()
     refresh()
     assert store._state['items'][store._state['by_object']['BEND']]['poses'], 'BEND has poses'
@@ -1375,6 +1918,7 @@ def test_poses():
     turn.keyframe_insert('rotation_euler', index=2, frame=100)
     turn.rotation_euler = (0.0, 0.0, 0.0)
     turn.fss_ao_bake.poses = 4
+    cube('TURN_BASE', (2.0, 0.0, 0.0), material('SET_W', 512), 13)  # static under it: TURN moves against it
     refresh()
     full = store._state['items'][store._state['by_object']['TURN']]['poses']
     part = store._state['items'][store._state['by_object']['W']]['poses']
@@ -1387,20 +1931,112 @@ def test_poses():
     refresh()
     nla = store._state['items'][store._state['by_object']['TURN']]['poses']
     assert nla == full, nla
-    ratio = {side: round(v8[side] / v1[side], 3) for side in v1}
-    print(f"PASS: test_poses (variation per sector 1 pose {v1}, 8 poses {v8}: ratio {ratio} (at most 0.25); Self only "
-          f"minimum {min(float(ps[s].min()) for s in ps):.4f}; the panel showed poses {poses_seen} of 8; PEG posed "
-          f"with the wheel darkens its sectors by {peg_drop:.3f}, the -X face within {other:.3f}; bake 1 pose "
+    ratio = {side: round(vn[side] / v1[side], 3) for side in v1}
+    print(f"PASS: test_poses (variation per sector 1 pose {v1}, 8 poses without PEG {vn}: ratio {ratio} (at most 0.25); Self only "
+          f"minimum {min(float(ps[s].min()) for s in ps):.4f}; the panel showed poses {poses_seen} of 8; PEG (moves "
+          f"with the wheel) darkens its sectors by {peg_drop:.3f}, as the custom list within {as_custom:.3f}, the -X "
+          f"face within {other:.3f}; bake 1 pose "
           f"{r1['bake_s']} s, 8 poses {r8['bake_s']} s; a deforming mover baked in the current frame, reported: "
           f"{rb['note']})")
 
 
+def test_move_together():
+    """Decision 59, in the wheel's file: SEAT (a plane) and FRAME (a cube on it) slide together, each keyed on its own
+    (no shared parent: only the sampled frames tell), 5 cm above FLOOR (static). FRAME shades SEAT as placed (moves
+    with it, placed in each pose); FLOOR moves against both, so both have poses; FLOOR has poses for them. At one pose
+    SEAT bakes at the current frame, FRAME darkening it, and another current frame makes it stale."""
+    scene = bpy.context.scene
+    mat = material('SET_W', 512)
+    seat = plane('SEAT', (5.0, 0.0, 0.05), mat, 10)
+    frame_ = cube('FRAME', (5.0, 0.0, 0.08), mat, 11)
+    plane('FLOOR', (5.0, 0.0, 0.0), mat, 12)
+    f0 = scene.frame_current
+    for o in (seat, frame_):
+        y = o.location.y
+        o.keyframe_insert('location', index=1, frame=0)
+        o.location.y = y + 0.05
+        o.keyframe_insert('location', index=1, frame=100)
+        o.location.y = y
+    scene.frame_set(f0)
+    refresh()
+    items, by = store._state['items'], store._state['by_object']
+    it_s, it_f, it_fl = items[by['SEAT']], items[by['FRAME']], items[by['FLOOR']]
+    assert 'FRAME' in it_s['occluders'] and 'FRAME' not in it_s['against'] and 'FRAME' in it_s['posed'], it_s
+    assert it_s['against'] == ['FLOOR'] and len(it_s['poses']) == scene.fss_ao_bake.poses, it_s
+    assert 'SEAT' in it_f['occluders'] and it_f['against'] == ['FLOOR'], it_f
+    assert set(it_fl['against']) == {'FRAME', 'SEAT'} and it_fl['poses'], it_fl
+    assert it_s['pose_range'] == (0.0, 100.0), it_s['pose_range']
+    # one pose: the current frame
+    seat.fss_ao_bake.poses = 1
+    refresh()
+    it_s = store._state['items'][store._state['by_object']['SEAT']]
+    assert it_s['poses'] is None and it_s['against'] == ['FLOOR'], it_s
+    select(['SEAT'])
+    assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
+    r = store.read_status()['results'][0]
+    assert r['status'] == 'baked' and r.get('n_poses', 1) == 1, r
+    refresh()
+    assert grade_of('SEAT') == 'UP_TO_DATE'
+    m = core.load_master(store.bake_folder(), store._state['by_object']['SEAT'])  # the wheel file's bake folder
+    seat_min = float((m['image'][m['filled']] / 65535.0).min())
+    assert seat_min < 0.9, seat_min  # FRAME sits on it
+    scene.frame_set(f0 + 20)
+    refresh()
+    moved = grade_of('SEAT')
+    scene.frame_set(f0)
+    refresh()
+    assert moved == 'SURROUNDINGS' and grade_of('SEAT') == 'UP_TO_DATE', moved
+    select([])
+    print(f"PASS: test_move_together (FRAME shades SEAT as placed, both posed against FLOOR over frames 0 to 100, FLOOR "
+          f"posed for both; at one pose SEAT baked at the current frame, minimum {seat_min:.3f}; another current frame "
+          f"made it stale, back: up to date; {store._state.get('motion_frames')} frames sampled)")
+
+
+def test_resolution_choice():
+    """Resolution: "ORM Texture Size" is offered only with an ORM texture (its size in the name); without one the
+    choice reads the texture set's size; an existing file keeps its size whatever the choice (the panel shows it)."""
+    refresh()
+    ctx = bpy.context
+    with_orm, without = bpy.data.materials['SET_ORM'], bpy.data.materials['SET_A']
+    w, h = ao_bake.apply_mod.orm_size(with_orm)
+    ids = [i[0] for i in ao_bake.resolution_items(with_orm.fss_ao_apply, ctx)]
+    names = [i[1] for i in ao_bake.resolution_items(with_orm.fss_ao_apply, ctx)]
+    assert ids[0] == 'ORM' and names[0] == f'ORM Texture Size ({w} x {h})', names
+    a = without.fss_ao_apply
+    assert ao_bake.apply_mod.orm_size(without) is None
+    assert 'ORM' not in [i[0] for i in ao_bake.resolution_items(a, ctx)]
+    keep = a.get('resolution', 0)
+    a['resolution'] = 0  # stored "ORM Texture Size" (the old default), no ORM texture: the set's size
+    assert a.resolution == str(store.texture_size(without)), (a.resolution, store.texture_size(without))
+    a.resolution = '512'
+    assert a.resolution == '512'
+    a['resolution'] = keep
+    # an existing file keeps its size: written at 256, then applied again with 512 chosen
+    path = os.path.join(ao_bake.apply_mod.output_folder(ctx.scene), 'keep_size.png')
+    if os.path.isfile(path):
+        os.remove(path)
+    first = apply_set('SET_A', file_name='keep_size.png', resolution='256')
+    again = apply_set('SET_A', file_name='keep_size.png', resolution='512')
+    assert tuple(first['size']) == (256, 256) and tuple(again['size']) == (256, 256), (first['size'], again['size'])
+    assert ao_bake.apply_mod.existing_size(path) == (256, 256)
+    calls = []
+    ao_bake._draw_size(_Layout(calls), a, 'resolution', path)
+    texts = [kw.get('text') for name, args, kw in calls if name == 'label']
+    assert "256 x 256 (the file's size)" in texts and not [c for c in calls if c[0] == 'prop'], calls
+    print(f"PASS: test_resolution_choice (with an ORM texture: {names[0]!r} offered; without: not offered, the "
+          f"choice reads {store.texture_size(without)}; an existing 256 px file stays 256 with 512 chosen, the panel "
+          f"shows its size)")
+
+
 def test_soften_edges():
-    """Decision 46: Apply's Soften Sharp Edges, on a master built by hand (no bake): a step of three 10 mm faces with
-    UVs continuous across both edges (64 px per face): top (AO 1.0) over a convex lip to a wall (0.4), the wall over a
-    concave corner to a floor (0.6). The wall brightens toward the lip as the smoothstep from 1.0 at the edge over the
-    width; the top, the floor and the wall at the concave corner keep their values; nothing gets darker; a width under
-    a texel is raised to one texel."""
+    """Decisions 46 and 58: Apply's Soften Sharp Edges, on a master built by hand (no bake): a step of three 10 mm
+    faces with UVs continuous across both edges (64 px per face): top (AO 1.0) over a convex lip to a wall (0.4), the
+    wall over a concave corner to a floor (0.6). Only folds shaded smooth (corner normals the same on both sides) are
+    softened; hard-shaded ones stay as baked. Lip smooth: the wall brightens toward the lip as the smoothstep from 1.0
+    at the edge over the width; the top, the floor and the wall at the corner keep their values; nothing gets darker; a
+    width under a texel is raised to one texel. Corner smooth: its step closes by half from each side (smoothstep). A V
+    of the AO at the corner (rising 40 per m away from it on both faces) is rounded as a blur of the width would:
+    k x W / 3 x (1 - d / W)^3; a ramp running through the corner (rising on the wall, falling on the floor) stays."""
     s = 0.01
     quads = [  # (corners in 3D, u offset): top x -1..0 at z 0, wall z 0..-1 at x 0, floor x 0..1 at z -1
         ([(-s, 0, 0), (0, 0, 0), (0, s, 0), (-s, s, 0)], 16),
@@ -1418,24 +2054,51 @@ def test_soften_edges():
     fn = np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0])
     fn /= np.linalg.norm(fn, axis=1, keepdims=True)
     assert fn[0] @ [0, 0, 1] > 0.99 and fn[2] @ [1, 0, 0] > 0.99 and fn[4] @ [0, 0, 1] > 0.99, fn
+
+    def corner_normals(lip, corner):
+        """Flat (hard) everywhere; the lip's or the corner's two vertices with one normal on both sides (smooth)."""
+        cn = np.repeat(fn[:, None], 3, axis=1).copy()
+        for smooth, z, faces in ((lip, 0.0, range(0, 4)), (corner, -s, range(2, 6))):
+            if smooth:
+                n = fn[faces[0]] + fn[faces[-1]]
+                for t in faces:
+                    for c in range(3):
+                        p = pos[tris[t, c]]
+                        if abs(p[0]) < 1e-9 and abs(p[2] - z) < 1e-9:
+                            cn[t, c] = n / np.linalg.norm(n)
+        return cn
     m = core.build_master(pos, tris, np.repeat(fn[:, None], 3, axis=1), 4 * 64 / s, gutter=core.GUTTER,
                           order=core.ORDER, mirror_open=core.MIRROR_OPEN, fold_split=core.FOLD_SPLIT)
     owner, _cnt = core.rasterize_ids(m['muv'], m['W'], m['H'])
+
+    def master_of(value):
+        """The master with value(p3 (n,3), triangle (n,)) at each face pixel's centre."""
+        ys, xs = np.nonzero(owner >= 0)
+        t = owner[ys, xs]
+        bc = core.barycentric_many(np.stack([xs + 0.5, ys + 0.5], axis=1), m['muv'][t])
+        p3 = np.einsum('nk,nkd->nd', bc, pos[tris[t]])
+        img = np.zeros(owner.shape, np.uint16)
+        img[ys, xs] = np.rint(np.clip(value(p3, t), 0, 1) * 65535)
+        return dict(m, image=img, filled=owner >= 0, face_map=owner)
     face_ao = np.repeat([1.0, 0.4, 0.6], 2)
-    img = np.where(owner >= 0, np.rint(face_ao[np.maximum(owner, 0)] * 65535), 0).astype(np.uint16)
-    master = dict(m, image=img, filled=owner >= 0, face_map=owner)
+    master = master_of(lambda p3, t: face_ao[t])
     W, H = 224, 96
     kw = dict(padding=4, outside_mode='tri', kmax=core.K_MAX, surface_cos=core.SURFACE_COS)
     ctx = core.copy_context(pos, tris, uvpx, master, core.K_MIN, core.K_MAX)
-    base = core.copy_master(pos, tris, uvpx, np.zeros(len(tris), np.int64), master, (0, 0, W, H), core.K_MIN, ctx=ctx,
-                            **kw)[0]
+
+    def copy(mst, sc=None):
+        return core.copy_master(pos, tris, uvpx, np.zeros(len(tris), np.int64), mst, (0, 0, W, H), core.K_MIN,
+                                ctx=ctx, soften=sc, **kw)[:2]
+    base = copy(master)[0]
     width = 0.001  # 6.4 texels
-    sc = core.soften_context(pos, tris, uvpx, ctx, width)
-    assert sc is not None and sc['edges'] == 1, sc and sc['edges']  # the lip only: the corner is concave
-    soft, info = core.copy_master(pos, tris, uvpx, np.zeros(len(tris), np.int64), master, (0, 0, W, H), core.K_MIN,
-                                  ctx=ctx, soften=sc, **kw)[:2]
     row = 48
     written = base >= 0
+    # every edge shaded hard: nothing to soften
+    assert core.soften_context(pos, tris, uvpx, ctx, width, cn=corner_normals(False, False)) is None
+    # the lip shaded smooth, the corner hard
+    sc = core.soften_context(pos, tris, uvpx, ctx, width, cn=corner_normals(True, False))
+    assert sc is not None and sc['edges'] == 1 and sc['convex'].all(), sc and sc['edges']
+    soft, info = copy(master, sc)
     assert (soft[written] >= base[written] - 1e-9).all(), 'softening darkened a pixel'
     assert np.allclose(soft[row, 16:80], base[row, 16:80]) and np.allclose(base[row, 16:80], 1.0, atol=1e-3)
     assert np.allclose(soft[row, 144:208], base[row, 144:208]), 'the floor changed'
@@ -1447,15 +2110,192 @@ def test_soften_edges():
     exp = np.array(exp)
     err = float(np.abs(soft[row, 80:144] - exp).max())
     assert err < 2e-3, (err, soft[row, 80:90], exp[:10])
-    assert np.allclose(soft[row, 120:144], 0.4, atol=1e-3), 'the wall at the concave corner changed'
+    assert np.allclose(soft[row, 120:144], 0.4, atol=1e-3), 'the wall at the hard corner changed'
     # a width under one texel (0.156 mm here) is raised to one texel: only the first column, its centre half way
-    sc1 = core.soften_context(pos, tris, uvpx, ctx, 1e-6)
-    thin = core.copy_master(pos, tris, uvpx, np.zeros(len(tris), np.int64), master, (0, 0, W, H), core.K_MIN, ctx=ctx,
-                            soften=sc1, **kw)[0]
+    sc1 = core.soften_context(pos, tris, uvpx, ctx, 1e-6, cn=corner_normals(True, False))
+    thin = copy(master, sc1)[0]
     assert abs(thin[row, 80] - 0.7) < 2e-3 and abs(thin[row, 81] - 0.4) < 1e-3, thin[row, 78:84]
-    print(f"PASS: test_soften_edges (1 convex edge of 2; wall vs smoothstep max error {err:.5f}; top, floor and the "
-          f"concave corner unchanged; {info['softened_px']} px brightened; at a width under a texel: one column, "
-          f"{thin[row, 80]:.3f})")
+    # the corner shaded smooth, the lip hard: the step 0.4 | 0.6 closes by half from each side
+    scc = core.soften_context(pos, tris, uvpx, ctx, width, cn=corner_normals(False, True))
+    assert scc is not None and scc['edges'] == 1 and not scc['convex'].any()
+    step = copy(master, scc)[0]
+    assert np.allclose(step[row, 16:120], base[row, 16:120]), 'the top or the wall away from the corner changed'
+    err_step = 0.0
+    for i in range(120, 168):
+        d = abs(i + 0.5 - 144) / 64 * s
+        x = min(d / width, 1.0)
+        want = (0.4 + 0.1 * (1 - x * x * (3 - 2 * x))) if i < 144 else (0.6 - 0.1 * (1 - x * x * (3 - 2 * x)))
+        err_step = max(err_step, abs(float(step[row, i]) - want))
+    assert err_step < 2e-3, (err_step, step[row, 138:150])
+    # a V at the corner is rounded; a ramp through it stays
+    k = 40.0
+
+    def dist(p3, t):
+        return np.where(t < 4, p3[:, 2] + s, p3[:, 0])  # from the corner line, on the wall (t 2, 3) and the floor
+    vee = master_of(lambda p3, t: 0.3 + k * dist(p3, t))
+    ramp = master_of(lambda p3, t: 0.5 + np.where(t < 4, k, -k) * dist(p3, t))
+    err_v, err_r, peak = 0.0, 0.0, 0.0
+    for mst, is_vee in ((vee, True), (ramp, False)):
+        b0, s0 = copy(mst)[0], copy(mst, scc)[0]
+        for i in range(132, 156):
+            d = abs(i + 0.5 - 144) / 64 * s
+            x = min(d / width, 1.0)
+            got = float(s0[row, i] - b0[row, i])
+            if is_vee:
+                want = k * width / 3 * (1 - x) ** 3
+                err_v = max(err_v, abs(got - want))
+                peak = max(peak, got)
+            else:
+                err_r = max(err_r, abs(got))
+    assert err_v < 2e-3 and peak > 0.01, (err_v, peak)
+    assert err_r < 2e-3, err_r
+    # the copy in C++ (apply-native-copy journal): bit-identical to numpy here, unsoftened and softened
+    n_bits = 0
+    for mst, sc_ in ((master, None), (master, sc), (master, sc1), (master, scc), (vee, scc), (ramp, scc)):
+        tisl = np.zeros(len(tris), np.int64)
+        ref = core.copy_master(pos, tris, uvpx, tisl, mst, (0, 0, W, H), core.K_MIN, ctx=ctx, soften=sc_,
+                               backend='numpy', **kw)
+        for threads in (1, 12):
+            got = core.copy_master(pos, tris, uvpx, tisl, mst, (0, 0, W, H), core.K_MIN, ctx=ctx, soften=sc_,
+                                   backend='native', threads=threads, **kw)
+            assert np.array_equal(ref[0].view(np.uint64), got[0].view(np.uint64)), (threads, sc_ is not None)
+            assert ref[1]['softened_px'] == got[1]['softened_px'] and got[1]['copy'] == 'native'
+        n_bits += int((ref[0] >= 0).sum())
+    print(f"PASS: test_soften_edges (hard edges: none softened; smooth lip: wall vs smoothstep max error {err:.5f}, "
+          f"top, floor and the hard corner unchanged, {info['softened_px']} px brightened; at a width under a texel: "
+          f"one column, {thin[row, 80]:.3f}; smooth corner: step closed by half within {err_step:.5f}; V rounded by "
+          f"up to {peak:.4f} within {err_v:.5f} of the blur; ramp through the corner kept within {err_r:.5f}; the C++ "
+          f"copy at 1 and 12 threads bit-identical to numpy on {n_bits} px of 6 copies, 5 softened)")
+
+
+def test_native_copy():
+    """Apply-native-copy journal, finish lines 1, 3 and 4: Apply's copy in C++ (fss_ao_copy.dll) against the numpy
+    copy. Each Apply (grey, ORM layout with green and blue copied, SET_B at 512 px, into the ORM slot texture, per
+    object over a random file, the curvature), with Soften Sharp Edges off and on (1 mm), the master paged as Apply
+    reads it, paged with a cache of 2 tiles (tiles dropped and read again) and whole in memory: the numpy copy
+    (FSS_AO_COPY=numpy), the DLL at 12 threads and at 1 write byte-identical files, and say which copy ran. With the
+    DLL moved away, Apply runs the numpy copy, says so, and writes the same file."""
+    nat = core.native_copy()
+    assert nat.backend()[0] == 'native', nat.backend()
+    refresh()
+    s = bpy.context.scene.fss_ao_bake
+    old = (s.threads, s.soften_edges, s.soften_width)
+    keep = WORK / 'native_copy'
+    if keep.exists():
+        shutil.rmtree(keep)
+    keep.mkdir(parents=True)
+    OUT.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(17)
+    po_base = rng.integers(0, 65536, (SIZE, SIZE, 3))
+    orm_path = WORK / 'orm16.png'
+    orm_bytes = orm_path.read_bytes()
+    opened = core.open_master
+
+    def tiny(folder, stem, cache_bytes=None, kind='ao'):
+        out = opened(folder, stem, cache_bytes=1, kind=kind)
+        for p in out.get('pages', ()):  # a cache of 2 tiles: masters of 3 or 4 tiles drop and read tiles again
+            p.cap = 2
+            p.cache = np.empty((2, p.T * p.T), p.dtype)
+            p.tile_in = np.full(2, -1, np.int64)
+            p.used = np.zeros(2, np.int64)
+            p.slot_of[:] = -1
+        return out
+
+    def whole(folder, stem, cache_bytes=None, kind='ao'):
+        out = core.load_master(folder, stem, kind)
+        out['close'] = lambda: None
+        return out
+    cases = [('grey', 'SET_A', 'ao', dict(file_name='nc_grey.png'), None),
+             ('orm_layout', 'SET_ORM', 'ao', dict(file_name='nc_orm_layout.png', layout='ORM', green_blue='COPY'),
+              None),
+             ('cubes_512', 'SET_B', 'ao', dict(file_name='nc_cubes_512.png', resolution='512'), None),
+             ('orm_slot', 'SET_ORM', 'ao', dict(target='ORM'), None),
+             ('per_object', 'SET_PO', 'ao', dict(file_name='nc_po.png'), ['Q1']),
+             ('per_object_gb', 'SET_GB', 'ao', dict(file_name='nc_gb.png'), ['G2']),
+             ('curvature', 'SET_B', 'curv', dict(), None)]
+
+    def run(label, name, kind, kw, objects, copy, threads):
+        if copy == 'numpy':
+            os.environ[nat.ENV] = 'numpy'
+        else:
+            os.environ.pop(nat.ENV, None)
+        s.threads = threads
+        mat = bpy.data.materials[name]
+        target = ApplySettings(**kw)
+        if kind == 'ao' and target.target == 'FILE' and objects:
+            write_png(OUT / target.file_name, po_base)
+        if target.target == 'ORM':
+            orm_path.write_bytes(orm_bytes)
+        try:
+            rep = ao_bake_apply.apply_set(bpy.context, mat, [bpy.data.objects[n] for n in objects] if objects else None,
+                                          target, kind=kind)
+        finally:
+            os.environ.pop(nat.ENV, None)
+        assert not rep.get('error') and rep['copied'], rep
+        dst = keep / f'{label}_{copy}_{threads}.png'
+        shutil.copy2(rep['path'], dst)
+        return rep, dst
+    results = {}
+    n_files = 0
+    try:
+        for soften in (False, True):
+            s.soften_edges, s.soften_width = soften, 0.001
+            for mode, opener in (('paged', opened), ('tiny', tiny), ('whole', whole)):
+                if mode != 'paged' and not soften:
+                    continue
+                core.open_master = opener
+                try:
+                    for label, name, kind, kw, objects in cases:
+                        tag = f'{label}_{mode}_{"soft" if soften else "plain"}'
+                        reps = {}
+                        for copy, threads in (('numpy', 12), ('native', 12), ('native', 1)):
+                            rep, dst = run(tag, name, kind, kw, objects, copy, threads)
+                            reps[(copy, threads)] = (rep, dst.read_bytes())
+                            n_files += 1
+                            if copy == 'numpy':
+                                assert rep['copy'] == f'numpy ({nat.ENV}=numpy is set)', rep['copy']
+                                assert f"  copy: numpy ({nat.ENV}=numpy is set)" in ao_bake_apply.report_lines(rep)
+                            else:
+                                want = f"C++ ({threads} thread{'s' if threads != 1 else ''})"
+                                assert rep['copy'] == want, (rep['copy'], want)
+                                assert not any('copy:' in x for x in ao_bake_apply.report_lines(rep))
+                        ref = reps[('numpy', 12)]
+                        for key, (rep, data) in reps.items():
+                            assert data == ref[1], (tag, key)
+                            assert rep['written_px'] == ref[0]['written_px'] > 0, (tag, key)
+                            assert rep['softened_px'] == ref[0]['softened_px'], (tag, key)
+                        results[tag] = (ref[1], ref[0].get('page_loads'), ref[0]['written_px'])
+                finally:
+                    core.open_master = opened
+        # the same file paged, through a cache of 2 tiles and whole; tiles were dropped and read again
+        for label, *_r in cases:
+            assert len({results[f'{label}_{m}_soft'][0] for m in ('paged', 'tiny', 'whole')}) == 1, label
+        po_loads = (results['per_object_paged_soft'][1], results['per_object_tiny_soft'][1])
+        assert sum(map(sum, po_loads[1])) > sum(map(sum, po_loads[0])), po_loads
+        # without the DLL (moved away): the numpy copy, said in the report, the same file
+        dll = os.path.join(nat.LIB_DIR, nat.DLL)
+        away = dll + '.away'
+        s.soften_edges = False
+        os.rename(dll, away)
+        try:
+            nat.reset()
+            assert nat.backend()[0] == 'numpy' and 'missing' in nat.backend()[1], nat.backend()
+            rep, dst = run('grey_nodll', 'SET_A', 'ao', dict(file_name='nc_grey.png'), None, 'native', 12)
+        finally:
+            os.rename(away, dll)
+            nat.reset()
+        assert nat.backend()[0] == 'native', nat.backend()
+        assert rep['copy'].startswith('numpy (the C++ copy is not loaded') and 'missing' in rep['copy'], rep['copy']
+        line = [x for x in ao_bake_apply.report_lines(rep) if x.startswith('  copy: numpy')]
+        assert line, ao_bake_apply.report_lines(rep)
+        assert dst.read_bytes() == results['grey_paged_plain'][0]
+    finally:
+        s.threads, s.soften_edges, s.soften_width = old
+        orm_path.write_bytes(orm_bytes)
+    print(f"PASS: test_native_copy ({len(results)} Apply configurations x numpy, C++ 12 and 1 threads = {n_files} "
+          f"files byte-identical per configuration ({sum(r[2] for r in results.values())} px written); paged, a "
+          f"2-tile cache (SET_PO page loads {po_loads[0]} -> {po_loads[1]}) and whole the same file; FSS_AO_COPY=numpy "
+          f"and the DLL moved away: the numpy copy, reported ({line[0].strip()})")
 
 
 if __name__ == '__main__' and '--' in sys.argv and any(a.startswith('only=') for a in sys.argv):
@@ -1478,14 +2318,26 @@ elif __name__ == '__main__':
     test_apply_separate()
     test_rules_apply()
     test_apply_no_datablock()
+    test_apply_ticked()
+    test_resolution_choice()
     test_soften_edges()
     test_apply_steps()
     test_draw()
     test_panel_selection()
     test_custom_occluders()
     test_option_staleness()
+    test_auto_distance()
+    test_falloff()
+    test_curvature()
+    test_curvature_only()
+    test_native_copy()
+    test_corner_rule()
+    test_denoise()
+    test_denoise_oidn()
     test_shared_combine()
     test_run_mode()
+    test_unsaved()
     test_object_preview()
     test_poses()  # last: it replaces the scene with the wheel's
+    test_move_together()  # in the wheel's scene
     print(f'ALL AO BAKE TESTS PASSED ({time.time() - t0:.1f} s)')

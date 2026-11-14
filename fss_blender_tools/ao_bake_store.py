@@ -15,14 +15,20 @@ decisions 12 to 18, 21 and 27; P32 to P35).
   No Texture, Invisible or No Export tags, and only their faces of a texture set: a material that is not a skip
   material (uv_autoseam._is_skip_material); an object without such faces is excluded (decision 30).
   Occluders are the visible LOD0 meshes without the Non-AO-Occluder, Invisible or No Export tags, without their skip
-  faces, and not movers (animated, or under an animated parent, or tagged Animated): movers cast no AO onto other
-  objects. A shared mesh gets its self-shading only.
-- Options (decisions 34 and 35; a scene default and a per-object override, `fss_ao_bake` on the object): a mover is
-  baked in N poses spread over its own animation range and averaged (N = 1: the current frame); the occluders are the
+  faces. Moving ones too (decision 59): Refresh steps through the frames of the file's animation once (motion()) and
+  compares every object's placement; an occluder rigid to the object (both static, or moving together) shades it as
+  placed; one that moves against it (or the object against it) is placed at each of the object's poses, spread over
+  their animation, and averaged (one pose: the current frame). A mover whose motion cannot be sampled (a driver only,
+  or the Animated tag without keys that move it) casts no AO, as before. A shared mesh gets its self-shading only.
+- Options (decisions 34 and 35; a scene default and a per-object override, `fss_ao_bake` on the object): an object
+  with something moving against it is baked in N poses spread over that motion's frames and averaged (N = 1: the
+  current frame, decision 59); the occluders are the
   scene rule, the object alone (Self only) or the object's custom list (posed with the target). Changing one makes the
   master "surroundings changed"; at one pose and the scene rule the hashes are those of 0.57.
-- The bake (decisions 12 and 36, P34) runs in a second Blender on the saved file (ao_bake_runner.py), hidden or with
-  its window; this module writes the job, starts it, reads its status.json and creates the `cancel` file.
+- The bake (decisions 12 and 36, P34) runs in a second Blender (ao_bake_runner.py), hidden or with its window, on a
+  snapshot of the current state (a copy of the open file written into the bake folder, unsaved changes included, the
+  .blend untouched; removed after the bake); this module writes the snapshot and the job, starts it, reads its
+  status.json and creates the `cancel` file.
 The hashes are computed by refresh(), never while a panel draws.
 """
 
@@ -41,6 +47,12 @@ from . import lod_model, tags
 RUNNER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ao_bake_runner.py')
 PREVIEW_FILE = core.PREVIEW_FILE  # the runner's reduced preview of the master being baked (decision 36)
 GRADES = ('UP_TO_DATE', 'SURROUNDINGS', 'MESH', 'MISSING')
+# decision 55: a master's curvature: up to date, baked at another width, missing, or waiting for an AO bake (no AO
+# master or its mesh changed: the curvature is written in the AO master's layout)
+CURV_GRADES = ('UP_TO_DATE', 'WIDTH', 'MISSING', 'NEEDS_AO')
+# decision 56: a master's denoise against the panel's: as set, to re-run (from the raw bake kept beside it), or waiting
+# for an AO bake (no master, its mesh changed, or its raw bake is gone)
+DN_GRADES = ('UP_TO_DATE', 'STALE', 'NEEDS_AO')
 GRADE_TEXT = {'UP_TO_DATE': 'up to date', 'SURROUNDINGS': 'surroundings changed', 'MESH': 'mesh changed',
               'MISSING': 'missing'}
 
@@ -303,6 +315,30 @@ def pose_frames(obj, scene, n=None):
     return [round(lo + (hi - lo) * k / (n - 1), 4) for k in range(n)], ''
 
 
+def motion_frames(obj, scene, involved, sampled, n=None):
+    """Decision 59: (frames, note, range) of the poses of an object with something moving against it: n poses (its
+    count) spread evenly over the animation of the objects that move (involved: the object itself when it moves, and
+    its occluders that move against it), both ends included; when every one of them is in the same pose at both ends
+    (decision 41), spread without the end. A mover whose range cannot be read (a constraint, a driver) counts with
+    the sampled frames' range. (None, note, range) for the current frame (n = 1, or no range)."""
+    n = pose_count(obj, scene) if n is None else int(n)
+    lo, hi = float('inf'), float('-inf')
+    for o in involved:
+        r = mover_range(o) or ((sampled[0], sampled[-1]) if sampled else None)
+        if r is not None:
+            lo, hi = min(lo, r[0]), max(hi, r[1])
+    rng = (lo, hi) if lo <= hi else None
+    if n <= 1:
+        return None, '', rng
+    if rng is None:
+        return None, 'no animation range: baked in the current frame', rng
+    if hi <= lo:
+        return None, f'its animation range is one frame ({lo:g}): baked in the current frame', rng
+    if all(ends_coincide(o, lo, hi) for o in involved):
+        return [round(lo + (hi - lo) * k / n, 4) for k in range(n)], '', rng
+    return [round(lo + (hi - lo) * k / (n - 1), 4) for k in range(n)], '', rng
+
+
 def occluder_mode(obj, scene):
     """Decision 35: 'SCENE' (the scene rule, decision 15), 'SELF' (the object alone) or 'CUSTOM' (its own list): the
     object's override, else the scene's default."""
@@ -310,7 +346,7 @@ def occluder_mode(obj, scene):
     return scene.fss_ao_bake.occluders if mode == 'DEFAULT' else mode
 
 
-SHARED_COMBINES = ('AVERAGE', 'LIGHTEST', 'DARKEST')
+SHARED_COMBINES = ('AVERAGE', 'LIGHTEST', 'DARKEST', 'ONE')
 
 
 def shared_combine(mesh, scene):
@@ -318,6 +354,15 @@ def shared_combine(mesh, scene):
     scene's default ('AVERAGE', 'LIGHTEST' (most lit) or 'DARKEST')."""
     mode = getattr(getattr(mesh, 'fss_ao_shared', None), 'combine', 'DEFAULT') or 'DEFAULT'
     return scene.fss_ao_bake.shared_combine if mode == 'DEFAULT' else mode
+
+
+def shared_instance(mesh, copies):
+    """Decision 48: One Instance's copy: the mesh's picked copy when it is one of `copies`, else the first by name."""
+    picked = getattr(getattr(mesh, 'fss_ao_shared', None), 'instance', None)
+    names = {o.name for o in copies}
+    if picked is not None and picked.name in names:
+        return picked
+    return sorted(copies, key=lambda o: o.name)[0]
 
 
 def custom_occluders(obj, view_layer):
@@ -356,8 +401,95 @@ def bake_exclusion(obj, scene):
 
 
 def is_occluder(obj, scene):
+    """Can shade others (decision 15); a mover too (decision 59: refresh() leaves out the movers it cannot sample)."""
     return (tags.is_ao_occluder(obj, scene) and not tags.is_marked_invisible(obj, scene)
-            and not tags.is_no_export(obj, scene) and not all_skip(obj) and not is_mover(obj, scene))
+            and not tags.is_no_export(obj, scene) and not all_skip(obj))
+
+
+MOTION_TOL = 1e-4  # decision 59: placements this close (m, and rotation-scale matrix units) are the same
+MOTION_SAMPLES = 64  # frames sampled at most
+
+
+def _key_times(idb):
+    """The frames of an ID's own animation: its range's ends, its action's keyframes, its strips' ends."""
+    ad = getattr(idb, 'animation_data', None)
+    if ad is None:
+        return []
+    out = []
+    r = _anim_range(idb)
+    if r is not None:
+        out += [r[0], r[1]]
+    for fc in _fcurves(ad):
+        n = len(fc.keyframe_points)
+        if n:
+            co = np.empty(2 * n, np.float64)
+            fc.keyframe_points.foreach_get('co', co)
+            out += co[0::2].tolist()
+    for track in ad.nla_tracks:
+        for strip in track.strips:
+            out += [float(strip.frame_start), float(strip.frame_end)]
+    return out
+
+
+def sample_frames(view_layer):
+    """Decision 59: the frames Refresh steps through: every key and range end of the view layer's animated objects
+    and the middles between them, at most MOTION_SAMPLES (spread evenly, both ends kept)."""
+    t = set()
+    for o in view_layer.objects:
+        t.update(round(float(x), 4) for x in _key_times(o))
+    t = sorted(t)
+    if len(t) < 2:
+        return t
+    mids = [round(0.5 * (a + b), 4) for a, b in zip(t, t[1:])]
+    t = sorted(set(t) | set(mids))
+    if len(t) > MOTION_SAMPLES:
+        idx = np.unique(np.rint(np.linspace(0, len(t) - 1, MOTION_SAMPLES)).astype(int))
+        t = [t[i] for i in idx]
+    return t
+
+
+def motion(scene, view_layer, objs):
+    """Decision 59: every object's world placement at the current frame and at each sampled frame (the scene set to
+    each, then back to the current frame). Returns dict(frames, index {name: row}, M (n, 1 + frames, 4, 4), moving
+    (n,) bool: its placement changes)."""
+    import math
+    frames = sample_frames(view_layer)
+    objs = list(objs)
+    index = {o.name: i for i, o in enumerate(objs)}
+
+    def grab():
+        return np.array([np.array(o.matrix_world, dtype=np.float64) for o in objs]).reshape(len(objs), 4, 4)
+    mats = [grab()]
+    if frames and objs:
+        f0, s0 = scene.frame_current, scene.frame_subframe
+        try:
+            for f in frames:
+                fi = int(math.floor(f))
+                scene.frame_set(fi, subframe=float(f - fi))
+                mats.append(grab())
+        finally:
+            scene.frame_set(f0, subframe=s0)
+    M = np.stack(mats, axis=1)
+    moving = (np.abs(M - M[:, :1]).max(axis=(1, 2, 3)) > MOTION_TOL) if len(objs) else np.zeros(0, bool)
+    return dict(frames=frames, index=index, M=M, moving=moving)
+
+
+def moves_against(mo, a, b):
+    """Decision 59: b's placement relative to a changes over the sampled frames (one moves, the other does not, or
+    both move differently). a, b: names in motion() mo."""
+    ia, ib = mo['index'][a], mo['index'][b]
+    if not (mo['moving'][ia] or mo['moving'][ib]):
+        return False
+    Ma, Mb = mo['M'][ia], mo['M'][ib]
+    rel = np.linalg.inv(Ma[0]) @ Mb[0]  # b in a's space at the current frame
+    return bool(np.abs(Ma @ rel - Mb).max() > MOTION_TOL)
+
+
+def _swept_box(obj, mats):
+    """The world box of the object over these placements (k, 4, 4)."""
+    c = np.array([tuple(v) for v in obj.bound_box], dtype=np.float64)
+    w = np.einsum('kij,nj->kni', mats[:, :3, :3], c) + mats[:, None, :3, 3]
+    return w.reshape(-1, 3).min(axis=0), w.reshape(-1, 3).max(axis=0)
 
 
 def texture_size(material):
@@ -371,10 +503,52 @@ def _world_box(obj):
     return c.min(axis=0), c.max(axis=0)
 
 
+def denoise_opts(scene):
+    """Decision 56: the denoise options as core.denoise_master takes them, or None when Denoise is off. What a
+    master's denoise is compared with (the curvature width too when the curvature guides it)."""
+    import math
+    s = scene.fss_ao_bake
+    if not s.denoise:
+        return None
+    if s.dn_method == 'OIDN':  # Open Image Denoise: only the strength (the device does not change the result's kind)
+        return dict(method='OIDN', strength=round(float(s.dn_strength), 4))
+    o = dict(method='FILTER', radius=round(float(s.dn_radius), 6), strength=round(float(s.dn_strength), 4),
+             max_levels=int(s.dn_levels), detail=round(float(s.dn_detail), 4),
+             normal_deg=round(math.degrees(float(s.dn_normal)), 3), curv_mode=s.dn_curv_mode, noise=s.dn_noise)
+    if s.dn_curv_mode != 'OFF':
+        o.update(curv_threshold=round(float(s.dn_curv_threshold), 4), curv_width=round(float(s.curv_width), 6))
+    if s.dn_noise == 'SAMPLES':
+        o['samples'] = int(s.samples)
+    return o
+
+
 def settings_dict(scene):
     s = scene.fss_ao_bake
     return dict(ao_distance=round(float(s.distance), 6), samples=int(s.samples), device=s.device,
-                threads=int(s.threads))
+                threads=int(s.threads), sample_split=s.sample_quality == 'SPLIT', curvature=bool(s.curvature),
+                curv_width=round(float(s.curv_width), 6), denoise=denoise_opts(scene))
+
+
+def item_distance(obj, scene):
+    """Decision 51: a master's AO distance. The scene's; with Auto Distance, the factor times the longest axis of the
+    object's own box (its local bounding box at its world scale), at most the scene's, so only small objects get a
+    shorter one. A shared mesh measures its first copy, so every copy bakes at one distance."""
+    s = scene.fss_ao_bake
+    d = round(float(s.distance), 6)
+    if not s.auto_distance:
+        return d
+    c = np.array([tuple(v) for v in obj.bound_box], dtype=np.float64)
+    scale = np.linalg.norm(np.array(obj.matrix_world, dtype=np.float64)[:3, :3], axis=0)
+    longest = float(((c.max(axis=0) - c.min(axis=0)) * scale).max())
+    return min(d, round(max(float(s.auto_distance_factor) * longest, 0.001), 6))
+
+
+def falloff_steps(scene):
+    """Decision 53: the steps of the distance falloff (0: off). Each view is baked at the master's AO distance times
+    1/n, 2/n ... 1 and the results averaged, so an occluder darkens less the farther it is (linear, 0 at the
+    distance)."""
+    s = scene.fss_ao_bake
+    return int(s.falloff_steps) if s.falloff else 0
 
 
 def _surround_settings(scene):
@@ -407,8 +581,39 @@ def refresh(context, relink=True):
             excluded[obj.name] = why
         else:
             baked.append(obj)
-    occluders = [o for o in meshes if is_occluder(o, scene)]
-    boxes = {o.name: _world_box(o) for o in set(baked) | set(occluders)}
+    candidates = sorted(set(baked) | {o for o in meshes if is_occluder(o, scene)}, key=lambda o: o.name)
+    mo = motion(scene, view_layer, candidates)  # decision 59: who moves, and against whom
+
+    def moving(o):
+        return bool(mo['moving'][mo['index'][o.name]])
+
+    def unknown(o):
+        """A mover whose motion is not sampled: tagged Animated, or animated without a range (a driver only)."""
+        return (not moving(o) and is_mover(o, scene)
+                and (tags.is_marked_animated(o, scene) or mover_range(o) is None))
+    occluders = [o for o in candidates if is_occluder(o, scene) and not unknown(o)]
+    by_name = {o.name: o for o in candidates}  # bpy.data.objects[name] scans the whole list: looked up here instead
+
+    def obj_of(name):
+        o = by_name.get(name)
+        if o is None:
+            o = by_name[name] = bpy.data.objects[name]
+        return o
+    boxes = {o.name: _world_box(o) for o in candidates}  # at the current frame
+    # over the sampled frames: what a moving object comes near during the poses
+    swept = {o.name: (_swept_box(o, mo['M'][mo['index'][o.name]]) if moving(o) else boxes[o.name]) for o in candidates}
+    occ_names = [o.name for o in occluders]
+    occ_box = {k: (np.array([bx[n][0] for n in occ_names]).reshape(-1, 3),
+                   np.array([bx[n][1] for n in occ_names]).reshape(-1, 3)) for k, bx in (('now', boxes),
+                                                                                         ('swept', swept))}
+    occ_key = {}  # an occluder's part of the surroundings key, once per Refresh
+
+    def near(obj, which, distance):
+        """The occluders whose box is within the distance of the object's (core.box_gap, all at once)."""
+        lo, hi = (swept if which == 'swept' else boxes)[obj.name]
+        olo, ohi = occ_box[which]
+        gap = np.maximum(np.maximum(lo[None] - ohi, olo - hi[None]), 0.0).max(axis=1) if len(occ_names) else []
+        return sorted(n for n, g in zip(occ_names, np.asarray(gap).tolist()) if g <= distance and n != obj.name)
     geo = {}
     evs = {}
 
@@ -425,39 +630,55 @@ def refresh(context, relink=True):
     users = {}
     for obj in baked:
         users.setdefault(obj.data, []).append(obj)
-    distance = float(scene.fss_ao_bake.distance)
     base = _surround_settings(scene)
     frame = scene.frame_current
     items = {}
     by_object = {}
+    split = scene.fss_ao_bake.sample_quality == 'SPLIT'
+    samples = int(scene.fss_ao_bake.samples)
+    falloff = falloff_steps(scene)
 
-    def surroundings(obj, mover):
-        """One object's occluders, poses and surroundings key (decisions 15, 34, 35): (mode, occluder names, pose
-        frames or None, pose note, posed occluder names, key)."""
+    def occluder_key(n):
+        if n not in occ_key:
+            o = obj_of(n)
+            occ_key[n] = (n, core.matrix_key(o.matrix_world), geo_hash(o), sorted(tags.get_tags(o)))
+        return occ_key[n]
+
+    def surroundings(obj, mover, distance):
+        """One object's occluders within its master's AO distance (a moving one's box over its motion), poses and
+        surroundings key (decisions 15, 34, 35, 51, 59): (mode, occluder names, pose frames or None, pose note, posed
+        occluder names, key, the occluders moving against it, the poses' frame range)."""
         mode = occluder_mode(obj, scene)
-        frames, pose_note, posed = None, '', []
+        frames, pose_note, rng = None, '', None
         if mode == 'SELF':
             occ = []
         elif mode == 'CUSTOM':
             occ = custom_occluders(obj, view_layer)
-            posed = [n for n in occ if is_mover(bpy.data.objects[n], scene)]  # posed with the target
-        else:
-            box = boxes[obj.name]
-            occ = sorted(o.name for o in occluders if o != obj and core.box_gap(box, boxes[o.name]) <= distance)
-        if mover and mode != 'SELF':  # Self only: nothing around it moves with it, so one pose is the same
-            frames, pose_note = pose_frames(obj, scene)
-        key = dict(base, matrix=core.matrix_key(obj.matrix_world), mover=mover,
-                   frame=frame if (mover and not frames) else None,
-                   occluders=[(n, core.matrix_key(bpy.data.objects[n].matrix_world),
-                               geo_hash(bpy.data.objects[n]), sorted(tags.get_tags(bpy.data.objects[n])))
-                              for n in occ])
+        else:  # several poses: what comes near over the motion; one pose: what is near at the current frame
+            occ = near(obj, 'swept' if pose_count(obj, scene) > 1 else 'now', distance)
+        known = [n for n in occ if n in mo['index']]
+        posed = [n for n in known if moving(obj_of(n))]  # placed at each pose frame
+        against = [n for n in known if obj.name in mo['index'] and moves_against(mo, obj.name, n)]
+        if against:
+            involved = ([obj] if moving(obj) else []) + [obj_of(n) for n in against if moving(obj_of(n))]
+            frames, pose_note, rng = motion_frames(obj, scene, involved, mo['frames'])
+        elif unknown(obj) and mode != 'SELF':
+            pose_note = 'moves without keys (a driver or the Animated tag): baked in the current frame'
+        one_pose = (bool(against) or unknown(obj)) and not frames  # its current frame matters
+        key = dict(base, ao_distance=distance, matrix=core.matrix_key(obj.matrix_world), mover=mover,
+                   frame=frame if one_pose else None,
+                   occluders=[occluder_key(n) for n in occ])
+        if falloff:  # decision 53: a key only with falloff, so the hashes without it stay
+            key['falloff'] = falloff
         # decisions 34 and 35: keys only when not the 0.57 bake (one pose, the scene rule), so its hashes stay
         if mode != 'SCENE':
             key['occluder_mode'] = mode
         if frames:
             key['poses'] = frames
             key['posed'] = posed
-        return mode, occ, frames, pose_note, posed, key
+            if split:  # decision 49: the poses share the samples
+                key['samples_per_view'] = core.view_samples(samples, len(frames), True)
+        return mode, occ, frames, pose_note, posed, key, against, rng
     for me, objs in sorted(users.items(), key=lambda kv: kv[0].name):
         objs = sorted(objs, key=lambda o: o.name)
         shared = len(objs) > 1
@@ -476,31 +697,37 @@ def refresh(context, relink=True):
                 excluded[o.name] = 'no face with a texture set (material)'
             continue
         mh = geo_hash(first)
-        mover = is_mover(first, scene)
+        mover = moving(first) or unknown(first)
+        dist = item_distance(first, scene)
         copies, combine = None, None
         if shared:
             # decision 47: every copy baked in its own surroundings, its own poses; combined per master pixel
             combine = shared_combine(me, scene)
             copies, keys = [], []
-            for o in objs:
-                m_o = is_mover(o, scene)
-                c_mode, c_occ, c_frames, c_note, c_posed, c_key = surroundings(o, m_o)
+            # decision 48: One Instance bakes only the picked copy (else the first by name) for all of them
+            for o in ([shared_instance(me, objs)] if combine == 'ONE' else objs):
+                m_o = moving(o) or unknown(o)
+                c_mode, c_occ, c_frames, c_note, c_posed, c_key, c_against, c_rng = surroundings(o, m_o, dist)
                 copies.append(dict(object=o.name, occluder_mode=c_mode, occluders=c_occ, poses=c_frames,
-                                   pose_note=c_note, posed=c_posed, mover=m_o))
+                                   pose_note=c_note, posed=c_posed, mover=m_o, against=c_against, pose_range=c_rng))
                 keys.append([o.name, c_key])
-            sur = _hash(dict(base, shared=True, combine=combine, copies=keys))
+            sur = dict(base, ao_distance=dist, shared=True, combine=combine, copies=keys, sample_split=split)
+            if falloff:
+                sur['falloff'] = falloff
+            sur = _hash(sur)
             mode = 'COPIES'
             occ = sorted({n for c in copies for n in c['occluders']})
-            frames, pose_note, posed = None, '', []
+            frames, pose_note, posed, against, rng = None, '', [], [], None
         else:
-            mode, occ, frames, pose_note, posed, key = surroundings(first, mover)
+            mode, occ, frames, pose_note, posed, key, against, rng = surroundings(first, mover, dist)
             sur = _hash(key)
         sets = sorted({slots[m].name for m in set_mats})
         tex = {str(m): int(texture_size(slots[m])) for m in set_mats}  # faces of other indices are not baked
         item = dict(key=stem, kind=kind, name=name, object=first.name, mesh=me.name, users=[o.name for o in objs],
                     uv=uv, mesh_hash=mh, surround_hash=sur, occluders=occ, mover=mover, frame=frame,
                     skip_slots=skip, tex_size=tex, sets=sets, grade='MISSING', occluder_mode=mode, poses=frames,
-                    pose_note=pose_note, posed=posed, copies=copies, combine=combine)
+                    pose_note=pose_note, posed=posed, copies=copies, combine=combine, ao_distance=dist,
+                    falloff=falloff, against=against, pose_range=rng)
         items[stem] = item
         for o in objs:
             by_object[o.name] = stem
@@ -527,10 +754,15 @@ def refresh(context, relink=True):
             relinked.append((entry['relinked_from'], item['name']))
         if relinked:
             write_index(folder, index)
+    width = round(float(scene.fss_ao_bake.curv_width), 6)
+    dn_want = denoise_opts(scene)
     for stem, item in items.items():
         item['grade'] = grade(item, masters.get(stem), folder)
+        item['cm_grade'] = curv_grade(item, masters.get(stem), folder, width)
+        item['dn_grade'] = dn_grade(item, masters.get(stem), folder, dn_want)
     _state.update(items=items, by_object=by_object, excluded=excluded, refreshed=time.time(), folder=folder,
-                  relinked=relinked, sets=texture_set_rows(items, masters))
+                  relinked=relinked, sets=texture_set_rows(items, masters), curv_width=width,
+                  dn_want=dn_want, motion_frames=len(mo['frames']), moving=int(mo['moving'].sum()))
     return _state
 
 
@@ -544,12 +776,95 @@ def grade(item, entry, folder):
     return 'UP_TO_DATE'
 
 
+def curv_grade(item, entry, folder, width):
+    """Decision 55: the state of a master's curvature (CURV_GRADES); item['grade'] is its AO grade."""
+    if item['grade'] in ('MISSING', 'MESH'):
+        return 'NEEDS_AO'
+    c = (entry or {}).get('curvature')
+    if not c or not os.path.isfile(core.master_paths(folder, item['key'], 'curv')[0]):
+        return 'MISSING'
+    if round(float(c.get('width', -1.0)), 6) != round(float(width), 6):
+        return 'WIDTH'
+    return 'UP_TO_DATE'
+
+
+def dn_grade(item, entry, folder, want):
+    """Decision 56: the state of a master's denoise (DN_GRADES) against the options wanted (None: off)."""
+    if item['grade'] in ('MISSING', 'MESH'):
+        return 'NEEDS_AO'
+    have = ((entry or {}).get('denoise') or {}).get('settings')
+    if have is not None:  # masters denoised before Follow Gradient and Bridge Seams were removed (both off)
+        have = {k: v for k, v in have.items() if not (k in ('bridge', 'gradient') and v is False)}
+        have.setdefault('method', 'FILTER')  # denoised before the method choice: the Surface Filter
+    if have == want:
+        return 'UP_TO_DATE'
+    if have is not None and not os.path.isfile(core.master_paths(folder, item['key'], 'ao.raw')[0]):
+        return 'NEEDS_AO'
+    return 'STALE'
+
+
+def dn_counts():
+    c = {g: 0 for g in DN_GRADES}
+    for item in _state['items'].values():
+        c[item.get('dn_grade', 'UP_TO_DATE')] += 1
+    return c
+
+
+def curv_counts():
+    c = {g: 0 for g in CURV_GRADES}
+    for item in _state['items'].values():
+        c[item.get('cm_grade', 'MISSING')] += 1
+    return c
+
+
+def bake_choice(stems, want_ao, want_cm, selected, denoise=None):
+    """Decision 55: what a bake button bakes of each master: ({stem: (ao, cm, dn)}, names that need an AO bake before
+    their curvature). Selected: everything ticked; Missing and Stale: the stale parts. When the AO is baked and CM is
+    ticked, the curvature is written with it (the layout may change). Decision 56: with AO ticked, a master whose AO
+    is up to date but whose denoise is not gets the filter again from its raw bake (dn, no rays); when the curvature
+    guides the denoise (denoise: the options, None off), a stale curvature is written first, CM ticked or not."""
+    what, needs_ao = {}, []
+    guide = denoise is not None and denoise.get('curv_mode', 'OFF') != 'OFF'
+    for stem in stems:
+        it = _state['items'][stem]
+        ao = want_ao and (selected or it['grade'] != 'UP_TO_DATE')
+        dn = want_ao and not ao and it.get('dn_grade') == 'STALE'
+        cm = want_cm and (ao or selected or it.get('cm_grade') != 'UP_TO_DATE')
+        if guide and (ao or dn) and (ao or it.get('cm_grade') != 'UP_TO_DATE'):
+            cm = True
+        if cm and not ao and it.get('cm_grade') == 'NEEDS_AO':
+            needs_ao.append(it['name'])
+            cm = False
+        if ao or cm or dn:
+            what[stem] = (ao, cm, dn)
+    return what, needs_ao
+
+
+def bake_auto(stems, want_ao, want_cm, denoise=None):
+    """The panel's Bake Selected: per master, its missing or stale parts as
+    Missing and Stale bakes them (a stale denoise alone re-run from the raw bake, without rays); a master with
+    nothing out of date is baked in full (everything ticked). Returns bake_choice's pair."""
+    what, needs_ao, full = {}, [], []
+    for stem in stems:
+        w, n = bake_choice([stem], want_ao, want_cm, False, denoise)
+        if w or n:
+            what.update(w)
+            needs_ao += n
+        else:
+            full.append(stem)
+    w, n = bake_choice(full, want_ao, want_cm, True, denoise)
+    what.update(w)
+    return what, needs_ao + n
+
+
 def regrade():
     """After a bake: the grades again from index.json, with the hashes of the last refresh."""
     folder = _state.get('folder')
     masters = read_index(folder, use_cache=False).get('masters', {}) if folder else {}
     for stem, item in _state['items'].items():
         item['grade'] = grade(item, masters.get(stem), folder)
+        item['cm_grade'] = curv_grade(item, masters.get(stem), folder, _state.get('curv_width', 0.0))
+        item['dn_grade'] = dn_grade(item, masters.get(stem), folder, _state.get('dn_want'))
     _state['sets'] = texture_set_rows(_state['items'], masters)
 
 
@@ -586,7 +901,31 @@ def items_for_objects(objects):
 # The bake in a second Blender
 # ---------------------------------------------------------------------------------------------------------------------
 
-def make_job(context, stems, test_delay_s=0.0, tile_px=0, test_tile_delay_s=0.0):
+SNAPSHOT = 'snapshot.blend'  # the current state the second Blender opens (in the bake folder)
+
+
+def remove_snapshot(folder):
+    """The snapshot (and a .blend1 Blender may have kept of an older one) removed, if there."""
+    for name in (SNAPSHOT, SNAPSHOT + '1'):
+        try:
+            os.remove(os.path.join(folder, name))
+        except OSError:
+            pass
+
+
+def write_snapshot(folder):
+    """The open file's current state, unsaved changes included, written as a copy into the bake folder: the .blend
+    on disk, its path and its unsaved state stay as they are; relative paths are remapped to the copy's folder.
+    Returns its path."""
+    remove_snapshot(folder)
+    path = os.path.join(folder, SNAPSHOT)
+    bpy.ops.wm.save_as_mainfile(filepath=path, copy=True, check_existing=False, compress=False, relative_remap=True)
+    return path
+
+
+def make_job(context, stems, test_delay_s=0.0, tile_px=0, test_tile_delay_s=0.0, what=None):
+    """The job file of a bake, and the snapshot of the current state the bake opens. what: {stem: (ao, cm, dn)}
+    (decisions 55, 56), else the AO of each, with the curvature when CM is ticked."""
     scene = context.scene
     folder = bake_folder()
     os.makedirs(folder, exist_ok=True)
@@ -599,14 +938,18 @@ def make_job(context, stems, test_delay_s=0.0, tile_px=0, test_tile_delay_s=0.0)
                         skip_slots=item['skip_slots'], tex_size=item['tex_size'], occluders=occ,
                         surround_hash=item['surround_hash'], mesh_hash=item['mesh_hash'], mover=item['mover'],
                         frame=item['frame'], occluder_mode=item.get('occluder_mode', 'SCENE'),
-                        poses=item.get('poses'), pose_note=item.get('pose_note', ''))
+                        poses=item.get('poses'), pose_note=item.get('pose_note', ''),
+                        ao_distance=item['ao_distance'], falloff=item.get('falloff', 0))
+        ao, cm, dn = (what or {}).get(stem, (True, bool(scene.fss_ao_bake.curvature), False))
+        job_item.update(ao=bool(ao), cm=bool(cm), dn=bool(dn))
         if item.get('copies'):  # decision 47: a shared mesh's copies, each with its own surroundings
             job_item['combine'] = item['combine']
             job_item['copies'] = [dict(c, occluders=[dict(name=n, skip_slots=skip_slots(bpy.data.objects[n]),
                                                           posed=n in c['posed']) for n in c['occluders']])
                                   for c in item['copies']]
         items.append(job_item)
-    job = dict(schema=core.SCHEMA, blend=bpy.data.filepath, folder=folder, settings=settings_dict(scene),
+    source = write_snapshot(folder)
+    job = dict(schema=core.SCHEMA, blend=bpy.data.filepath, source=source, folder=folder, settings=settings_dict(scene),
                items=items, created=time.strftime('%Y-%m-%d %H:%M:%S'), test_delay_s=float(test_delay_s),
                tile_px=int(tile_px), test_tile_delay_s=float(test_tile_delay_s))
     path = os.path.join(folder, 'job.json')
@@ -616,9 +959,11 @@ def make_job(context, stems, test_delay_s=0.0, tile_px=0, test_tile_delay_s=0.0)
 
 
 def start_bake(job_path, hidden=False):
-    """Starts the second Blender on the saved file: hidden (decision 36: in the background, no window and no console,
-    its output in runner.log) or with its window. Returns the process."""
+    """Starts the second Blender on the job's snapshot (the saved file for a job without one): hidden (decision 36:
+    in the background, no window and no console, its output in runner.log) or with its window. Returns the process."""
     folder = os.path.dirname(job_path)
+    with open(job_path, encoding='utf-8') as f:
+        source = json.load(f).get('source') or bpy.data.filepath
     for name in ('status.json', 'cancel', PREVIEW_FILE):
         try:
             os.remove(os.path.join(folder, name))
@@ -627,7 +972,7 @@ def start_bake(job_path, hidden=False):
     args = [bpy.app.binary_path, '--factory-startup']
     if hidden:
         args.append('-b')
-    args += [bpy.data.filepath, '--python', RUNNER, '--', job_path]
+    args += [source, '--python', RUNNER, '--', job_path]
     kw = {}
     if hidden:
         log = open(os.path.join(folder, 'runner.log'), 'w', encoding='utf-8')
@@ -672,5 +1017,7 @@ def finish_run():
         log.close()
         _run['log'] = None
     _run['proc'] = None
+    if _run.get('folder'):
+        remove_snapshot(_run['folder'])
     regrade()
     return read_status()

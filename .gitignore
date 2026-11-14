@@ -14,3 +14,6 @@ tests/_work/
 
 # Per-machine deploy targets (see deploy.local.json.example)
 deploy.local.json
+
+# Native build intermediates (native/*/build.cmd)
+native/*/build/

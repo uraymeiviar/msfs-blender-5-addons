@@ -19,6 +19,7 @@ import math
 import os
 import struct
 import sys
+import time
 import zlib
 
 import numpy as np
@@ -43,6 +44,27 @@ def jxl():
                 spec.loader.exec_module(mod)
         _jxl_module.append(mod)
     return _jxl_module[0]
+
+
+_copy_module = []
+
+
+def native_copy():
+    """ao_bake_copy (Apply's copy in C++, apply-native-copy journal), imported as jxl() imports its module."""
+    if not _copy_module:
+        try:
+            from . import ao_bake_copy as mod
+        except ImportError:
+            name = '_fss_ao_bake_copy'
+            mod = sys.modules.get(name)
+            if mod is None:
+                spec = importlib.util.spec_from_file_location(
+                    name, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ao_bake_copy.py'))
+                mod = importlib.util.module_from_spec(spec)
+                sys.modules[name] = mod
+                spec.loader.exec_module(mod)
+        _copy_module.append(mod)
+    return _copy_module[0]
 
 
 # -------------------------------------------------------------------------------------------------------------------
@@ -796,31 +818,41 @@ def _chunks(n, per):
     return [(a, min(n, a + per)) for a in range(0, n, per)]
 
 
-def soften_context(pos, tris, uvpx, ctx, width, use=None, sharp_deg=None, max_samples=512):
-    """The convex sharp edges for Apply's edge softening (auto-bake journal, decision 46), computed once per master.
+SOFT_SMOOTH_COS = math.cos(math.radians(1.0))  # corner normals this close across an edge: the edge is shaded smooth
 
-    A sharp edge: two faces (welded neighbours) whose normals differ by more than sharp_deg (the copy's surface angle).
-    Convex: each face's far corner lies behind the other face (a lip, a rim; not an inside corner, whose AO is contact
-    shadow). Per triangle of `use` (the texture set's), the width it softens over: `width` (m), at least one target
-    texel of that triangle; and the edges that can lie within it (the candidates). Returns None without such edges."""
+
+def soften_context(pos, tris, uvpx, ctx, width, use=None, sharp_deg=None, max_samples=512, cn=None):
+    """The folds for Apply's edge softening (auto-bake journal, decisions 46 and 58), computed once per master.
+
+    A fold: two faces (welded neighbours) whose normals differ by more than sharp_deg (the copy's surface angle). Only
+    folds shaded smooth are softened (cn, the corner normals (T,3,3) in tris' order: the same normal on both sides at
+    both ends); a hard-shaded edge (split normals, marked sharp) is left as baked. None: every fold counts as smooth.
+    Convex: each face's far corner lies behind the other face (a lip, a rim); else concave (an inside corner). Per
+    triangle of `use` (the texture set's), the width it softens over: `width` (m), at least one target texel of that
+    triangle; and the edges that can lie within it (the candidates). Returns None without such edges."""
     from mathutils import Vector
     from mathutils.kdtree import KDTree
     sharp_cos = math.cos(math.radians(SURFACE_DEG if sharp_deg is None else sharp_deg))
     wt, tn = ctx['wt'], ctx['tri_normal']
     T = len(tris)
     use = np.ones(T, bool) if use is None else np.asarray(use, bool)
-    rows = []
+    if cn is not None:
+        cn = np.asarray(cn, np.float64)
+        cn = cn / np.maximum(np.linalg.norm(cn, axis=2, keepdims=True), 1e-30)
+    rows, convex = [], []
     for lst in edge_map(wt).values():
         if len(lst) != 2:
             continue
         (t1, i1, j1), (t2, i2, j2) = lst
         if not (use[t1] or use[t2]) or float(tn[t1] @ tn[t2]) >= sharp_cos:
             continue
-        a, b = pos[tris[t1, i1]], pos[tris[t1, j1]]
-        f1, f2 = pos[tris[t1, 3 - i1 - j1]], pos[tris[t2, 3 - i2 - j2]]
-        if not ((f2 - a) @ tn[t1] < 0 and (f1 - a) @ tn[t2] < 0):
-            continue  # concave (or folded): left as baked
         iy, jy = (i2, j2) if wt[t2, i2] == wt[t1, i1] else (j2, i2)
+        if cn is not None and not (float(cn[t1, i1] @ cn[t2, iy]) >= SOFT_SMOOTH_COS
+                                   and float(cn[t1, j1] @ cn[t2, jy]) >= SOFT_SMOOTH_COS):
+            continue  # shaded hard: left as baked
+        a = pos[tris[t1, i1]]
+        f1, f2 = pos[tris[t1, 3 - i1 - j1]], pos[tris[t2, 3 - i2 - j2]]
+        convex.append(bool((f2 - a) @ tn[t1] < 0 and (f1 - a) @ tn[t2] < 0))
         rows.append((t1, i1, j1, t2, iy, jy))
     if not rows:
         return None
@@ -836,6 +868,8 @@ def soften_context(pos, tris, uvpx, ctx, width, use=None, sharp_deg=None, max_sa
         return v / np.maximum(np.linalg.norm(v, axis=1, keepdims=True), 1e-30)
     mX = inward(E[:, 0], 3 - E[:, 1] - E[:, 2])
     mY = inward(E[:, 3], 3 - E[:, 4] - E[:, 5])
+    hX = ((pos[tris[E[:, 0], 3 - E[:, 1] - E[:, 2]]] - A) * mX).sum(axis=1)  # each face's height over the edge
+    hY = ((pos[tris[E[:, 3], 3 - E[:, 4] - E[:, 5]]] - A) * mY).sum(axis=1)
     a3 = tri_areas_3d(pos, tris)
     with np.errstate(all='ignore'):
         texel = np.sqrt(a3 / np.abs(tri_areas_2d(uvpx)))
@@ -868,17 +902,37 @@ def soften_context(pos, tris, uvpx, ctx, width, use=None, sharp_deg=None, max_sa
     cand = np.zeros(int(start[-1]), np.int64)
     for t, ids in lists:
         cand[start[t]:start[t + 1]] = ids
-    return dict(E=E, A=A, B=B, mX=mX, mY=mY, Wt=Wt, start=start, cand=cand, width=float(width), edges=len(E))
+    return dict(E=E, A=A, B=B, mX=mX, mY=mY, hX=hX, hY=hY, convex=np.array(convex, bool), pos=pos, tris=tris,
+                Wt=Wt, start=start, cand=cand, width=float(width), edges=len(E))
+
+
+def _bary3(p, tri3):
+    """Barycentric coordinates (n,3) of points p (n,3) in triangles tri3 (n,3,3), clamped onto the triangle."""
+    a = tri3[:, 0]
+    v0, v1, v2 = tri3[:, 1] - a, tri3[:, 2] - a, p - a
+    d00, d01, d11 = (v0 * v0).sum(1), (v0 * v1).sum(1), (v1 * v1).sum(1)
+    d20, d21 = (v2 * v0).sum(1), (v2 * v1).sum(1)
+    den = np.maximum(d00 * d11 - d01 * d01, 1e-30)
+    v = (d11 * d20 - d01 * d21) / den
+    w = (d00 * d21 - d01 * d20) / den
+    bc = np.clip(np.stack([1.0 - v - w, v, w], axis=1), 0.0, None)
+    return bc / np.maximum(bc.sum(axis=1, keepdims=True), 1e-30)
 
 
 def _soften(sc, tri_ids, P3, vals, read, tn, surface_cos, chunk=COPY_CHUNK):
-    """Edge softening of values at points P3 on triangles tri_ids (decision 46): near a convex sharp edge, the darker
-    side ramps up to the brighter side's value at the edge over the triangle's width (smoothstep); the brighter side
-    keeps its value. A point near several edges takes the largest brightening. Returns (values, points brightened)."""
+    """Edge softening of values at points P3 on triangles tri_ids, within the triangle's width W of a smooth-shaded
+    fold. Convex (decision 46): the darker side ramps up to the brighter side's value at the edge (smoothstep); the
+    brighter side keeps its value; near several edges the largest brightening. Concave (decision 58): the fold is
+    blurred across, as a blur of width W along the unfolded surface would (a ramp running through the edge stays, the
+    kink is rounded): with the AO's slopes away from the edge sX and sY (each side read at the edge and half a width
+    in) a point at distance d gains (sX + sY) / 2 x W / 3 x (1 - d / W)^3 (a triangular kernel's blur of |d|), and a
+    step at the edge closes by half from each side (smoothstep); several edges add, as their blurs do. Returns
+    (values, points changed)."""
     start, cand = sc['start'], sc['cand']
     nc = start[tri_ids + 1] - start[tri_ids]
     idx = np.nonzero(nc > 0)[0]
     add = np.zeros(len(vals))
+    cadd = np.zeros(len(vals))  # concave: blur corrections, summed
     if not len(idx):
         return vals, 0
     cnt = nc[idx]
@@ -914,18 +968,822 @@ def _soften(sc, tri_ids, P3, vals, read, tn, surface_cos, chunk=COPY_CHUNK):
         vx, vy = at_edge(0, 1, 2), at_edge(3, 4, 5)
         delta = np.where(on_x, vy - vx, vx - vy)
         x = dist / W
-        gain = np.where(delta > 0, delta * (1.0 - x * x * (3.0 - 2.0 * x)), 0.0)
-        np.maximum.at(add, i, gain)
-    done = add > 1e-9
-    return np.where(done, np.minimum(1.0, vals + add), vals), int(done.sum())
+        fade = 1.0 - x * x * (3.0 - 2.0 * x)
+        cv = sc['convex'][e]
+        np.maximum.at(add, i, np.where(cv & (delta > 0), delta * fade, 0.0))
+        cc = np.nonzero(~cv)[0]
+        if len(cc):
+            ec, uc = e[cc], u[cc]
+            a_c = A[ec] + (B[ec] - A[ec]) * uc[:, None]
+            pd = np.maximum(np.minimum(0.5 * W[cc], 0.9 * np.minimum(sc['hX'][ec], sc['hY'][ec])), 1e-9)
+
+            def probe(t_col, m):
+                t = E[ec, t_col]
+                bc = _bary3(a_c + m[ec] * pd[:, None], sc['pos'][sc['tris'][t]])
+                return read(t, bc)[0]
+            on_c = on_x[cc]
+            s_own = (np.where(on_c, probe(0, mX), probe(3, mY)) - np.where(on_c, vx[cc], vy[cc])) / pd
+            s_other = (np.where(on_c, probe(3, mY), probe(0, mX)) - np.where(on_c, vy[cc], vx[cc])) / pd
+            corr = 0.5 * delta[cc] * fade[cc] + 0.5 * (s_own + s_other) * (W[cc] / 3.0) * (1.0 - x[cc]) ** 3
+            np.add.at(cadd, i[cc], corr)
+    done = (add > 1e-9) | (np.abs(cadd) > 1e-9)
+    return np.where(done, np.clip(vals + add + cadd, 0.0, 1.0), vals), int(done.sum())
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Curvature (auto-bake journal item D, decision 54): from the object's own geometry, no rays
+# ---------------------------------------------------------------------------------------------------------------------
+#
+# Signed, 50 % grey flat (P3), measured within a width (m) around each point, like Substance's sampling radius:
+# - a sharp edge (welded faces whose normals are split there and differ by more than CURV_SHARP_DEG) is a band of that
+#   width on both its faces, brightest (convex) or darkest (concave) at the edge and fading out (smoothstep); its
+#   strength is the angle between the faces over 90 degrees (at most 1). Several convex edges: the strongest; several
+#   concave: the strongest; a convex and a concave band add.
+# - a smooth-shaded bend (the corner normals) is the angle the surface turns within the width, over 90 degrees: per
+#   triangle the mean normal curvature along its edges, averaged per vertex, interpolated.
+# The sum is clipped to -1 .. 1 and written as 0.5 + 0.5 x value.
+
+CURV_FLAT = 32768
+CURV_SHARP_DEG = 30.0
+CURV_WIDTH = 0.0005  # m, the default width
+
+
+def curvature_context(pos, tris, cn, width, max_samples=512):
+    """What curvature_at needs for a mesh: tris (T,3) vertex ids into pos (V,3), cn (T,3,3) corner normals, width (m).
+    The sharp edges with sign and strength, their candidates per triangle, the per-vertex smooth curvature."""
+    from mathutils import Vector
+    from mathutils.kdtree import KDTree
+    T = len(tris)
+    P = pos[tris]
+    tn = np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0])
+    tn /= np.maximum(np.linalg.norm(tn, axis=1, keepdims=True), 1e-30)
+    wv = weld_ids(pos)
+    wt = wv[tris]
+    sharp_cos = math.cos(math.radians(CURV_SHARP_DEG))
+    rows = []
+    for lst in edge_map(wt).values():
+        if len(lst) != 2:
+            continue
+        (t1, i1, j1), (t2, i2, j2) = lst
+        cos = float(tn[t1] @ tn[t2])
+        if cos >= sharp_cos:
+            continue
+        iy, jy = (i2, j2) if wt[t2, i2] == wt[t1, i1] else (j2, i2)
+        if float(cn[t1, i1] @ cn[t2, iy]) > 0.999 and float(cn[t1, j1] @ cn[t2, jy]) > 0.999:
+            continue  # smooth-shaded across: the smooth term carries it
+        a = pos[tris[t1, i1]]
+        f1, f2 = pos[tris[t1, 3 - i1 - j1]], pos[tris[t2, 3 - i2 - j2]]
+        convex = (f2 - a) @ tn[t1] < 0 and (f1 - a) @ tn[t2] < 0
+        concave = (f2 - a) @ tn[t1] > 0 and (f1 - a) @ tn[t2] > 0
+        if not (convex or concave):
+            continue  # folded
+        strength = min(1.0, math.degrees(math.acos(max(-1.0, min(1.0, cos)))) / 90.0)
+        rows.append((t1, i1, j1, t2, iy, jy, 1.0 if convex else -1.0, strength))
+    # smooth term: per triangle the mean of (n_i - n_j).(p_i - p_j) / |p_i - p_j|^2 over its edges (1/m, convex > 0)
+    k_t = np.zeros(T)
+    for i, j in ((0, 1), (1, 2), (2, 0)):
+        dp = P[:, i] - P[:, j]
+        k_t += ((cn[:, i] - cn[:, j]) * dp).sum(axis=1) / np.maximum((dp * dp).sum(axis=1), 1e-30)
+    k_t /= 3.0
+    area = tri_areas_3d(pos, tris)
+    nv = int(wv.max()) + 1 if len(wv) else 0
+    ks, ws = np.zeros(nv), np.zeros(nv)
+    for c in range(3):
+        np.add.at(ks, wt[:, c], k_t * area)
+        np.add.at(ws, wt[:, c], area)
+    k_v = ks / np.maximum(ws, 1e-30)
+    out = dict(width=float(width), wt=wt, tn=tn, k_corner=k_v[wt], edges=len(rows), start=np.zeros(T + 1, np.int64),
+               cand=np.zeros(0, np.int64))
+    if not rows:
+        return out
+    E = np.array([r[:6] for r in rows], dtype=np.int64)
+    sign = np.array([r[6] for r in rows])
+    strength = np.array([r[7] for r in rows])
+    A, B = pos[tris[E[:, 0], E[:, 1]]], pos[tris[E[:, 0], E[:, 2]]]
+    d = B - A
+    L = np.linalg.norm(d, axis=1)
+    dn = d / np.maximum(L, 1e-30)[:, None]
+
+    def inward(t, far):
+        v = pos[tris[t, far]] - A
+        v = v - (v * dn).sum(axis=1, keepdims=True) * dn
+        return v / np.maximum(np.linalg.norm(v, axis=1, keepdims=True), 1e-30)
+    mX = inward(E[:, 0], 3 - E[:, 1] - E[:, 2])
+    mY = inward(E[:, 3], 3 - E[:, 4] - E[:, 5])
+    step = max(float(width), 1e-6)
+    n_s = np.clip(np.ceil(L / step), 1, max_samples).astype(np.int64)
+    half = float((L / n_s).max()) / 2
+    kd = KDTree(int(n_s.sum()))
+    owner = np.repeat(np.arange(len(E)), n_s)
+    k = 0
+    for e in range(len(E)):
+        for q in range(n_s[e]):
+            kd.insert(Vector(A[e] + d[e] * ((q + 0.5) / n_s[e])), k)
+            k += 1
+    kd.balance()
+    cen = P.mean(axis=1)
+    rad = np.linalg.norm(P - cen[:, None], axis=2).max(axis=1)
+    start = np.zeros(T + 1, np.int64)
+    lists = []
+    for t in range(T):
+        found = kd.find_range(Vector(cen[t]), float(rad[t] + width + half))
+        if found:
+            ids = np.unique(owner[[i for _co, i, _d in found]])
+            lists.append((t, ids))
+            start[t + 1] = len(ids)
+    start = np.cumsum(start)
+    cand = np.zeros(int(start[-1]), np.int64)
+    for t, ids in lists:
+        cand[start[t]:start[t + 1]] = ids
+    out.update(E=E, A=A, B=B, mX=mX, mY=mY, sign=sign, strength=strength, start=start, cand=cand)
+    return out
+
+
+def curvature_at(cc, tri_ids, bary, P3, chunk=COPY_CHUNK):
+    """Curvature (-1 .. 1) at points P3 (N,3) on triangles tri_ids with barycentric coordinates bary (N,3)."""
+    width = cc['width']
+    val = (bary * cc['k_corner'][tri_ids]).sum(axis=1) * width / (math.pi / 2)
+    start, cand = cc['start'], cc['cand']
+    nc = start[tri_ids + 1] - start[tri_ids]
+    idx = np.nonzero(nc > 0)[0]
+    if len(idx):
+        cnt = nc[idx]
+        total = int(cnt.sum())
+        pix = np.repeat(idx, cnt)
+        first = np.repeat(start[tri_ids[idx]] - np.concatenate([[0], np.cumsum(cnt)[:-1]]), cnt)
+        edge = cand[first + np.arange(total)]
+        E, A, B, mX, mY, tn = cc['E'], cc['A'], cc['B'], cc['mX'], cc['mY'], cc['tn']
+        hi = np.zeros(len(tri_ids))
+        lo = np.zeros(len(tri_ids))
+        cos = math.cos(math.radians(CURV_SHARP_DEG))
+        for c0, c1 in _chunks(total, chunk):
+            i, e = pix[c0:c1], edge[c0:c1]
+            p, a, b = P3[i], A[e], B[e]
+            ab = b - a
+            u = np.clip(((p - a) * ab).sum(axis=1) / np.maximum((ab * ab).sum(axis=1), 1e-30), 0.0, 1.0)
+            q = a + ab * u[:, None]
+            dist = np.linalg.norm(p - q, axis=1)
+            s = tri_ids[i]
+            cx = (tn[s] * tn[E[e, 0]]).sum(axis=1)
+            cy = (tn[s] * tn[E[e, 3]]).sum(axis=1)
+            m = np.where((cx >= cy)[:, None], mX[e], mY[e])
+            keep = (np.maximum(cx, cy) >= cos) & (((p - q) * m).sum(axis=1) >= -1e-3 * width) & (dist < width)
+            if not keep.any():
+                continue
+            i, e, x = i[keep], e[keep], dist[keep] / width
+            g = cc['strength'][e] * (1.0 - x * x * (3.0 - 2.0 * x))
+            conv = cc['sign'][e] > 0
+            np.maximum.at(hi, i[conv], g[conv])
+            np.maximum.at(lo, i[~conv], g[~conv])
+        val = val + hi - lo
+    return np.clip(val, -1.0, 1.0)
+
+
+def write_curvature(folder, stem, m, pos, tris, cn, width, threads=None, rows=256):
+    """The curvature master <stem>.curv.jxl (or .curv.png) in the AO master's layout (the .ao.map's faces, m's muv),
+    from the triangles of the master (tris (T,3) into pos, cn (T,3,3), in tri_src order). Not filled pixels: flat.
+    Returns dict(path, edges, seconds)."""
+    t0 = time.time()
+    cc = curvature_context(pos, tris, cn, width)
+    _img, mp, _npz = master_paths(folder, stem)
+    W, H, gen = map_rows(mp, rows)
+    jx, pn = image_paths(folder, stem, 'curv')
+    lib = jxl()
+    path, other = (jx, pn) if lib.available() else (pn, jx)
+    w = lib.Writer(path + '.tmp', W, H, threads=threads or lib.THREADS) if lib.available() else \
+        PngRowWriter(path + '.tmp', W, H, bits=16, channels=1)
+    muv = m['muv']
+    P = pos[tris]
+    try:
+        top = 0
+        for block in gen:  # rows from the top: file row r is master pixel row H - 1 - r
+            n = block.shape[0]
+            out = np.full((n, W), CURV_FLAT, np.uint16)
+            filled, face = code_filled(block), code_face(block)
+            rr, xx = np.nonzero(filled & (face >= 0))
+            if len(rr):
+                f = face[rr, xx]
+                py = (H - 1 - (top + rr)) + 0.5
+                a, b, c = muv[f, 0], muv[f, 1], muv[f, 2]
+                v1, v2 = b - a, c - a
+                vx, vy = xx + 0.5 - a[:, 0], py - a[:, 1]
+                den = v1[:, 0] * v2[:, 1] - v1[:, 1] * v2[:, 0]
+                den = np.where(np.abs(den) > 1e-12, den, 1e-12)
+                l1 = (vx * v2[:, 1] - vy * v2[:, 0]) / den
+                l2 = (v1[:, 0] * vy - v1[:, 1] * vx) / den
+                bary = np.stack([1 - l1 - l2, l1, l2], 1)
+                P3 = np.einsum('nk,nkd->nd', bary, P[f])
+                out[rr, xx] = np.rint((0.5 + 0.5 * curvature_at(cc, f, bary, P3)) * 65535.0).astype(np.uint16)
+            w.write(out)
+            top += n
+        w.close()
+    except BaseException:
+        w.abort()
+        raise
+    os.replace(path + '.tmp', path)
+    try:
+        os.remove(other)
+    except OSError:
+        pass
+    return dict(path=path, edges=int(cc['edges']), seconds=round(time.time() - t0, 2))
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Denoise (decision 56): an adaptive, geometry-aware filter of a master, guided by its geometry and its curvature master
+# ---------------------------------------------------------------------------------------------------------------------
+#
+# A-trous joint bilateral filter (the B3 spline, 5 x 5 taps at steps 1, 2, 4 ... px): a neighbour pixel counts with
+#   the spatial weight of its 3D distance (Gaussian, sigma = the radius times the pixel's flatness), 0 across a shading
+#   normal change over the normal angle (sharp edges; and islands far apart in 3D get no spatial weight), and the
+#   range weight of the AO difference against the two pixels' noise (Gaussian, Detail x their noise): a real change
+#   of the AO (a contact shadow) is kept, a change within the noise is smoothed. The noise variance per pixel is
+#   alpha v (1 - v), alpha measured from the master itself (the residual against the 4 neighbours on the same face) or
+#   1 / samples; it is carried through the levels. The curvature master guides it (curv_mode): SIMILAR, a neighbour
+#   counts less the more its curvature differs (Gaussian, sigma Threshold), so a sharp edge's band is smoothed along
+#   the edge, not across it; SHRINK, the radius times the flatness (1 at flat grey, 0 at Threshold from grey and
+#   beyond), so edge bands and tight bends are left as baked; OFF. Measured on the console buttons (Session 39):
+#   SHRINK left the bands' noise and did worse than OFF.
+# Banded: the rows from the top in bands, each read with a halo of the levels' reach from the raw master paged; one
+#   band and its halo are held, whatever the master's size. Pixels without a face (gutter) keep their raw value.
+
+DN_KERNEL = np.array([1 / 16, 1 / 4, 3 / 8, 1 / 4, 1 / 16], np.float32)
+DN_VAR_FLOOR = 0.0025  # v (1 - v) at least this: near black and white the noise is not 0 in practice
+DN_BAND = 128  # rows per band
+DN_MEASURE_RANGE = (0.02, 0.98)  # the AO of the pixels the noise is measured on
+DN_CHI2_MEDIAN = 0.4549  # the median of a chi-square with 1 degree of freedom (the noise from squared residuals)
+DN_DEFAULTS = dict(radius=0.001, strength=1.0, max_levels=5, detail=3.0, normal_deg=30.0, curv_mode='SIMILAR',
+                   curv_threshold=0.1, noise='MEASURED', samples=256)
+
+
+def denoise_levels(radius_px, max_levels):
+    """The a-trous levels whose spread reaches radius_px (the B3 kernel spreads sqrt((4^L - 1) / 3) px after L
+    levels), at least 1 and at most max_levels."""
+    L = 1
+    while L < max_levels and math.sqrt((4 ** L - 1) / 3.0) < radius_px:
+        L += 1
+    return L
+
+
+def page_image(path, W, H, page_path, cache_bytes):
+    """A master-sized 16-bit image (JPEG XL or PNG) decoded once into a tiled scratch file, read as a PagedArray
+    (row 0 the bottom). The caller closes it and removes page_path."""
+    if path.endswith('.jxl'):
+        lib = jxl()
+        if not lib.available():
+            raise lib.JxlError(f'{path}: the JPEG XL library is not loaded ({lib.error()})')
+        if tuple(lib.info(path)) != (W, H):
+            raise ValueError(f'{path}: {lib.info(path)}, the layout says {W} x {H}')
+        sink = _TiledSink(page_path, H, W)
+        try:
+            lib.decode_rows(path, sink.put, threads=lib.DECODE_THREADS)
+        finally:
+            sink.f.close()
+        sink.close()
+    else:
+        reader = PngRows(path)
+        if (reader.w, reader.h) != (W, H):
+            reader.close()
+            raise ValueError(f'{path}: {reader.w} x {reader.h} px, the layout says {W} x {H}')
+        tw = _TiledWriter(page_path, H, W, np.uint16)
+        for block in reader:
+            tw.write(block[:, :, 0] if block.ndim == 3 else block)
+        tw.close()
+    return PagedArray(page_path, H, W, np.uint16, cache_bytes)
+
+
+def _dn_window(master, ys, W):
+    yi, xi = np.broadcast_arrays(ys[:, None], np.arange(W)[None, :])
+    v = master['image'][yi, xi].astype(np.float32) / 65535.0
+    face = master['face_map'][yi, xi]
+    filled = master['filled'][yi, xi]
+    return v, np.where(filled, face, -1), (yi, xi)
+
+
+def _dn_geometry(face, ys, muv, P, CN):
+    """3D position and interpolated shading normal of each pixel with a face (NaN / 0 elsewhere); P None: the normal
+    only (POS None)."""
+    h, W = face.shape
+    POS = np.zeros((h, W, 3), np.float32) if P is not None else None
+    NRM = np.zeros((h, W, 3), np.float32)
+    rr, xx = np.nonzero(face >= 0)
+    if not len(rr):
+        return POS, NRM
+    f = face[rr, xx]
+    a, b, c = muv[f, 0], muv[f, 1], muv[f, 2]
+    v1, v2 = b - a, c - a
+    vx, vy = xx + 0.5 - a[:, 0], ys[rr] + 0.5 - a[:, 1]
+    den = v1[:, 0] * v2[:, 1] - v1[:, 1] * v2[:, 0]
+    den = np.where(np.abs(den) > 1e-12, den, 1e-12)
+    l1 = (vx * v2[:, 1] - vy * v2[:, 0]) / den
+    l2 = (v1[:, 0] * vy - v1[:, 1] * vx) / den
+    bary = np.stack([1 - l1 - l2, l1, l2], 1)
+    if P is not None:
+        POS[rr, xx] = np.einsum('nk,nkd->nd', bary, P[f])
+    n = np.einsum('nk,nkd->nd', bary, CN[f])
+    n /= np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-30)
+    NRM[rr, xx] = n
+    return POS, NRM
+
+
+def noise_alpha(master, W, H, band=DN_BAND, every=4, cap=4_000_000):
+    """The master's noise as alpha in variance = alpha v (1 - v): from the residual of each pixel against its 4
+    neighbours on the same face (variance 5/4 of the noise's), the median over every `every`-th band. Only partly
+    occluded pixels (DN_MEASURE_RANGE) count: an unoccluded one is exactly white, without noise, and an object mostly
+    in the open would otherwise measure no noise at all. None without such pixels."""
+    got, n = [], 0
+    for y0 in range(0, H, band * every):
+        ys = np.arange(y0, min(H, y0 + band))
+        if len(ys) < 3:
+            continue
+        v, face, _ = _dn_window(master, ys, W)
+        c, f = v[1:-1, 1:-1], face[1:-1, 1:-1]
+        same = (f >= 0) & (f == face[:-2, 1:-1]) & (f == face[2:, 1:-1]) & (f == face[1:-1, :-2]) & (f == face[1:-1, 2:])
+        same &= (c > DN_MEASURE_RANGE[0]) & (c < DN_MEASURE_RANGE[1])
+        if not same.any():
+            continue
+        m4 = (v[:-2, 1:-1] + v[2:, 1:-1] + v[1:-1, :-2] + v[1:-1, 2:]) / 4
+        q = np.maximum(c * (1 - c), DN_VAR_FLOOR)
+        r = ((c - m4) ** 2 / 1.25 / q)[same]
+        got.append(r)
+        n += len(r)
+        if n >= cap:
+            break
+    if not got:
+        return None
+    return float(np.median(np.concatenate(got)) / DN_CHI2_MEDIAN)
+
+
+def _dn_slices(n, d):
+    """(destination, source) slices of an axis of n for the neighbour at i + d."""
+    return (slice(0, n - d), slice(d, n)) if d >= 0 else (slice(-d, n), slice(0, n + d))
+
+
+def denoise_window(v0, valid, POS, NRM, sig, var0, levels, detail, cos_min, C=None, c_sigma=0.1):
+    """The a-trous joint bilateral filter on a window (see above). sig: the spatial sigma per pixel (m), var0 the
+    noise variance per pixel, C the curvature per pixel (0..1) or None. Returns (the filtered values, their noise variance) (valid pixels; the others as given)."""
+    h, W = v0.shape
+    v, var = v0.copy(), var0.copy()
+    s2 = (2.0 * sig * sig).astype(np.float32) + np.float32(1e-20)
+    k2 = np.float32(2.0 * detail * detail)
+    c2 = np.float32(2.0 * c_sigma * c_sigma)
+    for lv in range(levels):
+        step = 2 ** lv
+        sw = np.zeros((h, W), np.float32)
+        swv = np.zeros((h, W), np.float32)
+        sw2 = np.zeros((h, W), np.float32)
+        for iy in range(5):
+            dy = (iy - 2) * step
+            if abs(dy) >= h:
+                continue
+            ydst, ysrc = _dn_slices(h, dy)
+            for ix in range(5):
+                dx = (ix - 2) * step
+                if abs(dx) >= W:
+                    continue
+                xdst, xsrc = _dn_slices(W, dx)
+                c, j = (ydst, xdst), (ysrc, xsrc)
+                ok = valid[c] & valid[j]
+                if not ok.any():
+                    continue
+                d = POS[c] - POS[j]
+                w = np.exp(-np.einsum('hwc,hwc->hw', d, d) / s2[c])
+                w *= DN_KERNEL[iy] * DN_KERNEL[ix]
+                w *= np.einsum('hwc,hwc->hw', NRM[c], NRM[j]) >= cos_min
+                pred = v[j]
+                dv = v[c] - pred
+                w *= np.exp(-dv * dv / (k2 * (var[c] + var[j]) + np.float32(1e-12)))
+                if C is not None:
+                    dc = C[c] - C[j]
+                    w *= np.exp(-dc * dc / c2)
+                w *= ok
+                sw[c] += w
+                swv[c] += w * pred
+                sw2[c] += w * w * var[j]
+        good = valid & (sw > 0)
+        v = np.where(good, swv / np.maximum(sw, 1e-30), v)
+        var = np.where(good, sw2 / np.maximum(sw * sw, np.float32(1e-30)), var)
+    return v, var
+
+
+def denoise_master(folder, stem, pos, tris, cn, opts, threads=None, band=DN_BAND, on_band=None, cache_bytes=None):
+    """Decision 56: the raw master <stem>.ao.raw.jxl (or .png) filtered into the master <stem>.ao.jxl (or .png), in
+    bands from the top (see above); tris (T,3) into pos, cn (T,3,3), in tri_src order (as write_curvature). opts:
+    DN_DEFAULTS' keys (radius m, strength, max_levels, detail, normal_deg, curv_mode OFF / SIMILAR / SHRINK,
+    curv_threshold, noise MEASURED or SAMPLES, samples). The curvature master guides it when it exists. on_band(i, n) after each band.
+    Returns the stats (alpha, levels, radius_px, curvature used, pixels, mean change, seconds)."""
+    t0 = time.time()
+    cache_bytes = cache_bytes or PAGE_CACHE_BYTES
+    o = dict(DN_DEFAULTS, **opts)
+    raw = master_paths(folder, stem, 'ao.raw')[0]
+    if not os.path.isfile(raw):
+        raise FileNotFoundError(f'{raw}: no raw master')
+    master = open_master(folder, stem, cache_bytes=cache_bytes, kind='ao.raw')
+    if master is None:
+        raise FileNotFoundError(f'{stem}: the raw master or its layout is missing')
+    curv_img, curv_page = None, None
+    try:
+        W, H = master['W'], master['H']
+        cpath = master_paths(folder, stem, 'curv')[0]
+        if o['curv_mode'] != 'OFF' and os.path.isfile(cpath):
+            curv_page = os.path.join(folder, stem) + '.curv.dnpage'
+            curv_img = page_image(cpath, W, H, curv_page, cache_bytes // 3)
+        density = float(master['density'])  # px per m
+        radius_px = float(o['radius']) * density
+        levels = denoise_levels(radius_px, int(o['max_levels']))
+        halo = 2 * (2 ** levels - 1)
+        if o['noise'] == 'SAMPLES':
+            alpha = 1.0 / max(int(o['samples']), 1)
+        else:
+            alpha = noise_alpha(master, W, H)
+            if alpha is None:
+                alpha = 1.0 / max(int(o['samples']), 1)
+        P = pos[tris].astype(np.float32)
+        CN = np.asarray(cn, np.float32)
+        muv = master['muv']
+        cos_min = np.float32(math.cos(math.radians(float(o['normal_deg']))))
+        strength = float(o['strength'])
+        dst = os.path.join(folder, stem) + ('.ao.jxl' if raw.endswith('.jxl') else '.ao.png')
+        other = os.path.join(folder, stem) + ('.ao.png' if raw.endswith('.jxl') else '.ao.jxl')
+        lib = jxl()
+        w = lib.Writer(dst + '.tmp', W, H, threads=threads or lib.THREADS) if dst.endswith('.jxl') else \
+            PngRowWriter(dst + '.tmp', W, H, bits=16, channels=1)
+        n_px, change = 0, 0.0
+        nb = -(-H // band)
+        try:
+            for i, top in enumerate(range(0, H, band)):
+                y1 = H - top
+                y0 = max(0, y1 - band)
+                wa, wb = max(0, y0 - halo), min(H, y1 + halo)
+                ys = np.arange(wa, wb)
+                v0, face, idx = _dn_window(master, ys, W)
+                raw16 = master['image'][idx[0][y0 - wa:y1 - wa], idx[1][y0 - wa:y1 - wa]]
+                valid = face >= 0
+                if valid.any() and strength > 0:
+                    POS, NRM = _dn_geometry(face, ys, muv, P, CN)
+                    C = None if curv_img is None else curv_img[idx].astype(np.float32) / 65535.0
+                    thr = max(float(o['curv_threshold']), 1e-6)
+                    if C is not None and o['curv_mode'] == 'SHRINK':
+                        flat = np.clip(1.0 - np.abs(C - 0.5) * 2.0 / thr, 0.0, 1.0)
+                        C = None
+                    else:
+                        flat = np.ones_like(v0)
+                    sig = (np.float32(o['radius']) * flat).astype(np.float32)
+                    var0 = (alpha * np.maximum(v0 * (1 - v0), DN_VAR_FLOOR)).astype(np.float32)
+                    out, var1 = denoise_window(v0, valid, POS, NRM, sig, var0, levels, float(o['detail']), cos_min,
+                                               C, thr)
+                    r = slice(y0 - wa, y1 - wa)
+                    vb, okb = v0[r], valid[r]
+                    res = np.where(okb, vb + strength * (out[r] - vb), vb)
+                    q = np.clip(np.rint(res * 65535.0), 0, 65535).astype(np.uint16)
+                    q = np.where(okb, q, raw16)
+                    n_px += int(okb.sum())
+                    change += float(np.abs(res - vb)[okb].sum())
+                else:
+                    q = raw16
+                w.write(np.ascontiguousarray(q[::-1]))  # file rows from the top
+                if on_band is not None:
+                    on_band(i + 1, nb)
+            w.close()
+        except BaseException:
+            w.abort()
+            raise
+        os.replace(dst + '.tmp', dst)
+        try:
+            os.remove(other)
+        except OSError:
+            pass
+    finally:
+        master['close']()
+        if curv_img is not None:
+            curv_img.close()
+            try:
+                os.remove(curv_page)
+            except OSError:
+                pass
+    return dict(alpha=round(alpha, 6), noise=round(math.sqrt(alpha * 0.25), 5), levels=int(levels),
+                radius_px=round(radius_px, 2), curvature=o['curv_mode'] if curv_img is not None else 'OFF', px=int(n_px),
+                mean_change=round(change / max(n_px, 1), 6), seconds=round(time.time() - t0, 2))
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Denoise with Open Image Denoise (OIDN, the denoiser Blender ships), islands isolated
+# ---------------------------------------------------------------------------------------------------------------------
+#
+# OIDN's RT filter (the AO as colour, a white albedo, the pixels' shading normals) sees an image, not islands: run on
+# the master as it is, the islands next to one another in it bleed into each other. So the islands are isolated: they
+# are split into groups whose islands lie at least 2 x OIDN_GROUP_PX apart (a greedy colouring of the islands within
+# that distance), and per group an image holds only that group's islands, each grown OIDN_EDGE_PX pixels outward with
+# its own edge values and normals (one pixel a step), the rest filled by push-pull (each empty pixel the mean of the
+# nearest coarser level with island pixels). OIDN runs once per group; each island keeps its own group's result right
+# up to its border. Measured on the console buttons (256 samples against 1024): master RMS 0.0025, 4 x 4 0.0010, as
+# the Surface Filter at Detail 6. Banded: windows of rows with a halo of OIDN_HALO rows, so a master of any size fits.
+# Pixels without a face (gutter) keep their raw value. The device: the GPU OIDN finds when the bake runs on the GPU
+# (else, or when that fails, the CPU).
+
+OIDN_GROUP_PX = 24
+OIDN_EDGE_PX = 4
+OIDN_HALO = 128
+OIDN_WINDOW_PX = 8_000_000  # pixels of a window (its band and halo) at most
+OIDN_DEVICES = {'GPU': 0, 'CPU': 1}  # OIDN_DEVICE_TYPE_DEFAULT (the fastest it finds), OIDN_DEVICE_TYPE_CPU
+_oidn_cache = {}
+
+
+def oidn_library():
+    """Blender's OpenImageDenoise library through ctypes (loaded once); RuntimeError when it is not there."""
+    if 'lib' in _oidn_cache:
+        return _oidn_cache['lib']
+    import ctypes
+    import glob
+    import bpy
+    folder = os.path.join(os.path.dirname(bpy.app.binary_path), 'blender.shared')
+    names = (['OpenImageDenoise.dll'] if os.name == 'nt' else
+             sorted(os.path.basename(p) for p in glob.glob(os.path.join(folder, 'libOpenImageDenoise.*'))))
+    path = os.path.join(folder, names[0]) if names else ''
+    if not path or not os.path.isfile(path):
+        raise RuntimeError(f'Open Image Denoise not found beside Blender ({folder})')
+    if hasattr(os, 'add_dll_directory'):
+        os.add_dll_directory(folder)
+    lib = ctypes.CDLL(path)
+    vp, cp, sz = ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t
+    sig = dict(oidnNewDevice=(vp, [ctypes.c_int]), oidnCommitDevice=(None, [vp]), oidnNewFilter=(vp, [vp, cp]),
+               oidnNewBuffer=(vp, [vp, sz]), oidnWriteBuffer=(None, [vp, sz, sz, vp]),
+               oidnReadBuffer=(None, [vp, sz, sz, vp]),
+               oidnSetFilterImage=(None, [vp, cp, vp, ctypes.c_int, sz, sz, sz, sz, sz]),
+               oidnSetFilterBool=(None, [vp, cp, ctypes.c_bool]), oidnSetFilterInt=(None, [vp, cp, ctypes.c_int]),
+               oidnCommitFilter=(None, [vp]), oidnExecuteFilter=(None, [vp]),
+               oidnGetDeviceError=(ctypes.c_int, [vp, ctypes.POINTER(cp)]), oidnReleaseFilter=(None, [vp]),
+               oidnReleaseBuffer=(None, [vp]), oidnReleaseDevice=(None, [vp]))
+    for name, (res, args) in sig.items():
+        fn = getattr(lib, name)
+        fn.restype, fn.argtypes = res, args
+    _oidn_cache['lib'] = lib
+    return lib
+
+
+def _oidn_error(lib, dev):
+    import ctypes
+    msg = ctypes.c_char_p()
+    code = lib.oidnGetDeviceError(dev, ctypes.byref(msg))
+    return f'{code} {msg.value.decode(errors="replace") if msg.value else ""}'.strip() if code else ''
+
+
+def oidn_device(kind):
+    """(lib, device handle, the device used): the GPU OIDN finds for 'GPU' (the CPU when it finds none or fails)."""
+    lib = oidn_library()
+    for name in ((kind, 'CPU') if kind != 'CPU' else ('CPU',)):
+        dev = lib.oidnNewDevice(OIDN_DEVICES.get(name, 1))
+        if dev:
+            lib.oidnCommitDevice(dev)
+            if not _oidn_error(lib, dev):
+                return lib, dev, name
+            lib.oidnReleaseDevice(dev)
+    raise RuntimeError('Open Image Denoise: no device could be made')
+
+
+def oidn_run(lib, dev, color, normal):
+    """OIDN's RT filter on one image: color (h, w) in 0..1, normal (h, w, 3); a white albedo. Returns (h, w)."""
+    h, w = color.shape
+    c3 = np.ascontiguousarray(np.repeat(color[..., None], 3, axis=2), np.float32)
+    nbytes = c3.nbytes
+    bufs = []
+
+    def buf(arr):
+        b = lib.oidnNewBuffer(dev, nbytes)
+        a = np.ascontiguousarray(arr, np.float32)
+        lib.oidnWriteBuffer(b, 0, nbytes, a.ctypes.data)
+        bufs.append(b)
+        return b
+    f = lib.oidnNewFilter(dev, b'RT')
+    try:
+        lib.oidnSetFilterImage(f, b'color', buf(c3), 3, w, h, 0, 0, 0)  # 3: OIDN_FORMAT_FLOAT3
+        lib.oidnSetFilterImage(f, b'albedo', buf(np.ones_like(c3)), 3, w, h, 0, 0, 0)
+        lib.oidnSetFilterImage(f, b'normal', buf(normal), 3, w, h, 0, 0, 0)
+        out = lib.oidnNewBuffer(dev, nbytes)
+        bufs.append(out)
+        lib.oidnSetFilterImage(f, b'output', out, 3, w, h, 0, 0, 0)
+        lib.oidnSetFilterBool(f, b'hdr', False)
+        lib.oidnSetFilterBool(f, b'srgb', False)
+        lib.oidnSetFilterBool(f, b'cleanAux', True)
+        lib.oidnSetFilterInt(f, b'quality', 6)  # OIDN_QUALITY_HIGH
+        lib.oidnCommitFilter(f)
+        lib.oidnExecuteFilter(f)
+        err = _oidn_error(lib, dev)
+        if err:
+            raise RuntimeError(f'Open Image Denoise: {err}')
+        res = np.empty_like(c3)
+        lib.oidnReadBuffer(out, 0, nbytes, res.ctypes.data)
+    finally:
+        lib.oidnReleaseFilter(f)
+        for b in bufs:
+            lib.oidnReleaseBuffer(b)
+    return res[..., 0]
+
+
+_SHIFTS = ((1, 0), (-1, 0), (0, 1), (0, -1))
+
+
+def _dilate_labels(lab, steps, vals=()):
+    """Labels grown `steps` pixels (4-neighbour, the first to arrive wins); vals: arrays (h, w[, C]) carried with
+    them (the mean of the arriving neighbours of the same label). Returns (labels, vals).
+
+    Works on the growing edge only (the pixels a step can reach are the empty neighbours of the pixels the step before
+    labelled), in a copy padded by one pixel so the neighbours need no bounds; the neighbours are read in _SHIFTS order
+    and the means summed in that order in float32, as a whole-image step would."""
+    h, w = lab.shape
+    W2 = w + 2
+    Lp = np.full((h + 2, W2), -2, lab.dtype)  # -2: the border, never labelled; -1: empty
+    Lp[1:-1, 1:-1] = np.where(lab >= 0, lab, -1)
+    Lf = Lp.ravel()
+    vals = [v.copy() for v in vals]
+    flat = [v.reshape(h * w, -1) for v in vals]  # views of the copies
+    offs = tuple(dy * W2 + dx for dy, dx in _SHIFTS)
+    inner = Lp[1:-1, 1:-1]
+    empty_nb = np.zeros((h, w), bool)
+    for dy, dx in _SHIFTS:
+        empty_nb |= Lp[1 + dy:h + 1 + dy, 1 + dx:w + 1 + dx] == -1
+    yy, xx = np.nonzero((inner >= 0) & empty_nb)
+    front = (yy + 1) * W2 + xx + 1
+    for _k in range(steps):
+        if not len(front):
+            break
+        nb = (front[:, None] + np.array(offs)[None, :]).ravel()
+        nb = np.unique(nb[Lf[nb] == -1])
+        if not len(nb):
+            break
+        cand = np.full(len(nb), -1, Lf.dtype)
+        for o in offs:
+            src = Lf[nb + o]
+            take = (cand < 0) & (src >= 0)
+            cand[take] = src[take]
+        for v in flat:
+            acc = np.zeros((len(nb), v.shape[1]), np.float32)
+            cnt = np.zeros(len(nb), np.float32)
+            for o in offs:
+                q = nb + o
+                same = (Lf[q] == cand) & (Lf[q] >= 0)
+                qs = q[same]
+                acc[same] += v[(qs // W2 - 1) * w + qs % W2 - 1]
+                cnt[same] += 1
+            f = (nb // W2 - 1) * w + nb % W2 - 1
+            v[f] = acc / np.maximum(cnt, 1)[:, None]
+        Lf[nb] = cand
+        front = nb
+    return np.where(inner >= 0, inner, lab), vals
+
+
+def _push_pull(v, wgt):
+    """Empty pixels (wgt 0) filled from a pyramid of masked means: each takes the value of the finest coarser level
+    that has island pixels there (nearest upsampling, so the fill next to an island is its own edge)."""
+    levels = []
+    cv = v * (wgt[..., None] if v.ndim == 3 else wgt)
+    cw = wgt.astype(np.float32)
+    while max(cw.shape) > 1:
+        h2, w2 = -(-cw.shape[0] // 2), -(-cw.shape[1] // 2)
+        pv = np.zeros((h2 * 2, w2 * 2) + cv.shape[2:], np.float32)
+        pw = np.zeros((h2 * 2, w2 * 2), np.float32)
+        pv[:cv.shape[0], :cv.shape[1]] = cv
+        pw[:cw.shape[0], :cw.shape[1]] = cw
+        cv = pv.reshape(h2, 2, w2, 2, *cv.shape[2:]).sum(axis=(1, 3))
+        cw = pw.reshape(h2, 2, w2, 2).sum(axis=(1, 3))
+        levels.append((cv, cw))
+    fill = None
+    for cv, cw in reversed(levels):
+        has = (cw > 0)[..., None] if cv.ndim == 3 else cw > 0
+        mean = cv / (np.maximum(cw, 1e-12)[..., None] if cv.ndim == 3 else np.maximum(cw, 1e-12))
+        if fill is not None:
+            up = np.repeat(np.repeat(fill, 2, 0), 2, 1)[:mean.shape[0], :mean.shape[1]]
+            mean = np.where(has, mean, up)
+        fill = mean
+    if fill is None:
+        return v
+    up = np.repeat(np.repeat(fill, 2, 0), 2, 1)[:v.shape[0], :v.shape[1]]
+    return np.where((wgt > 0)[..., None] if v.ndim == 3 else wgt > 0, v, up)
+
+
+def oidn_isolated(lib, dev, v0, nrm, isl, n_islands):
+    """OIDN on a window with its islands isolated (see above): v0 (h, w) the AO, nrm (h, w, 3), isl (h, w) the island
+    of each face pixel (-1 none), n_islands the number of the master's islands. Returns (values, groups)."""
+    out = v0.copy()
+    if not (isl >= 0).any():
+        return out, 0
+    grown, _ = _dilate_labels(isl, OIDN_GROUP_PX)
+    pairs = []
+    for a, b in ((grown[:, :-1], grown[:, 1:]), (grown[:-1], grown[1:])):
+        m = (a >= 0) & (b >= 0) & (a != b)
+        pairs.append(np.stack([np.minimum(a[m], b[m]), np.maximum(a[m], b[m])], 1))
+    pairs = np.unique(np.concatenate(pairs), axis=0) if any(len(p) for p in pairs) else np.zeros((0, 2), np.int64)
+    present = np.unique(isl[isl >= 0])
+    nbr = {int(i): [] for i in present}
+    for a, b in pairs.tolist():
+        if a in nbr and b in nbr:
+            nbr[a].append(b)
+            nbr[b].append(a)
+    color = np.full(n_islands, -1, np.int64)
+    for i in sorted(nbr, key=lambda k: -len(nbr[k])):
+        used = {int(color[j]) for j in nbr[i]}
+        c = 0
+        while c in used:
+            c += 1
+        color[i] = c
+    groups = int(color[present].max()) + 1
+    for g in range(groups):
+        lab = np.where((isl >= 0) & (color[np.maximum(isl, 0)] == g), isl, -1)
+        sel = lab >= 0
+        vv = np.where(sel, v0, 0).astype(np.float32)
+        nn = np.where(sel[..., None], nrm, 0).astype(np.float32)
+        lab2, (vv, nn) = _dilate_labels(lab, OIDN_EDGE_PX, (vv, nn))
+        wgt = (lab2 >= 0).astype(np.float32)
+        vv = _push_pull(np.where(lab2 >= 0, vv, 0), wgt)
+        nn = _push_pull(np.where((lab2 >= 0)[..., None], nn, 0), wgt)
+        nn /= np.maximum(np.linalg.norm(nn, axis=2, keepdims=True), 1e-6)
+        res = oidn_run(lib, dev, vv, nn)
+        out[sel] = res[sel]
+    return out, groups
+
+
+def denoise_master_oidn(folder, stem, pos, tris, cn, opts, device='GPU', on_band=None, cache_bytes=None):
+    """The raw master <stem>.ao.raw.jxl (or .png) denoised by OIDN with its islands isolated (see above) into the master
+    <stem>.ao.jxl (or .png); tris, pos, cn as denoise_master. opts: method OIDN, strength. on_band(i, n) after each
+    window. Returns the stats (method, device, groups at most, windows, pixels, mean change, seconds)."""
+    t0 = time.time()
+    cache_bytes = cache_bytes or PAGE_CACHE_BYTES
+    strength = float(opts.get('strength', 1.0))
+    raw = master_paths(folder, stem, 'ao.raw')[0]
+    if not os.path.isfile(raw):
+        raise FileNotFoundError(f'{raw}: no raw master')
+    lib, dev, used = oidn_device(device)
+    master = open_master(folder, stem, cache_bytes=cache_bytes, kind='ao.raw')
+    if master is None:
+        lib.oidnReleaseDevice(dev)
+        raise FileNotFoundError(f'{stem}: the raw master or its layout is missing')
+    try:
+        W, H = master['W'], master['H']
+        island = master['island']
+        n_islands = int(island.max()) + 1 if len(island) else 0
+        CN = np.asarray(cn, np.float32)
+        muv = master['muv']
+        dst = os.path.join(folder, stem) + ('.ao.jxl' if raw.endswith('.jxl') else '.ao.png')
+        other = os.path.join(folder, stem) + ('.ao.png' if raw.endswith('.jxl') else '.ao.jxl')
+        jl = jxl()
+        w = jl.Writer(dst + '.tmp', W, H, threads=jl.THREADS) if dst.endswith('.jxl') else \
+            PngRowWriter(dst + '.tmp', W, H, bits=16, channels=1)
+        band = max(64, OIDN_WINDOW_PX // max(W, 1) - 2 * OIDN_HALO)
+        nb = -(-H // band)
+        n_px, change, groups = 0, 0.0, 0
+        try:
+            for i, top in enumerate(range(0, H, band)):
+                y1 = H - top
+                y0 = max(0, y1 - band)
+                wa, wb = max(0, y0 - OIDN_HALO), min(H, y1 + OIDN_HALO)
+                ys = np.arange(wa, wb)
+                v0, face, idx = _dn_window(master, ys, W)
+                r = slice(y0 - wa, y1 - wa)
+                raw16 = master['image'][idx[0][r], idx[1][r]]
+                valid = face >= 0
+                if valid[r].any() and strength > 0:
+                    _none, NRM = _dn_geometry(face, ys, muv, None, CN)  # OIDN reads only the normal
+                    isl = np.where(valid, island[np.maximum(face, 0)], -1)
+                    out, g = oidn_isolated(lib, dev, v0, NRM, isl, n_islands)
+                    groups = max(groups, g)
+                    vb, okb = v0[r], valid[r]
+                    res = np.where(okb, vb + strength * (np.clip(out[r], 0.0, 1.0) - vb), vb)
+                    q = np.clip(np.rint(res * 65535.0), 0, 65535).astype(np.uint16)
+                    q = np.where(okb, q, raw16)
+                    n_px += int(okb.sum())
+                    change += float(np.abs(res - vb)[okb].sum())
+                else:
+                    q = raw16
+                w.write(np.ascontiguousarray(q[::-1]))  # file rows from the top
+                if on_band is not None:
+                    on_band(i + 1, nb)
+            w.close()
+        except BaseException:
+            w.abort()
+            raise
+        os.replace(dst + '.tmp', dst)
+        try:
+            os.remove(other)
+        except OSError:
+            pass
+    finally:
+        master['close']()
+        lib.oidnReleaseDevice(dev)
+    return dict(method='OIDN', device=used, groups=groups, windows=nb, px=int(n_px),
+                mean_change=round(change / max(n_px, 1), 6), seconds=round(time.time() - t0, 2))
 
 
 def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode='tri', kmax=16, surface_cos=None,
-                same_face=False, ctx=None, chunk=COPY_CHUNK, soften=None):
+                same_face=False, ctx=None, chunk=COPY_CHUNK, soften=None, threads=None, backend=None):
     """Returns (image (h,w) with -1 where nothing was written, info). ctx: copy_context (computed here when None);
     chunk: sub-samples per step (the result does not depend on it). master['image'], ['filled'] and ['face_map'] may be
     arrays or PagedArray views (read a[yi, xi] with index arrays). soften: a soften_context, or None (decision 46: the
-    darker side of convex sharp edges brightened toward the edge, inside and padding pixels)."""
+    darker side of convex sharp edges brightened toward the edge, inside and padding pixels).
+
+    The inside pixels' sub-samples and the padding pixels' reads run in C++ (ao_bake_copy, apply-native-copy journal)
+    with `threads` threads (at most 12) when its DLL is loaded and the copy is one it does (outside_mode 'tri', not
+    same_face, a uint16 master without rect_id), bit-identical to the numpy code below, which runs otherwise or with
+    FSS_AO_COPY=numpy; backend 'numpy' forces the numpy code, 'native' raises when the C++ copy cannot run.
+    info['copy']: which ran ('native' or 'numpy'), info['copy_why']: why numpy ran."""
     x0, y0, w, h = crop
     if ctx is None:
         ctx = copy_context(pos, tris, uvpx, master, k, kmax)
@@ -998,6 +1856,19 @@ def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode=
             out_ = np.where(wsum_f > 1e-9, acc_f / np.maximum(wsum_f, 1e-30), out_)
         return out_
 
+    nat = native_copy()
+    use, why = nat.backend() if backend != 'numpy' else ('numpy', 'the numpy copy asked for')
+    prep = None
+    if use == 'native':
+        if outside_mode != 'tri' or same_face or int(kmax) > nat.MAX_LEVEL:
+            use, why = 'numpy', f'a copy the C++ code does not do (outside_mode {outside_mode}, same_face {same_face})'
+        else:
+            prep = nat.prepare(master, (PagedArray, _PagedView))
+            if prep is None:
+                use, why = 'numpy', 'a master the C++ code does not read (not uint16, rect_id, or other arrays)'
+    if backend == 'native' and use != 'native':
+        raise RuntimeError(f'the C++ copy cannot run: {why}')
+    surface_read = surface_cos is not None and face_map is not None
     owner_c, count_c = raster_window(uvpx, w, h, 1, x0, y0)
     out = np.full((h, w), -1.0)
     sig, kt_raw, kt = ctx['sig'], ctx['kt_raw'], ctx['kt']
@@ -1044,6 +1915,8 @@ def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode=
         out[pj_, pi_] = np.where(sw > 0, (vv * wv).sum(axis=1) / np.maximum(sw, 1e-30), cv)
         return c_
 
+    gx = np.zeros(len(jj), np.int64) if use == 'native' else None
+    gy = np.zeros(len(jj), np.int64) if use == 'native' else None
     for L in np.unique(lvl):
         at_level = np.nonzero(lvl == L)[0]
         # in square blocks whose sub-sample raster (the block's area x L x L) is at most `chunk`: the pixels of one
@@ -1052,8 +1925,22 @@ def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode=
         key = (jj[at_level] // side) * (w // side + 1) + ii[at_level] // side
         order = np.argsort(key, kind='stable')
         cuts = np.flatnonzero(np.diff(key[order])) + 1
+        if use == 'native':
+            # the C++ copy: each pixel with the corner of its block's raster grid (the box of the block's pixels), as
+            # inside_step rasterizes the block
+            idx = at_level[order]
+            starts = np.concatenate([[0], cuts]).astype(np.int64)
+            n_in = np.diff(np.append(starts, len(idx)))
+            gx[idx] = x0 + np.repeat(np.minimum.reduceat(ii[idx], starts), n_in)
+            gy[idx] = y0 + np.repeat(np.minimum.reduceat(jj[idx], starts), n_in)
+            continue
         for grp in np.split(at_level[order], cuts):
             n_cl_in += inside_step(int(L), grp)
+    if use == 'native' and len(jj):
+        vals_in, n_cl_in = nat.inside(prep, tri_normal, surface_cos, surface_read, uvpx, x0 + ii, y0 + jj,
+                                      owner_c[jj, ii], lvl, gx, gy, threads)
+        out[jj, ii] = vals_in
+        del vals_in
     soft_cos = SURFACE_COS if surface_cos is None else surface_cos
     n_soft = 0
     if soften is not None and len(jj):
@@ -1072,23 +1959,26 @@ def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode=
         bc_c = barycentric_many(cen, uvpx[T])
         kmin = np.argmin(bc_c, axis=1)
         U = nb[T, kmin]
-        cache = {}
-        tri_uv = np.zeros((len(T), 3, 2))
-        src = np.zeros(len(T), dtype=np.int64)
-        for n in range(len(T)):
-            t, kk, u = int(T[n]), int(kmin[n]), int(U[n])
-            if u < 0 or bc_c[n, kk] >= 0:
-                tri_uv[n] = uvpx[t]
-                src[n] = t
-                n_no_nb += int(u < 0)
-                continue
-            key = (t, kk)
-            if key not in cache:
-                cache[key] = _hinged_uv(pos, tris, wt, uvpx, t, kk, u)
-            tri_uv[n] = cache[key]
-            src[n] = u
+        # the pixel's own triangle where it has no neighbour across that edge or its centre is not beyond that edge;
+        # else the neighbour hinged flat across the edge, computed once per distinct (triangle, edge)
+        flat = (U < 0) | (bc_c[np.arange(len(T)), kmin] >= 0)
+        n_no_nb = int((U < 0).sum())
+        tri_uv = np.array(uvpx[T], dtype=np.float64)
+        src = np.array(T, dtype=np.int64)
+        hinge = np.nonzero(~flat)[0]
+        if len(hinge):
+            keys, inv = np.unique(T[hinge] * 3 + kmin[hinge], return_inverse=True)
+            hinged = np.array([_hinged_uv(pos, tris, wt, uvpx, key // 3, key % 3, int(nb[key // 3, key % 3]))
+                               for key in keys.tolist()]).reshape(-1, 3, 2)
+            tri_uv[hinge] = hinged[inv.ravel()]
+            src[hinge] = U[hinge]
         plvl = kt[T]
-        for L in np.unique(plvl):
+        if use == 'native':
+            vals_pad, n_cl_pad = nat.padding(prep, tri_normal, surface_cos, surface_read, x0 + pi, y0 + pj, src,
+                                             tri_uv, plvl, threads)
+            out[pj, pi] = vals_pad
+            del vals_pad
+        for L in (np.unique(plvl) if use != 'native' else ()):
             at_level = np.nonzero(plvl == L)[0]
             sub = (np.arange(L) + 0.5) / L
             sx, sy = np.meshgrid(sub, sub)
@@ -1116,7 +2006,8 @@ def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode=
                 px_at_k_cap=capped_px, footprint_px_median=float(np.median(sig)), footprint_px_max=float(sig.max()),
                 inside_px=int(len(ii)), padding_px=int(len(pi)), clamped_inside_points=n_cl_in,
                 clamped_padding_points=n_cl_pad, padding_without_neighbour=n_no_nb,
-                stacked_px=int((count_c > 1).sum()), softened_px=n_soft)
+                stacked_px=int((count_c > 1).sum()), softened_px=n_soft, copy=use, copy_why=why,
+                copy_threads=nat.threads_of(threads) if use == 'native' else 1)
     return out, info, owner_c, steps, count_c
 
 
@@ -1138,6 +2029,17 @@ K_MAX = 16
 SEEDS = (11, 12)  # core and skirt bakes
 EXTRUSION = 2e-5  # m, selected-to-active from the target (step3_master.py)
 RAY_DISTANCE = 4e-5
+
+
+SPLIT_MIN = 4  # decision 49: the fewest samples a view gets when the samples are split
+
+
+def view_samples(samples, n, split):
+    """Decision 49: the samples of one view of n averaged views (poses, a shared mesh's copies): the sample count
+    split over them (at least SPLIT_MIN) with Split Samples, else the full count."""
+    if not split or n <= 1:
+        return int(samples)
+    return max(SPLIT_MIN, -(-int(samples) // int(n)))
 
 
 def method_settings():
@@ -1173,6 +2075,10 @@ TILE_MIN = 512
 # 214 Mpx floor's bake 300 s in tiles of 1024 and 2048 px, 319 s in 4096 and 320 s in 8192 px, at 2.3, 2.3, 4.8 and
 # 16.2 GB), so more memory buys no time and the largest tile is 2048 px; a smaller budget gets smaller tiles
 TILE_SIZES = (2048, 1024, 512)
+# decision 50: a master of several views (poses, a shared mesh's copies) bakes every tile once per view, and much of a
+# Cycles bake's time does not grow with the tile (Session 38, GPU: 2.2 s for a 0.8 Mpx tile, 2.8 s for 4 Mpx), so
+# fewer, larger tiles are faster there: up to 8192 px when the budget allows
+TILE_SIZES_VIEWS = (8192, 4096, 2048, 1024, 512)
 
 
 # The memory model of the bake in tiles and pages (Sessions 20 and 23): per tile pixel Cycles' bake data and the tile's
@@ -1264,13 +2170,15 @@ def estimate(W, H, size, in_use):
             + BYTES_PER_BAND_PX * W * min(size, H))
 
 
-def choose_tile(W, H, budget, in_use):
+def choose_tile(W, H, budget, in_use, views=1):
     """The largest tile size whose bake fits the budget: the whole master when it is not larger than the largest of
     TILE_SIZES and fits, else the largest of TILE_SIZES that fits; in_use: the process's working set before the
-    master (Blender, the scene). The tile size is also the band's height (decision 33). Returns (size, estimate of the
-    peak in bytes, fits)."""
+    master (Blender, the scene). The tile size is also the band's height (decision 33). views: how many bakes each
+    tile gets (decision 50: more than one allows tiles up to 8192 px). Returns (size, estimate of the peak in bytes,
+    fits)."""
     longest = max(W, H)
-    sizes = ([longest] if longest <= TILE_SIZES[0] else []) + [s for s in TILE_SIZES if s < longest]
+    table = TILE_SIZES_VIEWS if views > 1 else TILE_SIZES  # decision 50
+    sizes = ([longest] if longest <= table[0] else []) + [s for s in table if s < longest]
     for s in sizes:
         est = estimate(W, H, s, in_use)
         if est <= budget:
@@ -1373,6 +2281,104 @@ def quantize16(values):
     return np.round(np.clip(np.asarray(values, dtype=np.float64), 0.0, 1.0) * 65535.0).astype(np.uint16)
 
 
+# The corner rule (decision 57): build_master places each island with the bottom of its rectangle on a row of pixel
+# centres (+ 0.5), and the minimum-area rectangle has a side along an edge of the island's outline, so in every island
+# at least one border edge runs through pixel centres. Such a pixel is baked from a point on the edge itself; at an
+# inside corner (a concave fold) the other face's plane passes through that point and part of its rays escape: the
+# console buttons (Session 41) had 6.6 % of their on-edge pixels at inside corners brighter than the pixel inward by
+# over 0.05 (0.07 against 0.001 at one wall), against 1.3 % just inside; Apply's padding copied them into the texture
+# as a light line. AO only darkens toward an inside corner, so along each island border edge across a concave fold the
+# baked pixels of that face within CORNER_PX of the edge may not be brighter than the pixel one step inward by more than
+# CORNER_EXCESS (well above the bake's noise): such a pixel takes the inward pixel's value. It runs in the composition,
+# before the gutter is filled from the baked pixels, so the raw master (and Denoise after it) starts corrected.
+CORNER_PX = 0.5
+CORNER_EXCESS = 0.02
+CORNER_RULE = 1  # in a master's index entry (corner_rule): its bake ran the rule (masters without it predate it)
+
+
+def corner_pairs(m, pos, tris):
+    """Decision 57: (cy, cx, iy, ix) int arrays sorted by cy: the pixels the corner rule checks and the pixel one step
+    inward of each, from the layout m (muv, island, W, H) and the triangles' 3D corners pos[tris] (master order)."""
+    muv, island = m['muv'], m['island']
+    W, H = int(m['W']), int(m['H'])
+    P = pos[tris]
+    tn = np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0])
+    tn /= np.maximum(np.linalg.norm(tn, axis=1, keepdims=True), 1e-30)
+    wt = weld_ids(pos)[tris]
+    out = []
+    for lst in edge_map(wt).values():
+        if len(lst) < 2:
+            continue
+        for (t, i, j) in lst:
+            if island[t] < 0:
+                continue
+            others = [(u, a, b) for (u, a, b) in lst if u != t]
+            if all(island[u] == island[t] for u, _a, _b in others):
+                continue  # an edge inside the island
+            u, ui, uj = others[0]
+            if float(tn[t] @ tn[u]) >= SURFACE_COS:
+                continue  # not a fold
+            a3 = P[t, i]
+            if (P[u, 3 - ui - uj] - a3) @ tn[t] < 0 and (P[t, 3 - i - j] - a3) @ tn[u] < 0:
+                continue  # convex: a rim brightens toward its edge for real
+            A, B = muv[t, i], muv[t, j]
+            e = B - A
+            L = float(np.linalg.norm(e))
+            if L < 1e-6:
+                continue
+            n = np.array([-e[1], e[0]]) / L
+            if (muv[t, 3 - i - j] - A) @ n < 0:
+                n = -n
+            s = np.linspace(0.0, 1.0, int(L * 2) + 2)
+            pts = A[None, :] + s[:, None] * e[None, :]
+            base = np.floor(pts).astype(np.int64)
+            cand = np.unique(np.concatenate([base + np.array([dx, dy]) for dx in (-1, 0, 1) for dy in (-1, 0, 1)]),
+                             axis=0)
+            c = cand + 0.5
+            d = (c - A) @ n
+            k = (d > -0.02) & (d < CORNER_PX)
+            if not k.any():
+                continue
+            cand, c = cand[k], c[k]
+            bc = barycentric_many(c, np.repeat(muv[t][None], len(c), axis=0))
+            k = (bc[:, i] >= -1e-6) & (bc[:, j] >= -1e-6)  # within the edge's span (its own coordinate is d)
+            cand, c = cand[k], c[k]
+            inw = np.floor(c + n).astype(np.int64)
+            k = ((cand[:, 0] >= 0) & (cand[:, 0] < W) & (cand[:, 1] >= 0) & (cand[:, 1] < H) & (inw[:, 0] >= 0)
+                 & (inw[:, 0] < W) & (inw[:, 1] >= 0) & (inw[:, 1] < H))
+            if k.any():
+                out.append(np.stack([cand[k, 1], cand[k, 0], inw[k, 1], inw[k, 0]], axis=1))
+    if not out:
+        return tuple(np.zeros(0, np.int64) for _ in range(4))
+    a = np.concatenate(out)
+    a = a[np.argsort(a[:, 0], kind='stable')]
+    return a[:, 0], a[:, 1], a[:, 2], a[:, 3]
+
+
+def corner_fix(pairs, M16e, baked_e, ex0, ey0, win):
+    """Decision 57 on a block (values M16e and baked flags over the window and its halo, bottom-left (ex0, ey0)): the
+    corner pixels in the block brighter than their inward pixel by over CORNER_EXCESS take its value. Returns (values,
+    the number changed inside the window `win`); the values are a copy when any changed."""
+    cy, cx, iy, ix = pairs
+    eh, ew = M16e.shape
+    a, b = np.searchsorted(cy, ey0), np.searchsorted(cy, ey0 + eh)
+    if a == b:
+        return M16e, 0
+    cy, cx, iy, ix = cy[a:b] - ey0, cx[a:b] - ex0, iy[a:b] - ey0, ix[a:b] - ex0
+    k = (cx >= 0) & (cx < ew) & (iy >= 0) & (iy < eh) & (ix >= 0) & (ix < ew)
+    cy, cx, iy, ix = cy[k], cx[k], iy[k], ix[k]
+    k = baked_e[cy, cx] & baked_e[iy, ix]
+    k &= M16e[cy, cx].astype(np.int64) - M16e[iy, ix] > int(CORNER_EXCESS * 65535)
+    if not k.any():
+        return M16e, 0
+    cy, cx, iy, ix = cy[k], cx[k], iy[k], ix[k]
+    out = M16e.copy()
+    np.minimum.at(out, (cy, cx), M16e[iy, ix])  # against the values as baked: one pass, in no order
+    x0, y0, w, h = win
+    inside = (cx + ex0 >= x0) & (cx + ex0 < x0 + w) & (cy + ey0 >= y0) & (cy + ey0 < y0 + h)
+    return out, int(len(np.unique(np.stack([cy[inside], cx[inside]], axis=1), axis=0)))
+
+
 def compose_block(m, M16e, baked_e, ex0, ey0, win):
     """The composition of a master (step3_master.py) for one window, after the tiles around it are baked.
 
@@ -1385,6 +2391,9 @@ def compose_block(m, M16e, baked_e, ex0, ey0, win):
     (h, w) int32) of the window."""
     x0, y0, w, h = win
     eh, ew = M16e.shape
+    n_corner = 0
+    if m.get('corner_pairs') is not None and len(m['corner_pairs'][0]):  # decision 57, before the gutter's fill
+        M16e, n_corner = corner_fix(m['corner_pairs'], M16e, baked_e, ex0, ey0, win)
     sub = (slice(y0 - ey0, y0 - ey0 + h), slice(x0 - ex0, x0 - ex0 + w))
     rid = rect_window(m['rects'], ex0, ey0, ew, eh)
     in_rect = rid >= 0
@@ -1404,7 +2413,7 @@ def compose_block(m, M16e, baked_e, ex0, ey0, win):
     del grown
     filled = baked[sub] | fmi
     counts = dict(nearest_fill_px=int(fmi.sum()), rect_px_unfilled=int((in_rect[sub] & ~filled).sum()),
-                  rect_px=int(in_rect[sub].sum()))
+                  rect_px=int(in_rect[sub].sum()), corner_px=n_corner)
     del fm
     # the face map
     core = m['core_tris']
@@ -1575,16 +2584,16 @@ MAP_MAGIC = b'FSSAOMAP'
 MAP_VERSION = 1
 
 
-def image_paths(folder, stem):
-    """(jxl, png): the two names a master's AO image can have."""
+def image_paths(folder, stem, kind='ao'):
+    """(jxl, png): the two names a master's image can have; kind 'ao', or 'curv' for its curvature (decision 54)."""
     base = os.path.join(folder, stem)
-    return base + '.ao.jxl', base + '.ao.png'
+    return base + f'.{kind}.jxl', base + f'.{kind}.png'
 
 
-def master_paths(folder, stem):
+def master_paths(folder, stem, kind='ao'):
     """(image, map, npz) of a master; image is its .ao.jxl, or its .ao.png when only that exists (a master of 0.55, or
-    one baked without the JPEG XL library)."""
-    jx, pn = image_paths(folder, stem)
+    one baked without the JPEG XL library); kind 'curv': the curvature image of the same layout (decision 54)."""
+    jx, pn = image_paths(folder, stem, kind)
     base = os.path.join(folder, stem)
     image = pn if (os.path.isfile(pn) and not os.path.isfile(jx)) else jx
     return image, base + '.ao.map', base + '.ao.npz'
@@ -1593,7 +2602,8 @@ def master_paths(folder, stem):
 def all_master_files(folder, stem):
     """Every file a master can have (for a rename)."""
     base = os.path.join(folder, stem)
-    return [base + ext for ext in ('.ao.jxl', '.ao.png', '.ao.map', '.ao.npz', THUMB_EXT)]
+    return [base + ext for ext in ('.ao.jxl', '.ao.png', '.ao.map', '.ao.npz', THUMB_EXT, '.curv.jxl', '.curv.png',
+                                   '.ao.raw.jxl', '.ao.raw.png')]
 
 
 def read_image(path):
@@ -1781,11 +2791,11 @@ def has_maps_in_npz(npz):
         return False
 
 
-def load_master(folder, stem):
+def load_master(folder, stem, kind='ao'):
     """The whole master in memory as copy_master reads it (the image as uint16, 0..65535; filled, the face map; the
     island rectangles instead of a per-pixel map), or None when a file is missing. For tests and small masters: Apply
-    reads a master paged (open_master)."""
-    png, mp, npz = master_paths(folder, stem)
+    reads a master paged (open_master). kind 'curv': its curvature image instead of the AO (decision 54)."""
+    png, mp, npz = master_paths(folder, stem, kind)
     if not (os.path.isfile(png) and os.path.isfile(npz)):
         return None
     with np.load(npz) as z:
@@ -1913,6 +2923,20 @@ class PagedArray:
         self.clock = 0
         self.loads = 0
         self.f = open(path, 'rb')
+        self._map = None
+
+    def address(self):
+        """The address of the whole scratch file memory-mapped read-only, for the C++ copy (ao_bake_copy), which reads
+        its tiles there; unmapped by close()."""
+        if self._map is None:
+            import mmap
+            size = self.ntx * (-(-self.shape[0] // self.T)) * self.T * self.T * self.dtype.itemsize
+            mm = mmap.mmap(self.f.fileno(), 0, access=mmap.ACCESS_READ)
+            if len(mm) < size:
+                mm.close()
+                raise ValueError(f'{self.path}: {len(mm)} bytes, the tiles need {size}')
+            self._map = (mm, np.frombuffer(mm, np.uint8))
+        return self._map[1].ctypes.data
 
     def view(self, decode, dtype):
         return _PagedView(self, decode, dtype)
@@ -1960,6 +2984,10 @@ class PagedArray:
         self.used[self.slot_of[need]] = self.clock
 
     def close(self):
+        if self._map is not None:
+            mm = self._map[0]
+            self._map = None  # the array over the mapping goes first, then the mapping can close
+            mm.close()
         self.f.close()
 
 
@@ -1973,12 +3001,12 @@ class _PagedView:
         return self.decode(self.base[key])
 
 
-def open_master(folder, stem, cache_bytes=PAGE_CACHE_BYTES):
+def open_master(folder, stem, cache_bytes=PAGE_CACHE_BYTES, kind='ao'):
     """The master paged (decision 33), or None when a file is missing: the AO image (JPEG XL or PNG) and the map
     decoded once into two tiled scratch files in the bake folder (<stem>.ao.page and <stem>.ao.mappage), read through
     a cache of tiles; close() closes and deletes them. A master of schema 1 (filled and the face map in the .npz) is
     loaded whole (load_master)."""
-    png, mp, npz = master_paths(folder, stem)
+    png, mp, npz = master_paths(folder, stem, kind)
     if not (os.path.isfile(png) and os.path.isfile(npz)):
         return None
     if has_maps_in_npz(npz):
@@ -1991,7 +3019,7 @@ def open_master(folder, stem, cache_bytes=PAGE_CACHE_BYTES):
         out = _layout(z)
     W, H = out['W'], out['H']
     base = os.path.join(folder, stem)
-    page_img, page_map = base + '.ao.page', base + '.ao.mappage'
+    page_img, page_map = base + f'.{kind}.page', base + '.ao.mappage'
     made = []
     try:
         if png.endswith('.jxl'):
