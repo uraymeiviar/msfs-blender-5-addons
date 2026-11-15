@@ -17,6 +17,7 @@ It matches **FSS Blender Tools 0.36.9** and the FSS exporter based on Asobo expo
   | [lod.md](lod.md) | The panels **Object LOD**, **Viewport LOD** and **LOD Settings** (**FSS MSFS Tools** sidebar tab): automatic LODs, marks, viewport preview, the table of what MSFS does at your view, contributors, the settings per LOD, the LOD sphere, and exporting with LODs |
   | [uv.md](uv.md) | The **UV Auto Seam** panel (**FSS MSFS Tools** sidebar tab: proposed and current seams, workflow, reports, limits) and the **Heatmap** panel (**FSS Tools** sidebar tab: distortion, texel density and visibility on the model, the distribution chart, the UV grid) |
   | [exporter.md](exporter.md) | The exporter: export target MSFS 2024 or MSFS 2020, one `.blend` for both simulators, materials, instancing, legacy normals |
+  | [polygone.md](polygone.md) | The **Polygone** add-on (its own sidebar tab): mesh reduction of the selected objects with libPolygone, its settings, feature lines and locks, the results |
 
 - **The MSFS rules behind the steps** (draw calls, LOD limits, materials, texture budgets, with their SDK sources) are in the aircraft repository's **MSFS Authoring Guide**, `doc/msfs-authoring/`. This guide links its steps to those rules by topic.
 
