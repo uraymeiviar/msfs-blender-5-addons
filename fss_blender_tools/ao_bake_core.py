@@ -1616,9 +1616,12 @@ def denoise_master_oidn(folder, stem, pos, tris, cn, opts, device='GPU', on_band
 
 
 def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode='tri', kmax=16, surface_cos=None,
-                same_face=False, ctx=None, chunk=COPY_CHUNK, soften=None, threads=None):
+                same_face=False, ctx=None, chunk=COPY_CHUNK, soften=None, threads=None, fold_cos=None):
     """Returns (image (h,w) with -1 where nothing was written, info, owners (h,w), padding steps (h,w), stacked counts
-    (h,w)). ctx: copy_context (computed here when None); chunk: the sub-samples of a block of inside pixels of one
+    (h,w)). fold_cos (auto-bake decision 78): a padding pixel beyond an edge whose two faces' normals have a cosine
+    under it (a sharp fold) continues its own face, not the neighbour hinged across (None: PADDING_FOLD_COS; -2: always
+    the neighbour, the rule before decision 78). ctx: copy_context (computed here when None); chunk: the sub-samples of a
+    block of inside pixels of one
     level (the result does not depend on it). master['image'], ['filled'] and ['face_map'] may be arrays or PagedArray
     views. soften: a soften_context, or None (decision 46: the darker side of convex sharp edges brightened toward the
     edge, inside and padding pixels; decision 58: concave folds blurred across).
@@ -1687,6 +1690,7 @@ def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode=
     pj, pi = np.nonzero((owner_c < 0) & (grown >= 0))
     n_cl_pad = 0
     n_no_nb = 0
+    n_fold = 0
     if len(pi):
         T = grown[pj, pi]
         cen = np.stack([x0 + pi + 0.5, y0 + pj + 0.5], axis=1)
@@ -1697,6 +1701,13 @@ def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode=
         # else the neighbour hinged flat across the edge, computed once per distinct (triangle, edge)
         flat = (U < 0) | (bc_c[np.arange(len(T)), kmin] >= 0)
         n_no_nb = int((U < 0).sum())
+        # decision 78: beyond a sharp fold the neighbour's AO (another surface, e.g. a panel's top past a hole's wall)
+        # is not this face's: texture filtering would blend it into the face's edge texels along the pixel staircase
+        f_cos = PADDING_FOLD_COS if fold_cos is None else fold_cos
+        has = np.nonzero(~flat)[0]
+        fold = np.einsum('nd,nd->n', tri_normal[T[has]], tri_normal[U[has]]) < f_cos
+        n_fold = int(fold.sum())
+        flat[has[fold]] = True
         tri_uv = np.array(uvpx[T], dtype=np.float64)
         src = np.array(T, dtype=np.int64)
         hinge = np.nonzero(~flat)[0]
@@ -1722,7 +1733,7 @@ def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode=
     info = dict(k_min=k, k_max=kmax, k_levels={int(L): int((lvl == L).sum()) for L in np.unique(lvl)},
                 px_at_k_cap=capped_px, footprint_px_median=float(np.median(sig)), footprint_px_max=float(sig.max()),
                 inside_px=int(len(ii)), padding_px=int(len(pi)), clamped_inside_points=n_cl_in,
-                clamped_padding_points=n_cl_pad, padding_without_neighbour=n_no_nb,
+                clamped_padding_points=n_cl_pad, padding_without_neighbour=n_no_nb, padding_at_folds=n_fold,
                 stacked_px=int((count_c > 1).sum()), softened_px=n_soft, copy='native',
                 copy_threads=nat.threads_of(threads))
     return out, info, owner_c, steps, count_c
@@ -1741,6 +1752,7 @@ MIRROR_OPEN = True  # P15
 FOLD_SPLIT = 30.0  # P18, degrees
 SURFACE_DEG = 30.0  # the copy's surface-aware read
 SURFACE_COS = math.cos(math.radians(SURFACE_DEG))
+PADDING_FOLD_COS = SURFACE_COS  # decision 78: padding beyond a sharper fold continues its own face (copy_master)
 K_MIN = 2
 K_MAX = 16
 SEEDS = (11, 12)  # core and skirt bakes

@@ -1053,6 +1053,8 @@ def bake_item(item, coll):
                             bake_s=round(t_core + t_skirt, 3), compose_s=round(t_compose, 3),
                             save_s=round(t_save, 3), total_s=round(time.time() - t0, 3)),
                  compose=counts, image=files.stats)
+    if item.get('combine') == 'ONE' and item.get('copies'):  # decision 77: the copy One Instance was baked from
+        entry['instance'] = item['copies'][0]['object']
     update_index(entry)
     res = dict(status='baked', W=int(W), H=int(H), tile=int(tile), n_tiles=int(n), bake_s=round(t_core + t_skirt, 3),
                total_s=round(time.time() - t0, 3), peak_working_set_gb=entry['tiles']['peak_working_set_gb'],

@@ -359,13 +359,44 @@ def shared_combine(mesh, scene):
     return scene.fss_ao_bake.shared_combine if mode == 'DEFAULT' else mode
 
 
-def shared_instance(mesh, copies):
-    """Decision 48: One Instance's copy: the mesh's picked copy when it is one of `copies`, else the first by name."""
-    picked = getattr(getattr(mesh, 'fss_ao_shared', None), 'instance', None)
-    names = {o.name for o in copies}
-    if picked is not None and picked.name in names:
+def shared_instance(mesh, copies, entry=None, chosen=None):
+    """Decision 77: the copy One Instance grades against and bakes, and where it came from, first that applies:
+    ('bake') `chosen`, the bake's choice from the selection, when it is one of `copies`; ('entry') the master's index
+    entry's `instance` when that object is still one of them; ('pointer') an entry without `instance` (a master baked
+    before decision 77): the mesh's old picked copy (decision 48) when it is one of them; ('first') the first copy by
+    name. Returns (object, source)."""
+    by_name = {o.name: o for o in copies}
+    if chosen in by_name:
+        return by_name[chosen], 'bake'
+    if entry is not None:
+        if 'instance' in entry:
+            if entry['instance'] in by_name:
+                return by_name[entry['instance']], 'entry'
+        else:
+            picked = getattr(getattr(mesh, 'fss_ao_shared', None), 'instance', None)
+            if picked is not None and picked.name in by_name:
+                return picked, 'pointer'
+    return by_name[min(by_name)], 'first'
+
+
+def bakeable_copy(obj, view_layer, scene):
+    """Whether this object is one of the copies Refresh bakes: a visible LOD0 mesh with faces and no exclusion."""
+    return (obj.type == 'MESH' and obj.data is not None and len(obj.data.polygons) > 0
+            and obj.visible_get(view_layer=view_layer) and not obj.hide_render and in_lod0(obj)
+            and not bake_exclusion(obj, scene))
+
+
+def instance_choice(selected, active=None, picked=''):
+    """Decision 77: the copy a bake of the selection bakes for a One Instance mesh, from the names of its selected
+    copies: the drop-down's copy when it is one of them, else the active object when it is, else the first by name;
+    None without a selected copy."""
+    if not selected:
+        return None
+    if picked and picked in selected:
         return picked
-    return sorted(copies, key=lambda o: o.name)[0]
+    if active and active in selected:
+        return active
+    return min(selected)
 
 
 def custom_refs(obj):
@@ -731,13 +762,16 @@ def detect_occluders(context, objs):
     return done
 
 
-def refresh(context, relink=True):
-    """Computes every master's keys and grade against index.json; links renamed masters again. Returns _state."""
+def refresh(context, relink=True, instances=None):
+    """Computes every master's keys and grade against index.json; links renamed masters again. Returns _state.
+    instances: {mesh name: object name}, a bake's choice of the copy of One Instance meshes (decision 77)."""
     scene = context.scene
     view_layer = context.view_layer
     depsgraph = context.evaluated_depsgraph_get()
     folder = bake_folder()
     index = read_index(folder, use_cache=False) if folder else dict(masters={})
+    masters = index.get('masters', {})
+    instances = instances or {}
     meshes = _visible_meshes(view_layer)
     excluded = {}
     baked = []
@@ -860,12 +894,21 @@ def refresh(context, relink=True):
         mover = moving(first) or unknown(first)
         dist = item_distance(first, scene)
         copies, combine = None, None
+        one = None  # decision 77: One Instance's (copy, source, the copy the master was baked from)
         if shared:
             # decision 47: every copy baked in its own surroundings, its own poses; combined per master pixel
             combine = shared_combine(me, scene)
             copies, keys = [], []
-            # decision 48: One Instance bakes only the picked copy (else the first by name) for all of them
-            for o in ([shared_instance(me, objs)] if combine == 'ONE' else objs):
+            if combine == 'ONE':
+                # decision 77: One Instance bakes one copy for all of them: the bake's choice from the selection,
+                # else the copy its master was baked from, else the first by name
+                entry = masters.get(stem)
+                rep, src = shared_instance(me, objs, entry, instances.get(me.name))
+                baked_from = None
+                if entry is not None:
+                    baked_from = entry['instance'] if 'instance' in entry else shared_instance(me, objs, entry)[0].name
+                one = (rep, src, baked_from)
+            for o in ([one[0]] if one else objs):
                 m_o = moving(o) or unknown(o)
                 c_mode, c_occ, c_frames, c_note, c_posed, c_key, c_against, c_rng = surroundings(o, m_o, dist)
                 copies.append(dict(object=o.name, occluder_mode=c_mode, occluders=c_occ, poses=c_frames,
@@ -888,6 +931,8 @@ def refresh(context, relink=True):
                     skip_slots=skip, tex_size=tex, sets=sets, grade='MISSING', occluder_mode=mode, poses=frames,
                     pose_note=pose_note, posed=posed, copies=copies, combine=combine, ao_distance=dist,
                     falloff=falloff, against=against, pose_range=rng)
+        if one:  # decision 77: the copy graded and baked, where it came from, the copy the master was baked from
+            item.update(instance=one[0].name, instance_from=one[1], baked_from=one[2])
         items[stem] = item
         for o in objs:
             by_object[o.name] = stem
@@ -1023,6 +1068,12 @@ def regrade():
     folder = _state.get('folder')
     masters = read_index(folder, use_cache=False).get('masters', {}) if folder else {}
     for stem, item in _state['items'].items():
+        if 'baked_from' in item:  # decision 77: One Instance's master, baked from the copy its entry names
+            entry = masters.get(stem)
+            if entry is None:
+                item['baked_from'] = None
+            elif 'instance' in entry:
+                item['baked_from'] = entry['instance']
         item['grade'] = grade(item, masters.get(stem), folder)
         item['cm_grade'] = curv_grade(item, masters.get(stem), folder, _state.get('curv_width', 0.0))
         item['dn_grade'] = dn_grade(item, masters.get(stem), folder, _state.get('dn_want'))

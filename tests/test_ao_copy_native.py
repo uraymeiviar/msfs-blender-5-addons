@@ -53,6 +53,7 @@ C:\\Users\\uray\\.claude\\tools\\cpucap\\cpucap.exe 50 G:\\e-jets-e2\\tools\\ble
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import shutil
 import struct
@@ -76,7 +77,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ao_native_reference import Reference  # noqa: E402  (decision 6: the Python code's values, recorded)
 
 REF = Reference('harness')
-INFO_SKIP = ('copy', 'copy_why', 'copy_threads', 'raster', 'dilate', 'soften')
+INFO_SKIP = ('copy', 'copy_why', 'copy_threads', 'raster', 'dilate', 'soften', 'padding_at_folds')
+# the references were recorded before auto-bake decision 78: the padding hinged across every edge, also sharp folds
+# (test_fold_padding checks the rule of decision 78)
+core.PADDING_FOLD_COS = -2.0
 
 
 def copy_values(res):
@@ -363,6 +367,69 @@ def page_bytes(folder, stem, kind, threads):
 
 def scratch_left(folder):
     return [f for f in os.listdir(folder) if f.endswith(('.page', '.mappage', '.tmp', '.raw'))]
+
+
+def test_fold_padding():
+    """Auto-bake decision 78: a padding pixel beyond an edge where the faces fold by more than 30 degrees continues its
+    own face (a wall's padding holds the wall's AO, not the top's past its rim); below 30 degrees (a smooth seam) it
+    still reads the neighbour hinged flat across the edge, as before."""
+    s, c = 0.01 * math.sin(math.radians(10)), 0.01 * math.cos(math.radians(10))
+    pos = np.array([(0, 0, 0), (0.01, 0, 0), (0.01, 0, 0.01), (0, 0, 0.01),  # wall A (normal -y)
+                    (0.01, 0.01, 0.01), (0, 0.01, 0.01),  # top B, folded 90 degrees at A's upper edge (normal +z)
+                    (0.05, 0, 0), (0.06, 0, 0), (0.06, 0, 0.01), (0.05, 0, 0.01),  # wall A2
+                    (0.06, -s, 0.01 + c), (0.05, -s, 0.01 + c)], np.float64)  # B2, on at 10 degrees: a smooth seam
+    tris = np.array([(0, 1, 2), (0, 2, 3), (3, 2, 4), (3, 4, 5), (6, 7, 8), (6, 8, 9), (9, 8, 10), (9, 10, 11)], np.int64)
+    P = pos[tris]
+    fn = np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0])
+    fn /= np.linalg.norm(fn, axis=1, keepdims=True)
+    m = core.build_master(pos, tris, np.repeat(fn[:, None], 3, axis=1), 6000.0, gutter=core.GUTTER, order=core.ORDER,
+                          mirror_open=core.MIRROR_OPEN, fold_split=core.FOLD_SPLIT)
+    owner, _cnt = core.rasterize_ids(m['muv'], m['W'], m['H'])
+    grown, _st = core.dilate_ids(owner, 2)
+    dark = np.isin(grown, (0, 1, 4, 5))  # the walls dark, the tops light
+    master = dict(m, image=np.where(dark, 20000, 60000).astype(np.uint16), filled=grown >= 0, face_map=grown)
+    # the target: each face pair in its own two islands (UV seams at the fold), 30 px apart
+    W = H = 160
+    uv = np.zeros((len(pos), 2))
+    uvpx = np.zeros((len(tris), 3, 2))
+    for t, (a, b, cc) in enumerate(tris):
+        for k, v in enumerate((a, b, cc)):
+            x, y, z = pos[v]
+            if t < 2:
+                uvpx[t, k] = (10 + x * 1500, 10 + z * 1500)
+            elif t < 4:
+                uvpx[t, k] = (70 + x * 1500, 10 + y * 1500)
+            elif t < 6:
+                uvpx[t, k] = (10 + (x - 0.05) * 1500, 80 + z * 1500)
+            else:
+                uvpx[t, k] = (70 + (x - 0.05) * 1500, 80 + (0.0 if v in (8, 9) else 0.01) * 1500)
+    del uv
+    tisl = np.zeros(len(tris), np.int64)
+    kw = dict(padding=6, outside_mode='tri', kmax=core.K_MAX, surface_cos=core.SURFACE_COS, threads=1)
+    new = core.copy_master(pos, tris, uvpx, tisl, master, (0, 0, W, H), core.K_MIN, fold_cos=core.SURFACE_COS, **kw)
+    old = core.copy_master(pos, tris, uvpx, tisl, master, (0, 0, W, H), core.K_MIN, fold_cos=-2.0, **kw)
+    out_n, info_n, own, steps = new[0], new[1], new[2], new[3]
+    out_o = old[0]
+    gw, _ = core.dilate_ids(own, 6)
+    pad = (own < 0) & (out_n >= 0)
+    wall_val = float(np.median(out_n[(own == 0) | (own == 1)]))
+    top_val = float(np.median(out_n[(own == 2) | (own == 3)]))
+    wall_pad = pad & np.isin(gw, (0, 1))
+    top_pad = pad & np.isin(gw, (2, 3))
+    assert abs(wall_val - 20000 / 65535) < 2e-3 and abs(top_val - 60000 / 65535) < 2e-3, (wall_val, top_val)
+    # decision 78: every padding pixel of the fold pair holds its own face's AO
+    err_wall = float(np.abs(out_n[wall_pad] - wall_val).max())
+    err_top = float(np.abs(out_n[top_pad] - top_val).max())
+    assert err_wall < 2e-3 and err_top < 2e-3, (err_wall, err_top)
+    # before it, the wall's padding past the rim took the top's AO
+    took = int((np.abs(out_o[wall_pad] - top_val) < 2e-3).sum())
+    assert took > 0 and info_n['padding_at_folds'] > 0 and old[1]['padding_at_folds'] == 0, (took, info_n)
+    # the smooth seam (10 degrees): as before, bit for bit
+    smooth = (gw >= 4) | (own >= 4)
+    assert same_bits(np.where(smooth, out_n, 0.0), np.where(smooth, out_o, 0.0))
+    print(f"PASS: test_fold_padding (90 degree fold: {int(wall_pad.sum())} wall and {int(top_pad.sum())} top padding "
+          f"px within {max(err_wall, err_top):.5f} of their own face, {info_n['padding_at_folds']} px at folds; the "
+          f"old rule gave {took} wall padding px the top's AO; the 10 degree seam unchanged)")
 
 
 def test_open(rng, folder):
@@ -1656,6 +1723,7 @@ if __name__ == '__main__':
         test_dilate(rng_of('dilate'))
         test_uv_islands(rng_of('uv_islands'))
         test_soften(rng_of('soften'), folder)
+        test_fold_padding()  # auto-bake decision 78
         if only == ['pixels']:  # a quicker run of the tests above: -- only=pixels
             print(f'PIXELS TESTS PASSED ({time.time() - t0:.1f} s)')
             sys.exit(0)

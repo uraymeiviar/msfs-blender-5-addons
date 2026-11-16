@@ -916,6 +916,100 @@ def test_ao_bake_unavailable():
           f'operators refused, every other panel and poll unchanged; moved back, md5s unchanged)')
 
 
+def test_ao_one_instance_box():
+    """AO bake decision 77: the Object box of a One Instance mesh's copy draws no Copy picker (`instance`); the
+    drop-down (`bake_copy`) only with two or more of the mesh's copies selected, its items those copies by name, its
+    value the active one until the artist picks another; from the last Refresh, "One Instance: baked from <copy>" for
+    a master with an index entry, "One Instance: <copy> (first by name)" without one, and "Bake Selected bakes <copy>"
+    when the selection would bake another copy."""
+    from fss_blender_tools import ao_bake, ao_bake_store as store
+    mat = bpy.data.materials.new('PANEL_ONE_MAT')
+    me = bpy.data.meshes.new('PANEL_ONE_MESH')
+    me.from_pydata([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [], [(0, 1, 2)])
+    me.uv_layers.new(name='UVMap')
+    me.materials.append(mat)
+    objs = {}
+    for i, name in enumerate(('ONE_C', 'ONE_A', 'ONE_B')):
+        objs[name] = bpy.data.objects.new(name, me)
+        objs[name].location = (3.0 * i, 10.0, 0.0)
+        bpy.context.scene.collection.objects.link(objs[name])
+    bpy.context.view_layer.update()
+    a, b, c = objs['ONE_A'], objs['ONE_B'], objs['ONE_C']
+    me.fss_ao_shared.combine = 'ONE'
+
+    def box(selected, active):
+        _select(selected, active)
+        calls = []
+        ao_bake._draw_object(_Layout(calls), bpy.context)
+        props = [args[1] for name, args, _kwargs in calls if name == 'prop']
+        labels = [kwargs.get('text') for name, _args, kwargs in calls if name == 'label']
+        return props, labels
+
+    saved = dict(store._state)
+    seen = {}
+    try:
+        # before a Refresh: no line; one copy selected: no drop-down
+        props, labels = box([a], a)
+        assert 'instance' not in props and 'bake_copy' not in props, props
+        assert not any('One Instance' in (t or '') for t in labels), labels
+        seen['one selected'] = props
+        # two selected, ONE_C active: the drop-down, its items the two, its value the active one
+        props, labels = box([a, c], c)
+        assert 'instance' not in props and props.count('bake_copy') == 1, props
+        items = [i[0] for i in ao_bake.bake_copy_items(me.fss_ao_shared, bpy.context)]
+        assert items == ['ONE_A', 'ONE_C'] and me.fss_ao_shared.bake_copy == 'ONE_C', (items, me.fss_ao_shared.bake_copy)
+        me.fss_ao_shared.bake_copy = 'ONE_A'
+        assert me.fss_ao_shared.bake_copy_name == 'ONE_A' and me.fss_ao_shared.bake_copy == 'ONE_A'
+        seen['two selected'] = items
+        # the last Refresh: the master baked from ONE_B; the selection (A and C, the drop-down A) bakes ONE_A
+        store._state.update(items={'k': dict(combine='ONE', users=['ONE_A', 'ONE_B', 'ONE_C'], baked_from='ONE_B',
+                                             copies=[dict(object='ONE_B')])},
+                            by_object={n: 'k' for n in objs})
+        props, labels = box([a, c], c)
+        assert 'One Instance: baked from ONE_B' in labels and 'Bake Selected bakes ONE_A' in labels, labels
+        seen['baked from'] = [t for t in labels if 'One Instance' in (t or '') or 'Bake Selected' in (t or '')]
+        # ONE_B alone selected: the copy it was baked from, no second line
+        props, labels = box([b], b)
+        assert 'One Instance: baked from ONE_B' in labels and not any('Bake Selected' in (t or '') for t in labels)
+        assert 'bake_copy' not in props, props
+        # no index entry: the first by name; ONE_A selected bakes it, the same copy: no second line
+        store._state['items']['k']['baked_from'] = None
+        props, labels = box([a], a)
+        assert 'One Instance: ONE_A (first by name)' in labels, labels
+        assert not any('Bake Selected' in (t or '') for t in labels), labels
+        props, labels = box([b], b)
+        assert 'Bake Selected bakes ONE_B' in labels, labels
+        seen['first by name'] = [t for t in labels if 'One Instance' in (t or '') or 'Bake Selected' in (t or '')]
+        # no motion from a Refresh (before one, or a copy not baked): the Poses row only when it or a parent moves
+        store._state.update(items={}, by_object={})
+        props, labels = box([a], a)
+        assert 'pose_mode' not in props, props
+        parent = bpy.data.objects.new('ONE_PARENT', None)
+        bpy.context.scene.collection.objects.link(parent)
+        try:
+            a.parent = parent
+            parent.keyframe_insert('location', frame=0)
+            props, labels = box([a], a)
+            assert 'pose_mode' in props and 'poses' not in props, props
+            a.fss_ao_bake.pose_mode = 'MANUAL'
+            props, labels = box([a], a)
+            assert 'pose_mode' in props and 'poses' in props, props
+            seen['poses before a Refresh'] = props
+        finally:
+            a.parent = None
+            bpy.data.objects.remove(parent)
+    finally:
+        store._state.clear()
+        store._state.update(saved)
+        for o in objs.values():
+            bpy.data.objects.remove(o)
+        bpy.data.meshes.remove(me)
+        bpy.data.materials.remove(mat)
+    print(f'PASS: test_ao_one_instance_box (no Copy picker; one copy selected: {seen["one selected"]}; the drop-down '
+          f'with two: {seen["two selected"]}; {seen["baked from"]}; {seen["first by name"]}; Poses before a Refresh: '
+          f'{seen["poses before a Refresh"]})')
+
+
 def main():
     test_layout()
     test_draw_all()
@@ -927,6 +1021,7 @@ def main():
     test_add_parent()
     test_rename_meshes()
     test_ao_bake_unavailable()  # apply-native-copy decision 6
+    test_ao_one_instance_box()  # AO bake decision 77
     print("ALL TESTS PASSED")
 
 

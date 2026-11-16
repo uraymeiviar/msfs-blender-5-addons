@@ -253,8 +253,9 @@ class FSS_AOBakeSettings(bpy.types.PropertyGroup):
          "copies have (the panel under a knob) shows fully, one copy's neighbour only faintly"),
         ('LIGHTEST', 'Most Lit', "Each pixel takes its lightest copy: only shadows every copy has"),
         ('DARKEST', 'Darkest', "Each pixel takes its darkest copy: every copy's shadows, also one copy's neighbour"),
-        ('ONE', 'One Instance', "Only one copy is baked, in its own surroundings, and all copies use it: the mesh's "
-         "picked copy, else its first copy by name")],
+        ('ONE', 'One Instance', "Only one copy is baked, in its own surroundings, and all copies use it: the copy "
+         "selected when it is baked (with several selected, the one the drop-down names), kept until a bake of "
+         "another selected copy; never baked, its first copy by name")],
         description="How the copies of a mesh shared by several objects are combined into its one AO; a mesh can "
         "override it")
     run_mode: bpy.props.EnumProperty(name="Run In", default='HIDDEN', items=[
@@ -323,24 +324,77 @@ def mesh_combine_items(self, context):
     return items
 
 
-def _combine_update(self, context):
-    """Decision 48: choosing One Instance on a selected copy makes that copy the instance."""
-    obj = getattr(context, 'active_object', None)
-    if self.combine == 'ONE' and obj is not None and obj.data is self.id_data:
-        self.instance = obj
-
-
 def _is_copy(self, obj):
     return obj.type == 'MESH' and obj.data is self.id_data
 
 
+def selected_copies(context, mesh):
+    """Decision 77: the names of the selected copies of this mesh that a bake bakes (sorted)."""
+    scene, view_layer = context.scene, context.view_layer
+    return sorted(o.name for o in getattr(context, 'selected_objects', None) or ()
+                  if o.data is mesh and store.bakeable_copy(o, view_layer, scene))
+
+
+def bake_copy_choice(context, mesh, names=None):
+    """Decision 77: the copy a bake of the selection bakes for this One Instance mesh (its name), or None."""
+    names = selected_copies(context, mesh) if names is None else names
+    active = getattr(context, 'active_object', None)
+    return store.instance_choice(names, active.name if active is not None else None,
+                                 mesh.fss_ao_shared.bake_copy_name)
+
+
+def bake_instances(context):
+    """Decision 77: {mesh name: object name}, the copy a bake of the selection bakes for each One Instance mesh with
+    a selected copy."""
+    scene = context.scene
+    out = {}
+    meshes = {o.data for o in getattr(context, 'selected_objects', None) or () if o.type == 'MESH'}
+    for me in meshes:
+        if store.shared_combine(me, scene) == 'ONE':  # refresh uses it only for a mesh with several copies
+            choice = bake_copy_choice(context, me)
+            if choice:
+                out[me.name] = choice
+    return out
+
+
+_copy_items = []  # Blender keeps no reference to a dynamic enum's strings: kept here
+
+
+def bake_copy_items(self, context):
+    """Decision 77: the drop-down's choices, the mesh's selected copies by name."""
+    context = context if context is not None else bpy.context
+    items = [(n, n, f'Bake Selected bakes {n} for every copy of the mesh', i)
+             for i, n in enumerate(selected_copies(context, self.id_data))]
+    _copy_items[:] = items
+    return items
+
+
+def _get_bake_copy(self):
+    names = selected_copies(bpy.context, self.id_data)
+    choice = bake_copy_choice(bpy.context, self.id_data, names)
+    return names.index(choice) if choice in names else 0
+
+
+def _set_bake_copy(self, value):
+    names = selected_copies(bpy.context, self.id_data)
+    if 0 <= value < len(names):
+        self.bake_copy_name = names[value]
+
+
 class FSS_AOMeshSettings(bpy.types.PropertyGroup):
     """Decision 47: a shared mesh's override, on the mesh (one master for all its copies, so one choice)."""
-    combine: bpy.props.EnumProperty(name="Copies", items=mesh_combine_items, default=0, update=_combine_update,
+    combine: bpy.props.EnumProperty(name="Copies", items=mesh_combine_items, default=0,
                                     description="How this shared mesh's copies are combined into its one AO")
     instance: bpy.props.PointerProperty(type=bpy.types.Object, name="Copy", poll=_is_copy,
-                                        description="One Instance (decision 48): the copy whose surroundings all "
-                                        "copies use. Empty: the first copy by name")
+                                        description="Decision 48's picked copy, no longer shown (decision 77): read "
+                                        "only for a One Instance master baked before decision 77, whose index entry "
+                                        "does not name its copy")
+    bake_copy_name: bpy.props.StringProperty(name="Copy to Bake", options={'HIDDEN'},
+                                             description="Decision 77: the drop-down's copy, by name")
+    bake_copy: bpy.props.EnumProperty(name="Copy to Bake", items=bake_copy_items, get=_get_bake_copy,
+                                      set=_set_bake_copy,
+                                      description="One Instance with several copies selected: the copy Bake Selected "
+                                      "bakes, in its own surroundings, for every copy of the mesh")
 
 
 class FSS_AOOccluderRef(bpy.types.PropertyGroup):
@@ -810,7 +864,9 @@ class FSS_OT_AOBakeStart(bpy.types.Operator):
                 and _apply_run['gen'] is None)
 
     def execute(self, context):
-        store.refresh(context)
+        # decision 77: a bake of the selection bakes a One Instance mesh's selected copy; Missing and Stale keeps the
+        # copy each master was baked from
+        store.refresh(context, instances=bake_instances(context) if self.scope in ('AUTO', 'SELECTED') else None)
         sync_state(context)
         items = store._state['items']
         s = context.scene.fss_ao_bake
@@ -1920,11 +1976,21 @@ def _draw_object(layout, context):
         row = box.row(align=True)
         row.label(text=f'Shared mesh, {len(copies)} copies:', icon='LINKED')
         row.prop(obj.data.fss_ao_shared, 'combine', text='')
-        if store.shared_combine(obj.data, scene) == 'ONE':
-            box.prop(obj.data.fss_ao_shared, 'instance', text='Copy')
-            rep = store.shared_instance(obj.data, copies)
-            if obj.data.fss_ao_shared.instance is None or rep is not obj.data.fss_ao_shared.instance:
-                box.label(text=f'One Instance: {rep.name} (first by name)', icon='INFO')
+        if store.shared_combine(obj.data, scene) == 'ONE':  # decision 77
+            names = selected_copies(context, obj.data)
+            if len(names) > 1:  # several copies selected: which one Bake Selected bakes
+                box.prop(obj.data.fss_ao_shared, 'bake_copy', text='Bake Copy')
+            item = store._state['items'].get(store._state['by_object'].get(obj.name))
+            if item is not None and item.get('combine') == 'ONE':  # from the last Refresh
+                shown = item.get('baked_from')
+                if shown:
+                    box.label(text=f'One Instance: baked from {shown}', icon='INFO')
+                else:
+                    shown = min(item['users'])
+                    box.label(text=f'One Instance: {shown} (first by name)', icon='INFO')
+                choice = bake_copy_choice(context, obj.data, names)
+                if choice and choice != shown:
+                    box.label(text=f'Bake Selected bakes {choice}', icon='BLANK1')
     if scene.fss_ao_bake.auto_distance:  # decision 51: shown only when it is the object's own, under Max Distance
         first = sorted(copies, key=lambda u: u.name)[0] if len(copies) > 1 else obj
         d = store.item_distance(first, scene)
@@ -1933,8 +1999,11 @@ def _draw_object(layout, context):
     col = box.column(align=True)
     col.prop(o, 'occluders')
     info = _motion_info(obj)  # decision 59: from the last Refresh
-    if info is None:  # before a Refresh: no line (decision 67)
-        pass
+    if info is None:  # before a Refresh: no line (decision 67); an object that moves (or a parent) shows its Poses
+        if store.is_mover(obj, scene):
+            col.prop(o, 'pose_mode', text='Poses')
+            if o.pose_mode == 'MANUAL':
+                col.prop(o, 'poses', text='Number of Poses')
     elif info['against']:
         rng = info['pose_range']
         n = len(info['against'])

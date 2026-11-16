@@ -119,6 +119,21 @@ REF = Reference('suite')
 # Python code gave them before its geometry moved to C++ (tests/data/ao_scene_rule_reference.json)
 from ao_scene_rule_reference import RuleReference, digest as rule_digest, state_values  # noqa: E402
 RULE = RuleReference('suite')
+
+
+def recorded_padding(fn):
+    """The test's reference values were recorded before auto-bake decision 78 (the padding hinged across every edge,
+    also sharp folds): it runs with that rule; the rule of decision 78 is checked in test_ao_copy_native.py
+    (test_fold_padding)."""
+    def run(*args, **kwargs):
+        keep = core.PADDING_FOLD_COS
+        core.PADDING_FOLD_COS = -2.0
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            core.PADDING_FOLD_COS = keep
+    run.__name__ = fn.__name__
+    return run
 _RULE_CALLS = {}
 _store_refresh, _store_detect = store.refresh, store.detect_occluders
 
@@ -135,8 +150,24 @@ def _rule_key(kind):
     return f'{name}/{_RULE_CALLS[name]:02d}/{kind}'
 
 
-def _checked_refresh(context, relink=True):
-    st = _store_refresh(context, relink)
+_RULE_OFF = [0]  # > 0: Refreshes added after the reference was recorded (no Python values), neither checked nor counted
+
+
+@contextlib.contextmanager
+def rule_unrecorded():
+    """Refreshes in this block are not checked against the scene rule reference and take no call number: the checks
+    added after decision 6 removed the Python code (AO bake decision 77), whose values were never recorded."""
+    _RULE_OFF[0] += 1
+    try:
+        yield
+    finally:
+        _RULE_OFF[0] -= 1
+
+
+def _checked_refresh(context, relink=True, instances=None):
+    st = _store_refresh(context, relink, instances)
+    if _RULE_OFF[0]:
+        return st
     exact, gaps = state_values(st)
     RULE.check(_rule_key('refresh'), rule_digest(exact), gaps, exact)
     return st
@@ -1576,9 +1607,12 @@ def test_shared_combine():
     """Decision 47: a shared mesh's copies (S1, S2 on plane D, 2 cm apart) are each baked in their own surroundings and
     combined per master pixel. Its -X face looks at S2 from S1 and at open space from S2: darkest < average < most lit
     there; the top stays lit; the plane's contact shadow is in every mode. The mesh's override and a moved copy make
-    the master "surroundings changed"; the master's entry records the combine and the copies. Decision 48: One
-    Instance chosen with a copy active picks that copy and bakes it alone; without a pick, the first copy by name.
-    Decision 49: Split Samples gives each copy's view half the samples, Full Quality all; the averages agree."""
+    the master "surroundings changed"; the master's entry records the combine and the copies. Decision 77: One
+    Instance bakes the selected copy alone (with several selected, the drop-down's, else the active one) and the
+    entry's `instance` names it; a later selection, and Missing and Stale, keep it; an entry without `instance` (a
+    master of decision 48) takes the old picked copy, else the first by name; a mesh never baked, or its copy renamed,
+    the first by name. Decision 49: Split Samples gives each copy's view half the samples, Full Quality all; the
+    averages agree."""
     refresh()
     item = store._state['items'][store._state['by_object']['S1']]
     assert item['combine'] == 'AVERAGE' and [c['object'] for c in item['copies']] == ['S1', 'S2'], item
@@ -1625,23 +1659,135 @@ def test_shared_combine():
         assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
         assert grade_of('S1') == 'UP_TO_DATE', grade_of('S1')
         got[mode] = faces()
-    # decision 48: One Instance, chosen with S2 active, bakes S2 alone for both (its -X face open, as Most Lit's);
-    # without a picked copy, the first by name (S1: -X faces S2, as Darkest's)
-    select(['S2'])
-    bpy.context.view_layer.objects.active = s2
+    # decision 77: One Instance bakes the selected copy; its master's index entry remembers it (`instance`) and Refresh
+    # grades against that copy. The Refreshes the scene rule reference recorded for decision 48 (S2 graded and baked,
+    # then the first by name graded and baked) keep their place and values; the checks added around them run in
+    # rule_unrecorded() blocks
+    scene = bpy.context.scene
+    s = scene.fss_ao_bake
+    stem = store._state['by_object']['S1']
+    one = {}  # what each step found, for the report
+
+    def graded():
+        it = store._state['items'][stem]
+        return [c['object'] for c in it['copies']], it['grade'], it.get('instance_from'), it.get('baked_from')
+
+    def remembered():
+        return (entry_of('S1')[0] or {}).get('instance', 'no field')
+
+    def bake(names, active=None, scope='SELECTED'):
+        select(names)
+        if active:
+            bpy.context.view_layer.objects.active = bpy.data.objects[active]
+        assert bpy.ops.fss.ao_bake_start(scope=scope, hidden=True, wait=True) == {'FINISHED'}
+        return remembered()
     me.fss_ao_shared.combine = 'ONE'
-    assert me.fss_ao_shared.instance == s2, me.fss_ao_shared.instance
-    for pick in ('S2', None):
-        me.fss_ao_shared.instance = bpy.data.objects[pick] if pick else None
-        refresh()
-        item = store._state['items'][store._state['by_object']['S1']]
-        assert [c['object'] for c in item['copies']] == [pick or 'S1'], item['copies']
-        grades[f'one instance {pick or "first by name"}'] = grade_of('S1')
+    me.fss_ao_shared.instance = s2  # decision 48's picked copy: read only for an entry without `instance`
+    refresh()  # the Darkest master's entry has no `instance`: the old picked copy (rule 1.3)
+    one['old pointer S2'] = graded()
+    assert one['old pointer S2'][:3] == (['S2'], 'SURROUNDINGS', 'pointer'), one
+    grades['one instance S2'] = grade_of('S1')
+    # step 2.1: S2 selected, Bake Selected: S2 baked, the entry names it, the faces as Most Lit's
+    one['2.1 S2 selected, instance'] = bake(['S2'])
+    assert one['2.1 S2 selected, instance'] == 'S2', one
+    assert store._state['items'][stem]['baked_from'] == 'S2' and grade_of('S1') == 'UP_TO_DATE', graded()
+    got['ONE S2'] = faces()
+    with rule_unrecorded():
+        # step 2.2: S1 selected, Refresh: a selection changes nothing
         select(['S1'])
-        assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
-        got[f'ONE {pick or "first"}'] = faces()
+        refresh()
+        one['2.2 S1 selected, Refresh'] = graded()
+        assert one['2.2 S1 selected, Refresh'] == (['S2'], 'UP_TO_DATE', 'entry', 'S2'), one
+        # step 2.3: S2 moved, Missing and Stale with S1 selected: S2 baked again, the entry still names S2
+        s2.location.y += 0.01
+        bpy.context.view_layer.update()
+        select(['S1'])
+        refresh()
+        def outdated():
+            return sorted(store.bake_choice(list(store._state['items']), s.bake_ao, s.curvature, False,
+                                            store.denoise_opts(scene))[0])
+        stale = outdated()
+        assert stem in stale, stale  # also plane D, which S2 shades
+        one['2.3 S2 moved, stale'] = stale
+        one['2.3 S2 moved, before'] = graded()
+        assert one['2.3 S2 moved, before'][:2] == (['S2'], 'SURROUNDINGS'), one
+        one['2.3 Missing and Stale, instance'] = bake(['S1'], scope='STALE')
+        assert one['2.3 Missing and Stale, instance'] == 'S2' and grade_of('S1') == 'UP_TO_DATE', (one, graded())
+        s2.location.y -= 0.01
+        bpy.context.view_layer.update()
+        # S2 back: Missing and Stale again, so every master is up to date as before (the recorded Refreshes after)
+        assert bake(['S1'], scope='STALE') == 'S2', remembered()
+        refresh()
+        assert not outdated() and graded()[:2] == (['S2'], 'UP_TO_DATE'), (outdated(), graded())
+        # step 2.4: S1 and S2 selected, S2 active, the drop-down set to S1: S1 baked (the faces as Darkest's)
+        select(['S1', 'S2'])
+        bpy.context.view_layer.objects.active = s2
+        items = [i[0] for i in ao_bake.bake_copy_items(me.fss_ao_shared, bpy.context)]
+        assert items == ['S1', 'S2'] and me.fss_ao_shared.bake_copy == 'S2', (items, me.fss_ao_shared.bake_copy)
+        me.fss_ao_shared.bake_copy = 'S1'
+        assert me.fss_ao_shared.bake_copy_name == 'S1' and me.fss_ao_shared.bake_copy == 'S1'
+        one['2.4 drop-down S1, instance'] = bake(['S1', 'S2'], active='S2')
+        assert one['2.4 drop-down S1, instance'] == 'S1', one
+        got['ONE S1 drop-down'] = faces()
+        # the drop-down naming a copy not selected: the active one
+        select(['S2'])
+        assert ao_bake.bake_instances(bpy.context) == {me.name: 'S2'}, ao_bake.bake_instances(bpy.context)
+        # the drop-down unset, S2 active: S2 baked (the faces as Most Lit's)
+        me.fss_ao_shared.bake_copy_name = ''
+        one['2.4 drop-down unset, S2 active, instance'] = bake(['S1', 'S2'], active='S2')
+        assert one['2.4 drop-down unset, S2 active, instance'] == 'S2', one
+        got['ONE S2 active'] = faces()
+        # step 2.5: an old master (its entry without `instance`), baked from S2, the old picked copy S2: up to date
+        index = store.read_index(str(FOLDER), use_cache=False)
+        del index['masters'][stem]['instance']
+        store.write_index(str(FOLDER), index)
+        assert remembered() == 'no field'
+        refresh()
+        one['2.5 old entry, pointer S2'] = graded()
+        assert one['2.5 old entry, pointer S2'] == (['S2'], 'UP_TO_DATE', 'pointer', 'S2'), one
+    # step 2.5, then the pointer empty: the first by name (S1), surroundings changed
+    me.fss_ao_shared.instance = None
+    refresh()
+    one['2.5 old entry, pointer empty'] = graded()
+    assert one['2.5 old entry, pointer empty'][:3] == (['S1'], 'SURROUNDINGS', 'first'), one
+    grades['one instance first by name'] = grade_of('S1')
+    one['S1 selected, instance'] = bake(['S1'])
+    assert one['S1 selected, instance'] == 'S1', one
+    got['ONE first'] = faces()
+    with rule_unrecorded():
+        # step 2.7: the remembered copy (S1) renamed: the first by name (S2)
+        s1 = bpy.data.objects['S1']
+        s1.name = 'S9_RENAMED'
+        select([])
+        refresh()
+        one['2.7 S1 renamed'] = graded()
+        assert one['2.7 S1 renamed'] == (['S2'], 'SURROUNDINGS', 'first', 'S1'), one
+        s1.name = 'S1'
+        # step 2.6: a mesh never baked (a copy of the mesh, two copies far away): its first copy by name
+        me2 = me.copy()
+        me2.name = 'MESH_NEVER_BAKED'
+        me2.fss_ao_shared.combine = 'ONE'
+        coll = s2.users_collection[0]
+        news = []
+        for name, x in (('NB_2', 50.0), ('NB_1', 50.2)):
+            o = bpy.data.objects.new(name, me2)
+            o.location = (x, 50.0, 50.0)
+            coll.objects.link(o)
+            news.append(o)
+        bpy.context.view_layer.update()
+        store.refresh(bpy.context, relink=False)  # no relink: the copy's mesh hash is the baked mesh's
+        it = store._state['items'][store._state['by_object']['NB_1']]
+        one['2.6 never baked'] = ([c['object'] for c in it['copies']], it['grade'], it['instance_from'],
+                                  it['baked_from'])
+        assert one['2.6 never baked'] == (['NB_1'], 'MISSING', 'first', None), one
+        for o in news:
+            bpy.data.objects.remove(o)
+        bpy.data.meshes.remove(me2)
+        bpy.context.view_layer.update()
     assert abs(got['ONE S2']['-X'] - got['LIGHTEST']['-X']) < 0.03, got
+    assert abs(got['ONE S2 active']['-X'] - got['LIGHTEST']['-X']) < 0.03, got
     assert abs(got['ONE first']['-X'] - got['DARKEST']['-X']) < 0.03, got
+    assert abs(got['ONE S1 drop-down']['-X'] - got['DARKEST']['-X']) < 0.03, got
     me.fss_ao_shared.combine = 'DEFAULT'
     refresh()
     grades['back to the default'] = grade_of('S1')
@@ -1656,7 +1802,7 @@ def test_shared_combine():
     d, a, li = got['DARKEST']['-X'], got['AVERAGE']['-X'], got['LIGHTEST']['-X']
     assert d < a - 0.02 and a < li - 0.02, got
     assert all(v['+Z'] > 0.98 and v['min'] < 0.9 for v in got.values()), got
-    print(f"PASS: test_shared_combine (per face mean / minimum: {got}; {grades})")
+    print(f"PASS: test_shared_combine (per face mean / minimum: {got}; {grades}; decision 77: {one})")
 
 
 def test_auto_distance():
@@ -2495,6 +2641,7 @@ def test_resolution_choice():
           f"shows its size)")
 
 
+@recorded_padding
 def test_soften_edges():
     """Decisions 46 and 58: Apply's Soften Sharp Edges, on a master built by hand (no bake): a step of three 10 mm
     faces with UVs continuous across both edges (64 px per face): top (AO 1.0) over a convex lip to a wall (0.4), the
@@ -2642,6 +2789,7 @@ def test_soften_edges():
 ALL_THREADS = os.cpu_count() or 2  # decision 6: the C++ parts at 1, 12 and all threads
 
 
+@recorded_padding
 def test_native_copy():
     """Apply-native-copy journal, finish lines 1, 3 and 4, and decision 6: Apply's copy in C++ (fss_ao_copy.dll). Each
     Apply (grey, ORM layout with green and blue copied, SET_B at 512 px, into the ORM slot texture, per object over a
@@ -2774,6 +2922,7 @@ def test_native_copy():
           f"{po_loads[0]} and {po_loads[1]}: the copy reads the mapped page files) and whole the same file)")
 
 
+@recorded_padding
 def test_native_open():
     """Apply-native-copy journal, Session 4, finish lines 1 to 3, and decision 6: the master opened by the DLL
     (fss_ao_copy_open_master). Every master of the suite (each kind it has: AO, curvature, raw) opened at 1, 12 and
@@ -2880,6 +3029,7 @@ def test_native_open():
           f"scratch file left)")
 
 
+@recorded_padding
 def test_native_png():
     """Apply-native-copy journal, Session 7 (decision 4), finish lines 1 and 4, and decision 6: Apply's texture
     written by the C++ PNG writer for each of test_native_copy's configurations (Soften Sharp Edges off): its pixels
@@ -3105,7 +3255,7 @@ def test_unavailable():
                                  report=lambda kind, msg: reports.append(msg))
             # Refresh needs the DLL too (its scene rule, bake-post-native journal Session 5): the job starts on the
             # Refresh made above, with the DLL in place
-            keep, store.refresh = store.refresh, lambda context, relink=True: store._state
+            keep, store.refresh = store.refresh, lambda context, relink=True, instances=None: store._state
             try:
                 assert ao_bake.FSS_OT_AOBakeStart.execute(op, bpy.context) == {'FINISHED'}, reports
             finally:
