@@ -280,6 +280,33 @@ class Grid:
         return best
 
 
+def _footprint(T, cell, shift):
+    """The cells triangles T (pixels from the origin) touch: (mask, row, column of its (0, 0) on a grid whose origin
+    is `shift` cells in)."""
+    corner = np.floor(T.reshape(-1, 2).min(0) / cell)
+    solid = solid_mask(*spans(np.maximum((T - corner * cell) / cell, 0.0)))
+    return solid, int(corner[1]) + shift, int(corner[0]) + shift
+
+
+def _window(shape, y, x, size):
+    """The part of a mask of this shape at (y, x) that lies on a square of size cells: ((rows, columns) of the mask,
+    y, x on the square), or None."""
+    h, w = shape
+    sy, sx = max(-y, 0), max(-x, 0)
+    ey, ex = min(h, size - y), min(w, size - x)
+    if ey <= sy or ex <= sx:
+        return None
+    return (slice(sy, ey), slice(sx, ex)), y + sy, x + sx
+
+
+def _paint_footprint(grid, solid, y, x):
+    """Occupy a footprint on the grid, cropped to it."""
+    window = _window(solid.shape, y, x, grid.cells)
+    if window is not None:
+        (rows, columns), wy, wx = window
+        grid.paint(solid[rows, columns], wy, wx)
+
+
 def cell_size(side, gap):
     """Pixels per raster cell for a layout of about this side. When the gap is a whole number of cells, the islands
     come to the gap exactly, without a part of a cell to spare."""
@@ -287,12 +314,16 @@ def cell_size(side, gap):
     return gap / math.ceil(gap / cell) if cell < gap else cell
 
 
-def _place_once(tri, order_t, start_t, lo, order, can_turn, gap, cell, side):
+def _place_once(tri, order_t, start_t, lo, order, can_turn, gap, cell, side, fixed_ids=()):
     reach = reach_table(round(gap / cell, 6))
     shift = max(len(reach) - 1, reach[0]) + 1  # a grown footprint must not start below the raster
     first = shift + int(math.ceil(0.5 * gap / cell))  # half the gap to the layout's edge
     grid = Grid(max(int(side / cell) + 2 * shift + BLOCK, MIN_CELLS))
     extent = shift
+    for i in fixed_ids:  # pinned islands: where they are, the others go around them
+        solid, y, x = _footprint(tri[order_t[start_t[i]:start_t[i + 1]]], cell, shift)
+        _paint_footprint(grid, solid, y, x)
+        extent = max(extent, min(max(y + solid.shape[0], x + solid.shape[1]), grid.cells))
     turns = {}
     offset = {}
     for i in order:
@@ -315,9 +346,9 @@ def _place_once(tri, order_t, start_t, lo, order, can_turn, gap, cell, side):
     return turns, offset
 
 
-def place(tri, tri_isl, n, active, can_turn, gap):
+def place(tri, tri_isl, n, active, can_turn, gap, fixed=None):
     """Place the active islands of triangles `tri` (m, 3, 2, in pixels) from their present orientation, or a quarter
-    turn from it where can_turn. Returns (turns per island, origin per island: the point subtracted before turning,
+    turn from it where can_turn. fixed: islands that stay where they are (pinned); the others go around them. Returns (turns per island, origin per island: the point subtracted before turning,
     offset per island: the point added after turning), or None when no raster could hold them."""
     order_t = np.argsort(tri_isl, kind='stable')
     start_t = np.searchsorted(tri_isl[order_t], np.arange(n + 1))
@@ -339,9 +370,12 @@ def place(tri, tri_isl, n, active, can_turn, gap):
     largest = float(size[active].max()) + 2.0 * gap
     cell = cell_size(needed, gap)
     side = max(1.1 * needed, 1.3 * largest)
+    fixed_ids = [] if fixed is None else np.flatnonzero(fixed & ~active).tolist()
+    if fixed_ids:
+        side = max(side, float(hi[fixed_ids].max()) + 2.0 * gap + needed)
     for _attempt in range(3):
         cell = max(cell, side / MAX_CELLS)
-        result = _place_once(tri, order_t, start_t, lo, order, can_turn, gap, cell, side)
+        result = _place_once(tri, order_t, start_t, lo, order, can_turn, gap, cell, side, fixed_ids)
         if result is not None:
             turns = np.zeros(n, np.int64)
             offset = lo.copy()
@@ -353,12 +387,13 @@ def place(tri, tri_isl, n, active, can_turn, gap):
     return None
 
 
-def repair(tri, tri_isl, n, active, can_turn, gap, limit):
+def repair(tri, tri_isl, n, active, can_turn, gap, limit, fixed=None):
     """Islands of a layout that lie outside the texture (0 to limit pixels), wholly or in part, moved into its free space
     (decision 156). The islands inside stay where they are; the others go, largest first, into the best free place
     inside, a quarter turn allowed where can_turn, keeping the gap to every island and half of it to the texture's
     edges; an island that fits nowhere is skipped. The ones left go into columns beyond the right edge, wholly
-    outside, so that none covers part of the texture. Their scale never changes.
+    outside, so that none covers part of the texture. Their scale never changes. fixed: pinned islands, which never
+    move; an island inside the texture that comes closer to one than the gap is moved as if it were outside.
 
     tri (m, 3, 2) in pixels with tri_isl per triangle. Returns (moved, turns, origin, offset, outside, outside area in
     px^2): moved and outside per island; turns, origin and offset as apply takes them."""
@@ -375,12 +410,13 @@ def repair(tri, tri_isl, n, active, can_turn, gap, limit):
     size = hi - lo
     e1, e2 = tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]
     area = np.bincount(tri_isl, weights=0.5 * np.abs(e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0]), minlength=n)
-    inside = active & (lo >= 0.0).all(1) & (hi <= limit).all(1)
-    out = active & ~inside
+    fixed = np.zeros(n, bool) if fixed is None else fixed & active
+    inside = active & ~fixed & (lo >= 0.0).all(1) & (hi <= limit).all(1)
+    out = active & ~fixed & ~inside
     moved = np.zeros(n, bool)
     turns = np.zeros(n, np.int64)
     offset = lo.copy()
-    if not out.any():
+    if not out.any() and not fixed.any():
         return moved, turns, lo, offset, out, 0.0
     cell = cell_size(limit, gap)
     reach = reach_table(round(gap / cell, 6))
@@ -392,12 +428,32 @@ def repair(tri, tri_isl, n, active, can_turn, gap, limit):
     cells = grid.cells
     grid.paint(np.ones((cells, cells - wall), bool), 0, wall)
     grid.paint(np.ones((cells - wall, wall), bool), wall, 0)
+    if fixed.any():
+        # the pinned islands, and around each the cells an island must keep clear of
+        forbidden = np.zeros((cells, cells), bool)
+        for i in np.flatnonzero(fixed).tolist():
+            solid, y, x = _footprint(tri[order_t[start_t[i]:start_t[i + 1]]], cell, shift)
+            _paint_footprint(grid, solid, y, x)
+            grown, pad = grown_mask(solid, reach)
+            window = _window(grown.shape, y - pad, x - pad, cells)
+            if window is not None:
+                (rows, columns), wy, wx = window
+                part = grown[rows, columns]
+                forbidden[wy:wy + part.shape[0], wx:wx + part.shape[1]] |= part
+        for i in np.flatnonzero(inside).tolist():
+            solid, y, x = _footprint(tri[order_t[start_t[i]:start_t[i + 1]]], cell, shift)
+            window = _window(solid.shape, y, x, cells)
+            if window is not None:
+                (rows, columns), wy, wx = window
+                part = solid[rows, columns]
+                if (forbidden[wy:wy + part.shape[0], wx:wx + part.shape[1]] & part).any():
+                    inside[i] = False
+        out = active & ~fixed & ~inside
+        if not out.any():
+            return moved, turns, lo, offset, out, 0.0
     for i in np.flatnonzero(inside).tolist():
-        corner = np.floor(lo[i] / cell)
-        local = tri[order_t[start_t[i]:start_t[i + 1]]] - corner * cell
-        solid = solid_mask(*spans(np.maximum(local / cell, 0.0)))
-        grid.paint(solid[:max(cells - int(corner[1]) - shift, 0), :max(cells - int(corner[0]) - shift, 0)],
-                   int(corner[1]) + shift, int(corner[0]) + shift)
+        solid, y, x = _footprint(tri[order_t[start_t[i]:start_t[i + 1]]], cell, shift)
+        _paint_footprint(grid, solid, y, x)
     key = (size[:, 0] * size[:, 1]) ** BOX_POWER * area ** (1.0 - BOX_POWER)
     out_ids = np.flatnonzero(out)
     left = []

@@ -157,6 +157,71 @@ def test_repair():
     print("PASS: test_repair (half-outside and below-origin islands placed inside with the gap, the large one beyond the edge)")
 
 
+def test_keep_pinned():
+    """Decision 157: with Keep Pinned Islands, an island with a pinned UV keeps its UVs and the others are packed around
+    it; off, it is packed like the others. The pins themselves stay either way."""
+    # the repair alone: an island inside the texture too close to a pinned one moves, the pinned one does not
+    limit, gap = 100.0, 2.0
+    rects = [(40, 40, 60, 60), (50, 50, 70, 70), (2, 2, 20, 20)]  # pinned; overlapping it; clear of it
+    tri = np.array([t for x0, y0, x1, y1 in rects for t in ([(x0, y0), (x1, y0), (x1, y1)], [(x0, y0), (x1, y1), (x0, y1)])],
+                   np.float64)
+    tri_isl = np.repeat(np.arange(3), 2)
+    fixed = np.array([True, False, False])
+    moved, turns, origin, offset, outside, _area = uv_fill.repair(tri, tri_isl, 3, np.ones(3, bool), np.ones(3, bool), gap,
+                                                                  limit, fixed=fixed)
+    assert moved.tolist() == [False, True, False] and not outside.any(), (moved, outside)
+    points = uv_fill.apply(tri.reshape(-1, 2), np.repeat(tri_isl, 3), moved, turns, origin, offset).reshape(-1, 3, 2)
+    boxes = [(points[tri_isl == i].reshape(-1, 2).min(0), points[tri_isl == i].reshape(-1, 2).max(0)) for i in range(3)]
+    assert np.allclose(boxes[0][0], (40, 40)) and np.allclose(boxes[2][0], (2, 2)), boxes
+    for a, b in ((0, 1), (1, 2)):
+        d = np.maximum(np.maximum(boxes[b][0] - boxes[a][1], boxes[a][0] - boxes[b][1]), 0.0)
+        assert np.hypot(*d) >= gap * (1 - 1e-9), (a, b, boxes)
+    # Pack: a pinned island in the middle of the texture, four others around it
+    reset()
+    scene = bpy.context.scene
+    m = mat('PINS', 1024)
+    rects = [(0, 0, 0.3, 0.3)] + [(1 + 0.5 * i, 0, 0.15, 0.15) for i in range(4)]
+    uv_rects = [(0.4, 0.4, 0.2, 0.2)] + [(0.45, 0.45, 0.05, 0.05)] * 4
+    obj = quad_obj('PINS', rects, mats=[m] * 5, uv_rects=uv_rects)
+    me = obj.data
+    if len(me.uv_layers.active.pin) == 0:
+        me.attributes.new(name='.pn.' + me.uv_layers.active.name, type='BOOLEAN', domain='CORNER')
+    pins = np.zeros(len(me.loops), bool)
+    pins[:2] = True  # two corners of the first quad
+    me.uv_layers.active.pin.foreach_set('value', pins)
+    before = uvs(obj).copy()
+    scene.fss_uv_keep_pinned = True
+    scene.fss_uv_pack_corner = 'TOP_RIGHT'
+    r = uv_pack.pack(m)
+    after = uvs(obj)
+    assert np.array_equal(after[:4], before[:4]), (after[:4], before[:4])
+    assert r['kept_pinned'] and r['pinned_islands'] == 1 and r['mode'] == 'underflow' and ok(r), r
+    assert r['corner'] == 'BOTTOM_LEFT', "the layout must not move under the pinned island"
+    assert (after[4:] >= 0).all() and (after[4:] <= 1).all() and not np.allclose(after[4:], before[4:])
+    for q in after[4:].reshape(-1, 4, 2) * 1024:
+        assert abs(quad_density(q, 15.0, 15.0) - 20.48) / 20.48 < 1e-4
+    report = chr(10).join(uv_pack._set_block(r))
+    assert 'Pinned islands kept as they are: 1' in report, report
+    # Off: packed like the others, and the pins stay
+    scene.fss_uv_keep_pinned = False
+    r = uv_pack.pack(m)
+    assert not r['kept_pinned'] and r['pinned_islands'] == 1 and ok(r), r
+    assert not np.allclose(uvs(obj)[:4], before[:4]), "Keep Pinned Islands off: the pinned island is packed"
+    assert '1 pinned island(s) packed like the others' in chr(10).join(uv_pack._set_block(r))
+    got = np.zeros(len(me.loops), bool)
+    me.uv_layers.active.pin.foreach_get('value', got)
+    assert np.array_equal(got, pins), "the pins themselves must stay"
+    # The tick sits above Pack All
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    calls, _labels = draw_panel()
+    names = [(name, args[1] if name == 'prop' else args[0]) for name, args, _kw in calls if name in ('prop', 'operator')]
+    assert names.index(('prop', uv_marks.KEEP_PINNED_PROP)) < names.index(('operator', 'fss.uv_pack_all')), names
+    scene.fss_uv_pack_corner = 'BOTTOM_LEFT'
+    print("PASS: test_keep_pinned (pinned island unchanged, four packed around it at 20.48 px/cm, corner not moved; "
+          "off: packed, pins kept; the tick above Pack All)")
+
+
 def test_exact_density():
     reset()
     m = mat('EXACT')
@@ -1816,6 +1881,7 @@ def main():
     test_fill_directions()
     test_fill_fallbacks()
     test_repair()
+    test_keep_pinned()
     test_exact_density()
     test_material_factor()
     test_underflow_and_sizes()

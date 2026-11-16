@@ -41,6 +41,7 @@ DIRECTION_MARK_PROP = 'fss_uv_direction_mark'  # the table's pulldown, read from
 SKIP_AUTOSEAM_KEY = 'fss_uv_skip_autoseam'
 KEEP_UVS_PROP = 'fss_uv_keep_uvs'  # on a material: its texture set is not packed (decision 116)
 MATERIAL_FACTOR_PROP = 'fss_uv_material_density'  # on a material: the density factor of all its islands (decision 146)
+KEEP_PINNED_PROP = 'fss_uv_keep_pinned'  # on the scene: islands with a pinned UV keep their UVs (decision 157)
 MATERIAL_TICK_PROP = 'fss_uv_material_density_use'  # the Material row's tick: unticked, the factor stays but is ignored
 MATERIAL_VIS_PROP = 'fss_uv_material_use_visibility'  # off on a material: its islands ignore visibility, on all objects
 VISIBILITY_ICON = 'LIGHT_SUN'  # the table's switch, highlighted while it is off: the islands count as fully lit
@@ -133,6 +134,11 @@ def scene_freedom(scene=None):
 def target_density(scene=None):
     scene = scene or bpy.context.scene
     return DEFAULT_TARGET if scene is None else scene.fss_uv_target_density
+
+
+def keep_pinned(scene):
+    """Keep Pinned Islands (decision 157): Pack and Check leave every island with a pinned UV as it is."""
+    return bool(getattr(scene, KEEP_PINNED_PROP, False)) if scene is not None else False
 
 
 def pack_corner(scene):
@@ -1092,6 +1098,7 @@ def _draw_texture_sets(layout, context):
     box.template_list(FSS_UL_TextureSets.bl_idname, '', bpy.data, 'materials', context.window_manager,
                       'fss_uv_pack_active', rows=min(len(materials), LIST_ROWS))
     ticked = sum(1 for material in materials if not uv_pack.is_kept(material))
+    box.prop(context.scene, KEEP_PINNED_PROP)
     row = box.row()
     row.enabled = ticked > 0
     row.operator(FSS_OT_UvPackAll.bl_idname, text=f'Pack All ({ticked})', icon='UV')
@@ -1597,6 +1604,10 @@ def register():
                     '0.75: scaled by the seen share, biased towards visible. 0.5: scaled by the seen share of its area. '
                     '0.25: biased towards scaling down. 0: only an island seen whole counts, any other gets the minimum. '
                     'Lower saves texture but blurs the part you see. Used by Pack and Check All, with no new Update Visibility')
+    setattr(bpy.types.Scene, KEEP_PINNED_PROP, bpy.props.BoolProperty(
+        name='Keep Pinned Islands', default=False, update=_marks_changed,
+        description='Islands with a pinned UV keep their place, turn and size, and the others are packed around them. '
+                    'Off: pinned islands are packed like any other (their pins stay)'))
     bpy.types.Scene.fss_uv_pack_corner = bpy.props.EnumProperty(
         name='Layout Corner', items=PACK_CORNERS, default='BOTTOM_LEFT',
         description='The corner of the texture Pack moves each layout to, as one block. Changes the UVs at the next '
@@ -1664,7 +1675,7 @@ def unregister():
         delattr(bpy.types.WindowManager, name)
     for name in (MATERIAL_VIS_PROP, MATERIAL_FACTOR_PROP, MATERIAL_TICK_PROP, KEEP_UVS_PROP, 'fss_uv_margin_px', SIZE_PROP):
         delattr(bpy.types.Material, name)
-    for name in ('fss_uv_density_freedom_max', 'fss_uv_density_freedom_min', 'fss_uv_pack_corner', 'fss_uv_partly_seen_value', 'fss_uv_target_density'):
+    for name in (KEEP_PINNED_PROP, 'fss_uv_density_freedom_max', 'fss_uv_density_freedom_min', 'fss_uv_pack_corner', 'fss_uv_partly_seen_value', 'fss_uv_target_density'):
         delattr(bpy.types.Scene, name)
     for name in (DIRECTION_MARK_PROP, USE_VISIBILITY_PROP, FACTOR_PROP, MAX_PROP, MIN_PROP, OWN_PROP):
         delattr(bpy.types.Object, name)

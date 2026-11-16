@@ -9,9 +9,11 @@ minimum factor (uv_marks.density) x the island's visibility (decisions 82 and 11
 factor, moved towards lo by the island's facing (hi = lo + facing x (top - lo)): an island facing the cameras can reach
 the top of the object's range, one facing away stays at its minimum. An island the artist set by hand (the face attribute
 uv_marks.OVERRIDE_KEY, the highest value of its faces) has lo = hi = target density x that multiplier: no marks, visibility
-or facing, and t does not move it. One t holds for the whole set (decision 113): 1
-when the set fits at the top of its ranges, else the largest t that fits, else 0, and the layout then spills into
-[0, k] x [0, k] (decision 112). When written, the layout moves as one block to the
+or facing, and t does not move it. One t holds for the whole set (decision 156, replacing the search of 113): 1, the
+top of every range; islands outside the texture then go into its free space (uv_fill.repair); with some still outside,
+0, the bottom of every range, repaired again; still outside: overflow, the islands left lying beyond the right edge
+(decision 112: nothing is squeezed). With Keep Pinned Islands (decision 157) an island with a pinned UV keeps its UVs and
+the others are packed around it. When written, the layout moves as one block to the
 scene's corner (decision 123, aligned_to_corner); k, the gaps and the densities are measured before that and do not
 change, and a layout that does not fit then spills past the edges opposite that corner.
 
@@ -537,6 +539,7 @@ class TextureSet:
         factors = []  # per part and island: the visibility factor
         facings = []  # per part and island: how directly it faces the cameras, 0 to 1
         overrides = []  # per part and island: the multiplier set by hand, 0 for none
+        pinned = []  # per part and island: a UV of it is pinned
         override_mixed = []  # per part and island: its faces do not all have that value
         n_isl = 0
         for pi, (md, users, faces) in enumerate(parts):
@@ -553,6 +556,11 @@ class TextureSet:
             Wc = (md.CO @ Mw[:3, :3].T + Mw[:3, 3])[md.LV[lsel]] * bu_cm
             p_3d = _bbox_diag(Wc, isl[loc[md.loop_face[lsel]]], ni)
             uv_zero.append(np.bincount(isl, weights=md.uv_zero_faces(Mw, self.size, cm2)[faces], minlength=ni) > 0)
+            pins = np.zeros(md.nl, bool)
+            if len(md.uv_layer.pin):  # the pin layer exists only once something was pinned
+                md.uv_layer.pin.foreach_get('value', pins)
+            face_pinned = np.bincount(md.loop_face, weights=pins, minlength=md.nf) > 0
+            pinned.append(np.bincount(isl, weights=face_pinned[faces], minlength=ni) > 0)
             # visibility per island (decision 82 via score_face_set, floor of decision 111); 1.0 when missing or stale
             vis_data = vis_cache.get(md.me.name)
             if vis_data is None:
@@ -655,6 +663,9 @@ class TextureSet:
         self.proxy = np.zeros(self.n, bool)  # islands packed through their proxy quad
         self.use_fill = True  # try the raster layout next to Pack Islands' (uv_fill)
         self.use_repair = True  # move islands outside the texture into its free space (uv_fill.repair, decision 156)
+        self.pinned = (np.concatenate(pinned) if pinned else np.zeros(0, bool)) & ~self.zero_area
+        # Keep Pinned Islands (decision 157): they keep their UVs, the others are packed around them
+        self.fixed = self.pinned & uv_marks.keep_pinned(scene)
         self.no_area_objects = sorted(set(self.no_area_objects))
 
     def objects(self):
@@ -811,6 +822,9 @@ class TextureSet:
 
     def pack(self, t, shape_method='CONCAVE'):
         """Pack at density t; returns (final UVs, k, extent px (x, y), prepared UVs)."""
+        if not (~self.zero_area & ~self.fixed).any():  # every island kept: nothing to pack
+            Q = self.uv0.copy()
+            return (Q, *self._extent(Q), Q)
         P, r = self._prepared_uv(t)
         a = ANCHOR_PX / self.size
         anchors = np.array([[0, 0], [a, 0], [0, a], [r - a, r], [r, r - a], [r, r]], dtype=np.float64)
@@ -827,7 +841,7 @@ class TextureSet:
             'uv', np.concatenate([P, quads.reshape(-1, 2), anchors]).astype(np.float32).ravel())
         # faces packed: the real faces of normal islands, the proxy quads of proxy islands, the anchors; zero-area
         # islands are not packed (Blender packs only selected faces and leaves the others untouched: measured)
-        packed = ~self.zero_area
+        packed = ~self.zero_area & ~self.fixed  # pinned islands kept (decision 157) are not packed either
         fsel = np.concatenate([(packed & ~self.proxy)[self.face_island], packed & self.proxy, np.ones(2, bool)])
         me.polygons.foreach_set('select', fsel)
         vsel = np.zeros(len(me.vertices), bool)
@@ -879,7 +893,7 @@ class TextureSet:
             ca, sa = np.cos(ang[li]), np.sin(ang[li])
             d = P[pl] - c0[li]
             Q[pl] = np.stack([ca * d[:, 0] - sa * d[:, 1], sa * d[:, 0] + ca * d[:, 1]], 1) + c1[li]
-        zl = self.zero_area[self.loop_isl]
+        zl = (self.zero_area | self.fixed)[self.loop_isl]
         Q[zl] = self.uv0[zl]
         k, ext = self._extent(Q)
         return Q, k, ext, P
@@ -897,11 +911,14 @@ class TextureSet:
         and beside the large ones (uv_fill), from the orientation Pack Islands gave them: Upright and Flip islands do
         not turn; every other island may turn by 90 degrees, in a Quarter set as well. Returns (UVs, k, extent px), or
         None when the raster could not hold them."""
-        keep = ~self.zero_area
+        laid = ~self.zero_area
+        keep = laid & ~self.fixed
+        if not keep.any():
+            return None
         px = self.px(Q)
-        kt = keep[self.tri_isl]
+        kt = laid[self.tri_isl]
         placed = uv_fill.place(px[self.TLt][kt], self.tri_isl[kt], self.n, keep, ~self.upright,
-                               self.margin_px + MARGIN_EXTRA)
+                               self.margin_px + MARGIN_EXTRA, fixed=self.fixed)
         if placed is None:
             return None
         F = uv_fill.apply(px, self.loop_isl, keep, *placed) / self.size
@@ -914,7 +931,8 @@ class TextureSet:
         px = self.px(Q)
         kt = keep[self.tri_isl]
         moved, turns, origin, offset, outside, outside_px2 = uv_fill.repair(
-            px[self.TLt][kt], self.tri_isl[kt], self.n, keep, ~self.upright, self.margin_px + MARGIN_EXTRA, self.size)
+            px[self.TLt][kt], self.tri_isl[kt], self.n, keep, ~self.upright, self.margin_px + MARGIN_EXTRA, self.size,
+            fixed=self.fixed)
         if not moved.any():
             return None
         F = uv_fill.apply(px, self.loop_isl, moved, turns, origin, offset) / self.size
@@ -948,7 +966,7 @@ def search(ts, shape_method, progress=None):
         else:
             r = {'t': t, 'Q': Q, 'k': k, 'ext': ext, 'pre': P, 'filled': False}
         r.update(repaired=False, placed=0, outside=0, outside_px2=0.0, outside_isl=None)
-        if r['k'] > 1.0 and ts.use_repair:
+        if (r['k'] > 1.0 or ts.fixed.any()) and ts.use_repair:  # kept pinned islands: also clear them
             if progress is not None:
                 progress(f'Moving islands outside the texture into free space, layout {len(packs)}', share(len(packs) - 0.25))
             fixed = ts.repair(r['Q'])
@@ -985,20 +1003,30 @@ def pack_set(ts, progress=None):
     packs = 0
     shape = 'CONCAVE'
     rounds = 0
+    # pinned islands kept as the artist left them (decision 157): their own gaps and overlaps are not the packer's
+    pinned_violations = pinned_overlaps = 0
+    if ts.fixed.any():
+        px0 = ts.px(ts.uv0)
+        kt = ts.fixed[ts.tri_isl]
+        ks = ts.fixed[ts.seg_isl]
+        base, _offenders = layout_metrics(px0[ts.TLt][kt], ts.tri_isl[kt], px0[ts.seg_loops][ks], ts.seg_isl[ks], ts.n,
+                                          ts.margin_px)
+        pinned_violations, pinned_overlaps = base['margin_violations'], base['overlap_tri_pairs']
+    keep_repair = bool(ts.fixed.any())  # it is what clears the kept pinned islands
     while True:
         res, n, mode = search(ts, shape, progress)
         packs += n
         if progress is not None:
             progress('Measuring the layout', PROGRESS_MEASURE)
         row, offenders = evaluate(ts, res)
-        clean = row['margin_violations'] == 0 and row['overlap_tri_pairs'] == 0
-        if clean or (shape == 'AABB' and not res['filled'] and not res['repaired']):
+        clean = (row['margin_violations'] <= pinned_violations and row['overlap_tri_pairs'] <= pinned_overlaps)
+        if clean or (shape == 'AABB' and not res['filled'] and (not res['repaired'] or keep_repair)):
             break
-        if res['filled'] or res['repaired']:  # the raster's footprints should rule this out; Pack Islands alone from here on
+        if res['filled'] or (res['repaired'] and not keep_repair):  # the raster's footprints should rule this out
             ts.use_fill = ts.use_fill and not res['filled']
             ts.use_repair = ts.use_repair and not res['repaired']
         elif rounds < PROXY_ROUNDS:
-            ts.proxy[sorted(offenders)] = True
+            ts.proxy[sorted(set(offenders) - set(np.flatnonzero(ts.fixed).tolist()))] = True
             rounds += 1
         else:
             ts.proxy[:] = False
@@ -1006,6 +1034,8 @@ def pack_set(ts, progress=None):
     row.update(mode=mode, packs=packs, shape_method=shape, filled=res['filled'], repaired=res['repaired'],
                placed_islands=res['placed'], outside_islands=res['outside'],
                outside_area_pct=100.0 * res['outside_px2'] / float(ts.size * ts.size),
+               pinned_islands=int(ts.pinned.sum()), kept_pinned=bool(ts.fixed.any()),
+               pinned_conflicts=int(pinned_violations + pinned_overlaps),
                proxy_islands=0 if res['filled'] else int(ts.proxy.sum()))
     return res, mode, row
 
@@ -1023,7 +1053,7 @@ def evaluate(ts, res):
     # density per island against its range (degenerate, collapsed and zero-area islands have none)
     a_uv = np.bincount(ts.tri_isl, weights=tri_area(tri), minlength=ts.n)
     d = np.sqrt(a_uv / np.maximum(ts.a3, 1e-30))
-    ok = ~ts.degenerate & ~ts.collapsed & ~ts.zero_area
+    ok = ~ts.degenerate & ~ts.collapsed & ~ts.zero_area & ~ts.fixed  # a kept pinned island keeps its density
     dev = np.maximum(np.where(d < ts.lo, (ts.lo - d) / ts.lo, 0.0), np.where(d > ts.hi, (d - ts.hi) / ts.hi, 0.0))[ok]
     big = a_uv[ok] >= 100.0
     up_err = 0.0
@@ -1244,7 +1274,8 @@ def _run(material, write, progress=None, vis_cache=None):
         if write:
             if progress is not None:
                 progress('Writing the UVs', PROGRESS_WRITE)
-            corner = uv_marks.pack_corner(context.scene)
+            # kept pinned islands stay where they are, so the layout does not move to another corner (decision 157)
+            corner = 'BOTTOM_LEFT' if ts.fixed.any() else uv_marks.pack_corner(context.scene)
             write_back(ts, dict(res, Q=aligned_to_corner(ts, res['Q'], corner, res.get('outside_isl'))))
             result.update(written=True, corner=corner)
     finally:
@@ -1363,6 +1394,13 @@ def _set_block(r, selected=None):
         + (f", {r['upright_islands']} upright" if r['upright_islands'] else '')
         + (', quarter turns only' if r['quarter'] else ''),
     ]
+    if r.get('pinned_islands'):
+        if r.get('kept_pinned'):
+            lines.append(f"  Pinned islands kept as they are: {r['pinned_islands']}; the others packed around them"
+                         + (f"; {r['pinned_conflicts']} pinned pair(s) closer than the margin or overlapping, as pinned"
+                            if r.get('pinned_conflicts') else ''))
+        else:
+            lines.append(f"  {r['pinned_islands']} pinned island(s) packed like the others (Keep Pinned Islands is off)")
     if r.get('repaired'):
         lines.append(f"  Islands outside the texture moved into its free space: {r['placed_islands']}"
                      + (f"; {r['outside_islands']} fit nowhere and lie beyond the right edge "
