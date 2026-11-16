@@ -54,7 +54,8 @@ EXPECTED = {
     'FSS_PT_visibility': ("Visibility Scoring", 'FSS_PT_uv_marks', 0, MSFS),
     'FSS_PT_uv_marks_results': ("Check Results", 'FSS_PT_uv_marks', 0, MSFS),
     'FSS_PT_uv_marks_advanced': ("Advanced", 'FSS_PT_uv_marks', 1, MSFS),
-    'FSS_PT_ao_bake': ("AO Bake", '', 8, MSFS),
+    'FSS_PT_ao_bake': ("Bake", '', 8, MSFS),
+    'FSS_PT_ao_run': ("Run", 'FSS_PT_ao_bake', 0, MSFS),  # AO bake journal decisions 75, 76
     'FSS_PT_tools': ("General", '', 0, TOOLS),
     'FSS_PT_empty_bounds': ("Empty Bounds", '', 1, TOOLS),
     'FSS_PT_uv_heatmap': ("Heatmap", '', 2, TOOLS),
@@ -840,6 +841,81 @@ def build_names(scene, obj):
     return names
 
 
+AO_OPERATORS = {'ao_bake_refresh', 'ao_run', 'ao_object_step', 'ao_bake_start', 'ao_bake_select', 'ao_bake_tree_set',
+                'ao_bake_detect', 'ao_bake_tree_fold', 'ao_bake_tree_select', 'ao_bake_tree_highlight',
+                'ao_bake_tree_select_all', 'ao_bake_tree_highlight_all', 'ao_bake_tree_toggle',
+                'ao_bake_custom_occluders', 'ao_apply'}  # every AO Bake operator but the two Cancels
+
+
+def _drawn():
+    """Every FSS panel's drawn calls (None when its poll hides it)."""
+    out = {}
+    for idname, cls in sorted(fss_panels().items()):
+        if hasattr(cls, 'poll') and not cls.poll(bpy.context):
+            out[idname] = None
+            continue
+        calls = []
+        cls.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+        out[idname] = [(n, a, {k: v for k, v in kw.items() if k != '_op'}) for n, a, kw in calls]
+    return out
+
+
+def _polls():
+    """The poll of every fss operator."""
+    out = {}
+    for name in dir(bpy.ops.fss):
+        try:
+            out[name] = getattr(bpy.ops.fss, name).poll()
+        except Exception as exc:  # noqa: BLE001
+            out[name] = type(exc).__name__
+    return out
+
+
+def _md5(path):
+    import hashlib
+    return hashlib.md5(Path(path).read_bytes()).hexdigest()
+
+
+def test_ao_bake_unavailable():
+    """Apply-native-copy decision 6: with fss_ao_copy.dll moved away, and with libjxl's jxl.dll moved away (each put
+    back and its md5 checked): AO Bake's first line is the reason (icon ERROR), the rest of it is drawn as before, its
+    operators' polls refuse; every other panel draws as before and every other operator's poll is unchanged."""
+    from fss_blender_tools import ao_bake_core as core
+    nat, lib = core.native_copy(), core.jxl()
+    assert nat.unavailable() is None, nat.unavailable()
+    before_draw, before_polls = _drawn(), _polls()
+    assert AO_OPERATORS <= set(before_polls), AO_OPERATORS - set(before_polls)
+    whys = []
+    for path in (Path(nat.LIB_DIR) / nat.DLL, Path(lib.LIB_DIR) / 'jxl.dll'):
+        md5 = _md5(path)
+        away = path.with_name(path.name + '.away')
+        path.rename(away)
+        try:
+            nat.reset()
+            lib.reset()
+            why = nat.unavailable()
+            draw, polls = _drawn(), _polls()
+        finally:
+            away.rename(path)
+            nat.reset()
+            lib.reset()
+        assert _md5(path) == md5, path
+        assert why and path.name in why and 'missing' in why, why
+        ao = draw['FSS_PT_ao_bake']
+        assert ao[0] == ('label', (), {'text': f'Not available: {why}', 'icon': 'ERROR'}), ao[:2]
+        assert ao[1:] == before_draw['FSS_PT_ao_bake'], 'the rest of AO Bake changed'
+        other = [k for k in draw if k != 'FSS_PT_ao_bake' and draw[k] != before_draw[k]]
+        assert not other, other
+        assert not any(polls[n] for n in AO_OPERATORS), {n: polls[n] for n in AO_OPERATORS}
+        changed = {n for n in polls if polls[n] != before_polls[n]}
+        assert changed <= AO_OPERATORS, changed - AO_OPERATORS
+        whys.append(why)
+    assert nat.unavailable() is None and _drawn() == before_draw and _polls() == before_polls
+    print(f'PASS: test_ao_bake_unavailable ({len(before_draw)} panels, {len(before_polls)} operators; the DLL away: '
+          f'"{whys[0]}"; jxl.dll away: "{whys[1]}"; each: the reason first in AO Bake, its {len(AO_OPERATORS)} '
+          f'operators refused, every other panel and poll unchanged; moved back, md5s unchanged)')
+
+
 def main():
     test_layout()
     test_draw_all()
@@ -850,6 +926,7 @@ def main():
     test_lod_settings_bars()
     test_add_parent()
     test_rename_meshes()
+    test_ao_bake_unavailable()  # apply-native-copy decision 6
     print("ALL TESTS PASSED")
 
 

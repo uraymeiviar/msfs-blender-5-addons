@@ -732,8 +732,9 @@ class Baker:
 
     def write_curvature(self, folder, stem, m, pos, tris, cn, width, threads=None, rows=CURV_BAND, max_samples=512):
         """ao_bake_core.write_curvature in the baker (the same rows, byte for byte: OptiX baker journal Session 6):
-        the curvature master <stem>.curv.jxl (or .curv.png) in the AO master's layout, from the master's triangles
-        (tris (T, 3) into pos, cn (T, 3, 3), in tri_src order). Returns dict(path, edges, seconds)."""
+        the curvature master <stem>.curv.jxl (an older .curv.png removed) in the AO master's layout, from the master's
+        triangles (tris (T, 3) into pos, cn (T, 3, 3), in tri_src order). Returns dict(path, edges, seconds). libjxl is
+        required (apply-native-copy decision 6): a JxlError without it."""
         np = _np()
         core = _core()
         t0 = time.time()
@@ -745,11 +746,11 @@ class Baker:
             ready = self.ch.load_curvature(1, geo, nbytes, timeout=TILE_TIMEOUT_S)
         finally:
             block.close()
-        jx, pn = core.image_paths(folder, stem, 'curv')
+        path, other = core.image_paths(folder, stem, 'curv')
         lib = core.jxl()
-        path, other = (jx, pn) if lib.available() else (pn, jx)
-        w = lib.Writer(path + '.tmp', W, H, threads=threads or lib.THREADS) if lib.available() else \
-            core.PngRowWriter(path + '.tmp', W, H, bits=16, channels=1)
+        if not lib.available():
+            raise lib.JxlError(f'{path}: the JPEG XL library is not loaded ({lib.error()})')
+        w = lib.Writer(path + '.tmp', W, H, threads=threads or lib.THREADS)
         name, io_block = self._block('rows', rows * W * 6)
         try:
             codes_view = np.frombuffer(io_block, np.int32, rows * W, 0)
@@ -778,8 +779,8 @@ class Baker:
     def denoise_master(self, folder, stem, cn, opts, device='GPU', on_band=None, cache_bytes=None):
         """ao_bake_core.denoise_master_oidn in the baker (OptiX baker journal Session 8: OIDN 2.5.1 shipped with the
         baker, the islands isolated as the add-on does it, each pixel's island mean restored, the change bound to the
-        noise): the raw master <stem>.ao.raw.jxl (or .png) into the master <stem>.ao.jxl (or .png), in the add-on's
-        windows. cn (T, 3, 3): the master's corner normals in its face order; opts: strength. on_band(i, n) after each
+        noise): the raw master <stem>.ao.raw.jxl into the master <stem>.ao.jxl (libjxl required, apply-native-copy
+        decision 6), in the add-on's windows. cn (T, 3, 3): the master's corner normals in its face order; opts: strength. on_band(i, n) after each
         window. Returns the stats as denoise_master_oidn's (method OIDN, device, groups, windows, px, mean change,
         seconds) and the baker's name and OIDN's version."""
         np = _np()
@@ -801,11 +802,11 @@ class Baker:
                 ready = self.ch.load_denoise(1, geo, nbytes, timeout=TILE_TIMEOUT_S)
             finally:
                 block.close()
-            dst = os.path.join(folder, stem) + ('.ao.jxl' if raw.endswith('.jxl') else '.ao.png')
-            other = os.path.join(folder, stem) + ('.ao.png' if raw.endswith('.jxl') else '.ao.jxl')
+            dst, other = core.image_paths(folder, stem)
             jl = core.jxl()
-            w = jl.Writer(dst + '.tmp', W, H, threads=jl.THREADS) if dst.endswith('.jxl') else \
-                core.PngRowWriter(dst + '.tmp', W, H, bits=16, channels=1)
+            if not jl.available():
+                raise jl.JxlError(f'{dst}: the JPEG XL library is not loaded ({jl.error()})')
+            w = jl.Writer(dst + '.tmp', W, H, threads=jl.THREADS)
             band = max(64, core.OIDN_WINDOW_PX // max(W, 1) - 2 * core.OIDN_HALO)
             nb = -(-H // band)
             rows_max = min(H, band + 2 * core.OIDN_HALO)

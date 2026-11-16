@@ -23,7 +23,9 @@ the work folder on their texture sets.
         --python tests\\test_ao_bake_native_job.py -- --cockpit
 """
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import os
 import re
@@ -43,6 +45,7 @@ from test_ao_bake import bpy, core, store, ao_bake  # noqa: E402
 from test_ao_baker_static import check, RESULTS  # noqa: E402
 
 native = sys.modules['fss_blender_tools.ao_bake_native']
+JOB_REF = tb.Reference('native_job')  # decision 6: the files of the Python composition, recorded
 WORK = tb.REPO_ROOT / 'tests' / '_work' / 'ao_bake_native_job'
 COCKPIT_WORK = tb.REPO_ROOT / 'tests' / '_work' / 'ao_baker_cycles'
 REAL_INDEX = Path(r'G:\e-jets-e2\assets\visual\cockpit\COCKPIT.bake\index.json')  # read only
@@ -89,6 +92,9 @@ def files_of(folder):
     return out
 
 
+CONSOLE = {'last': ''}  # the console output of the last bake_all's bake
+
+
 def bake_all(label, env=None, runner=None):
     """Every master of the suite's scene baked anew (the bake folder emptied), with env set for the second Blender
     (and so for aobaker.exe) and the runner given; returns (status, log, seconds, files) and keeps a copy of the
@@ -104,7 +110,10 @@ def bake_all(label, env=None, runner=None):
         if runner:
             store.RUNNER = runner
         tb.refresh()
-        res = bpy.ops.fss.ao_bake_start(scope='STALE', hidden=True, wait=True)
+        console = io.StringIO()
+        with contextlib.redirect_stdout(console):  # decision 74: the bake's report goes to the console
+            res = bpy.ops.fss.ao_bake_start(scope='STALE', hidden=True, wait=True)
+        CONSOLE['last'] = console.getvalue()
         assert res == {'FINISHED'}, res
     finally:
         store.RUNNER = keep_runner
@@ -178,17 +187,30 @@ def suite():
     # finish line 2: Cycles unchanged
     st_h, _log_h, t_h, f_h = bake_all('head', runner=head_runner)
     check('head-bakes', st_h.get('state') == 'done' and len(f_h) > 0, rev=rev, masters=len(f_h), seconds=round(t_h, 1))
+    # decision 6: every master's files as the committed runner (the Python composition) writes them, recorded
+    bad = []
+    for stem in sorted(f_h):
+        try:
+            JOB_REF.check(f'head/{stem}', dict(sorted(f_h[stem].items())))
+        except AssertionError as exc:
+            bad.append(str(exc))
+    check('head-same-as-recorded', not bad, masters=len(f_h), differing=bad[:4])
     st_c, log_c, t_c, f_c = bake_all('cycles')
     n, diff = same_files(f_h, f_c)
     check('cycles-same-as-head', not diff and 'baker Cycles (the Baker setting)' in log_c, masters=n,
           differing=diff[:8],
           seconds=round(t_c, 1))
+    # decision 6: this runner's files (the C++ composition) against the values recorded from the Python composition
+    from ao_native_reference import digest
+    bad = sorted(s for s in set(f_c) | set(k[5:] for k in JOB_REF.want if k.startswith('head/'))
+                 if JOB_REF.want.get(f'head/{s}') != digest(dict(sorted(f_c.get(s, {}).items()))))
+    check('cycles-same-as-recorded', not bad, masters=len(f_c), differing=bad[:8])
     settings(s, 'AUTO')
     st_n, log_n, t_n, f_n = bake_all('nocuda', env={native.NO_CUDA_ENV: '1'})
     n, diff = same_files(f_h, f_n)
     line = [x for x in log_n.splitlines() if 'baker Cycles' in x]
     check('auto-no-gpu-cycles', not diff and bool(line) and 'NoDriver' in line[0]
-          and 'Cycles because' in bpy.context.window_manager.fss_ao_bake_state.report,
+          and 'Cycles because' in CONSOLE['last'],
           masters=n, differing=diff[:8], log=line[:1], seconds=round(t_n, 1))
     missing = str(WORK / 'no_such' / 'aobaker.exe')
     st_m, log_m, t_m, f_m = bake_all('noexe', env={'FSS_AO_BAKER_EXE': missing})
@@ -324,6 +346,7 @@ def main():
         cockpit()
     else:
         suite()
+        check('reference-values', True, cases=JOB_REF.done(complete=True))
     failed = [r['name'] for r in RESULTS if not r['ok']]
     print(f'{len(RESULTS) - len(failed)} passed, {len(failed)} failed' + (f': {failed}' if failed else ''), flush=True)
     if args.out:

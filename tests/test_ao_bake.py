@@ -10,9 +10,9 @@ Blender). Checked:
   object's faces without a material are not baked, an object without one is excluded and listed (decision 30);
 - the master paged (Session 23): baked and written band by band, no per-pixel array in the .npz, Apply in bands of 5
   rows, of 256 rows and from the whole master in memory byte-identical, no scratch file left;
-- the masters as JPEG XL (Session 26, decision 37): every master .jxl; a PNG master as 0.55.2 wrote it is up to date
-  and applied byte-identically, and a re-bake replaces it with a .jxl and removes the PNG; with the library made
-  unloadable (FSS_AO_BAKE_NO_JXL) the bake writes PNG, the report says so once, and Apply works;
+- the masters as JPEG XL (Session 26, decision 37; apply-native-copy decision 6): every master .jxl; a PNG master as
+  0.55.2 wrote it and a master of schema 1 are not read: graded missing, white in Apply ("re-bake needed"); a re-bake
+  replaces the PNG with a .jxl and removes the PNG;
 - staleness: a moved vertex, changed custom normals and an added modifier give "mesh changed"; a moved occluder inside
   the AO distance, an occluder tagged Non-AO-Occluder, the AO distance and a moved object give "surroundings changed";
   an occluder moved outside the distance, UVs moved, scaled and re-unwrapped, a material changed leave it up to date;
@@ -30,7 +30,16 @@ Blender). Checked:
   under 4 x counted (finish line 7);
 - the panel draws without writing;
 - the options of Session 25 (decisions 34 to 36): a Non-AO-Occluder in a custom list shades the target, an object not
-  in the list does not (finish line 4); the pose count, occluder mode and custom list each give "surroundings changed"
+  in the list does not (finish line 4); Custom with Scene as occluder off and on and items added or ignored (decision
+  60): the occluders of each combination, an older list unchanged, the eyedropper field and the Add/Ignore icon, the
+  rows greyed and red, an ignored occluder's contact shadow gone; the Detected list (decision 62): the scene rule's
+  occluders kept for every object, filtered by name, ignored from the list and back; the Detected tree (decision 63):
+  parent rows, joined for several selected, fold and filter, [+] and [-] on a parent and a child (mixed state), Self
+  Only and Scene Rule turned Custom, With its children in the Custom list (an item on a child wins), Add Selected and
+  the eyedropper with an empty, the name selecting the object; the oriented boxes (decision 64): a bar turned 45
+  degrees whose world box comes within A's AO distance but whose own box does not is no occluder of A, turned
+  towards A it is; a sheared object keeps its world box; moving (decision 65): sliding away no occluder, turning
+  towards A one; the pose count, occluder mode and custom list each give "surroundings changed"
   and back "up to date" (finish line 5); the run mode Hidden (and Visible with FSS_AO_BAKE_TEST_VISIBLE=1): the bake
   finishes, the panel's progress updates during it and no preview of the master is written (OptiX baker decision 30),
   the .blend, its datablocks and is_dirty unchanged (finish line 7);
@@ -39,11 +48,20 @@ Blender). Checked:
   `-- only=test_poses` runs that test alone;
 - Soften Sharp Edges (decision 46) on a master built by hand: the darker side of a convex edge follows the smoothstep
   to the brighter side's value, a concave corner and the brighter side unchanged, a width under a texel raised to one;
-  the copy in C++ and in numpy bit-identical there, softened;
-- Apply's copy in C++ (apply-native-copy journal, Session 2): every Apply output (grey, ORM layout, another size, the
-  ORM slot, per object, curvature; Soften Sharp Edges off and on; the master paged, paged with a cache of 2 tiles,
-  and whole) byte-identical with FSS_AO_COPY=numpy, with the DLL at 12 threads and at 1; with the DLL moved away and
-  with FSS_AO_COPY=numpy Apply runs the numpy copy and its report says so.
+  the copy in C++ there as recorded, softened;
+- the C++ parts against the values the Python code gave before apply-native-copy decision 6 removed it (recorded in
+  tests/data/ao_native_reference.json, tests/ao_native_reference.py), each at 12, 1 and all threads byte-identical:
+  Apply's copy (Session 2; every Apply output: grey, ORM layout, another size, the ORM slot, per object, curvature,
+  green and blue resampled; Soften Sharp Edges off and on; the master paged, paged with a cache of 2 tiles, and
+  whole; the C++ raster, dilation, UV islands and Soften counted, Session 11), the opening (Session 4; every master's page files,
+  every Apply output), the PNG writer (Session 7, decision 4: the Python writer's pixels) and reader, and the
+  composition with the map writer (bake-post-native journal; every master's files);
+- every Refresh and Detected-tree Refresh against the Python scene rule's results, recorded before its geometry moved
+  to C++ (bake-post-native journal Session 5; tests/data/ao_scene_rule_reference.json): each item's mesh and
+  surroundings hashes, grades, occluders, against and posed lists, the scene-rule lists, the gaps within 1e-9 m;
+- decision 6: with fss_ao_copy.dll moved away, and with libjxl's jxl.dll moved away (each put back, md5 checked): the
+  panel's first line says why, the AO Bake operators refuse, a job fails with the reason in its log and status, Apply
+  refuses.
 
 The baker (OptiX baker journal, decision 22): Cycles, or the one FSS_AO_BAKE_TEST_BAKER names (AUTO, OPTIX), with
 FSS OptiX at the suite's 16 samples.
@@ -53,7 +71,9 @@ C:\\Users\\uray\\.claude\\tools\\cpucap\\cpucap.exe 50 G:\\e-jets-e2\\tools\\ble
     --python tests/test_ao_bake.py
 """
 
+import contextlib
 import hashlib
+import io
 import math
 import json
 import os
@@ -91,6 +111,46 @@ for name in ADDONS:
     addon_utils.enable(name, default_set=True)
     assert Path(sys.modules[name].__file__).resolve().is_relative_to(REPO_ROOT), sys.modules[name].__file__
 
+sys.path.insert(0, str(REPO_ROOT / 'tests'))
+from ao_native_reference import Reference  # noqa: E402  (decision 6: the Python code's values, recorded)
+
+REF = Reference('suite')
+# bake-post-native journal Session 5: every Refresh and Detected-tree Refresh against the scene rule's results as the
+# Python code gave them before its geometry moved to C++ (tests/data/ao_scene_rule_reference.json)
+from ao_scene_rule_reference import RuleReference, digest as rule_digest, state_values  # noqa: E402
+RULE = RuleReference('suite')
+_RULE_CALLS = {}
+_store_refresh, _store_detect = store.refresh, store.detect_occluders
+
+
+def _rule_key(kind):
+    """'<test>/<n>/<kind>': the innermost test function on the stack and the call's number in it."""
+    f, name = sys._getframe(1), 'top'
+    while f is not None:
+        if f.f_code.co_name.startswith('test_') or f.f_code.co_name == 'build_scene':
+            name = f.f_code.co_name
+            break
+        f = f.f_back
+    _RULE_CALLS[name] = _RULE_CALLS.get(name, 0) + 1
+    return f'{name}/{_RULE_CALLS[name]:02d}/{kind}'
+
+
+def _checked_refresh(context, relink=True):
+    st = _store_refresh(context, relink)
+    exact, gaps = state_values(st)
+    RULE.check(_rule_key('refresh'), rule_digest(exact), gaps, exact)
+    return st
+
+
+def _checked_detect(context, objs):
+    done = _store_detect(context, objs)
+    exact, gaps = state_values(store._state, done)
+    RULE.check(_rule_key('detect'), rule_digest(exact), gaps, exact)
+    return done
+
+
+if __name__ == '__main__':  # this suite's own run (other suites import this module for its scene)
+    store.refresh, store.detect_occluders = _checked_refresh, _checked_detect
 WORK = REPO_ROOT / 'tests' / '_work' / 'ao_bake_suite'
 BLEND = WORK / 'suite.blend'
 FOLDER = WORK / 'suite.bake'
@@ -371,6 +431,12 @@ def read(path):
     return (vals if vals.ndim == 3 else vals[:, :, None]), bits, ct
 
 
+def png_pixels(path):
+    """A PNG's values (H, W, C) in file order (the top first), as the reference values of decision 6 hold them (files
+    of the Python and the C++ writer have the same pixels, other bytes: apply-native-copy decision 4)."""
+    return np.ascontiguousarray(read(path)[0][::-1])
+
+
 def faces_mask(name, W=SIZE, H=SIZE, material=None):
     depsgraph = bpy.context.evaluated_depsgraph_get()
     obj = bpy.data.objects[name]
@@ -429,8 +495,8 @@ def test_bake_all():
     no_set = set(np.nonzero(ev_n['mat'] == 1)[0].tolist())
     assert len(no_set) == 8 and not no_set & set(n_master['tri_src'].tolist()), no_set
     assert len(n_master['tri_src']) == len(ev_n['tris']) - 8
-    report = bpy.context.window_manager.fss_ao_bake_state.report
-    assert 'excluded (no face with a texture set (material)): 1: NM' in report, report
+    report = bpy.context.window_manager.fss_ao_bake_state.report  # decision 74: one line, no exclusions
+    assert report.startswith('done ') and '\n' not in report and 'excluded' not in report, report
     # FL7: darkening
     mins = {n: float(master_image(n)[1].min()) for n in ('A', 'B', 'C', 'D', 'E', 'O1', 'S1', 'M')}
     assert mins['A'] < 0.9 and mins['D'] < 0.9 and mins['E'] < 0.9, mins  # O1, S1/S2, K (skip-bake) darken
@@ -559,7 +625,7 @@ def test_paged():
         assert rep['page_loads'] and rep5['page_loads'], (rep.get('page_loads'), rep5.get('page_loads'))
         opened = core.open_master
 
-        def whole(folder, s, cache_bytes=0, kind='ao'):
+        def whole(folder, s, cache_bytes=0, kind='ao', threads=None):
             out = core.load_master(folder, s, kind)
             out['close'] = lambda: None
             return out
@@ -580,9 +646,10 @@ def test_paged():
 
 
 def test_formats():
-    """Session 26 (decision 37), finish lines 5 and 6: the masters are JPEG XL; a PNG master as 0.55.2 wrote it is
-    applied unchanged and a re-bake replaces it with a .jxl, removing the PNG; with the library made unloadable the
-    bake writes PNG, says so once in the report, and Apply works."""
+    """Session 26 (decision 37) and apply-native-copy decision 6: the masters are JPEG XL. A PNG master as 0.55.2 and
+    a bake without libjxl wrote it, and a master of schema 1 (its maps in the .npz), are masters the C++ code does not
+    read: Refresh grades them missing (to be baked again), Apply leaves their faces white with the reason 're-bake
+    needed'; a re-bake replaces the PNG with a .jxl, removing the PNG, and Apply writes the .jxl's file again."""
     lib = core.jxl()
     assert lib.available(), lib.error()
     refresh()
@@ -600,67 +667,68 @@ def test_formats():
     m = core.load_master(folder, stem)
     assert m['image'].shape == (entry['H'], entry['W']) and np.array_equal(m['image'], img)
     ref = apply_set('SET_A', file_name='fmt_jxl.png')
-    # a PNG master as 0.55.2 wrote it (its writer is unchanged): the same pixels, the .jxl removed, schema 2
+    a_faces = faces_mask('A', material='SET_A')
+    # a master of schema 1 (a copy of A's files, its .npz with the maps): not read, to be baked again
+    old_dir = WORK / 'schema1'
+    if old_dir.exists():
+        shutil.rmtree(old_dir)
+    old_dir.mkdir(parents=True)
+    _img, mp, npz = core.master_paths(folder, stem)
+    shutil.copy2(jpath, old_dir / os.path.basename(jpath))
+    shutil.copy2(mp, old_dir / os.path.basename(mp))
+    with np.load(npz) as z:
+        arrays = {k: z[k] for k in z.files}
+    np.savez_compressed(old_dir / os.path.basename(npz), filled=m['filled'], face_map=m['face_map'], **arrays)
+    why_s1 = core.master_unreadable(str(old_dir), stem)
+    assert why_s1 and why_s1.endswith(core.REBAKE) and 'schema 1' in why_s1, why_s1
+    assert not store.has_files(str(old_dir), stem)
+    for fn in (core.open_master, core.load_master):
+        try:
+            fn(str(old_dir), stem)
+            raise AssertionError(f'{fn.__name__} read a master of schema 1')
+        except core.MasterUnreadable as exc:
+            assert str(exc) == why_s1, exc
+    shutil.rmtree(old_dir)
+    # a PNG master as 0.55.2 wrote it: not read any more (decision 6), graded missing, white in Apply
     core.write_png_int(ppath, img)
     os.remove(jpath)
     index['masters'][stem]['schema'] = 2
     index['masters'][stem].pop('image', None)
     store.write_index(folder, index)
     refresh()
-    assert grade_of('A') == 'UP_TO_DATE' and core.master_paths(folder, stem)[0] == ppath
+    why_png = core.master_unreadable(folder, stem)
+    assert grade_of('A') == 'MISSING' and core.master_paths(folder, stem)[0] == ppath, grade_of('A')
+    assert why_png == f'{os.path.basename(ppath)} is a PNG master: {core.REBAKE}', why_png
     old = apply_set('SET_A', file_name='fmt_png_0552.png')
-    assert file_hash(old['path']) == file_hash(ref['path']) and old['written_px'] == ref['written_px'] > 0
-    # a re-bake replaces it with a .jxl and removes the PNG
+    white = [w for w in old['white'] if w[0] == 'A']
+    assert white == [('A', core.REBAKE, white[0][2])] and white[0][2] > 0, old['white']
+    line = [x for x in ao_bake_apply.report_lines(old) if 'A (re-bake needed)' in x]
+    assert line, ao_bake_apply.report_lines(old)
+    vals = read(old['path'])[0][:, :, 0]
+    assert a_faces.any() and (vals[a_faces] == 65535).all(), 'A not white'
+    assert old['written_px'] < ref['written_px'], (old['written_px'], ref['written_px'])
+    for fn in (core.open_master, core.load_master):
+        try:
+            fn(folder, stem)
+            raise AssertionError(f'{fn.__name__} read a PNG master')
+        except core.MasterUnreadable as exc:
+            assert str(exc) == why_png, exc
+    # a re-bake replaces it with a .jxl and removes the PNG; Apply copies A again (test_tiles' master was baked in
+    # tiles, this one whole: other noise, the same pixels written)
     select(['A'])
     assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
     assert os.path.isfile(jpath) and not os.path.exists(ppath), os.listdir(folder)
     assert grade_of('A') == 'UP_TO_DATE'
-    OUT.mkdir(parents=True, exist_ok=True)
-    base = np.random.default_rng(7).integers(0, 65536, (SIZE, SIZE, 3))
-    for tag in ('rebaked_jxl', 'nolib_png'):
-        write_png(OUT / f'fmt_{tag}.png', base)
-    # per object: without the library only A's master (PNG) can be read; the set's other masters are .jxl
-    rebaked = apply_set('SET_A', [bpy.data.objects['A']], file_name='fmt_rebaked_jxl.png')
-    # no library: the second Blender inherits the switch
-    os.environ[lib.DISABLE_ENV] = '1'
-    lib.reset()
-    try:
-        assert not lib.available() and lib.DISABLE_ENV in lib.error()
-        assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
-        report = bpy.context.window_manager.fss_ao_bake_state.report
-        status = store.read_status(folder)
-        assert status['master_format'] == 'png' and status['results'][0]['status'] == 'baked', status
-        assert report.count('masters written as PNG') == 1, report
-        assert os.path.isfile(ppath) and not os.path.exists(jpath), os.listdir(folder)
-        log_lines = [x for x in (FOLDER / 'bake.log').read_text(encoding='utf-8').splitlines()[-6:]
-                     if 'masters as PNG' in x]
-        assert len(log_lines) == 1, log_lines
-        refresh()
-        assert grade_of('A') == 'UP_TO_DATE'
-        nolib = apply_set('SET_A', [bpy.data.objects['A']], file_name='fmt_nolib_png.png')
-        try:  # the whole set needs the other masters' .jxl: reported as an error, nothing written
-            ao_bake_apply.apply_set(bpy.context, bpy.data.materials['SET_A'], None,
-                                    ApplySettings(file_name='fmt_nolib_set.png'))
-            set_error = None
-        except OSError as exc:
-            set_error = str(exc)
-        assert set_error and 'JPEG XL library is not loaded' in set_error, set_error
-        assert not (OUT / 'fmt_nolib_set.png').exists()
-    finally:
-        del os.environ[lib.DISABLE_ENV]
-        lib.reset()
-    assert lib.available()
-    same_bake = file_hash(nolib['path']) == file_hash(rebaked['path'])  # reported: equal when Cycles repeats itself
-    # and back to JPEG XL
-    assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
-    assert os.path.isfile(jpath) and not os.path.exists(ppath)
+    again = apply_set('SET_A', file_name='fmt_rebaked_jxl.png')
+    assert 'A' in again['copied'] and not [w for w in again['white'] if w[0] == 'A'], again
+    assert again['written_px'] == ref['written_px'] > 0, (again['written_px'], ref['written_px'])
     left = [f for f in os.listdir(FOLDER) if f.endswith(('.page', '.mappage', '.tmp', '.raw'))]
     assert not left, left
-    print(f"PASS: test_formats ({len(jx)} masters .jxl, schema 3; A as a 0.55.2 PNG master: up to date, Apply "
-          f"byte-identical to the .jxl's ({ref['written_px']} px); a re-bake wrote the .jxl and removed the PNG; "
-          f"without the library: PNG written, the report says so once ({[x for x in report.splitlines() if 'PNG' in x][0]}), "
-          f"Apply of A written ({nolib['written_px']} px; the same file as the JPEG XL re-bake's: {same_bake}), the "
-          f"whole set (other masters .jxl) refused with an error; back to .jxl; no scratch file left)")
+    print(f"PASS: test_formats ({len(jx)} masters .jxl, schema 3; a master of schema 1: \"{why_s1}\", not opened; A as "
+          f"a 0.55.2 PNG master: graded missing, Apply white on its {white[0][2]} faces ({line[0].strip()}); a re-bake "
+          f"wrote the .jxl and removed the PNG, Apply copied A again ({again['written_px']} px, as before); no scratch "
+          f"file left)")
+
 
 def test_staleness():
     """FL2: each change gives its grade."""
@@ -758,7 +826,7 @@ def test_apply_orm():
     face = faces_mask('P')
     assert (new[:, :, 0][face] != 32768).all() and new[:, :, 0][face].min() < 0.9 * 65535
     assert Path(rep['backup']).read_bytes() == bytes16
-    assert any('Substance' in w for w in rep['warnings'])
+    assert not any('Substance' in w for w in rep['warnings'])  # decision 74: never named
     rep8 = apply_set('SET_ORM8', target='ORM')
     new8, bits, _ = read(p8)
     assert bits == 16 and np.array_equal(new8[:, :, 1:], orig8[:, :, 1:].astype(np.uint32) * 257)
@@ -870,7 +938,7 @@ class _Layout:
             self.calls.append((name, args, kwargs))
             if name == 'operator':
                 return SimpleNamespace()
-            if name in ('row', 'column', 'box', 'split'):
+            if name in ('row', 'column', 'box', 'split', 'grid_flow'):
                 return _Layout(self.calls)
             return None
         return call
@@ -889,9 +957,10 @@ def test_draw():
         before = props()
         calls = []
         bpy.types.FSS_PT_ao_bake.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+        bpy.types.FSS_PT_ao_run.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)  # decisions 75, 76
         assert props() == before
         ops = [args[0] for name, args, _kw in calls if name == 'operator']
-        assert 'fss.ao_bake_start' in ops and 'fss.ao_apply' in ops, ops
+        assert 'fss.ao_bake_refresh' in ops and 'fss.ao_run' in ops, ops
     print(f"PASS: test_draw ({len(st.sets)} texture set rows drawn without writing; rows "
           f"{[(r.material, r.state) for r in st.sets]})")
 
@@ -1044,8 +1113,12 @@ def test_apply_ticked():
     assert all(m.fss_ao_apply.use for m in mats)
     mats[0].fss_ao_apply.use = False
     st = ctx.window_manager.fss_ao_bake_state
-    assert bpy.ops.fss.ao_apply(scope='SELECTED') == {'FINISHED'}
-    done = {line.split(':')[0] for line in st.apply_report.splitlines() if not line.startswith(' ')}
+    console = io.StringIO()  # decision 74: the whole report in the console, the panel only what failed
+    with contextlib.redirect_stdout(console):
+        assert bpy.ops.fss.ao_apply(scope='SELECTED') == {'FINISHED'}
+    done = {line[len('AO Apply: '):].split(':')[0] for line in console.getvalue().splitlines()
+            if line.startswith('AO Apply: ') and not line[len('AO Apply: '):].startswith(' ')}
+    assert not st.apply_report, st.apply_report
     assert sets[0] not in done and set(sets[1:]) <= done, (sets, done)
     for m in mats:
         m.fss_ao_apply.use = False
@@ -1109,6 +1182,394 @@ def test_custom_occluders():
     print(f"PASS: test_custom_occluders (B with O2, tagged Non-AO-Occluder, in its list: minimum {b_min:.3f} (scene "
           f"rule: 1.0); F with only O2 (5 m away) in its list: minimum {f_min:.3f}, its cube O6 not in the list shades "
           f"nothing)")
+
+
+def test_custom_add_ignore():
+    """Decision 60: Custom with Scene as occluder off or on and items added or ignored gives the expected occluders;
+    a list without the new settings keeps its occluders and master; the eyedropper field adds without selecting; the
+    icon switches Add and Ignore; the rows draw without writing; an ignored occluder's contact shadow is gone."""
+    def occluders(name):
+        return store._state['items'][store._state['by_object'][name]]['occluders']
+    a, b, o1, o2, z = (bpy.data.objects[n] for n in ('A', 'B', 'O1', 'O2', 'Z'))
+    refresh()
+    rule = occluders('A')  # the scene rule's occluders of A (Default: Scene Rule)
+    assert 'O1' in rule and grade_of('A') == 'UP_TO_DATE', (rule, grade_of('A'))
+    assert float(master_image('A')[1].min()) < 0.9  # O1's contact shadow
+    # B's list from test_custom_occluders, saved without the new settings: the same occluders, still up to date
+    assert not b.fss_ao_bake.custom_scene and not any(r.ignore for r in b.fss_ao_bake.custom)
+    assert occluders('B') == ['O2'] and grade_of('B') == 'UP_TO_DATE', (occluders('B'), grade_of('B'))
+    s = a.fss_ao_bake
+    s.occluders = 'CUSTOM'
+    results = {}
+
+    def case(label, scene_on, items, expect):
+        s.custom_scene = scene_on
+        s.custom.clear()
+        for name, ignore in items:
+            ref = s.custom.add()
+            ref.object, ref.ignore = bpy.data.objects[name], ignore
+        refresh()
+        got = occluders('A')
+        results[label] = got
+        assert got == sorted(expect), (label, got, sorted(expect))
+    case('scene off, empty', False, [], [])
+    case('scene off, O1 and Z added', False, [('O1', False), ('Z', False)], ['O1', 'Z'])
+    case('scene off, O1 ignored', False, [('O1', True)], [])
+    case('scene on, empty', True, [], rule)
+    case('scene on, O1 ignored', True, [('O1', True)], [n for n in rule if n != 'O1'])
+    case('scene on, O2 (Non-AO-Occluder) added', True, [('O2', False)], sorted(set(rule) | {'O2'}))
+    case('scene on, O1 added (already in the rule)', True, [('O1', False)], rule)
+    assert store._state['scene_rule']['A'] == rule
+    # the rows: Ignore red; greyed: Ignore with the scene off, Add with the scene on for an object the rule includes
+    s.custom.clear()
+    for name, ignore in (('O1', False), ('O2', False), ('Z', True)):
+        ref = s.custom.add()
+        ref.object, ref.ignore = bpy.data.objects[name], ignore
+    drawn = {}
+    for scene_on in (True, False):
+        s.custom_scene = scene_on
+        for i, ref in enumerate(s.custom):
+            calls = []
+            row_holder = _Layout(calls)
+            row = row_holder.row()
+            row_holder.row = lambda **kw: row
+            snap = [(r.object.name, r.ignore) for r in s.custom], s.custom_scene, s.custom_index
+            ao_bake.FSS_UL_AOOccluders.draw_item(None, bpy.context, row_holder, s, ref, 0, s, 'custom_index', i)
+            assert ([(r.object.name, r.ignore) for r in s.custom], s.custom_scene, s.custom_index) == snap
+            drawn[(scene_on, ref.object.name)] = (row.active, row.alert)
+    assert drawn == {(True, 'O1'): (False, False), (True, 'O2'): (True, False), (True, 'Z'): (True, True),
+                     (False, 'O1'): (True, False), (False, 'O2'): (True, False), (False, 'Z'): (False, True)}, drawn
+    # the icon (TOGGLE) and the eyedropper field
+    bpy.context.view_layer.objects.active = a
+    assert bpy.ops.fss.ao_bake_custom_occluders(action='TOGGLE', index=0) == {'FINISHED'} and s.custom[0].ignore
+    assert bpy.ops.fss.ao_bake_custom_occluders(action='TOGGLE', index=0) == {'FINISHED'} and not s.custom[0].ignore
+    s.custom.clear()
+    selected = [o.name for o in bpy.context.selected_objects]
+    s.pick = o1
+    s.pick = o1  # not twice
+    s.pick = a  # not the object itself
+    assert [r.object.name for r in s.custom] == ['O1'] and s.pick is None, [r.object.name for r in s.custom]
+    assert [o.name for o in bpy.context.selected_objects] == selected
+    # the bake: scene on, O1 ignored: A's contact shadow from O1 is gone
+    s.custom[0].ignore = True
+    s.custom_scene = True
+    refresh()
+    assert grade_of('A') == 'SURROUNDINGS'
+    select(['A'])
+    assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
+    ignored_min = float(master_image('A')[1].min())
+    assert ignored_min > 0.99, ignored_min
+    # back to the default, baked again for the tests after this one
+    s.custom.clear()
+    s.custom_scene = False
+    s.occluders = 'DEFAULT'
+    refresh()
+    select(['A'])
+    assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
+    assert grade_of('A') == 'UP_TO_DATE' and float(master_image('A')[1].min()) < 0.9
+    print(f"PASS: test_custom_add_ignore (scene rule of A {rule}; {results}; rows (active, red) {drawn}; A with "
+          f"O1 ignored: minimum {ignored_min:.3f}, its contact shadow gone)")
+
+
+def _shown(filter_name=''):
+    """The Detected tree's rows, in their order (filter_items)."""
+    flag = 1 << 30  # UIList.bitflag_filter_item (an instance attribute)
+    objects = bpy.context.scene.objects
+    flags, order = ao_bake.FSS_UL_AODetected.filter_items(
+        SimpleNamespace(bitflag_filter_item=flag, filter_name=filter_name), bpy.context, bpy.context.scene, 'objects')
+    return [o.name for o, _f, _k in sorted(((o, f, k) for o, f, k in zip(objects, flags, order) if f & flag),
+                                           key=lambda x: x[2])]
+
+
+def _tree_row(name, filter_name=''):
+    """The Detected tree's row: ([+] lit, [-] lit, the operators' names), drawn without writing."""
+    calls = []
+    holder = _Layout(calls)
+    snap = [(o.name, o.fss_ao_bake.occluders, o.fss_ao_bake.custom_scene,
+             [(r.object.name, r.ignore, r.children) for r in o.fss_ao_bake.custom]) for o in bpy.data.objects]
+    ao_bake.FSS_UL_AODetected.draw_item(SimpleNamespace(filter_name=filter_name), bpy.context, holder,
+                                        bpy.context.scene, bpy.data.objects[name], 0, None, '', 0)
+    assert snap == [(o.name, o.fss_ao_bake.occluders, o.fss_ao_bake.custom_scene,
+                     [(r.object.name, r.ignore, r.children) for r in o.fss_ao_bake.custom]) for o in bpy.data.objects]
+    sets = [kw.get('depress', False) for n, a, kw in calls if n == 'operator' and a[0] == 'fss.ao_bake_tree_set']
+    ops = [a[0] for n, a, _kw in calls if n == 'operator']
+    texts = [kw.get('text') for n, a, kw in calls if n == 'label' and kw.get('text')]
+    return tuple(sets), ops, texts
+
+
+def test_detected():
+    """Decisions 62 and 63: every baked object's scene-rule occluders are kept at Refresh, also under Self Only; the
+    Detected tree shows them (filtered by name too); [-] ignores one (Scene Rule becomes Custom with Scene as occluder)
+    and [+] takes it back; the rows draw without writing."""
+    a = bpy.data.objects['A']
+    s = a.fss_ao_bake
+    select(['A'])
+    refresh()
+    rule = store._state['scene_rule']['A']
+    assert rule == store._state['items'][store._state['by_object']['A']]['occluders'] == ['O1'], rule
+    s.occluders = 'SELF'
+    refresh()
+    assert store._state['scene_rule']['A'] == ['O1'] and store._state['items'][store._state['by_object']['A']]['occluders'] == []
+    s.occluders = 'DEFAULT'
+    refresh()
+    assert _shown() == ['O1'] and _shown('o1') == ['O1'] and _shown('Z') == [], (_shown(), _shown('Z'))
+    before = _tree_row('O1')[0]
+    assert before == (True, False), before
+    assert bpy.ops.fss.ao_bake_tree_set(name='O1', on=False) == {'FINISHED'}
+    assert s.occluders == 'CUSTOM' and s.custom_scene and [(r.object.name, r.ignore) for r in s.custom] == [('O1', True)]
+    refresh()
+    assert store._state['items'][store._state['by_object']['A']]['occluders'] == [] and grade_of('A') == 'SURROUNDINGS'
+    ignored = _tree_row('O1')[0]
+    assert ignored == (False, True), ignored
+    assert bpy.ops.fss.ao_bake_tree_set(name='O1', on=False) == {'CANCELLED'}  # already so: nothing to change
+    assert bpy.ops.fss.ao_bake_tree_set(name='O1', on=True) == {'FINISHED'} and not len(s.custom)
+    refresh()
+    assert store._state['items'][store._state['by_object']['A']]['occluders'] == ['O1']
+    s.custom_scene = False
+    off = _tree_row('O1')[0]
+    assert off == (False, True), off
+    s.occluders, s.custom_scene = 'DEFAULT', False
+    refresh()
+    assert grade_of('A') == 'UP_TO_DATE', grade_of('A')
+    print(f"PASS: test_detected (A's scene rule {rule}, also kept under Self Only; the tree shows {_shown()}, 'Z' "
+          f"filters it to none; O1's row ([+], [-]) {before}, ignored {ignored} with A turned Custom and Scene as "
+          f"occluder, [+] takes it back; without the scene {off})")
+
+
+def test_tree():
+    """Decision 63: the Detected tree with a parent (empty TP over O1, detected for A, and S1, detected for D), joined
+    for A and D selected: its rows, counts, fold and filter; [-] on TP ignores the branch for both; [+] on O1 then
+    adds it back for A alone (TP mixed); [+] on TP clears the branch's items; Self Only becomes Custom on [+]; the
+    Custom list's With its children (an item on a child wins); Add Selected and the eyedropper with the empty; the
+    name selects the object. Parenting keeps every master up to date."""
+    a, d, o1, s1 = (bpy.data.objects[n] for n in ('A', 'D', 'O1', 'S1'))
+    sa, sd = a.fss_ao_bake, d.fss_ao_bake
+    refresh()
+    rule_a, rule_d = list(store._state['scene_rule']['A']), list(store._state['scene_rule']['D'])
+    assert rule_a == ['O1'] and {'S1', 'S2'} <= set(rule_d) and 'O1' not in rule_d, (rule_a, rule_d)
+    occ_d = store._state['items'][store._state['by_object']['D']]['occluders']
+    tp = bpy.data.objects.new('TP', None)
+    bpy.context.scene.collection.objects.link(tp)
+    worlds = [o.matrix_world.copy() for o in (o1, s1)]
+    for o in (o1, s1):
+        o.parent = tp
+    bpy.context.view_layer.update()
+    assert [o.matrix_world for o in (o1, s1)] == worlds
+    refresh()
+    assert grade_of('A') == grade_of('D') == 'UP_TO_DATE', (grade_of('A'), grade_of('D'))
+    ao_bake._tree_open.clear()
+    select(['A', 'D'])
+    tree = ao_bake.detected_tree(bpy.context)
+    rest = sorted(set(rule_d) - {'S1'})
+    assert tree['targets'] == ['A', 'D'] and tree['children'] == {'TP': ['O1', 'S1']}, tree
+    assert tree['roots'] == sorted(rest + ['TP']) and sorted(tree['members']['TP']) == ['O1', 'S1'], tree
+    assert tree['count']['TP'] == 2 and tree['count']['O1'] == 1 and tree['depth']['O1'] == 1, tree
+    # decision 70: each detected object's gap, a parent row's the smallest in its branch; the flat view
+    gap_a, gap_d = store._state['scene_gap']['A'], store._state['scene_gap']['D']
+    assert set(gap_a) == set(rule_a) and set(gap_d) == set(rule_d), (gap_a, gap_d)
+    assert tree['gap']['TP'] == min(tree['own_gap']['O1'], tree['own_gap']['S1']), tree
+    st = bpy.context.window_manager.fss_ao_bake_state
+    st.detected_view = 'FLAT'
+    flat = _shown()
+    assert flat == sorted(set(rule_a) | set(rule_d)), flat  # by name
+    st.detected_sort = 'DISTANCE'  # decision 71
+    flat = _shown()
+    assert [tree['own_gap'][n] for n in flat] == sorted(tree['own_gap'][n] for n in flat), flat
+    st.detected_view, st.detected_sort = 'TREE', 'NAME'
+    # an empty over one object only is no row; over two it is
+    tq = bpy.data.objects.new('TQ', None)
+    bpy.context.scene.collection.objects.link(tq)
+    s2 = bpy.data.objects['S2']
+    s2_world = s2.matrix_world.copy()
+    s2.parent = tq
+    s2.matrix_parent_inverse = tq.matrix_world.inverted()
+    bpy.context.view_layer.update()
+    ao_bake._tree_cache.update(key=None)
+    tree_q = ao_bake.detected_tree(bpy.context)
+    assert 'TQ' not in tree_q['members'] and 'S2' in tree_q['roots'], tree_q['roots']
+    s2.parent = None
+    s2.matrix_world = s2_world
+    bpy.data.objects.remove(tq)
+    bpy.context.view_layer.update()
+    ao_bake._tree_cache.update(key=None)
+    folded = _shown()
+    assert folded == sorted(rest + ['TP']), folded
+    assert bpy.ops.fss.ao_bake_tree_fold(name='TP') == {'FINISHED'}
+    unfolded = _shown()
+    assert unfolded[unfolded.index('TP'):unfolded.index('TP') + 3] == ['TP', 'O1', 'S1'], unfolded
+    assert bpy.ops.fss.ao_bake_tree_fold(name='TP') == {'FINISHED'} and _shown() == folded
+    assert _shown('s1') == ['TP', 'S1'], _shown('s1')  # the filter opens the branch
+    lit, ops, texts = _tree_row('TP')
+    assert lit == (True, False) and ops == ['fss.ao_bake_tree_set'] * 2 + [
+        'fss.ao_bake_tree_highlight', 'fss.ao_bake_tree_select', 'fss.ao_bake_tree_fold'], (lit, ops)
+    # the name a label (a click highlights the row), the distance column (decision 70), the count of targets
+    assert len(texts) == 3 and texts[0] == 'TP  (2)' and texts[1].endswith(' mm') and texts[2] == '2/2', texts
+    # [-] on the parent: both turn Custom with Scene as occluder and ignore TP with its children
+    assert bpy.ops.fss.ao_bake_tree_set(name='TP', on=False) == {'FINISHED'}
+    for st in (sa, sd):
+        assert st.occluders == 'CUSTOM' and st.custom_scene, (st.occluders, st.custom_scene)
+        assert [(r.object.name, r.ignore, r.children) for r in st.custom] == [('TP', True, True)]
+    refresh()
+    occ = {n: store._state['items'][store._state['by_object'][n]]['occluders'] for n in ('A', 'D')}
+    assert occ == {'A': [], 'D': [n for n in occ_d if n != 'S1']}, occ
+    assert _tree_row('TP')[0] == (False, True) and _tree_row('S2')[0] == (True, False)
+    # [+] on the child O1: added back for A alone (D does not detect it); TP is mixed
+    assert bpy.ops.fss.ao_bake_tree_set(name='O1', on=True) == {'FINISHED'}
+    assert [(r.object.name, r.ignore, r.children) for r in sa.custom] == [('TP', True, True), ('O1', False, False)]
+    assert [(r.object.name, r.ignore) for r in sd.custom] == [('TP', True)]
+    refresh()
+    assert store._state['items'][store._state['by_object']['A']]['occluders'] == ['O1']
+    mixed = _tree_row('TP')[0]
+    assert mixed == (False, False) and _tree_row('O1')[0] == (True, False), mixed
+    # [+] on the parent: the branch's items go, the scene rule decides again
+    assert bpy.ops.fss.ao_bake_tree_set(name='TP', on=True) == {'FINISHED'} and not len(sa.custom) and not len(sd.custom)
+    refresh()
+    assert store._state['items'][store._state['by_object']['D']]['occluders'] == occ_d
+    # Self Only: [+] makes it Custom without the scene, with the object added
+    select(['D'])
+    sd.occluders = 'SELF'
+    assert bpy.ops.fss.ao_bake_tree_set(name='S2', on=True) == {'FINISHED'}
+    assert sd.occluders == 'CUSTOM' and not sd.custom_scene and [r.object.name for r in sd.custom] == ['S2']
+    refresh()
+    assert store._state['items'][store._state['by_object']['D']]['occluders'] == ['S2']
+    # the Custom list: TP added with its children (scene off) adds O1 and S1 wherever they are; an item on S1 wins
+    select(['A'])
+    sa.occluders, sa.custom_scene = 'CUSTOM', False
+    sa.pick = tp  # an empty: added with With its children on
+    assert [(r.object.name, r.ignore, r.children) for r in sa.custom] == [('TP', False, True)]
+    refresh()
+    with_children = store._state['items'][store._state['by_object']['A']]['occluders']
+    assert with_children == ['O1', 'S1'], with_children
+    assert bpy.ops.fss.ao_bake_custom_occluders(action='CHILDREN', index=0) == {'FINISHED'} and not sa.custom[0].children
+    refresh()
+    assert store._state['items'][store._state['by_object']['A']]['occluders'] == []  # the empty alone darkens nothing
+    sa.custom[0].children = True
+    ref = sa.custom.add()
+    ref.object, ref.ignore = s1, True
+    refresh()
+    child_wins = store._state['items'][store._state['by_object']['A']]['occluders']
+    assert child_wins == ['O1'], child_wins
+    sa.custom.clear()
+    select(['A', 'TP'])
+    bpy.context.view_layer.objects.active = a
+    assert bpy.ops.fss.ao_bake_custom_occluders(action='ADD') == {'FINISHED'}
+    assert [(r.object.name, r.children) for r in sa.custom] == [('TP', True)]
+    # the select button: the object alone (no children) made active; with children, they too (decision 69)
+    assert bpy.ops.fss.ao_bake_tree_select(name='S2') == {'FINISHED'}
+    assert [o.name for o in bpy.context.selected_objects] == ['S2'] and bpy.context.view_layer.objects.active.name == 'S2'
+    assert bpy.ops.fss.ao_bake_tree_select(name='TP') == {'FINISHED'}
+    assert sorted(o.name for o in bpy.context.selected_objects) == ['O1', 'S1', 'TP']
+    assert bpy.context.view_layer.objects.active.name == 'TP'
+    assert bpy.ops.fss.ao_bake_tree_highlight(name='TP') == {'FINISHED'} and ao_bake._highlight['names'] == {'TP'}
+    assert bpy.ops.fss.ao_bake_tree_highlight(name='TP') == {'FINISHED'} and not ao_bake._highlight['names']
+    # back as before
+    for st in (sa, sd):
+        st.custom.clear()
+        st.occluders, st.custom_scene = 'DEFAULT', False
+    for o in (o1, s1):
+        o.parent = None
+    bpy.data.objects.remove(tp)
+    bpy.context.view_layer.update()
+    assert [o.matrix_world for o in (o1, s1)] == worlds
+    ao_bake._tree_open.clear()
+    refresh()
+    assert grade_of('A') == grade_of('D') == 'UP_TO_DATE', (grade_of('A'), grade_of('D'))
+    print(f"PASS: test_tree (A and D joined: rows {folded}, unfolded {unfolded}; [-] on TP: A {occ['A']}, D "
+          f"{occ['D']}; [+] on O1: TP mixed {mixed}; Self Only + [+] S2: D ['S2']; TP with its children "
+          f"{with_children}, S1 ignored on its own {child_wins})")
+
+
+def own_box(obj):
+    """The object's world box (lo, hi) and own box (centre, unit axes as columns, half sizes, ok: its axes square) at
+    the current frame, from its bound_box and matrix_world (the own box by the DLL, as the scene rule makes it)."""
+    c = np.array([tuple(v) for v in obj.bound_box], dtype=np.float64)
+    M = np.array(obj.matrix_world, dtype=np.float64)
+    w = c @ M[:3, :3].T + M[:3, 3]
+    return (w.min(axis=0), w.max(axis=0)), core.native_copy().own_boxes(c.min(axis=0), c.max(axis=0), M,
+                                                                          store.ORTHO_TOL)
+
+
+def test_oriented_rule():
+    """Decision 64: a bar (0.8 m x 2 cm) turned 45 degrees beside A: its world box comes within A's AO distance
+    (0.1 m) but its own box does not, so it is no occluder of A and A's master stays up to date; turned towards A it
+    becomes one (surroundings changed), back again up to date. The gap of two aligned boxes is their world boxes'; a
+    child of a parent scaled unevenly and turned has no own box (a shear) and keeps its world box. Decision 65: the
+    bar moving, its own box at each sampled frame: sliding away from A (its swept world box within the distance) no
+    occluder, turning towards A one."""
+    a = bpy.data.objects['A']
+    refresh()
+    rule = list(store._state['scene_rule']['A'])
+    distance = store.item_distance(a, bpy.context.scene)
+    h, w = 0.4, 0.01
+    me = bpy.data.meshes.new('MESH_BAR')
+    me.from_pydata([(x, y, z) for x in (-h, h) for y in (-w, w) for z in (-w, w)], [],
+                   [(0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1), (2, 3, 7, 6), (0, 2, 6, 4), (1, 5, 7, 3)])
+    bar = bpy.data.objects.new('BAR', me)
+    bpy.context.scene.collection.objects.link(bar)
+    bar.location = (-0.4, 0.4, 0.0)
+    bar.rotation_euler = (0.0, 0.0, math.radians(45))  # along (1, 1): its side faces A, 0.4 m away
+    bpy.context.view_layer.update()
+    (wa, oa), (wb, ob) = own_box(a), own_box(bar)
+    world_gap = float(np.max(np.maximum(np.maximum(wa[0] - wb[1], wb[0] - wa[1]), 0.0)))
+    own_gap = float(core.native_copy().box_gaps(oa[:3], *(np.array([x]) for x in ob[:3]))[0])
+    assert world_gap <= distance < own_gap, (world_gap, distance, own_gap)
+    refresh()
+    beside = list(store._state['scene_rule']['A'])
+    assert beside == rule and grade_of('A') == 'UP_TO_DATE', (beside, grade_of('A'))
+    bar.rotation_euler = (0.0, 0.0, math.radians(-45))  # along (1, -1): its end 2 cm from A's corner
+    bpy.context.view_layer.update()
+    refresh()
+    towards = list(store._state['scene_rule']['A'])
+    assert 'BAR' in towards and grade_of('A') == 'SURROUNDINGS', (towards, grade_of('A'))
+    # aligned boxes: the world boxes' gap; a shear: no own box
+    box = (np.zeros(3), np.eye(3), np.ones(3))
+    aligned = float(core.native_copy().box_gaps(box, np.array([[3.0, 0.5, 0.0]]), np.eye(3)[None],
+                                                np.ones((1, 3)))[0])
+    assert abs(aligned - 1.0) < 1e-12, aligned
+    parent = bpy.data.objects.new('BAR_PARENT', None)
+    bpy.context.scene.collection.objects.link(parent)
+    parent.scale = (2.0, 1.0, 1.0)
+    bar.parent = parent
+    bpy.context.view_layer.update()
+    assert not own_box(bar)[1][3]
+    bar.parent = None
+    bpy.data.objects.remove(parent)
+    # decision 65, a moving bar: sliding away from A along the diagonal, turned beside it: its world box swept over
+    # the motion comes within the distance (at frame 1 as above), its own box at no sampled frame
+    scene = bpy.context.scene
+    actions = set(bpy.data.actions)
+    bar.rotation_euler = (0.0, 0.0, math.radians(45))
+    bar.location = (-0.4, 0.4, 0.0)
+    bar.keyframe_insert('location', frame=1)
+    bar.location = (-0.6, 0.6, 0.0)
+    bar.keyframe_insert('location', frame=50)
+    scene.frame_set(1)
+    refresh()
+    sliding = list(store._state['scene_rule']['A'])
+    assert sliding == rule and grade_of('A') == 'UP_TO_DATE', (sliding, grade_of('A'))
+    # turning towards A during the motion: near at some sampled frames, so an occluder
+    bar.animation_data_clear()
+    bar.location = (-0.4, 0.4, 0.0)
+    bar.keyframe_insert('rotation_euler', frame=1)
+    bar.rotation_euler = (0.0, 0.0, math.radians(-45))
+    bar.keyframe_insert('rotation_euler', frame=50)
+    scene.frame_set(1)
+    refresh()
+    turning = list(store._state['scene_rule']['A'])
+    assert 'BAR' in turning, turning
+    bar.animation_data_clear()
+    for act in set(bpy.data.actions) - actions:
+        bpy.data.actions.remove(act)
+    scene.frame_set(1)
+    bpy.data.objects.remove(bar)
+    bpy.data.meshes.remove(me)
+    bpy.context.view_layer.update()
+    refresh()
+    assert store._state['scene_rule']['A'] == rule and grade_of('A') == 'UP_TO_DATE', grade_of('A')
+    print(f"PASS: test_oriented_rule (AO distance {distance:.3f}; the bar turned beside A: world box gap "
+          f"{world_gap:.3f}, own box gap {own_gap:.3f}, A's occluders {beside}, up to date; turned towards A: {towards}, "
+          f"surroundings changed; aligned boxes gap {aligned:.3f}; a sheared child has no own box; moving: sliding "
+          f"away {sliding}, turning towards A {turning})")
 
 
 def test_shared_combine():
@@ -1705,23 +2166,25 @@ def test_unsaved():
 
 
 def test_object_preview():
-    """Decision 43 as OptiX baker decision 31 left it: after a bake the panel draws the bake buttons again (only progress
-    and Cancel while it runs); the Object box shows no picture of the master, only who baked it; the bake writes no
-    thumbnail (<stem>.ao.thumb)."""
+    """Decision 43 as OptiX baker decision 31 and decision 66 left it: after a bake the panel draws the bake buttons
+    again (only progress and Cancel while it runs); the Object box shows no picture of the master and no line on who
+    baked it; the bake writes no thumbnail (<stem>.ao.thumb)."""
     refresh()
     select(['A'])
     calls = []
     bpy.types.FSS_PT_ao_bake.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+    assert bpy.types.FSS_PT_ao_run.poll(bpy.context)  # decision 76: Run is shown again once the bake is done
+    bpy.types.FSS_PT_ao_run.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
     ops = [args[0] for name, args, _kw in calls if name == 'operator']
-    assert 'fss.ao_bake_start' in ops, ops  # the buttons back after test_run_mode's bake
+    assert 'fss.ao_run' in ops, ops  # the buttons back after test_run_mode's bake
     assert not any(name == 'template_icon' for name, _a, _kw in calls), 'a picture is drawn'
     labels = [kw.get('text', args[0] if args else '') for name, args, kw in calls if name == 'label']
-    assert any(str(t).startswith('Baked by ') for t in labels), labels
+    assert not any(str(t).startswith(('Baked by ', 'No master baked')) for t in labels), labels
     thumbs = [n for n in os.listdir(FOLDER) if n.endswith(core.THUMB_EXT)]
     assert not thumbs, thumbs
     select([])
-    print("PASS: test_object_preview (bake buttons drawn after a bake; no picture of A's master, 'Baked by ...' "
-          "shown; no thumbnail written)")
+    print("PASS: test_object_preview (bake buttons drawn after a bake; no picture of A's master, no 'Baked by ...' "
+          "line; no thumbnail written)")
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -1906,11 +2369,13 @@ def test_poses():
     refresh()
     assert store._state['items'][store._state['by_object']['BEND']]['poses'], 'BEND has poses'
     select(['BEND'])
-    assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
+    console = io.StringIO()
+    with contextlib.redirect_stdout(console):
+        assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
     rb = store.read_status()['results'][0]
-    report = bpy.context.window_manager.fss_ao_bake_state.report
     assert rb['status'] == 'baked' and rb['n_poses'] == 1 and 'deforms' in rb.get('note', ''), rb
-    assert 'BEND: its mesh deforms between poses' in report, report
+    # decision 74: the bake's notes in the console's report
+    assert 'BEND: its mesh deforms between poses' in console.getvalue(), console.getvalue()
     # decision 41 (P59): a full turn (0 to 360 degrees over 0 to 100) is the same pose at both ends: 4 poses at 0, 25,
     # 50, 75; the wheel's 0 to 315 degrees is not: both ends kept
     turn = plane('TURN', (2.0, 0.0, 0.05), material('SET_W', 512), 15, size=0.1)
@@ -2151,34 +2616,42 @@ def test_soften_edges():
                 err_r = max(err_r, abs(got))
     assert err_v < 2e-3 and peak > 0.01, (err_v, peak)
     assert err_r < 2e-3, err_r
-    # the copy in C++ (apply-native-copy journal): bit-identical to numpy here, unsoftened and softened
+    # the copy in C++ (apply-native-copy journal; decision 6: as the numpy copy gave it, recorded), unsoftened and
+    # softened, the same at 1, 12 and all threads
     n_bits = 0
-    for mst, sc_ in ((master, None), (master, sc), (master, sc1), (master, scc), (vee, scc), (ramp, scc)):
+    for i_copy, (mst, sc_) in enumerate(((master, None), (master, sc), (master, sc1), (master, scc), (vee, scc),
+                                         (ramp, scc))):
         tisl = np.zeros(len(tris), np.int64)
-        ref = core.copy_master(pos, tris, uvpx, tisl, mst, (0, 0, W, H), core.K_MIN, ctx=ctx, soften=sc_,
-                               backend='numpy', **kw)
-        for threads in (1, 12):
+        ref = core.copy_master(pos, tris, uvpx, tisl, mst, (0, 0, W, H), core.K_MIN, ctx=ctx, soften=sc_, threads=1,
+                               **kw)
+        REF.check(f'soften_edges/{i_copy}', ref[0], ref[1]['softened_px'])
+        for t in (12, ALL_THREADS):
             got = core.copy_master(pos, tris, uvpx, tisl, mst, (0, 0, W, H), core.K_MIN, ctx=ctx, soften=sc_,
-                                   backend='native', threads=threads, **kw)
-            assert np.array_equal(ref[0].view(np.uint64), got[0].view(np.uint64)), (threads, sc_ is not None)
-            assert ref[1]['softened_px'] == got[1]['softened_px'] and got[1]['copy'] == 'native'
+                                   threads=t, **kw)
+            assert np.array_equal(ref[0].view(np.uint64), got[0].view(np.uint64)), (sc_ is not None, t)
+            assert ref[1]['softened_px'] == got[1]['softened_px'] and got[1]['copy'] == 'native', t
         n_bits += int((ref[0] >= 0).sum())
     print(f"PASS: test_soften_edges (hard edges: none softened; smooth lip: wall vs smoothstep max error {err:.5f}, "
           f"top, floor and the hard corner unchanged, {info['softened_px']} px brightened; at a width under a texel: "
           f"one column, {thin[row, 80]:.3f}; smooth corner: step closed by half within {err_step:.5f}; V rounded by "
           f"up to {peak:.4f} within {err_v:.5f} of the blur; ramp through the corner kept within {err_r:.5f}; the C++ "
-          f"copy at 1 and 12 threads bit-identical to numpy on {n_bits} px of 6 copies, 5 softened)")
+          f"copy as recorded and at 1, 12 and {ALL_THREADS} threads bit-identical on {n_bits} px of 6 copies, 5 "
+          f"softened)")
+
+
+ALL_THREADS = os.cpu_count() or 2  # decision 6: the C++ parts at 1, 12 and all threads
 
 
 def test_native_copy():
-    """Apply-native-copy journal, finish lines 1, 3 and 4: Apply's copy in C++ (fss_ao_copy.dll) against the numpy
-    copy. Each Apply (grey, ORM layout with green and blue copied, SET_B at 512 px, into the ORM slot texture, per
-    object over a random file, the curvature), with Soften Sharp Edges off and on (1 mm), the master paged as Apply
-    reads it, paged with a cache of 2 tiles (tiles dropped and read again) and whole in memory: the numpy copy
-    (FSS_AO_COPY=numpy), the DLL at 12 threads and at 1 write byte-identical files, and say which copy ran. With the
-    DLL moved away, Apply runs the numpy copy, says so, and writes the same file."""
+    """Apply-native-copy journal, finish lines 1, 3 and 4, and decision 6: Apply's copy in C++ (fss_ao_copy.dll). Each
+    Apply (grey, ORM layout with green and blue copied, SET_B at 512 px, into the ORM slot texture, per object over a
+    random file, the curvature, green and blue resampled at 512 px), with Soften Sharp Edges off and on (1 mm), the
+    master paged as Apply reads it, paged with a cache of 2 tiles and whole in memory (the C++ copy reads the page
+    files mapped, not through the cache: no tile loads): the DLL at 12, 1 and all threads writes the same file, its pixels and counts those the numpy copy gave (recorded before
+    decision 6 removed it), its bytes those the C++ writer gave then; the report says the C++ copy and its threads, and
+    the C++ raster, dilation, UV islands and Soften ran (counted)."""
     nat = core.native_copy()
-    assert nat.backend()[0] == 'native', nat.backend()
+    assert nat.unavailable() is None, nat.unavailable()
     refresh()
     s = bpy.context.scene.fss_ao_bake
     old = (s.threads, s.soften_edges, s.soften_width)
@@ -2193,8 +2666,8 @@ def test_native_copy():
     orm_bytes = orm_path.read_bytes()
     opened = core.open_master
 
-    def tiny(folder, stem, cache_bytes=None, kind='ao'):
-        out = opened(folder, stem, cache_bytes=1, kind=kind)
+    def tiny(folder, stem, cache_bytes=None, kind='ao', threads=None):
+        out = opened(folder, stem, cache_bytes=1, kind=kind, threads=threads)
         for p in out.get('pages', ()):  # a cache of 2 tiles: masters of 3 or 4 tiles drop and read tiles again
             p.cap = 2
             p.cache = np.empty((2, p.T * p.T), p.dtype)
@@ -2203,7 +2676,7 @@ def test_native_copy():
             p.slot_of[:] = -1
         return out
 
-    def whole(folder, stem, cache_bytes=None, kind='ao'):
+    def whole(folder, stem, cache_bytes=None, kind='ao', threads=None):
         out = core.load_master(folder, stem, kind)
         out['close'] = lambda: None
         return out
@@ -2214,13 +2687,25 @@ def test_native_copy():
              ('orm_slot', 'SET_ORM', 'ao', dict(target='ORM'), None),
              ('per_object', 'SET_PO', 'ao', dict(file_name='nc_po.png'), ['Q1']),
              ('per_object_gb', 'SET_GB', 'ao', dict(file_name='nc_gb.png'), ['G2']),
-             ('curvature', 'SET_B', 'curv', dict(), None)]
+             ('curvature', 'SET_B', 'curv', dict(), None),
+             # Session 11: green and blue resampled inside islands (uv_islands, island_labels)
+             ('orm_resampled', 'SET_GB', 'ao', dict(file_name='nc_gb_512.png', layout='ORM', green_blue='COPY',
+                                                    resolution='512'), None)]
+    # Session 11: the C++ raster, dilation, UV islands and Soften counted, to see which code ran
+    calls = dict(raster_ids=0, dilate=0, soften=0, uv_islands=0)
+    real = {n: getattr(nat, n) for n in calls}
 
-    def run(label, name, kind, kw, objects, copy, threads):
-        if copy == 'numpy':
-            os.environ[nat.ENV] = 'numpy'
-        else:
-            os.environ.pop(nat.ENV, None)
+    def counted(n):
+        def fn(*a, **k):
+            calls[n] += 1
+            return real[n](*a, **k)
+        return fn
+    for n in calls:
+        setattr(nat, n, counted(n))
+    totals = dict.fromkeys(calls, 0)
+
+    def run(label, name, kind, kw, objects, threads):
+        calls.update({k: 0 for k in calls})
         s.threads = threads
         mat = bpy.data.materials[name]
         target = ApplySettings(**kw)
@@ -2228,15 +2713,22 @@ def test_native_copy():
             write_png(OUT / target.file_name, po_base)
         if target.target == 'ORM':
             orm_path.write_bytes(orm_bytes)
-        try:
-            rep = ao_bake_apply.apply_set(bpy.context, mat, [bpy.data.objects[n] for n in objects] if objects else None,
-                                          target, kind=kind)
-        finally:
-            os.environ.pop(nat.ENV, None)
+        rep = ao_bake_apply.apply_set(bpy.context, mat, [bpy.data.objects[n] for n in objects] if objects else None,
+                                      target, kind=kind)
         assert not rep.get('error') and rep['copied'], rep
-        dst = keep / f'{label}_{copy}_{threads}.png'
+        ran = {k: v for k, v in calls.items() if v}
+        # the raster and the dilation always, Soften only when on, the UV islands when needed
+        assert ran.get('raster_ids') and ran.get('dilate'), (label, ran)
+        assert not ran.get('soften') or (s.soften_edges and kind == 'ao'), (label, ran)
+        assert bool(ran.get('uv_islands')) == (label.startswith(('orm_resampled', 'curvature'))), (label, ran)
+        for k_, v_ in ran.items():
+            totals[k_] += v_
+        want = f"C++ ({threads} thread{'s' if threads != 1 else ''})"
+        assert rep['copy'] == want and rep['png'] == want, (rep['copy'], rep['png'], want)
+        assert not any(x.startswith(('  copy:', '  open:', '  png:')) for x in ao_bake_apply.report_lines(rep))
+        dst = keep / f'{label}_{threads}.png'
         shutil.copy2(rep['path'], dst)
-        return rep, dst
+        return rep, dst.read_bytes(), dst
     results = {}
     n_files = 0
     try:
@@ -2249,55 +2741,410 @@ def test_native_copy():
                 try:
                     for label, name, kind, kw, objects in cases:
                         tag = f'{label}_{mode}_{"soft" if soften else "plain"}'
-                        reps = {}
-                        for copy, threads in (('numpy', 12), ('native', 12), ('native', 1)):
-                            rep, dst = run(tag, name, kind, kw, objects, copy, threads)
-                            reps[(copy, threads)] = (rep, dst.read_bytes())
-                            n_files += 1
-                            if copy == 'numpy':
-                                assert rep['copy'] == f'numpy ({nat.ENV}=numpy is set)', rep['copy']
-                                assert f"  copy: numpy ({nat.ENV}=numpy is set)" in ao_bake_apply.report_lines(rep)
-                            else:
-                                want = f"C++ ({threads} thread{'s' if threads != 1 else ''})"
-                                assert rep['copy'] == want, (rep['copy'], want)
-                                assert not any('copy:' in x for x in ao_bake_apply.report_lines(rep))
-                        ref = reps[('numpy', 12)]
-                        for key, (rep, data) in reps.items():
-                            assert data == ref[1], (tag, key)
-                            assert rep['written_px'] == ref[0]['written_px'] > 0, (tag, key)
-                            assert rep['softened_px'] == ref[0]['softened_px'], (tag, key)
+                        reps = {threads: run(tag, name, kind, kw, objects, threads)
+                                for threads in (12, 1, ALL_THREADS)}
+                        n_files += len(reps)
+                        ref = reps[12]
+                        # decision 6: the numpy copy's pixels and counts, the C++ writer's bytes, as recorded
+                        REF.check(f'native_copy/{tag}', png_pixels(ref[2]), ref[0]['written_px'],
+                                  ref[0]['softened_px'])
+                        REF.check(f'native_copy/{tag}/cpp_file', ref[1])
+                        for t, r in reps.items():
+                            assert r[1] == ref[1], (tag, f'C++ at 12 and {t} threads')
+                            assert r[0]['written_px'] == ref[0]['written_px'] > 0, (tag, t)
+                            assert r[0]['softened_px'] == ref[0]['softened_px'], (tag, t)
                         results[tag] = (ref[1], ref[0].get('page_loads'), ref[0]['written_px'])
                 finally:
                     core.open_master = opened
-        # the same file paged, through a cache of 2 tiles and whole; tiles were dropped and read again
+        # the same file paged, through a cache of 2 tiles and whole
         for label, *_r in cases:
             assert len({results[f'{label}_{m}_soft'][0] for m in ('paged', 'tiny', 'whole')}) == 1, label
         po_loads = (results['per_object_paged_soft'][1], results['per_object_tiny_soft'][1])
-        assert sum(map(sum, po_loads[1])) > sum(map(sum, po_loads[0])), po_loads
-        # without the DLL (moved away): the numpy copy, said in the report, the same file
-        dll = os.path.join(nat.LIB_DIR, nat.DLL)
-        away = dll + '.away'
-        s.soften_edges = False
-        os.rename(dll, away)
-        try:
-            nat.reset()
-            assert nat.backend()[0] == 'numpy' and 'missing' in nat.backend()[1], nat.backend()
-            rep, dst = run('grey_nodll', 'SET_A', 'ao', dict(file_name='nc_grey.png'), None, 'native', 12)
-        finally:
-            os.rename(away, dll)
-            nat.reset()
-        assert nat.backend()[0] == 'native', nat.backend()
-        assert rep['copy'].startswith('numpy (the C++ copy is not loaded') and 'missing' in rep['copy'], rep['copy']
-        line = [x for x in ao_bake_apply.report_lines(rep) if x.startswith('  copy: numpy')]
-        assert line, ao_bake_apply.report_lines(rep)
-        assert dst.read_bytes() == results['grey_paged_plain'][0]
     finally:
         s.threads, s.soften_edges, s.soften_width = old
         orm_path.write_bytes(orm_bytes)
-    print(f"PASS: test_native_copy ({len(results)} Apply configurations x numpy, C++ 12 and 1 threads = {n_files} "
-          f"files byte-identical per configuration ({sum(r[2] for r in results.values())} px written); paged, a "
-          f"2-tile cache (SET_PO page loads {po_loads[0]} -> {po_loads[1]}) and whole the same file; FSS_AO_COPY=numpy "
-          f"and the DLL moved away: the numpy copy, reported ({line[0].strip()})")
+        for n, fn in real.items():
+            setattr(nat, n, fn)
+    assert totals['raster_ids'] and totals['dilate'] and totals['uv_islands'], totals
+    print(f"PASS: test_native_copy, Session 11 (the C++ calls {totals})")
+    print(f"PASS: test_native_copy ({len(results)} Apply configurations x C++ 12, 1 and {ALL_THREADS} threads = "
+          f"{n_files} files: "
+          f"byte-identical per configuration, the pixels and counts of the numpy copy and the bytes of the C++ writer "
+          f"as recorded ({sum(r[2] for r in results.values())} px written); paged, a 2-tile cache (SET_PO tile loads "
+          f"{po_loads[0]} and {po_loads[1]}: the copy reads the mapped page files) and whole the same file)")
+
+
+def test_native_open():
+    """Apply-native-copy journal, Session 4, finish lines 1 to 3, and decision 6: the master opened by the DLL
+    (fss_ao_copy_open_master). Every master of the suite (each kind it has: AO, curvature, raw) opened at 1, 12 and
+    all threads writes the page files the Python opening wrote (recorded before decision 6 removed it). Each Apply of
+    test_native_copy's configurations (Soften Sharp Edges off and on) writes the same file at 12, 1 and all threads as
+    recorded, and its report says 'C++ (n threads)' without a console line."""
+    nat = core.native_copy()
+    assert nat.unavailable() is None, nat.unavailable()
+    refresh()
+    folder = str(FOLDER)
+    s = bpy.context.scene.fss_ao_bake
+    old = (s.threads, s.soften_edges, s.soften_width)
+
+    def pages(stem, kind, threads):
+        m = core.open_master(folder, stem, kind=kind, threads=threads)
+        try:
+            data = []
+            for p in m['pages']:
+                with open(p.path, 'rb') as f:
+                    data.append(f.read())
+        finally:
+            m['close']()
+        return data, m['open']
+    # every master, each kind it has
+    index = store.read_index(folder, use_cache=False)
+    n_pages, n_bytes, kinds = 0, 0, set()
+    for stem in index['masters']:
+        for kind in ('ao', 'curv', 'ao.raw'):
+            if not core.master_paths(folder, stem, kind)[0].endswith('.jxl') or \
+                    not os.path.isfile(core.master_paths(folder, stem, kind)[0]):
+                continue
+            ref = None
+            for threads in (1, 12, ALL_THREADS):
+                got, how = pages(stem, kind, threads)
+                assert how == f"C++ ({threads} thread{'s' if threads != 1 else ''})", how
+                if ref is None:
+                    ref = got
+                    REF.check(f'native_open/pages/{stem}/{kind}', ref[0], ref[1])
+                assert got[0] == ref[0] and got[1] == ref[1], (stem, kind, threads)
+                n_pages += 2
+                n_bytes += len(got[0]) + len(got[1])
+            kinds.add(kind)
+    n_masters = len(index['masters'])
+    # Apply
+    keep = WORK / 'native_open'
+    if keep.exists():
+        shutil.rmtree(keep)
+    keep.mkdir(parents=True)
+    OUT.mkdir(parents=True, exist_ok=True)
+    po_base = np.random.default_rng(19).integers(0, 65536, (SIZE, SIZE, 3))
+    orm_path = WORK / 'orm16.png'
+    orm_bytes = orm_path.read_bytes()
+    cases = [('grey', 'SET_A', 'ao', dict(file_name='no_grey.png'), None),
+             ('orm_layout', 'SET_ORM', 'ao', dict(file_name='no_orm_layout.png', layout='ORM', green_blue='COPY'),
+              None),
+             ('cubes_512', 'SET_B', 'ao', dict(file_name='no_cubes_512.png', resolution='512'), None),
+             ('orm_slot', 'SET_ORM', 'ao', dict(target='ORM'), None),
+             ('per_object', 'SET_PO', 'ao', dict(file_name='no_po.png'), ['Q1']),
+             ('per_object_gb', 'SET_GB', 'ao', dict(file_name='no_gb.png'), ['G2']),
+             ('curvature', 'SET_B', 'curv', dict(), None)]
+
+    def run(label, name, kind, kw, objects, threads):
+        s.threads = threads
+        target = ApplySettings(**kw)
+        if kind == 'ao' and target.target == 'FILE' and objects:
+            write_png(OUT / target.file_name, po_base)
+        if target.target == 'ORM':
+            orm_path.write_bytes(orm_bytes)
+        rep = ao_bake_apply.apply_set(bpy.context, bpy.data.materials[name],
+                                      [bpy.data.objects[n] for n in objects] if objects else None, target, kind=kind)
+        assert not rep.get('error') and rep['copied'], rep
+        dst = keep / f'{label}.png'
+        shutil.copy2(rep['path'], dst)
+        return rep, dst.read_bytes(), dst
+    n_apply, px = 0, 0
+    try:
+        for soften in (False, True):
+            s.soften_edges, s.soften_width = soften, 0.001
+            for label, name, kind, kw, objects in cases:
+                tag = f'{label}_{"soft" if soften else "plain"}'
+                ref = None
+                for threads in (12, 1, ALL_THREADS):
+                    rep, data, dst = run(f'{tag}_cpp_{threads}', name, kind, kw, objects, threads)
+                    assert rep['open'] == f"C++ ({threads} thread{'s' if threads != 1 else ''})", rep['open']
+                    assert not any('open:' in x for x in ao_bake_apply.report_lines(rep))
+                    if ref is None:
+                        ref = (rep, data, dst)
+                        # decision 6: the file the Python opening's Apply wrote (the C++ writer), as recorded
+                        REF.check(f'native_open/{tag}', data, rep['written_px'], rep['softened_px'])
+                    assert data == ref[1], (tag, threads)
+                    assert rep['written_px'] == ref[0]['written_px'] > 0 and rep['softened_px'] == \
+                        ref[0]['softened_px'], (tag, threads)
+                    n_apply += 1
+                px += ref[0]['written_px']
+    finally:
+        s.threads, s.soften_edges, s.soften_width = old
+        orm_path.write_bytes(orm_bytes)
+    left = [f for f in os.listdir(FOLDER) if f.endswith(('.page', '.mappage', '.tmp', '.raw'))]
+    assert not left, left
+    print(f"PASS: test_native_open ({n_masters} masters, kinds {sorted(kinds)}: {n_pages} page files of the DLL at 1, "
+          f"12 and {ALL_THREADS} threads byte-identical and as recorded ({n_bytes / 2 ** 20:.1f} MiB); {n_apply} "
+          f"Applies of {len(cases) * 2} configurations at 12, 1 and {ALL_THREADS} threads byte-identical, as recorded "
+          f"({px} px written); no "
+          f"scratch file left)")
+
+
+def test_native_png():
+    """Apply-native-copy journal, Session 7 (decision 4), finish lines 1 and 4, and decision 6: Apply's texture
+    written by the C++ PNG writer for each of test_native_copy's configurations (Soften Sharp Edges off): its pixels
+    those the Python writer wrote (recorded before decision 6 removed it), the same bytes at 12, 1 and all threads; the
+    report says 'C++ (n threads)' without a console line. read_png reads the suite's ORM texture with the C++ reader."""
+    nat = core.native_copy()
+    assert nat.unavailable() is None, nat.unavailable()
+    refresh()
+    s = bpy.context.scene.fss_ao_bake
+    old = (s.threads, s.soften_edges)
+    keep = WORK / 'native_png'
+    if keep.exists():
+        shutil.rmtree(keep)
+    keep.mkdir(parents=True)
+    OUT.mkdir(parents=True, exist_ok=True)
+    po_base = np.random.default_rng(23).integers(0, 65536, (SIZE, SIZE, 3))
+    orm_path = WORK / 'orm16.png'
+    orm_bytes = orm_path.read_bytes()
+    cases = [('grey', 'SET_A', 'ao', dict(file_name='np_grey.png'), None),
+             ('orm_layout', 'SET_ORM', 'ao', dict(file_name='np_orm_layout.png', layout='ORM', green_blue='COPY'),
+              None),
+             ('cubes_512', 'SET_B', 'ao', dict(file_name='np_cubes_512.png', resolution='512'), None),
+             ('orm_slot', 'SET_ORM', 'ao', dict(target='ORM'), None),
+             ('per_object', 'SET_PO', 'ao', dict(file_name='np_po.png'), ['Q1']),
+             ('per_object_gb', 'SET_GB', 'ao', dict(file_name='np_gb.png'), ['G2']),
+             ('curvature', 'SET_B', 'curv', dict(), None)]
+
+    def run(label, name, kind, kw, objects, threads):
+        s.threads = threads
+        target = ApplySettings(**kw)
+        if kind == 'ao' and target.target == 'FILE' and objects:
+            write_png(OUT / target.file_name, po_base)
+        if target.target == 'ORM':
+            orm_path.write_bytes(orm_bytes)
+        rep = ao_bake_apply.apply_set(bpy.context, bpy.data.materials[name],
+                                      [bpy.data.objects[n] for n in objects] if objects else None, target, kind=kind)
+        assert not rep.get('error') and rep['copied'], rep
+        dst = keep / f'{label}.png'
+        shutil.copy2(rep['path'], dst)
+        return rep, dst
+    n_cfg, px, sizes = 0, 0, []
+    try:
+        s.soften_edges = False
+        for label, name, kind, kw, objects in cases:
+            cpp = {}
+            for threads in (12, 1, ALL_THREADS):
+                rep, dst = run(f'{label}_cpp_{threads}', name, kind, kw, objects, threads)
+                want = f"C++ ({threads} thread{'s' if threads != 1 else ''})"
+                assert rep['png'] == want and rep['copy'] == want and rep['open'] == want, rep
+                assert not any(x.startswith('  png:') for x in ao_bake_apply.report_lines(rep))
+                if not cpp:
+                    REF.check(f'native_png/{label}', png_pixels(dst), rep['written_px'])
+                    written = rep['written_px']
+                assert rep['written_px'] == written > 0, (label, threads)
+                cpp[threads] = dst.read_bytes()
+            assert all(v == cpp[12] for v in cpp.values()), label
+            sizes.append(len(cpp[12]))
+            n_cfg += 1
+            px += written
+        # the reader: the ORM texture by the C++ reader (2 threads at most: one decompresses, one unfilters)
+        orm_path.write_bytes(orm_bytes)
+        how = {}
+        vals, bits, ct = core.read_png(str(orm_path), how=how)
+        assert how['read'] == 'C++ (2 threads)' and bits == 16 and ct == 2, (how, bits, ct)
+        assert np.array_equal(vals, png_pixels(orm_path)[::-1])
+    finally:
+        s.threads, s.soften_edges = old
+        orm_path.write_bytes(orm_bytes)
+    print(f"PASS: test_native_png ({n_cfg} Apply configurations, {px} px written: the C++ writer at 12, 1 and "
+          f"{ALL_THREADS} threads "
+          f"byte-identical, its pixels the Python writer's as recorded; {sum(sizes)} bytes; the ORM texture read by "
+          f"the C++ reader)")
+
+
+COMPOSE_FILES = ('.ao.jxl', '.ao.map', '.ao.npz', '.ao.raw.jxl', '.curv.jxl')
+
+
+def test_native_compose():
+    """Bake-post-native journal, finish lines 2 and 4, and decision 6: every master of the suite's scene baked in tiles
+    of 64 px (bands of several strips) with the C++ composition and map writer at 12, 1 and all threads: each master's
+    files byte-identical and those the Python composition wrote (recorded before decision 6 removed it), its index
+    entry the same but its times; bake.log says 'composed by C++ (n threads)'. The bake folder is restored afterwards,
+    so the later tests see the masters they had."""
+    nat = core.native_copy()
+    assert nat.unavailable() is None, nat.unavailable()
+    refresh()
+    folder = Path(store.bake_folder())
+    backup = WORK / 'native_compose_backup'
+    if backup.exists():
+        shutil.rmtree(backup)
+    shutil.copytree(folder, backup)
+    s = bpy.context.scene.fss_ao_bake
+    old_threads = s.threads
+    objs = sorted({it['object'] for it in store._state['items'].values()} & set(bpy.data.objects.keys()))
+    keys = sorted(store._state['items'])
+
+    def bake(threads):
+        s.threads = threads
+        select(objs)
+        res = bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True, tile=64)
+        assert res == {'FINISHED'}, res
+        status = store.read_status(str(folder))
+        assert status['state'] == 'done' and all(r['status'] == 'baked' for r in status['results']), status
+        files = {}
+        for k in keys:
+            for ext in COMPOSE_FILES:
+                p = folder / (k + ext)
+                if p.is_file():
+                    files[(k, ext)] = file_hash(p)
+        index = store.read_index(str(folder), use_cache=False)['masters']
+        entries = {}
+        for k in keys:
+            e = json.loads(json.dumps(index[k]))
+            for drop in ('times', 'baked_at'):
+                e.pop(drop, None)
+            e['tiles'] = {a: b for a, b in e['tiles'].items() if a not in ('in_use_gb', 'peak_working_set_gb',
+                                                                          'budget_gb', 'estimate_gb')}
+            # the JPEG XL encoder's seconds, and its threads (the setting this test changes)
+            e['image'] = {a: b for a, b in (e.get('image') or {}).items() if a not in ('seconds', 'threads')}
+            for sub in ('curvature', 'denoise'):
+                if isinstance(e.get(sub), dict):
+                    e[sub] = {a: b for a, b in e[sub].items() if 'second' not in a}
+            entries[k] = e
+        log = (folder / 'bake.log').read_text(encoding='utf-8')
+        start = log.rfind('] baker ')  # this job's lines
+        lines = [x.split('] ', 1)[-1].strip() for x in log[log.rfind('\n', 0, start) + 1:].splitlines()
+                 if ': composed by ' in x]
+        return dict(files=files, entries=entries, lines=lines, n=len(status['results']))
+    runs = {}
+    try:
+        runs['C++ 12'] = bake(12)
+        runs['C++ 1'] = bake(1)
+        runs['C++ all'] = bake(ALL_THREADS)
+    finally:
+        s.threads = old_threads
+        shutil.rmtree(folder)
+        shutil.copytree(backup, folder)
+        refresh()
+    ref = runs['C++ 12']
+    for k in keys:  # decision 6: each master's files as the Python composition wrote them
+        REF.check(f'native_compose/{k}', {ext: h for (kk, ext), h in sorted(ref['files'].items()) if kk == k})
+    assert ref['files'] and ref['n'] == len(keys) and len(ref['lines']) == len(keys), (len(ref['files']), ref['n'],
+                                                                                       ref['lines'][:3])
+    for label, run in runs.items():
+        diff = sorted(k for k in set(ref['files']) | set(run['files']) if ref['files'].get(k) != run['files'].get(k))
+        assert not diff, (label, diff[:6])
+        bad = {k: sorted(f for f in set(ref['entries'][k]) | set(run['entries'][k])
+                         if ref['entries'][k].get(f) != run['entries'][k].get(f)) for k in keys}
+        bad = {k: v for k, v in bad.items() if v}
+        assert not bad, (label, bad, [(f, ref['entries'][k].get(f), run['entries'][k].get(f))
+                                      for k, v in list(bad.items())[:1] for f in v])
+    def by(n):
+        return f"C++ ({n} thread{'s' if n != 1 else ''})"
+    want = {'C++ 12': f'composed by {by(12)} in ', 'C++ 1': f'composed by {by(1)} in ',
+            'C++ all': f'composed by {by(ALL_THREADS)} in '}
+    maps = {'C++ 12': f'the map written by {by(12)}', 'C++ 1': f'the map written by {by(1)}',
+            'C++ all': f'the map written by {by(ALL_THREADS)}'}
+    for label, run in runs.items():
+        assert len(run['lines']) == len(keys) and all(want[label] in x and maps[label] in x for x in run['lines']), \
+            (label, run['lines'][:2])
+    print(f"PASS: test_native_compose ({len(keys)} masters in tiles of 64 px, {len(ref['files'])} files: the C++ "
+          f"composition at 12, 1 and {ALL_THREADS} threads byte-identical and as recorded, the index entries the same "
+          f"but their "
+          f"times; the log: {' / '.join(r['lines'][0].split(': ', 1)[1] for r in runs.values())}; the bake folder "
+          f"restored)")
+
+
+AO_OPERATORS = ('ao_bake_refresh', 'ao_run', 'ao_object_step', 'ao_bake_start', 'ao_bake_select', 'ao_bake_tree_set',
+                'ao_bake_detect', 'ao_bake_tree_fold', 'ao_bake_tree_select', 'ao_bake_tree_highlight',
+                'ao_bake_tree_select_all', 'ao_bake_tree_highlight_all', 'ao_bake_tree_toggle',
+                'ao_bake_custom_occluders', 'ao_apply')  # every AO Bake operator but the two Cancels
+
+
+def md5_file(path):
+    return hashlib.md5(Path(path).read_bytes()).hexdigest()
+
+
+def test_unavailable():
+    """Apply-native-copy decision 6: fss_ao_copy.dll and libjxl are required. With the DLL moved away, and with
+    libjxl's jxl.dll moved away (each put back and its md5 checked): the panel's first line says why (icon ERROR), the
+    AO Bake operators' polls refuse with that reason (their buttons greyed), a job started anyway (the Bake
+    operator's execute, past its poll) fails in the second Blender with the reason in the log and the status and
+    leaves the masters as they were, and Apply refuses with an error and writes nothing; back in place, all runs."""
+    nat = core.native_copy()
+    lib = core.jxl()
+    refresh()
+    folder = str(FOLDER)
+    st = bpy.context.window_manager.fss_ao_bake_state
+    entry, stem = entry_of('A')
+    masters = {p: file_hash(p) for p in core.master_paths(folder, stem)}
+    select(['A'])
+    moves = {'DLL': os.path.join(nat.LIB_DIR, nat.DLL), 'libjxl': os.path.join(lib.LIB_DIR, 'jxl.dll')}
+    md5 = {k: md5_file(p) for k, p in moves.items()}
+    md5_jxl = {n: md5_file(os.path.join(lib.LIB_DIR, n)) for n in lib.DLLS}
+    seen = {}
+    for what, path in moves.items():
+        away = path + '.away'
+        os.rename(path, away)
+        try:
+            nat.reset()
+            lib.reset()
+            why = nat.unavailable()
+            assert why and 'missing' in why and os.path.basename(path) in why, (what, why)
+            assert why.startswith(f'{nat.DLL} could not be loaded' if what == 'DLL' else
+                                  'the JPEG XL library (libjxl) could not be loaded'), why
+            # the panel: one line with the reason first; the buttons greyed by the polls
+            calls = []
+            bpy.types.FSS_PT_ao_bake.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+            labels = [(kw.get('text'), kw.get('icon')) for name, _a, kw in calls if name == 'label']
+            assert labels[0] == (f'Not available: {why}', 'ERROR'), labels[:3]
+            assert sum(1 for t, _i in labels if t and why in t) == 1, labels
+            polls = {n: getattr(bpy.ops.fss, n).poll() for n in AO_OPERATORS}
+            assert not any(polls.values()), polls
+            try:
+                bpy.ops.fss.ao_bake_refresh()
+                raise AssertionError('Refresh ran')
+            except RuntimeError as exc:
+                refused = str(exc)
+            assert f'AO Bake not available: {why}' in refused, refused
+            # a job started anyway fails in the second Blender, the reason in the log and the status
+            reports = []
+            op = SimpleNamespace(scope='SELECTED', hidden=True, wait=True, test_delay=0.0, tile=0, test_tile_delay=0.0,
+                                 report=lambda kind, msg: reports.append(msg))
+            # Refresh needs the DLL too (its scene rule, bake-post-native journal Session 5): the job starts on the
+            # Refresh made above, with the DLL in place
+            keep, store.refresh = store.refresh, lambda context, relink=True: store._state
+            try:
+                assert ao_bake.FSS_OT_AOBakeStart.execute(op, bpy.context) == {'FINISHED'}, reports
+            finally:
+                store.refresh = keep
+            status = store.read_status(folder)
+            reason = f'AO Bake not available: {why}'
+            assert status['state'] == 'failed' and status['reason'] == reason, status
+            assert status['results'] and all(r['status'] == 'failed' and r['reason'] == reason
+                                             for r in status['results']), status['results']
+            log = (FOLDER / 'bake.log').read_text(encoding='utf-8').splitlines()
+            assert any(x.endswith(reason) for x in log[-3:]), log[-3:]
+            assert f'failed: A ({reason})' in st.report, st.report
+            assert {p: file_hash(p) for p in masters} == masters
+            # Apply refuses, nothing written
+            OUT.mkdir(parents=True, exist_ok=True)
+            out = OUT / f'na_{what}.png'
+            rep = ao_bake_apply.apply_set(bpy.context, bpy.data.materials['SET_A'], None,
+                                          ApplySettings(file_name=out.name))
+            assert rep.get('error') == reason and not out.exists(), rep
+            seen[what] = why
+        finally:
+            os.rename(away, path)
+            nat.reset()
+            lib.reset()
+        assert md5_file(path) == md5[what], (what, md5_file(path), md5[what])
+    assert {n: md5_file(os.path.join(lib.LIB_DIR, n)) for n in lib.DLLS} == md5_jxl
+    assert nat.unavailable() is None and lib.available()
+    calls = []
+    bpy.types.FSS_PT_ao_bake.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+    assert not any('Not available' in (kw.get('text') or '') for name, _a, kw in calls if name == 'label')
+    assert bpy.ops.fss.ao_bake_refresh.poll() and bpy.ops.fss.ao_bake_start.poll()
+    refresh()
+    assert grade_of('A') == 'UP_TO_DATE'
+    rep = apply_set('SET_A', file_name='na_back.png')
+    assert rep['copied'] and rep['written_px'] > 0
+    print(f"PASS: test_unavailable (the DLL moved away: \"{seen['DLL']}\"; jxl.dll moved away: \"{seen['libjxl']}\"; "
+          f"each: the panel's first line, {len(AO_OPERATORS)} AO operators refused by their polls, a job failed with "
+          f"the reason in bake.log and status.json, the masters unchanged, Apply refused; moved back, md5s unchanged "
+          f"({md5['DLL']}, jxl.dll {md5['libjxl']}), all runs again)")
 
 
 if __name__ == '__main__' and '--' in sys.argv and any(a.startswith('only=') for a in sys.argv):
@@ -2327,12 +3174,20 @@ elif __name__ == '__main__':
     test_draw()
     test_panel_selection()
     test_custom_occluders()
+    test_custom_add_ignore()
+    test_detected()
+    test_tree()
+    test_oriented_rule()
     test_option_staleness()
     test_auto_distance()
     test_falloff()
     test_curvature()
     test_curvature_only()
     test_native_copy()
+    test_native_open()
+    test_native_png()
+    test_native_compose()  # bake-post-native journal: the composition in C++
+    test_unavailable()  # apply-native-copy decision 6: the DLL and libjxl required
     test_corner_rule()
     test_denoise()
     test_denoise_oidn()
@@ -2342,4 +3197,9 @@ elif __name__ == '__main__':
     test_object_preview()
     test_poses()  # last: it replaces the scene with the wheel's
     test_move_together()  # in the wheel's scene
+    n_ref = REF.done(complete=True)
+    print(f'PASS: reference values ({n_ref} cases equal to the values the Python code gave before decision 6)')
+    n_rule = RULE.done(complete=True)
+    print(f'PASS: scene rule reference ({n_rule} Refreshes and Detected-tree Refreshes equal to the Python code\'s '
+          f'lists, hashes and grades; the largest gap difference {RULE.worst:.3g} m)')
     print(f'ALL AO BAKE TESTS PASSED ({time.time() - t0:.1f} s)')

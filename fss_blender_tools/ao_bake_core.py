@@ -5,13 +5,17 @@ The three prototype parts below are tests/bake_prototype/bake_geom.py, bake_unfo
 their computation unchanged (only the module prefix `bg.` dropped); the prototype scripts stay as they are. After them
 come the tool's own parts: the settings the prototype was measured with (Sessions 8, 11 and 14), the composition of a
 master from its core and skirt bakes (step3_master.py), the master's files (the AO as lossless JPEG XL through
-ao_bake_jxl.py, decision 37, or PNG), the evaluated triangles and their hash, 16-bit PNG files, and the resampling of
-an ORM texture's green and blue inside islands (decisions 24 to 26).
+ao_bake_jxl.py, decision 37), the evaluated triangles and their hash, 16-bit PNG files, and the resampling of an ORM
+texture's green and blue inside islands (decisions 24 to 26).
+
+Apply-native-copy decision 6: the per-pixel work runs in the C++ DLL (ao_bake_copy, native_copy()), which is required
+with libjxl; the functions below that it does (rasterize_ids, raster_window, dilate_ids, uv_islands, island_labels,
+copy_master's copy and Soften, compose_block, the .ao.map and PNG writers, read_png, open_master) call it and keep their
+names and signatures; there is no Python version of them.
 
 Pixel convention (Blender's bake): an image of W x H pixels, UV (u, v) at pixel coordinates (u * W, v * H), pixel (i, j)
 has its centre at (i + 0.5, j + 0.5); arrays are indexed [j, i] with row 0 at the bottom.
 """
-import ctypes
 import hashlib
 import importlib.util
 import json
@@ -121,37 +125,10 @@ def edge_map(wtris):
     return em
 
 
-def uv_islands(wtris, uv, tol=1e-6):
-    """Island label per triangle: triangles sharing an edge with equal UVs at both ends are in one island."""
-    n = len(wtris)
-    parent = np.arange(n)
-
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    for key, lst in edge_map(wtris).items():
-        if len(lst) < 2:
-            continue
-        for (t1, i1, j1) in lst:
-            for (t2, i2, j2) in lst:
-                if t2 <= t1:
-                    continue
-                # map the edge ends of t2 to those of t1 by welded id
-                ends1 = {int(wtris[t1, i1]): uv[t1, i1], int(wtris[t1, j1]): uv[t1, j1]}
-                ok = True
-                for c in (i2, j2):
-                    if np.max(np.abs(ends1[int(wtris[t2, c])] - uv[t2, c])) > tol:
-                        ok = False
-                if ok:
-                    a, b = find(t1), find(t2)
-                    if a != b:
-                        parent[a] = b
-    roots = np.array([find(i) for i in range(n)])
-    _, lab = np.unique(roots, return_inverse=True)
-    return lab.ravel()
+def uv_islands(wtris, uv, tol=1e-6, threads=None):
+    """Island label (int64) per triangle: triangles sharing an edge with equal UVs (within tol) at both ends are in one
+    island. fss_ao_copy_uv_islands on `threads` threads; wtris (T,3) welded vertex ids, uv (T,3,2) (as float64)."""
+    return native_copy().uv_islands(wtris, uv, tol, threads)
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -184,59 +161,24 @@ def barycentric_many(p, tri_uv):
     return np.stack([1.0 - l1 - l2, l1, l2], axis=-1)
 
 
-def rasterize_ids(uv_px, W, H, k=1, x0=0, y0=0, eps=1e-9):
+def rasterize_ids(uv_px, W, H, k=1, x0=0, y0=0, eps=1e-9, threads=None):
     """Owner triangle of each sample point. Samples: k x k per pixel at (i + (a + 0.5) / k, ...).
 
-    Grid covers pixels x0..x0+W-1, y0..y0+H-1 (in the uv_px frame). Returns (owner (H*k, W*k) int, -1 = none;
-    count (H*k, W*k) of triangles covering the sample). Last triangle wins.
-    """
-    owner = np.full((H * k, W * k), -1, dtype=np.int64)
-    count = np.zeros((H * k, W * k), dtype=np.int32)
-    for t in range(len(uv_px)):
-        tri = uv_px[t]
-        lo = np.floor((tri.min(axis=0) - np.array([x0, y0])) * k - 0.5).astype(int)
-        hi = np.ceil((tri.max(axis=0) - np.array([x0, y0])) * k - 0.5).astype(int)
-        sx0, sy0 = max(lo[0], 0), max(lo[1], 0)
-        sx1, sy1 = min(hi[0], W * k - 1), min(hi[1], H * k - 1)
-        if sx1 < sx0 or sy1 < sy0:
-            continue
-        xs = x0 + (np.arange(sx0, sx1 + 1) + 0.5) / k
-        ys = y0 + (np.arange(sy0, sy1 + 1) + 0.5) / k
-        P = np.stack(np.meshgrid(xs, ys), axis=-1)
-        bc = barycentric(P, tri[0], tri[1], tri[2])
-        if bc is None:
-            continue
-        inside = np.all(bc >= -eps, axis=-1)
-        if not inside.any():
-            continue
-        sub = owner[sy0:sy1 + 1, sx0:sx1 + 1]
-        sub[inside] = t
-        count[sy0:sy1 + 1, sx0:sx1 + 1] += inside
-    return owner, count
+    Grid covers pixels x0..x0+W-1, y0..y0+H-1 (in the uv_px frame). Returns (owner (H*k, W*k) int64, -1 = none;
+    count (H*k, W*k) int32 of triangles covering the sample). Last triangle wins; a sample is inside a triangle when
+    each of its barycentric coordinates is at least -eps. fss_ao_copy_raster_ids on `threads` threads (uv_px as
+    float64 (N,3,2))."""
+    return native_copy().raster_ids(uv_px, W, H, k, x0, y0, eps, select=False, threads=threads)
 
 
-def dilate_ids(owner, iterations, mask_allowed=None):
-    """Grow owner ids (>= 0) into -1 pixels by 8-neighbour steps. Returns (owner, steps) with steps = ring index."""
-    own = owner.copy()
-    steps = np.where(own >= 0, 0, -1)
-    H, W = own.shape
-    for it in range(1, iterations + 1):
-        new = own.copy()
-        for dy, dx in ((0, 1), (0, -1), (1, 0), (-1, 0), (1, 1), (1, -1), (-1, 1), (-1, -1)):
-            src = np.full_like(own, -1)
-            ys = slice(max(dy, 0), H + min(dy, 0))
-            yd = slice(max(-dy, 0), H + min(-dy, 0))
-            xs = slice(max(dx, 0), W + min(dx, 0))
-            xd = slice(max(-dx, 0), W + min(-dx, 0))
-            src[yd, xd] = own[ys, xs]
-            take = (new < 0) & (src >= 0)
-            if mask_allowed is not None:
-                take &= mask_allowed
-            new[take] = src[take]
-        grown = (new >= 0) & (own < 0)
-        steps[grown] = it
-        own = new
-    return own, steps
+def dilate_ids(owner, iterations, mask_allowed=None, threads=None):
+    """Grow owner ids (>= 0) into -1 pixels by 8-neighbour steps (a pixel takes the owner of its first neighbour
+    with one, in the order (0,1), (0,-1), (1,0), (-1,0), then the diagonals, as (dy, dx)), only into pixels of
+    mask_allowed when given.
+    Returns (owner in owner's dtype, steps int64: the ring index, 0 for the seeds, -1 where nothing reached).
+    fss_ao_copy_dilate on `threads` threads."""
+    own, steps = native_copy().dilate(owner, iterations, mask_allowed, threads)
+    return own.astype(np.asarray(owner).dtype, copy=False), steps
 
 
 def bilinear(img, x, y, den=1.0):
@@ -778,16 +720,11 @@ def _hinged_uv(pos, tris, wt, uvpx, t, k, u):
 COPY_CHUNK = 1 << 19  # sub-samples per step of the copy (Session 23: bounds its temporaries, not the result)
 
 
-def raster_window(uvpx, W, H, k=1, x0=0, y0=0, eps=1e-9):
-    """rasterize_ids over only the triangles whose bounds reach the grid: the same owners (indices into uvpx, the last
-    triangle still wins) and counts, without looping over every triangle of the mesh for a small window."""
-    sel = tris_in_window(uvpx, x0, y0, W, H)
-    if len(sel) == len(uvpx):
-        return rasterize_ids(uvpx, W, H, k, x0, y0, eps)
-    if not len(sel):
-        return np.full((H * k, W * k), -1, dtype=np.int64), np.zeros((H * k, W * k), dtype=np.int32)
-    own, cnt = rasterize_ids(uvpx[sel], W, H, k, x0, y0, eps)
-    return np.where(own >= 0, sel[np.maximum(own, 0)], -1), cnt
+def raster_window(uvpx, W, H, k=1, x0=0, y0=0, eps=1e-9, threads=None):
+    """rasterize_ids over only the triangles whose bounds reach the grid (tris_in_window): the same owners (indices
+    into uvpx, the last triangle still wins) and counts, without looping over every triangle of the mesh for a small
+    window. fss_ao_copy_raster_ids on `threads` threads."""
+    return native_copy().raster_ids(uvpx, W, H, k, x0, y0, eps, select=True, threads=threads)
 
 
 def copy_context(pos, tris, uvpx, master, k, kmax=16):
@@ -906,95 +843,11 @@ def soften_context(pos, tris, uvpx, ctx, width, use=None, sharp_deg=None, max_sa
                 Wt=Wt, start=start, cand=cand, width=float(width), edges=len(E))
 
 
-def _bary3(p, tri3):
-    """Barycentric coordinates (n,3) of points p (n,3) in triangles tri3 (n,3,3), clamped onto the triangle."""
-    a = tri3[:, 0]
-    v0, v1, v2 = tri3[:, 1] - a, tri3[:, 2] - a, p - a
-    d00, d01, d11 = (v0 * v0).sum(1), (v0 * v1).sum(1), (v1 * v1).sum(1)
-    d20, d21 = (v2 * v0).sum(1), (v2 * v1).sum(1)
-    den = np.maximum(d00 * d11 - d01 * d01, 1e-30)
-    v = (d11 * d20 - d01 * d21) / den
-    w = (d00 * d21 - d01 * d20) / den
-    bc = np.clip(np.stack([1.0 - v - w, v, w], axis=1), 0.0, None)
-    return bc / np.maximum(bc.sum(axis=1, keepdims=True), 1e-30)
-
-
-def _soften(sc, tri_ids, P3, vals, read, tn, surface_cos, chunk=COPY_CHUNK):
-    """Edge softening of values at points P3 on triangles tri_ids, within the triangle's width W of a smooth-shaded
-    fold. Convex (decision 46): the darker side ramps up to the brighter side's value at the edge (smoothstep); the
-    brighter side keeps its value; near several edges the largest brightening. Concave (decision 58): the fold is
-    blurred across, as a blur of width W along the unfolded surface would (a ramp running through the edge stays, the
-    kink is rounded): with the AO's slopes away from the edge sX and sY (each side read at the edge and half a width
-    in) a point at distance d gains (sX + sY) / 2 x W / 3 x (1 - d / W)^3 (a triangular kernel's blur of |d|), and a
-    step at the edge closes by half from each side (smoothstep); several edges add, as their blurs do. Returns
-    (values, points changed)."""
-    start, cand = sc['start'], sc['cand']
-    nc = start[tri_ids + 1] - start[tri_ids]
-    idx = np.nonzero(nc > 0)[0]
-    add = np.zeros(len(vals))
-    cadd = np.zeros(len(vals))  # concave: blur corrections, summed
-    if not len(idx):
-        return vals, 0
-    cnt = nc[idx]
-    total = int(cnt.sum())
-    pix = np.repeat(idx, cnt)
-    first = np.repeat(start[tri_ids[idx]] - np.concatenate([[0], np.cumsum(cnt)[:-1]]), cnt)
-    edge = cand[first + np.arange(total)]
-    E, A, B, mX, mY, Wt = sc['E'], sc['A'], sc['B'], sc['mX'], sc['mY'], sc['Wt']
-    for c0, c1 in _chunks(total, chunk):
-        i, e = pix[c0:c1], edge[c0:c1]
-        p, a, b = P3[i], A[e], B[e]
-        ab = b - a
-        u = np.clip(((p - a) * ab).sum(axis=1) / np.maximum((ab * ab).sum(axis=1), 1e-30), 0.0, 1.0)
-        q = a + ab * u[:, None]
-        dist = np.linalg.norm(p - q, axis=1)
-        s = tri_ids[i]
-        cx = (tn[s] * tn[E[e, 0]]).sum(axis=1)
-        cy = (tn[s] * tn[E[e, 3]]).sum(axis=1)
-        on_x = cx >= cy
-        W = Wt[s]
-        m = np.where(on_x[:, None], mX[e], mY[e])
-        keep = (np.maximum(cx, cy) >= surface_cos) & (((p - q) * m).sum(axis=1) >= -1e-3 * W) & (dist < W)
-        if not keep.any():
-            continue
-        i, e, u, dist, on_x, W = i[keep], e[keep], u[keep], dist[keep], on_x[keep], W[keep]
-        n = len(e)
-
-        def at_edge(t_col, ia_col, ib_col):
-            bc = np.zeros((n, 3))
-            bc[np.arange(n), E[e, ia_col]] = 1.0 - u
-            bc[np.arange(n), E[e, ib_col]] += u
-            return read(E[e, t_col], bc)[0]
-        vx, vy = at_edge(0, 1, 2), at_edge(3, 4, 5)
-        delta = np.where(on_x, vy - vx, vx - vy)
-        x = dist / W
-        fade = 1.0 - x * x * (3.0 - 2.0 * x)
-        cv = sc['convex'][e]
-        np.maximum.at(add, i, np.where(cv & (delta > 0), delta * fade, 0.0))
-        cc = np.nonzero(~cv)[0]
-        if len(cc):
-            ec, uc = e[cc], u[cc]
-            a_c = A[ec] + (B[ec] - A[ec]) * uc[:, None]
-            pd = np.maximum(np.minimum(0.5 * W[cc], 0.9 * np.minimum(sc['hX'][ec], sc['hY'][ec])), 1e-9)
-
-            def probe(t_col, m):
-                t = E[ec, t_col]
-                bc = _bary3(a_c + m[ec] * pd[:, None], sc['pos'][sc['tris'][t]])
-                return read(t, bc)[0]
-            on_c = on_x[cc]
-            s_own = (np.where(on_c, probe(0, mX), probe(3, mY)) - np.where(on_c, vx[cc], vy[cc])) / pd
-            s_other = (np.where(on_c, probe(3, mY), probe(0, mX)) - np.where(on_c, vy[cc], vx[cc])) / pd
-            corr = 0.5 * delta[cc] * fade[cc] + 0.5 * (s_own + s_other) * (W[cc] / 3.0) * (1.0 - x[cc]) ** 3
-            np.add.at(cadd, i[cc], corr)
-    done = (add > 1e-9) | (np.abs(cadd) > 1e-9)
-    return np.where(done, np.clip(vals + add + cadd, 0.0, 1.0), vals), int(done.sum())
-
-
 # ---------------------------------------------------------------------------------------------------------------------
 # Curvature (auto-bake journal item D, decision 54): from the object's own geometry, no rays
 # ---------------------------------------------------------------------------------------------------------------------
 #
-# Signed, 50 % grey flat (P3), measured within a width (m) around each point, like Substance's sampling radius:
+# Signed, 50 % grey flat (P3), measured within a width (m) around each point, a sampling radius:
 # - a sharp edge (welded faces whose normals are split there and differ by more than CURV_SHARP_DEG) is a band of that
 #   width on both its faces, brightest (convex) or darkest (concave) at the edge and fading out (smoothstep); its
 #   strength is the angle between the faces over 90 degrees (at most 1). Several convex edges: the strongest; several
@@ -1140,18 +993,17 @@ def curvature_at(cc, tri_ids, bary, P3, chunk=COPY_CHUNK):
 
 
 def write_curvature(folder, stem, m, pos, tris, cn, width, threads=None, rows=256):
-    """The curvature master <stem>.curv.jxl (or .curv.png) in the AO master's layout (the .ao.map's faces, m's muv),
-    from the triangles of the master (tris (T,3) into pos, cn (T,3,3), in tri_src order). Not filled pixels: flat.
-    Returns dict(path, edges, seconds)."""
+    """The curvature master <stem>.curv.jxl (an older .curv.png removed) in the AO master's layout (the .ao.map's
+    faces, m's muv), from the triangles of the master (tris (T,3) into pos, cn (T,3,3), in tri_src order). Not filled
+    pixels: flat. Returns dict(path, edges, seconds)."""
     t0 = time.time()
     cc = curvature_context(pos, tris, cn, width)
     _img, mp, _npz = master_paths(folder, stem)
     W, H, gen = map_rows(mp, rows)
     jx, pn = image_paths(folder, stem, 'curv')
-    lib = jxl()
-    path, other = (jx, pn) if lib.available() else (pn, jx)
-    w = lib.Writer(path + '.tmp', W, H, threads=threads or lib.THREADS) if lib.available() else \
-        PngRowWriter(path + '.tmp', W, H, bits=16, channels=1)
+    lib = jxl()  # decision 6: libjxl is required (its Writer raises JxlError without it)
+    path, other = jx, pn
+    w = lib.Writer(path + '.tmp', W, H, threads=threads or lib.THREADS)
     muv = m['muv']
     P = pos[tris]
     try:
@@ -1224,30 +1076,24 @@ def denoise_levels(radius_px, max_levels):
     return L
 
 
-def page_image(path, W, H, page_path, cache_bytes):
-    """A master-sized 16-bit image (JPEG XL or PNG) decoded once into a tiled scratch file, read as a PagedArray
-    (row 0 the bottom). The caller closes it and removes page_path."""
-    if path.endswith('.jxl'):
-        lib = jxl()
-        if not lib.available():
-            raise lib.JxlError(f'{path}: the JPEG XL library is not loaded ({lib.error()})')
-        if tuple(lib.info(path)) != (W, H):
-            raise ValueError(f'{path}: {lib.info(path)}, the layout says {W} x {H}')
-        sink = _TiledSink(page_path, H, W)
+def page_image(path, map_path, W, H, page_path, cache_bytes, threads=None):
+    """A master-sized 16-bit JPEG XL image of a master's layout decoded once into a tiled scratch file, read as a
+    PagedArray (row 0 the bottom). The caller closes it and removes page_path. Decision 6: the C++ opening does it
+    (ao_bake_copy.open_pages), which opens the image with the master's .ao.map (map_path); the map's page file is
+    removed at once. A PNG raises MasterUnreadable."""
+    if not path.endswith('.jxl'):
+        raise MasterUnreadable(f'{path}: a PNG image the C++ code does not open: {REBAKE}')
+    lib = jxl()
+    if not lib.available():
+        raise lib.JxlError(f'{path}: the JPEG XL library is not loaded ({lib.error()})')
+    map_page = page_path + '.mappage'
+    try:
+        native_copy().open_pages(lib.LIB_DIR, path, map_path, page_path, map_page, W, H, PAGE_TILE, threads)
+    finally:
         try:
-            lib.decode_rows(path, sink.put, threads=lib.DECODE_THREADS)
-        finally:
-            sink.f.close()
-        sink.close()
-    else:
-        reader = PngRows(path)
-        if (reader.w, reader.h) != (W, H):
-            reader.close()
-            raise ValueError(f'{path}: {reader.w} x {reader.h} px, the layout says {W} x {H}')
-        tw = _TiledWriter(page_path, H, W, np.uint16)
-        for block in reader:
-            tw.write(block[:, :, 0] if block.ndim == 3 else block)
-        tw.close()
+            os.remove(map_page)
+        except OSError:
+            pass
     return PagedArray(page_path, H, W, np.uint16, cache_bytes)
 
 
@@ -1366,7 +1212,7 @@ def denoise_window(v0, valid, POS, NRM, sig, var0, levels, detail, cos_min, C=No
 
 
 def denoise_master(folder, stem, pos, tris, cn, opts, threads=None, band=DN_BAND, on_band=None, cache_bytes=None):
-    """Decision 56: the raw master <stem>.ao.raw.jxl (or .png) filtered into the master <stem>.ao.jxl (or .png), in
+    """Decision 56: the raw master <stem>.ao.raw.jxl filtered into the master <stem>.ao.jxl, in
     bands from the top (see above); tris (T,3) into pos, cn (T,3,3), in tri_src order (as write_curvature). opts:
     DN_DEFAULTS' keys (radius m, strength, max_levels, detail, normal_deg, curv_mode OFF / SIMILAR / SHRINK,
     curv_threshold, noise MEASURED or SAMPLES, samples). The curvature master guides it when it exists. on_band(i, n) after each band.
@@ -1386,7 +1232,8 @@ def denoise_master(folder, stem, pos, tris, cn, opts, threads=None, band=DN_BAND
         cpath = master_paths(folder, stem, 'curv')[0]
         if o['curv_mode'] != 'OFF' and os.path.isfile(cpath):
             curv_page = os.path.join(folder, stem) + '.curv.dnpage'
-            curv_img = page_image(cpath, W, H, curv_page, cache_bytes // 3)
+            curv_img = page_image(cpath, master_paths(folder, stem)[1], W, H, curv_page, cache_bytes // 3,
+                                  threads=threads)
         density = float(master['density'])  # px per m
         radius_px = float(o['radius']) * density
         levels = denoise_levels(radius_px, int(o['max_levels']))
@@ -1402,11 +1249,9 @@ def denoise_master(folder, stem, pos, tris, cn, opts, threads=None, band=DN_BAND
         muv = master['muv']
         cos_min = np.float32(math.cos(math.radians(float(o['normal_deg']))))
         strength = float(o['strength'])
-        dst = os.path.join(folder, stem) + ('.ao.jxl' if raw.endswith('.jxl') else '.ao.png')
-        other = os.path.join(folder, stem) + ('.ao.png' if raw.endswith('.jxl') else '.ao.jxl')
+        dst, other = image_paths(folder, stem)  # decision 6: a raw master opens only as JPEG XL
         lib = jxl()
-        w = lib.Writer(dst + '.tmp', W, H, threads=threads or lib.THREADS) if dst.endswith('.jxl') else \
-            PngRowWriter(dst + '.tmp', W, H, bits=16, channels=1)
+        w = lib.Writer(dst + '.tmp', W, H, threads=threads or lib.THREADS)
         n_px, change = 0, 0.0
         nb = -(-H // band)
         try:
@@ -1702,8 +1547,8 @@ def oidn_isolated(lib, dev, v0, nrm, isl, n_islands):
 
 
 def denoise_master_oidn(folder, stem, pos, tris, cn, opts, device='GPU', on_band=None, cache_bytes=None):
-    """The raw master <stem>.ao.raw.jxl (or .png) denoised by OIDN with its islands isolated (see above) into the master
-    <stem>.ao.jxl (or .png); tris, pos, cn as denoise_master. opts: method OIDN, strength. on_band(i, n) after each
+    """The raw master <stem>.ao.raw.jxl denoised by OIDN with its islands isolated (see above) into the master
+    <stem>.ao.jxl; tris, pos, cn as denoise_master. opts: method OIDN, strength. on_band(i, n) after each
     window. Returns the stats (method, device, groups at most, windows, pixels, mean change, seconds)."""
     t0 = time.time()
     cache_bytes = cache_bytes or PAGE_CACHE_BYTES
@@ -1722,11 +1567,9 @@ def denoise_master_oidn(folder, stem, pos, tris, cn, opts, device='GPU', on_band
         n_islands = int(island.max()) + 1 if len(island) else 0
         CN = np.asarray(cn, np.float32)
         muv = master['muv']
-        dst = os.path.join(folder, stem) + ('.ao.jxl' if raw.endswith('.jxl') else '.ao.png')
-        other = os.path.join(folder, stem) + ('.ao.png' if raw.endswith('.jxl') else '.ao.jxl')
+        dst, other = image_paths(folder, stem)  # decision 6: a raw master opens only as JPEG XL
         jl = jxl()
-        w = jl.Writer(dst + '.tmp', W, H, threads=jl.THREADS) if dst.endswith('.jxl') else \
-            PngRowWriter(dst + '.tmp', W, H, bits=16, channels=1)
+        w = jl.Writer(dst + '.tmp', W, H, threads=jl.THREADS)
         band = max(64, OIDN_WINDOW_PX // max(W, 1) - 2 * OIDN_HALO)
         nb = -(-H // band)
         n_px, change, groups = 0, 0.0, 0
@@ -1773,170 +1616,60 @@ def denoise_master_oidn(folder, stem, pos, tris, cn, opts, device='GPU', on_band
 
 
 def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode='tri', kmax=16, surface_cos=None,
-                same_face=False, ctx=None, chunk=COPY_CHUNK, soften=None, threads=None, backend=None):
-    """Returns (image (h,w) with -1 where nothing was written, info). ctx: copy_context (computed here when None);
-    chunk: sub-samples per step (the result does not depend on it). master['image'], ['filled'] and ['face_map'] may be
-    arrays or PagedArray views (read a[yi, xi] with index arrays). soften: a soften_context, or None (decision 46: the
-    darker side of convex sharp edges brightened toward the edge, inside and padding pixels).
+                same_face=False, ctx=None, chunk=COPY_CHUNK, soften=None, threads=None):
+    """Returns (image (h,w) with -1 where nothing was written, info, owners (h,w), padding steps (h,w), stacked counts
+    (h,w)). ctx: copy_context (computed here when None); chunk: the sub-samples of a block of inside pixels of one
+    level (the result does not depend on it). master['image'], ['filled'] and ['face_map'] may be arrays or PagedArray
+    views. soften: a soften_context, or None (decision 46: the darker side of convex sharp edges brightened toward the
+    edge, inside and padding pixels; decision 58: concave folds blurred across).
 
-    The inside pixels' sub-samples and the padding pixels' reads run in C++ (ao_bake_copy, apply-native-copy journal)
-    with `threads` threads (at most 12) when its DLL is loaded and the copy is one it does (outside_mode 'tri', not
-    same_face, a uint16 master without rect_id), bit-identical to the numpy code below, which runs otherwise or with
-    FSS_AO_COPY=numpy; backend 'numpy' forces the numpy code, 'native' raises when the C++ copy cannot run.
-    info['copy']: which ran ('native' or 'numpy'), info['copy_why']: why numpy ran."""
+    Apply-native-copy decision 6: the copy runs in C++ (ao_bake_copy) on `threads` threads (ao_bake_copy.threads_of):
+    the band's raster (raster_window), the inside pixels' L x L sub-samples (each point on the pixel's own triangle, as
+    Cycles mirrors jitter back into it) and their master reads (clamped onto the island's baked area; surface_cos: only
+    texels of a face within that angle), Soften (the folds' values read the same way), the padding's dilation
+    (dilate_ids) and reads (the pixel's own triangle, or its neighbour hinged flat across the nearest edge). It does
+    outside_mode 'tri' without same_face, at most ao_bake_copy.MAX_LEVEL samples per pixel axis, on a uint16 master
+    without a rect_id map; anything else raises (tisl, the target triangles' islands, mattered only for the other
+    modes). info['copy'] is 'native', info['copy_threads'] the threads."""
     x0, y0, w, h = crop
     if ctx is None:
         ctx = copy_context(pos, tris, uvpx, master, k, kmax)
-    muv = master['muv']
-    M = master['image']
-    # a tool master is uint16 (Session 20): only the texels read are converted
-    den = 65535.0 if M.dtype == np.uint16 else 1.0
-    mH, mW = M.shape
-    rect_id = master.get('rect_id')
-    rects = np.asarray(master['rects']) if rect_id is None else None
-    filled = master['filled']
-    misl = master['island']
-
-    def in_own_rect(xi, yi, isl):
-        """rect_id[yi, xi] == isl, from the rectangles (they do not overlap) when there is no per-pixel map."""
-        if rect_id is not None:
-            return rect_id[yi, xi] == isl
-        r = rects[np.maximum(isl, 0)]
-        return (isl >= 0) & (xi >= r[:, 0]) & (xi < r[:, 0] + r[:, 2]) & (yi >= r[:, 1]) & (yi < r[:, 1] + r[:, 3])
+    nat = native_copy()
+    if outside_mode != 'tri' or same_face or int(kmax) > nat.MAX_LEVEL:
+        raise ValueError(f'a copy the C++ code does not do (outside_mode {outside_mode}, same_face {same_face}, '
+                         f'kmax {kmax})')
+    prep = nat.prepare(master, (PagedArray, _PagedView))
+    if prep is None:
+        raise MasterUnreadable('a master the C++ code does not read (not uint16, a rect_id map, or other arrays): '
+                               're-bake needed')
     wt = ctx['wt']
     nb = ctx['nb']
-    face_map = master.get('face_map')
     tri_normal = ctx['tri_normal']
-
-    def read(tri_ids, bary):
-        """bary (N,3) w.r.t. triangles tri_ids -> master values; clamps points outside their island's baked area."""
-        mp = np.einsum('nk,nkd->nd', bary, muv[tri_ids])
-        xi = np.clip(np.floor(mp[:, 0]).astype(np.int64), 0, mW - 1)
-        yi = np.clip(np.floor(mp[:, 1]).astype(np.int64), 0, mH - 1)
-        ok = in_own_rect(xi, yi, misl[tri_ids]) & filled[yi, xi]
-        bad = ~ok
-        n_clamped = int(bad.sum())
-        if bad.any():
-            bb = np.clip(bary[bad], 0, None)
-            bb /= np.maximum(bb.sum(axis=1, keepdims=True), 1e-30)
-            mp[bad] = np.einsum('nk,nkd->nd', bb, muv[tri_ids[bad]])
-        if surface_cos is None or face_map is None:
-            return bilinear(M, mp[:, 0], mp[:, 1], den), n_clamped
-        return _surface_bilinear(mp, tri_ids), n_clamped
-
-    def _surface_bilinear(mp, tri_ids):
-        """Bilinear read that keeps only texels showing a face of the same surface (normal within the angle)."""
-        fx = mp[:, 0] - 0.5
-        fy = mp[:, 1] - 0.5
-        xa = np.floor(fx).astype(np.int64)
-        ya = np.floor(fy).astype(np.int64)
-        ax = fx - xa
-        ay = fy - ya
-        acc = np.zeros(len(mp))
-        wsum = np.zeros(len(mp))
-        acc_f = np.zeros(len(mp))
-        wsum_f = np.zeros(len(mp))
-        nt = tri_normal[tri_ids]
-        for dx, dy, wgt in ((0, 0, (1 - ax) * (1 - ay)), (1, 0, ax * (1 - ay)), (0, 1, (1 - ax) * ay), (1, 1, ax * ay)):
-            xc = np.clip(xa + dx, 0, mW - 1)
-            yc = np.clip(ya + dy, 0, mH - 1)
-            f = face_map[yc, xc]
-            ok = (f >= 0) & (np.einsum('nd,nd->n', tri_normal[np.maximum(f, 0)], nt) >= surface_cos)
-            wv = np.where(ok, wgt, 0.0)
-            mv = M[yc, xc] / den
-            acc += wv * mv
-            wsum += wv
-            if same_face:
-                wf = np.where(f == tri_ids, wgt, 0.0)
-                acc_f += wf * mv
-                wsum_f += wf
-        plain = bilinear(M, mp[:, 0], mp[:, 1], den)
-        out_ = np.where(wsum > 1e-9, acc / np.maximum(wsum, 1e-30), plain)
-        if same_face:
-            out_ = np.where(wsum_f > 1e-9, acc_f / np.maximum(wsum_f, 1e-30), out_)
-        return out_
-
-    nat = native_copy()
-    use, why = nat.backend() if backend != 'numpy' else ('numpy', 'the numpy copy asked for')
-    prep = None
-    if use == 'native':
-        if outside_mode != 'tri' or same_face or int(kmax) > nat.MAX_LEVEL:
-            use, why = 'numpy', f'a copy the C++ code does not do (outside_mode {outside_mode}, same_face {same_face})'
-        else:
-            prep = nat.prepare(master, (PagedArray, _PagedView))
-            if prep is None:
-                use, why = 'numpy', 'a master the C++ code does not read (not uint16, rect_id, or other arrays)'
-    if backend == 'native' and use != 'native':
-        raise RuntimeError(f'the C++ copy cannot run: {why}')
-    surface_read = surface_cos is not None and face_map is not None
-    owner_c, count_c = raster_window(uvpx, w, h, 1, x0, y0)
+    surface_read = surface_cos is not None and master.get('face_map') is not None
+    owner_c, count_c = raster_window(uvpx, w, h, 1, x0, y0, threads=threads)
     out = np.full((h, w), -1.0)
     sig, kt_raw, kt = ctx['sig'], ctx['kt_raw'], ctx['kt']
     n_cl_in = 0
     jj, ii = np.nonzero(owner_c >= 0)
     lvl = kt[owner_c[jj, ii]]
     capped_px = int((kt_raw[owner_c[jj, ii]] > kmax).sum())
-    def inside_step(L, sel):
-        """The inside pixels jj[sel], ii[sel] of level L (a chunk of them)."""
-        pj_, pi_ = jj[sel], ii[sel]
-        # owners of the sub-samples on an L x L grid, only over the box of these pixels
-        bx0, by0 = int(pi_.min()), int(pj_.min())
-        bw, bh = int(pi_.max()) - bx0 + 1, int(pj_.max()) - by0 + 1
-        owner_s, _ = raster_window(uvpx, bw, bh, int(L), x0 + bx0, y0 + by0)
-        sub = (np.arange(L) + 0.5) / L
-        sx, sy = np.meshgrid(sub, sub)
-        sx, sy = sx.ravel(), sy.ravel()
-        n = len(pi_)
-        px = (x0 + pi_[:, None] + sx[None, :]).ravel()
-        py = (y0 + pj_[:, None] + sy[None, :]).ravel()
-        own_pix = np.repeat(owner_c[pj_, pi_], L * L)
-        a_idx = np.arange(L)
-        ax_, ay_ = np.meshgrid(a_idx, a_idx)
-        si = ((pi_ - bx0)[:, None] * L + ax_.ravel()[None, :]).ravel()
-        sj = ((pj_ - by0)[:, None] * L + ay_.ravel()[None, :]).ravel()
-        own_sub = owner_s[sj, si]
-        if outside_mode == 'tri':
-            # as Cycles: every jitter point stays on the pixel's own triangle (mirrored back), so only points on
-            # that triangle count
-            same = own_sub == own_pix
-        else:
-            same = (own_sub >= 0) & (tisl[np.maximum(own_sub, 0)] == tisl[own_pix])
-        use = np.where(same, own_sub, own_pix)
-        # 'drop': Cycles mirrors jitter that leaves the pixel's triangle back into it, so points beyond the island
-        # border are left out and a border pixel averages its part inside the island; 'extend' keeps them
-        wgt = same.astype(np.float64) if outside_mode in ('drop', 'tri') else np.ones(len(use))
-        bary = barycentric_many(np.stack([px, py], axis=1), uvpx[use])
-        vals, c_ = read(use, bary)
-        wv = wgt.reshape(n, L * L)
-        vv = vals.reshape(n, L * L)
-        sw = wv.sum(axis=1)
-        cb = barycentric_many(np.stack([x0 + pi_ + 0.5, y0 + pj_ + 0.5], axis=1), uvpx[owner_c[pj_, pi_]])
-        cv, _ = read(owner_c[pj_, pi_], cb)
-        out[pj_, pi_] = np.where(sw > 0, (vv * wv).sum(axis=1) / np.maximum(sw, 1e-30), cv)
-        return c_
-
-    gx = np.zeros(len(jj), np.int64) if use == 'native' else None
-    gy = np.zeros(len(jj), np.int64) if use == 'native' else None
+    gx = np.zeros(len(jj), np.int64)
+    gy = np.zeros(len(jj), np.int64)
     for L in np.unique(lvl):
         at_level = np.nonzero(lvl == L)[0]
         # in square blocks whose sub-sample raster (the block's area x L x L) is at most `chunk`: the pixels of one
-        # level may lie scattered over the whole window, and the raster covers the box of the pixels it is given
+        # level may lie scattered over the whole window; each pixel gets the corner of its block's raster grid (the
+        # box of the block's pixels), the grid its sub-samples' owners are rasterized on
         side = max(1, int(math.sqrt(chunk / (int(L) * int(L)))))
         key = (jj[at_level] // side) * (w // side + 1) + ii[at_level] // side
         order = np.argsort(key, kind='stable')
         cuts = np.flatnonzero(np.diff(key[order])) + 1
-        if use == 'native':
-            # the C++ copy: each pixel with the corner of its block's raster grid (the box of the block's pixels), as
-            # inside_step rasterizes the block
-            idx = at_level[order]
-            starts = np.concatenate([[0], cuts]).astype(np.int64)
-            n_in = np.diff(np.append(starts, len(idx)))
-            gx[idx] = x0 + np.repeat(np.minimum.reduceat(ii[idx], starts), n_in)
-            gy[idx] = y0 + np.repeat(np.minimum.reduceat(jj[idx], starts), n_in)
-            continue
-        for grp in np.split(at_level[order], cuts):
-            n_cl_in += inside_step(int(L), grp)
-    if use == 'native' and len(jj):
+        idx = at_level[order]
+        starts = np.concatenate([[0], cuts]).astype(np.int64)
+        n_in = np.diff(np.append(starts, len(idx)))
+        gx[idx] = x0 + np.repeat(np.minimum.reduceat(ii[idx], starts), n_in)
+        gy[idx] = y0 + np.repeat(np.minimum.reduceat(jj[idx], starts), n_in)
+    if len(jj):
         vals_in, n_cl_in = nat.inside(prep, tri_normal, surface_cos, surface_read, uvpx, x0 + ii, y0 + jj,
                                       owner_c[jj, ii], lvl, gx, gy, threads)
         out[jj, ii] = vals_in
@@ -1947,9 +1680,10 @@ def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode=
         own = owner_c[jj, ii]
         cb = barycentric_many(np.stack([x0 + ii + 0.5, y0 + jj + 0.5], axis=1), uvpx[own])
         p3 = np.einsum('nk,nkd->nd', cb, pos[tris[own]])
-        out[jj, ii], n_soft = _soften(soften, own, p3, out[jj, ii], read, tri_normal, soft_cos)
+        out[jj, ii], n_soft = nat.soften(prep, tri_normal, surface_cos, surface_read, soften, soft_cos, own, p3,
+                                         out[jj, ii], threads)
     # padding pixels
-    grown, steps = dilate_ids(owner_c, padding)
+    grown, steps = dilate_ids(owner_c, padding, threads=threads)
     pj, pi = np.nonzero((owner_c < 0) & (grown >= 0))
     n_cl_pad = 0
     n_no_nb = 0
@@ -1973,41 +1707,24 @@ def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode=
             tri_uv[hinge] = hinged[inv.ravel()]
             src[hinge] = U[hinge]
         plvl = kt[T]
-        if use == 'native':
-            vals_pad, n_cl_pad = nat.padding(prep, tri_normal, surface_cos, surface_read, x0 + pi, y0 + pj, src,
-                                             tri_uv, plvl, threads)
-            out[pj, pi] = vals_pad
-            del vals_pad
-        for L in (np.unique(plvl) if use != 'native' else ()):
-            at_level = np.nonzero(plvl == L)[0]
-            sub = (np.arange(L) + 0.5) / L
-            sx, sy = np.meshgrid(sub, sub)
-            sx, sy = sx.ravel(), sy.ravel()
-            for c0, c1 in _chunks(len(at_level), chunk // (int(L) * int(L))):
-                sel = at_level[c0:c1]
-                ppx = (pi[sel][:, None] + x0 + sx[None, :]).ravel()
-                ppy = (pj[sel][:, None] + y0 + sy[None, :]).ravel()
-                bary = barycentric_many(np.stack([ppx, ppy], axis=1), np.repeat(tri_uv[sel], L * L, axis=0))
-                # stay on the neighbour face: its nearest point (a thin neighbour extended further would reach other
-                # faces)
-                bary = np.clip(bary, 0, None)
-                bary /= np.maximum(bary.sum(axis=1, keepdims=True), 1e-30)
-                vals, c_ = read(np.repeat(src[sel], L * L), bary)
-                n_cl_pad += c_
-                out[pj[sel], pi[sel]] = vals.reshape(len(sel), L * L).mean(axis=1)
+        vals_pad, n_cl_pad = nat.padding(prep, tri_normal, surface_cos, surface_read, x0 + pi, y0 + pj, src, tri_uv,
+                                         plvl, threads)
+        out[pj, pi] = vals_pad
+        del vals_pad
         if soften is not None:
             # the padding pixel's point: its centre on the face it copies, clamped onto it
             bc = np.clip(barycentric_many(cen, tri_uv), 0, None)
             bc /= np.maximum(bc.sum(axis=1, keepdims=True), 1e-30)
             p3 = np.einsum('nk,nkd->nd', bc, pos[tris[src]])
-            out[pj, pi], n_pad_soft = _soften(soften, src, p3, out[pj, pi], read, tri_normal, soft_cos)
+            out[pj, pi], n_pad_soft = nat.soften(prep, tri_normal, surface_cos, surface_read, soften, soft_cos, src,
+                                                 p3, out[pj, pi], threads)
             n_soft += n_pad_soft
     info = dict(k_min=k, k_max=kmax, k_levels={int(L): int((lvl == L).sum()) for L in np.unique(lvl)},
                 px_at_k_cap=capped_px, footprint_px_median=float(np.median(sig)), footprint_px_max=float(sig.max()),
                 inside_px=int(len(ii)), padding_px=int(len(pi)), clamped_inside_points=n_cl_in,
                 clamped_padding_points=n_cl_pad, padding_without_neighbour=n_no_nb,
-                stacked_px=int((count_c > 1).sum()), softened_px=n_soft, copy=use, copy_why=why,
-                copy_threads=nat.threads_of(threads) if use == 'native' else 1)
+                stacked_px=int((count_c > 1).sum()), softened_px=n_soft, copy='native',
+                copy_threads=nat.threads_of(threads))
     return out, info, owner_c, steps, count_c
 
 
@@ -2318,104 +2035,50 @@ def corner_pairs(m, pos, tris):
     return a[:, 0], a[:, 1], a[:, 2], a[:, 3]
 
 
-def corner_fix(pairs, M16e, baked_e, ex0, ey0, win):
-    """Decision 57 on a block (values M16e and baked flags over the window and its halo, bottom-left (ex0, ey0)): the
-    corner pixels in the block brighter than their inward pixel by over CORNER_EXCESS take its value. Returns (values,
-    the number changed inside the window `win`); the values are a copy when any changed."""
-    cy, cx, iy, ix = pairs
-    eh, ew = M16e.shape
-    a, b = np.searchsorted(cy, ey0), np.searchsorted(cy, ey0 + eh)
-    if a == b:
-        return M16e, 0
-    cy, cx, iy, ix = cy[a:b] - ey0, cx[a:b] - ex0, iy[a:b] - ey0, ix[a:b] - ex0
-    k = (cx >= 0) & (cx < ew) & (iy >= 0) & (iy < eh) & (ix >= 0) & (ix < ew)
-    cy, cx, iy, ix = cy[k], cx[k], iy[k], ix[k]
-    k = baked_e[cy, cx] & baked_e[iy, ix]
-    k &= M16e[cy, cx].astype(np.int64) - M16e[iy, ix] > int(CORNER_EXCESS * 65535)
-    if not k.any():
-        return M16e, 0
-    cy, cx, iy, ix = cy[k], cx[k], iy[k], ix[k]
-    out = M16e.copy()
-    np.minimum.at(out, (cy, cx), M16e[iy, ix])  # against the values as baked: one pass, in no order
-    x0, y0, w, h = win
-    inside = (cx + ex0 >= x0) & (cx + ex0 < x0 + w) & (cy + ey0 >= y0) & (cy + ey0 < y0 + h)
-    return out, int(len(np.unique(np.stack([cy[inside], cx[inside]], axis=1), axis=0)))
+def compose_layout(m):
+    """The layout of master m as the C++ composition reads it (ao_bake_copy.Layout), made once per master."""
+    return native_copy().compose_layout(m, FILL, int(CORNER_EXCESS * 65535))
 
 
-def compose_block(m, M16e, baked_e, ex0, ey0, win):
+def compose_by(threads=None):
+    """Which code composes a master: 'C++ (n threads)' (the runner's log)."""
+    n = native_copy().threads_of(threads)
+    return f"C++ ({n} thread{'s' if n != 1 else ''})"
+
+
+def compose_block(m, M16e, baked_e, ex0, ey0, win, threads=None, layout=None):
     """The composition of a master (step3_master.py) for one window, after the tiles around it are baked.
 
     M16e (eh, ew) uint16 and baked_e (eh, ew) bool: the core and skirt values and the baked flags (core or skirt) over
-    the window and its halo of FILL pixels (clamped to the master), whose bottom-left pixel is (ex0, ey0). Inside each
-    island's rectangle, the pixels within FILL steps of a baked pixel of the same rectangle get that pixel's value; the
-    face map holds the face per pixel (core faces, then skirt faces inside rectangles, grown FILL steps inside
-    rectangles). With the halo the result equals the composition of the whole image at once (Session 20), so a master
-    is composed a strip at a time (Session 23). Returns (counts, values (h, w) uint16, filled (h, w) bool, face map
-    (h, w) int32) of the window."""
-    x0, y0, w, h = win
-    eh, ew = M16e.shape
-    n_corner = 0
-    if m.get('corner_pairs') is not None and len(m['corner_pairs'][0]):  # decision 57, before the gutter's fill
-        M16e, n_corner = corner_fix(m['corner_pairs'], M16e, baked_e, ex0, ey0, win)
-    sub = (slice(y0 - ey0, y0 - ey0 + h), slice(x0 - ex0, x0 - ex0 + w))
-    rid = rect_window(m['rects'], ex0, ey0, ew, eh)
-    in_rect = rid >= 0
-    baked = baked_e
-    idx = np.where(baked, np.arange(eh * ew, dtype=np.int32).reshape(eh, ew), np.int32(-1))
-    grown, _steps = dilate_ids(idx, FILL, mask_allowed=in_rect)
-    del idx, _steps
-    fm = (~baked) & (grown >= 0)
-    same = np.zeros_like(fm)
-    same[fm] = rid.ravel()[grown[fm]] == rid[fm]
-    fm &= same
-    del same
-    fmi = fm[sub]
-    vals = M16e[sub].copy()
-    if fmi.any():
-        vals[fmi] = M16e.ravel()[grown[sub][fmi]]  # sources are baked pixels
-    del grown
-    filled = baked[sub] | fmi
-    counts = dict(nearest_fill_px=int(fmi.sum()), rect_px_unfilled=int((in_rect[sub] & ~filled).sum()),
-                  rect_px=int(in_rect[sub].sum()), corner_px=n_corner)
-    del fm
-    # the face map
-    core = m['core_tris']
-    cuv = m['muv'][core]
-    sel = tris_in_window(cuv, ex0, ey0, ew, eh)
-    fmap = np.full((eh, ew), -1, dtype=np.int32)
-    if len(sel):
-        own, _cnt = rasterize_ids(cuv[sel], ew, eh, 1, ex0, ey0)
-        fmap = np.where(own >= 0, core[sel][np.maximum(own, 0)], -1).astype(np.int32)
-        del own, _cnt
-    sel = tris_in_window(m['skirt_uv'], ex0, ey0, ew, eh) if len(m['skirt_pos']) else []
-    if len(sel):
-        own, _cnt = rasterize_ids(m['skirt_uv'][sel], ew, eh, 1, ex0, ey0)
-        sk_face = np.where(own >= 0, m['skirt_src'][sel][np.maximum(own, 0)], -1)
-        del own, _cnt
-        take = (fmap < 0) & (sk_face >= 0) & in_rect
-        fmap[take] = sk_face[take]
-        del sk_face, take
-    fidx = np.where(fmap >= 0, np.arange(eh * ew, dtype=np.int32).reshape(eh, ew), np.int32(-1))
-    fgrown, _steps = dilate_ids(fidx, FILL, mask_allowed=in_rect)
-    del fidx, _steps
-    fm2 = (fmap < 0) & (fgrown >= 0)
-    fmap[fm2] = fmap.ravel()[fgrown[fm2]]
-    return counts, vals, filled, fmap[sub].copy()
+    the window and its halo of FILL pixels (clamped to the master), whose bottom-left pixel is (ex0, ey0). Decision 57
+    first: the corner pixels (m['corner_pairs']) brighter than their inward pixel by over CORNER_EXCESS take its value.
+    Inside each island's rectangle, the pixels within FILL steps of a baked pixel of the same rectangle get that
+    pixel's value; the face map holds the face per pixel (core faces, then skirt faces inside rectangles, grown FILL
+    steps inside rectangles). With the halo the result equals the composition of the whole image at once (Session 20),
+    so a master is composed a strip at a time (Session 23). Returns (counts, values (h, w) uint16, filled (h, w) bool,
+    face map (h, w) int32) of the window.
+
+    Apply-native-copy decision 6: fss_ao_compose_block (bake-post-native journal) on `threads` threads. layout:
+    compose_layout(m), when the caller made it once."""
+    return native_copy().compose(layout if layout is not None else compose_layout(m), M16e, baked_e, ex0, ey0, win,
+                                 threads)
 
 
-def compose_whole(m, M16, baked, window=2048):
+def compose_whole(m, M16, baked, window=2048, threads=None):
     """The composition of a whole master held in memory (tests and small masters): (counts, values, filled, face map),
-    window by window with compose_block."""
+    window by window with compose_block (threads as compose_block takes them)."""
     H, W = M16.shape
     vals = np.zeros_like(M16)
     filled = np.zeros((H, W), bool)
     face = np.full((H, W), -1, np.int32)
     counts = {}
+    layout = compose_layout(m)
     for win in tile_grid(W, H, window):
         x0, y0, w, h = win
         ex0, ey0 = max(0, x0 - FILL), max(0, y0 - FILL)
         ex1, ey1 = min(W, x0 + w + FILL), min(H, y0 + h + FILL)
-        c, v, f, fm = compose_block(m, M16[ey0:ey1, ex0:ex1], baked[ey0:ey1, ex0:ex1], ex0, ey0, win)
+        c, v, f, fm = compose_block(m, M16[ey0:ey1, ex0:ex1], baked[ey0:ey1, ex0:ex1], ex0, ey0, win, threads=threads,
+                                    layout=layout)
         vals[y0:y0 + h, x0:x0 + w] = v
         filled[y0:y0 + h, x0:x0 + w] = f
         face[y0:y0 + h, x0:x0 + w] = fm
@@ -2467,15 +2130,20 @@ class Bands:
         return v, b
 
 
-def compose_band(m, bands, kb, write_rows, counts, on_strip=None, ys1=None, stop=None):
+def compose_band(m, bands, kb, write_rows, counts, on_strip=None, ys1=None, stop=None, threads=None, layout=None):
     """Composes band kb a strip of COMPOSE_STRIP rows at a time from the top (or from row ys1, where an earlier call
     stopped); write_rows(values, codes) gets each strip's rows in file order (the top first), on_strip(y0, values) each
     strip as composed (the preview). stop: the first row of the band below when that band is not baked yet: the strips
-    whose halo reaches below it wait. Returns the top of the strips not composed (the band's first row when done)."""
+    whose halo reaches below it wait. Returns the top of the strips not composed (the band's first row when done).
+    threads: compose_block's (each window's values and map codes go straight into the strip's rows); layout:
+    compose_layout(m), made once by the caller."""
     W, H = m['W'], m['H']
-    y0, v, _b = bands.rows[kb]
+    y0, _v, _b = bands.rows[kb]
     yb1 = y0 + bands.height[kb]
     ys1 = yb1 if ys1 is None else ys1
+    if layout is None:
+        layout = compose_layout(m)
+    nat = native_copy()
     while ys1 > y0:
         ys0 = max(y0, ys1 - COMPOSE_STRIP)
         if stop is not None and ys0 - FILL < stop:
@@ -2488,9 +2156,8 @@ def compose_band(m, bands, kb, write_rows, counts, on_strip=None, ys1=None, stop
             w = min(COMPOSE_WINDOW, W - x0)
             ex0, ex1 = max(0, x0 - FILL), min(W, x0 + w + FILL)
             Me, Be = bands.block(ey0, ey1, ex0, ex1)
-            c, wv, wf, wm = compose_block(m, Me, Be, ex0, ey0, (x0, ys0, w, hs))
-            vals[:, x0:x0 + w] = wv
-            codes[:, x0:x0 + w] = map_code(wm, wf)
+            c, _wv, _wf, _wm = nat.compose(layout, Me, Be, ex0, ey0, (x0, ys0, w, hs), threads,
+                                           out_values=vals[:, x0:x0 + w], out_code=codes[:, x0:x0 + w], parts=False)
             for k, n in c.items():
                 counts[k] = counts.get(k, 0) + n
         write_rows(vals[::-1], codes[::-1])
@@ -2500,18 +2167,20 @@ def compose_band(m, bands, kb, write_rows, counts, on_strip=None, ys1=None, stop
     return ys1
 
 
-def bake_paged(m, tile, bake_tile, write_rows, counts, on_strip=None):
+def bake_paged(m, tile, bake_tile, write_rows, counts, on_strip=None, threads=None):
     """A master baked and composed band by band (decision 33): the bands from the top (the files are written from the
     top), each band's tiles from the left. bake_tile(i, (x0, y0, w, h), values, baked) bakes tile i of tile_grid (its
     place gives its seed) into the band's views of that tile and is a generator (the runner yields between tiles).
     Once a band is baked, the last strips of the band above it (they needed its top rows) are composed and written,
     then this band's strips that do not reach the band below; only the rows the next strips still read are kept. So
-    one band and a strip are held, whatever the master's height. Yields after each tile."""
+    one band and a strip are held, whatever the master's height. Yields after each tile. threads: the composition's
+    (compose_block; compose_by says how many)."""
     W, H = m['W'], m['H']
     tiles = tile_grid(W, H, tile)
     ntx, nb = -(-W // tile), -(-H // tile)
     bands = Bands(W)
     rest = {}  # band index: the top of its strips not composed yet
+    kw = dict(threads=threads, layout=compose_layout(m))
     for kb in range(nb - 1, -1, -1):
         yb0 = kb * tile
         _y0, band_v, band_b = bands.add(kb, yb0, min(tile, H - yb0))
@@ -2521,22 +2190,23 @@ def bake_paged(m, tile, bake_tile, write_rows, counts, on_strip=None):
             yield from bake_tile(i, tiles[i], band_v[:, x0:x0 + w], band_b[:, x0:x0 + w])
         del band_v, band_b
         if kb + 1 in rest:
-            compose_band(m, bands, kb + 1, write_rows, counts, on_strip, ys1=rest.pop(kb + 1))
+            compose_band(m, bands, kb + 1, write_rows, counts, on_strip, ys1=rest.pop(kb + 1), **kw)
             bands.trim(kb + 1, FILL)  # the halo of this band's top strip
         bands.drop(kb + 2)
-        ys1 = compose_band(m, bands, kb, write_rows, counts, on_strip, stop=yb0 if kb else None)
+        ys1 = compose_band(m, bands, kb, write_rows, counts, on_strip, stop=yb0 if kb else None, **kw)
         if ys1 > yb0:
             rest[kb] = ys1
             bands.trim(kb, ys1 + FILL - yb0)  # the rows the band's last strips read
 
 # ---------------------------------------------------------------------------------------------------------------------
-# A master's files (decisions 18, 33 and 37): <stem>.ao.jxl (or .ao.png), <stem>.ao.map, <stem>.ao.npz
+# A master's files (decisions 18, 33 and 37): <stem>.ao.jxl, <stem>.ao.map, <stem>.ao.npz
 # ---------------------------------------------------------------------------------------------------------------------
 #
 # <stem>.ao.jxl: the AO, 16-bit grey, lossless JPEG XL (decision 37, schema 3), encoded by ao_bake_jxl from the rows
 #   handed from the top as a band is composed (through a raw scratch file, <stem>.ao.jxl.tmp.raw, deleted afterwards).
-#   When the library cannot be loaded, <stem>.ao.png instead (decision 18, as schemas 1 and 2 wrote it), written row
-#   by row from the top. A master has one of the two; a new bake removes the other.
+#   Masters of 0.55 and earlier, or baked without the library, have <stem>.ao.png instead (decision 18, as schemas 1
+#   and 2 wrote it); the C++ code does not read those (apply-native-copy decision 6): Refresh grades them to be baked
+#   again, Apply leaves their pixels white, and a new bake removes the .ao.png.
 # <stem>.ao.map: the per-pixel data Apply reads besides the AO (Session 23; schema 1 kept them as `filled` and
 #   `face_map` in the .npz): MAP_MAGIC, then the version, W and H as little-endian uint32, then one zlib stream of the
 #   rows from the top, each W little-endian int32 codes: (face + 1) * 2 + filled, face -1 for none.
@@ -2590,34 +2260,10 @@ def code_face(code):
     return (np.asarray(code, dtype=np.int32) >> 1) - 1
 
 
-class MapRowWriter:
-    """<stem>.ao.map written row by row from the top (blocks of rows in file order)."""
-
-    def __init__(self, path, W, H, level=1):
-        self.path, self.W, self.H, self.rows = path, int(W), int(H), 0
-        self.f = open(path, 'wb')
-        self.f.write(MAP_MAGIC + struct.pack('<IIII', MAP_VERSION, self.W, self.H, 0))
-        self.comp = zlib.compressobj(level)
-
-    def write(self, block):
-        block = np.ascontiguousarray(block, dtype='<i4')
-        self.rows += block.shape[0]
-        data = self.comp.compress(block.tobytes())
-        if data:
-            self.f.write(data)
-
-    def close(self):
-        if self.rows != self.H:
-            raise ValueError(f'{self.path}: {self.rows} of {self.H} rows written')
-        self.f.write(self.comp.flush())
-        self.f.close()
-
-    def abort(self):
-        self.f.close()
-        try:
-            os.remove(self.path)
-        except OSError:
-            pass
+def map_writer(path, W, H, threads=None):
+    """The .ao.map's writer, ao_bake_copy.MapWriter (C++, compressed beside the composition; blocks of int32 rows in
+    file order, close, abort); `by` says 'C++ (n threads)'."""
+    return native_copy().MapWriter(path, W, H, level=1, threads=threads)
 
 
 def map_rows(path, rows=256):
@@ -2685,24 +2331,22 @@ def save_master(folder, stem, M16, m, filled, face_map, tri_src, meta):
 class MasterWriter:
     """The files of one master, written to temporary names row by row from the top (the AO and the map), then the
     layout; finish() replaces the old files (and removes the AO image of the other format), abort() removes the
-    temporary ones (a cancelled bake keeps the old master). The AO is JPEG XL when the library loads (decision 37),
-    else PNG (`format`, and `fallback` says why)."""
+    temporary ones (a cancelled bake keeps the old master). The AO is JPEG XL (decision 37; apply-native-copy decision
+    6: libjxl is required, a JxlError without it). The map's writer is map_writer's (C++; `map.by`)."""
 
     def __init__(self, folder, stem, W, H, threads=None):
         jx, pn = image_paths(folder, stem)
         base = os.path.join(folder, stem)
         lib = jxl()
-        self.format = 'jxl' if lib.available() else 'png'
-        self.fallback = None if self.format == 'jxl' else lib.error()
-        self.image, self.other = (jx, pn) if self.format == 'jxl' else (pn, jx)
+        if not lib.available():
+            raise lib.JxlError(f'{jx}: the JPEG XL library is not loaded ({lib.error()})')
+        self.format = 'jxl'
+        self.image, self.other = jx, pn
         self.paths = (self.image, base + '.ao.map', base + '.ao.npz')
         self.stats = {}
-        if self.format == 'jxl':
-            self.img = lib.Writer(self.image + '.tmp', W, H, threads=threads or lib.THREADS)
-        else:
-            self.img = PngRowWriter(self.image + '.tmp', W, H, bits=16, channels=1)
+        self.img = lib.Writer(self.image + '.tmp', W, H, threads=threads or lib.THREADS)
         try:
-            self.map = MapRowWriter(self.paths[1] + '.tmp', W, H)
+            self.map = map_writer(self.paths[1] + '.tmp', W, H, threads=threads)
         except BaseException:
             self.img.abort()
             raise
@@ -2754,32 +2398,49 @@ def has_maps_in_npz(npz):
         return False
 
 
+REBAKE = 're-bake needed'
+
+
+class MasterUnreadable(ValueError):
+    """A master the C++ code does not read (apply-native-copy decision 6: a PNG image, schema 1 with its maps in the
+    .npz, a rect_id map, values not uint16): it has to be baked again."""
+
+
+def master_unreadable(folder, stem, kind='ao'):
+    """Why the master (kind 'ao', 'curv' or 'ao.raw') is one the C++ code does not read, ending in REBAKE, or None:
+    its image is a .png (0.55 and earlier, or baked without libjxl) or its .npz holds the maps (schema 1)."""
+    image, _mp, npz = master_paths(folder, stem, kind)
+    if image.endswith('.png') and os.path.isfile(image):
+        return f'{os.path.basename(image)} is a PNG master: {REBAKE}'
+    if os.path.isfile(npz) and has_maps_in_npz(npz):
+        return f'{os.path.basename(npz)} is a master of schema 1: {REBAKE}'
+    return None
+
+
 def load_master(folder, stem, kind='ao'):
     """The whole master in memory as copy_master reads it (the image as uint16, 0..65535; filled, the face map; the
     island rectangles instead of a per-pixel map), or None when a file is missing. For tests and small masters: Apply
-    reads a master paged (open_master). kind 'curv': its curvature image instead of the AO (decision 54)."""
-    png, mp, npz = master_paths(folder, stem, kind)
-    if not (os.path.isfile(png) and os.path.isfile(npz)):
+    reads a master paged (open_master). kind 'curv': its curvature image instead of the AO (decision 54). Raises
+    MasterUnreadable for a master the C++ code does not read (master_unreadable)."""
+    image, mp, npz = master_paths(folder, stem, kind)
+    if not (os.path.isfile(image) and os.path.isfile(npz) and os.path.isfile(mp)):
         return None
+    why = master_unreadable(folder, stem, kind)
+    if why:
+        raise MasterUnreadable(why)
     with np.load(npz) as z:
         out = _layout(z)
-        old = 'filled' in z.files
-        if old:
-            out.update(filled=z['filled'], face_map=z['face_map'])
-    img = read_image(png)
+    img = read_image(image)
     H, W = img.shape
     out.update(image=img, W=W, H=H)
-    if not old:
-        if not os.path.isfile(mp):
-            return None
-        mW, mH, rows = map_rows(mp)
-        code = np.empty((mH, mW), np.int32)
-        y = 0
-        for block in rows:
-            n = block.shape[0]
-            code[mH - y - n:mH - y] = block[::-1]
-            y += n
-        out.update(filled=code_filled(code), face_map=code_face(code))
+    mW, mH, rows = map_rows(mp)
+    code = np.empty((mH, mW), np.int32)
+    y = 0
+    for block in rows:
+        n = block.shape[0]
+        code[mH - y - n:mH - y] = block[::-1]
+        y += n
+    out.update(filled=code_filled(code), face_map=code_face(code))
     return out
 
 
@@ -2789,83 +2450,6 @@ def load_master(folder, stem, kind='ao'):
 
 PAGE_TILE = 256  # px, a power of two
 PAGE_CACHE_BYTES = 384 * 2 ** 20  # the cache of one master's tiles: a third for the AO, two thirds for the map codes
-
-
-class _TiledWriter:
-    """A tiled scratch file of an (H, W) array, filled with rows in file order (the top first)."""
-
-    def __init__(self, path, H, W, dtype, T=PAGE_TILE):
-        self.path, self.H, self.W, self.T = path, H, W, T
-        self.dtype = np.dtype(dtype)
-        self.ntx, self.nty = -(-W // T), -(-H // T)
-        self.buf = np.zeros((T, self.ntx * T), self.dtype)
-        self.ty = None
-        self.r = 0  # file rows received
-        self.f = open(path, 'wb')
-
-    def _flush(self):
-        if self.ty is None:
-            return
-        T = self.T
-        tiles = np.ascontiguousarray(self.buf.reshape(T, self.ntx, T).transpose(1, 0, 2))
-        self.f.seek(self.ty * self.ntx * T * T * self.dtype.itemsize)
-        self.f.write(tiles.tobytes())
-        self.buf.fill(0)
-
-    def write(self, block):
-        block = np.asarray(block)
-        n = block.shape[0]
-        j = self.H - 1 - (self.r + np.arange(n))  # array rows, descending
-        ty = j // self.T
-        for t in np.unique(ty)[::-1]:
-            sel = ty == t
-            if self.ty != t:
-                self._flush()
-                self.ty = int(t)
-            self.buf[j[sel] - t * self.T, :self.W] = block[sel]
-        self.r += n
-
-    def close(self):
-        self._flush()
-        self.f.truncate(self.ntx * self.nty * self.T * self.T * self.dtype.itemsize)
-        self.f.close()
-
-
-class _TiledSink:
-    """The same tiled scratch file as _TiledWriter (uint16), filled from pieces of rows in any order (the JPEG XL
-    decoder hands them group by group, from several threads, one call at a time): put(x, y, n, address) with y from
-    the top. A row of tiles is buffered until every pixel of it came, then written and dropped; the decoder works on
-    groups of 2048 px at most, so a few rows of tiles are open at a time, never the whole image."""
-
-    def __init__(self, path, H, W, T=PAGE_TILE):
-        self.path, self.H, self.W, self.T = path, int(H), int(W), T
-        self.ntx, self.nty = -(-self.W // T), -(-self.H // T)
-        self.open = {}  # tile row: [buffer (T, ntx * T), address, pixels received]
-        self.most_open = 0
-        self.f = open(path, 'wb')
-        self.f.truncate(self.ntx * self.nty * T * T * 2)
-
-    def put(self, x, y, n, address):
-        j = self.H - 1 - y
-        ty = j // self.T
-        e = self.open.get(ty)
-        if e is None:
-            buf = np.zeros((self.T, self.ntx * self.T), np.uint16)
-            e = self.open[ty] = [buf, buf.ctypes.data, 0]
-            self.most_open = max(self.most_open, len(self.open))
-        ctypes.memmove(e[1] + 2 * ((j - ty * self.T) * self.ntx * self.T + x), address, 2 * n)
-        e[2] += n
-        if e[2] >= self.W * min(self.T, self.H - ty * self.T):
-            T = self.T
-            tiles = np.ascontiguousarray(e[0].reshape(T, self.ntx, T).transpose(1, 0, 2))
-            self.f.seek(ty * self.ntx * T * T * 2)
-            self.f.write(tiles.tobytes())
-            del self.open[ty]
-
-    def close(self):
-        self.f.close()
-        if self.open:
-            raise ValueError(f'{self.path}: {len(self.open)} rows of tiles incomplete')
 
 
 class PagedArray:
@@ -2939,8 +2523,12 @@ class PagedArray:
                 old = self.tile_in[s]
                 if old >= 0:
                     self.slot_of[old] = -1
-                self.f.seek(tid * size)
-                self.f.readinto(memoryview(self.cache[s]).cast('B'))
+                if self._map is not None:  # mapped for the C++ copy: read there, not through the file (a file read
+                    # waited for the C++ opening's mapped pages still being written to a hard disk, Session 6)
+                    self.cache[s] = self._map[1][tid * size:(tid + 1) * size].view(self.dtype)
+                else:
+                    self.f.seek(tid * size)
+                    self.f.readinto(memoryview(self.cache[s]).cast('B'))
                 self.tile_in[s] = tid
                 self.slot_of[tid] = s
                 self.loads += 1
@@ -2964,65 +2552,38 @@ class _PagedView:
         return self.decode(self.base[key])
 
 
-def open_master(folder, stem, cache_bytes=PAGE_CACHE_BYTES, kind='ao'):
-    """The master paged (decision 33), or None when a file is missing: the AO image (JPEG XL or PNG) and the map
-    decoded once into two tiled scratch files in the bake folder (<stem>.ao.page and <stem>.ao.mappage), read through
-    a cache of tiles; close() closes and deletes them. A master of schema 1 (filled and the face map in the .npz) is
-    loaded whole (load_master)."""
-    png, mp, npz = master_paths(folder, stem, kind)
-    if not (os.path.isfile(png) and os.path.isfile(npz)):
+def open_master(folder, stem, cache_bytes=PAGE_CACHE_BYTES, kind='ao', threads=None):
+    """The master paged (decision 33), or None when a file is missing: the AO image (JPEG XL) and the map decoded once
+    into two tiled scratch files in the bake folder (<stem>.ao.page and <stem>.ao.mappage) by the C++ DLL
+    (ao_bake_copy.open_pages, apply-native-copy journal Session 4; threads: the bake's Threads setting,
+    ao_bake_copy.threads_of), read through a cache of tiles; close() closes and deletes them. out['open'] says
+    'C++ (n threads)'. Raises MasterUnreadable for a master the C++ code does not read (master_unreadable: a PNG
+    image, schema 1; decision 6) and JxlError without libjxl."""
+    image, mp, npz = master_paths(folder, stem, kind)
+    if not (os.path.isfile(image) and os.path.isfile(npz) and os.path.isfile(mp)):
         return None
-    if has_maps_in_npz(npz):
-        out = load_master(folder, stem)
-        out['close'] = lambda: None
-        return out
-    if not os.path.isfile(mp):
-        return None
+    why = master_unreadable(folder, stem, kind)
+    if why:
+        raise MasterUnreadable(why)
     with np.load(npz) as z:
         out = _layout(z)
     W, H = out['W'], out['H']
     base = os.path.join(folder, stem)
     page_img, page_map = base + f'.{kind}.page', base + '.ao.mappage'
-    made = []
+    lib = jxl()
+    if not lib.available():
+        raise lib.JxlError(f'{image}: the JPEG XL library is not loaded ({lib.error()})')
+    nat = native_copy()
+    # both page files written by the DLL; on an error it removes them itself
+    native = nat.open_pages(lib.LIB_DIR, image, mp, page_img, page_map, W, H, PAGE_TILE, threads)
+    n = nat.threads_of(threads)
+    out.update(open=f"C++ ({n} thread{'s' if n != 1 else ''})", open_stats=native,
+               decode_open_tile_rows=native['most_open_tile_rows'])
     try:
-        if png.endswith('.jxl'):
-            lib = jxl()
-            if not lib.available():
-                raise lib.JxlError(f'{png}: the JPEG XL library is not loaded ({lib.error()})')
-            iw, ih = lib.info(png)
-            if (iw, ih) != (W, H):
-                raise ValueError(f'{png}: {iw} x {ih} px, the layout says {W} x {H}')
-            sink = _TiledSink(page_img, H, W)
-            made.append(page_img)
-            try:
-                lib.decode_rows(png, sink.put, threads=lib.DECODE_THREADS)
-            except BaseException:
-                sink.f.close()
-                raise
-            sink.close()
-            out['decode_open_tile_rows'] = sink.most_open
-        else:
-            reader = PngRows(png)
-            if (reader.w, reader.h) != (W, H):
-                reader.close()
-                raise ValueError(f'{png}: {reader.w} x {reader.h} px, the layout says {W} x {H}')
-            tw = _TiledWriter(page_img, H, W, np.uint16)
-            made.append(page_img)
-            for block in reader:
-                tw.write(block[:, :, 0])
-            tw.close()
-        mW, mH, rows = map_rows(mp)
-        if (mW, mH) != (W, H):
-            raise ValueError(f'{mp}: {mW} x {mH} px, the layout says {W} x {H}')
-        tw = _TiledWriter(page_map, H, W, np.int32)
-        made.append(page_map)
-        for block in rows:
-            tw.write(block)
-        tw.close()
         img = PagedArray(page_img, H, W, np.uint16, cache_bytes // 3)
         code = PagedArray(page_map, H, W, np.int32, cache_bytes - cache_bytes // 3)
     except BaseException:
-        for p in made:
+        for p in (page_img, page_map):
             try:
                 os.remove(p)
             except OSError:
@@ -3083,13 +2644,12 @@ def evaluated_triangles(obj, depsgraph, uv_names=()):
                 matrix=np.array(obj.matrix_world, dtype=np.float64))
 
 
-def mesh_hash(ev):
-    """Mesh changed (decision 17): the evaluated triangles, their positions and their corner normals, object space."""
-    h = hashlib.sha1()
-    h.update(np.ascontiguousarray(ev['tris'], dtype=np.int32).tobytes())
-    h.update(np.ascontiguousarray(ev['co'], dtype=np.float32).tobytes())
-    h.update(np.ascontiguousarray(np.round(ev['cn'], 4) + 0.0, dtype=np.float32).tobytes())
-    return h.hexdigest()[:20]
+def mesh_hash(ev, threads=None):
+    """Mesh changed (decision 17): the evaluated triangles, their positions and their corner normals, object space:
+    the first 20 hex digits of the SHA-1 of the triangles as int32, the positions as float32 and the corner normals
+    rounded to 4 decimals (np.round(x, 4) + 0.0) as float32, computed by the C++ DLL (bake-post-native journal Session
+    5: the bytes and digests of the Python code it replaced)."""
+    return native_copy().mesh_hash(ev['tris'], ev['co'], ev['cn'], threads)[:20]
 
 
 def matrix_key(matrix):
@@ -3116,86 +2676,21 @@ def world_bounds(ev):
     return pos.min(axis=0), pos.max(axis=0)
 
 
-def box_gap(a, b):
-    """Largest axis gap between two boxes (lo, hi); 0 when they touch or overlap."""
-    return float(np.max(np.maximum(np.maximum(a[0] - b[1], b[0] - a[1]), 0.0)))
-
-
 # ---------------------------------------------------------------------------------------------------------------------
 # PNG files (rows bottom-up, as Blender images)
 # ---------------------------------------------------------------------------------------------------------------------
-
-def _png_chunk(tag, data):
-    return struct.pack('>I', len(data)) + tag + data + struct.pack('>I', zlib.crc32(tag + data) & 0xffffffff)
-
 
 COLOUR_TYPE = {1: 0, 2: 4, 3: 2, 4: 6}  # channels: PNG colour type
 CHANNELS = {0: 1, 4: 2, 2: 3, 6: 4}
 
 
-class PngRowWriter:
-    """A PNG written row by row: blocks of rows in file order (the top first), (n, w) or (n, w, C) integers in the
-    file's depth. Filter 0, zlib level 6, one IDAT chunk per compressed block of `rows` rows, so the file is the same
-    whatever the blocks handed in (Session 23: the same bytes as Session 20's write_png_int)."""
-
-    def __init__(self, path, w, h, bits=16, channels=1, rows=256):
-        self.path, self.w, self.h, self.bits, self.ch, self.rows = path, int(w), int(h), bits, int(channels), rows
-        self.dtype = '>u2' if bits == 16 else np.uint8
-        self.pending = []
-        self.n_pending = 0
-        self.done = 0
-        self.comp = zlib.compressobj(6)
-        self.f = open(path, 'wb')
-        self.f.write(b'\x89PNG\r\n\x1a\n')
-        self.f.write(_png_chunk(b'IHDR', struct.pack('>IIBBBBB', self.w, self.h, bits, COLOUR_TYPE[self.ch], 0, 0, 0)))
-
-    def write(self, block):
-        block = np.asarray(block)
-        if not block.shape[0]:
-            return
-        self.pending.append(block)
-        self.n_pending += block.shape[0]
-        while self.n_pending >= self.rows:
-            self._emit(self.rows)
-
-    def _emit(self, n):
-        rows = self.pending[0] if len(self.pending) == 1 else np.concatenate(self.pending, axis=0)
-        take, rest = rows[:n], rows[n:]
-        self.pending = [rest] if rest.shape[0] else []
-        self.n_pending = rest.shape[0]
-        block = np.ascontiguousarray(take.astype(self.dtype)).reshape(n, -1)
-        raw = np.zeros((n, block.shape[1] * block.itemsize + 1), dtype=np.uint8)
-        raw[:, 1:] = block.view(np.uint8).reshape(n, -1)
-        data = self.comp.compress(raw.tobytes())
-        if data:
-            self.f.write(_png_chunk(b'IDAT', data))
-        self.done += n
-
-    def close(self):
-        if self.n_pending:
-            self._emit(self.n_pending)
-        if self.done != self.h:
-            self.f.close()
-            raise ValueError(f'{self.path}: {self.done} of {self.h} rows written')
-        self.f.write(_png_chunk(b'IDAT', self.comp.flush()))
-        self.f.write(_png_chunk(b'IEND', b''))
-        self.f.close()
-
-    def abort(self):
-        self.f.close()
-        try:
-            os.remove(self.path)
-        except OSError:
-            pass
-
-
-def write_png_int(path, q, bits=16, rows=256):
-    """q: (H, W) or (H, W, C) integers in the file's depth, row 0 = bottom. Filter 0, zlib level 6. Written row by
-    row (`rows` at a time, one IDAT chunk per compressed block), so no copy of the whole image is made."""
+def write_png_int(path, q, bits=16, rows=256, threads=None):
+    """q: (H, W) or (H, W, C) integers in the file's depth, row 0 = bottom, written by png_writer (C++) `rows` at a
+    time, so no copy of the whole image is made."""
     q = np.asarray(q)
     h, w = q.shape[:2]
     ch = 1 if q.ndim == 2 else q.shape[2]
-    writer = PngRowWriter(path, w, h, bits, ch, rows)
+    writer = png_writer(path, w, h, bits, ch, threads=threads)
     try:
         for top in range(0, h, rows):
             bot = min(h, top + rows)
@@ -3213,6 +2708,13 @@ def write_png(path, arr, bits=16):
     write_png_int(path, np.round(a * top).astype(np.uint16 if bits == 16 else np.uint8), bits)
 
 
+def png_writer(path, w, h, bits=16, channels=1, threads=None):
+    """A PNG written row by row (blocks of rows in file order, the top first; close, abort): the C++ writer
+    (ao_bake_copy.PngWriter, apply-native-copy journal decisions 4 and 6: filter 0, zlib level 6, the compression on
+    `threads` threads). Its `by` says 'C++ (n threads)'."""
+    return native_copy().PngWriter(path, w, h, bits, channels, threads)
+
+
 def png_info(path):
     """(width, height, bits, colour type, interlace) from the header, or None for another format."""
     try:
@@ -3227,115 +2729,32 @@ def png_info(path):
 
 
 class PngNotDecoded(Exception):
-    """A PNG this reader does not decode (palette, interlace, filters Average or Paeth): read it through Blender."""
+    """A PNG the C++ reader does not decode (not a PNG header, a palette, interlace, another depth): read it through
+    Blender."""
 
 
-class PngRows:
-    """A PNG read row by row: iterating gives blocks (n, w, C) uint16 in the file's depth, in file order (the top
-    first). Grey, grey + alpha, RGB and RGBA at 8 or 16 bits, filters None, Sub and Up; PngNotDecoded otherwise. The
-    file is read a chunk at a time (Session 23), never whole."""
-
-    def __init__(self, path, rows=256):
-        self.path, self.rows = path, rows
-        self.f = open(path, 'rb')
-        try:
-            if self.f.read(8) != b'\x89PNG\r\n\x1a\n':
-                raise PngNotDecoded('not a PNG')
-            tag, chunk = self._chunk()
-            if tag != b'IHDR':
-                raise PngNotDecoded('no IHDR')
-            self.w, self.h, self.bits, self.ct, _c, _f, il = struct.unpack('>IIBBBBB', chunk[:13])
-            if self.ct not in CHANNELS or self.bits not in (8, 16) or il:
-                raise PngNotDecoded(f'colour type {self.ct}, {self.bits} bits, interlace {il}')
-        except BaseException:
-            self.f.close()
-            raise
-        self.ch = CHANNELS[self.ct]
-
-    def _chunk(self):
-        head = self.f.read(8)
-        if len(head) < 8:
-            return None, b''
-        n = struct.unpack('>I', head[:4])[0]
-        data = self.f.read(n)
-        self.f.read(4)
-        return head[4:8], data
-
-    def close(self):
-        self.f.close()
-
-    def __iter__(self):
-        w, h, bits, ch = self.w, self.h, self.bits, self.ch
-        bpp = ch * bits // 8
-        rowlen = 1 + w * bpp
-        d = zlib.decompressobj()
-        pending = bytearray()
-        state = dict(y=0, prev=None)
-
-        def rows_out(n):
-            block = np.frombuffer(bytes(pending[:n * rowlen]), dtype=np.uint8).reshape(n, rowlen)
-            del pending[:n * rowlen]
-            filters = block[:, 0]
-            if np.any(filters > 2):
-                raise PngNotDecoded('filter Average or Paeth')
-            rows = block[:, 1:].copy()
-            if np.any(filters != 0):
-                for k in range(n):
-                    f = filters[k]
-                    if f == 1:
-                        r = rows[k].reshape(w, bpp).astype(np.uint32)
-                        rows[k] = (np.cumsum(r, axis=0) % 256).astype(np.uint8).ravel()
-                    elif f == 2:
-                        prev = rows[k - 1] if k > 0 else state['prev']
-                        if prev is not None:
-                            rows[k] = (rows[k].astype(np.uint16) + prev) % 256
-            state['prev'] = rows[-1].copy()
-            state['y'] += n
-            if bits == 16:
-                return rows.view('>u2').reshape(n, w, ch).astype(np.uint16)
-            return rows.reshape(n, w, ch).astype(np.uint16)
-
-        def ready():
-            while True:
-                n = min(len(pending) // rowlen, h - state['y'], self.rows)
-                if n <= 0:
-                    return
-                yield rows_out(n)
-
-        try:
-            while True:
-                tag, chunk = self._chunk()
-                if tag is None or tag == b'IEND':
-                    break
-                if tag != b'IDAT':
-                    continue
-                data = d.decompress(chunk, 1 << 24)
-                while True:
-                    pending.extend(data)
-                    yield from ready()
-                    if not d.unconsumed_tail:
-                        break
-                    data = d.decompress(d.unconsumed_tail, 1 << 24)
-            pending.extend(d.flush())
-            yield from ready()
-            if state['y'] != h:
-                raise PngNotDecoded(f'{state["y"]} of {h} rows decoded')
-        finally:
-            self.f.close()
-
-
-def read_png(path):
-    """(values (H, W) or (H, W, C) uint16 in the file's depth, row 0 = bottom, bits, colour type). Grey, grey + alpha,
-    RGB and RGBA at 8 or 16 bits, filters None, Sub and Up; raises PngNotDecoded otherwise."""
-    reader = PngRows(path)
-    h, ch = reader.h, reader.ch
-    vals = np.empty((h, reader.w, ch), dtype=np.uint16)
-    y = 0
-    for block in reader:
-        n = block.shape[0]
-        vals[h - y - n:h - y] = block[::-1]
-        y += n
-    return (vals[:, :, 0] if ch == 1 else vals), reader.bits, reader.ct
+def read_png(path, threads=None, how=None):
+    """(values (H, W) or (H, W, C) uint16 in the file's depth, row 0 = bottom, bits, colour type), read by the C++
+    reader (ao_bake_copy.read_png: grey, grey + alpha, RGB and RGBA at 8 or 16 bits, every filter; a truncated or
+    corrupt file raises its PngError, an OSError). A file it does not read (not a PNG header, a palette, interlace,
+    another depth) raises PngNotDecoded. how (a dict): gets 'read', 'C++ (n threads)'."""
+    nat = native_copy()
+    info = png_info(path)
+    if info is None:
+        if not os.path.isfile(path):
+            raise FileNotFoundError(path)
+        raise PngNotDecoded(f'{path}: not a PNG header')
+    w, h, bits, ct, il = info
+    if ct not in CHANNELS or bits not in (8, 16) or il:
+        raise PngNotDecoded(f'{path}: colour type {ct}, {bits} bits, interlace {il}: not read by the C++ reader')
+    try:
+        vals, _st = nat.read_png(path, w, h, CHANNELS[ct], bits, threads)
+    except nat.PngUnsupported as exc:
+        raise PngNotDecoded(str(exc)) from exc
+    if how is not None:
+        n = 2 if nat.threads_of(threads) > 1 else 1
+        how['read'] = f"C++ ({n} thread{'s' if n != 1 else ''})"
+    return (vals[:, :, 0] if vals.shape[2] == 1 else vals), bits, ct
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -3427,15 +2846,19 @@ def resample(src, src_label, dst_label, method='AUTOMATIC', rows=256):
     return out
 
 
-def island_labels(uv_px_by_mesh, W, H, padding):
+def island_labels(uv_px_by_mesh, W, H, padding, threads=None):
     """Island label per pixel of a W x H image for the triangles of several meshes [(uv_px (T,3,2), island (T,))],
-    grown into the padding (8-neighbour steps, the nearest island wins). -1 where no island reaches."""
+    grown into the padding (8-neighbour steps, the nearest island wins). -1 where no island reaches.
+
+    Apply-native-copy decision 6: the raster and the dilation in C++ (fss_ao_copy_raster_ids writing each mesh's
+    labels into the image, fss_ao_copy_dilate) on `threads` threads."""
+    nat = native_copy()
     owner = np.full((H, W), -1, dtype=np.int64)
     base = 0
     for uvpx, isl in uv_px_by_mesh:
-        own, _ = rasterize_ids(uvpx, W, H)
-        hit = own >= 0
-        owner[hit] = base + isl[own[hit]]
+        isl = np.asarray(isl, np.int64)
+        nat.raster_ids(uvpx, W, H, 1, 0, 0, select=False, threads=threads, label=base + isl, owner=owner,
+                       count=False)
         base += int(isl.max()) + 1 if len(isl) else 0
-    grown, _ = dilate_ids(owner, int(padding))
-    return grown
+    return nat.dilate(owner, int(padding), None, threads)[0]
+

@@ -85,11 +85,12 @@ def file_name(material, settings):
     return name
 
 
-def read_texture(path):
-    """(values (H, W, C) uint16 in the file's depth, bits, colour type). PNGs this module's reader does not decode are
-    read through a temporary Blender image, removed again."""
+def read_texture(path, threads=None):
+    """(values (H, W, C) uint16 in the file's depth, bits, colour type): core.read_png (the C++ reader, every filter,
+    on `threads`). PNGs it does not decode (a palette, interlace) are read through a temporary Blender image, removed
+    again."""
     try:
-        vals, bits, ct = core.read_png(path)
+        vals, bits, ct = core.read_png(path, threads=threads)
         if vals.ndim == 2:
             vals = vals[:, :, None]
         return vals, bits, ct
@@ -129,7 +130,7 @@ class Target:
             self.orm_size = (info[1], info[0]) if info else (orm.size[1], orm.size[0])
             needs = self.kind == 'ORM' or (settings.layout == 'ORM' and settings.green_blue == 'COPY')
             if needs:
-                vals, bits, _ct = read_texture(self.orm_path)
+                vals, bits, _ct = read_texture(self.orm_path, threads=int(scene.fss_ao_bake.threads))
                 self.orm = (vals * np.uint16(257 if bits == 8 else 1), bits)
         if self.kind == 'ORM':
             if self.orm is None:
@@ -141,8 +142,7 @@ class Target:
             self.H, self.W = vals.shape[:2]
             self.base = vals
             if bits == 8:
-                self.warnings.append('the ORM file is 8-bit: written as 16-bit, green and blue kept')
-            self.warnings.append('the next ORM export from Substance Painter replaces the red channel again')
+                self.warnings.append('the ORM file is 8-bit: written as 16-bit')
             backup_dir = os.path.join(folder, 'orm_backup')
             self.backup = os.path.join(backup_dir, os.path.basename(self.path))
             if not os.path.isfile(self.backup):
@@ -171,7 +171,7 @@ class Target:
             self.warnings.append('green and blue: no ORM texture to copy from, written white')
             self.gb = 'WHITE'
         if per_object and os.path.isfile(self.path):
-            vals, bits, _ct = read_texture(self.path)
+            vals, bits, _ct = read_texture(self.path, threads=int(scene.fss_ao_bake.threads))
             if vals.shape[:2] != (self.H, self.W):
                 raise ValueError(f'{self.path}: {vals.shape[1]} x {vals.shape[0]} px, the setting says '
                                  f'{self.W} x {self.H}')
@@ -207,6 +207,13 @@ def _set_tris(item, material, depsgraph):
     match = np.array([s == material for s in slots] + [False], bool)
     in_set = match[np.minimum(ev['mat'], len(match) - 1)]
     return obj, ev, ev['uv'].get(uv), in_set
+
+
+def _overlap(a, b):
+    """The overlap of two crops (x0, y0, w, h), or None."""
+    x0, y0 = max(a[0], b[0]), max(a[1], b[1])
+    x1, y1 = min(a[0] + a[2], b[0] + b[2]), min(a[1] + a[3], b[1] + b[3])
+    return (x0, y0, x1 - x0, y1 - y0) if x1 > x0 and y1 > y0 else None
 
 
 def _crop(uvpx, W, H, border):
@@ -262,15 +269,15 @@ def curvature_settings(settings, material):
 CURV_MIN_PX = 2.0  # decision 55: a curvature band narrower than this many texture pixels fades in the file
 
 
-def narrow_islands(pos_w, ev, tris, uvpx, W, H, width):
+def narrow_islands(pos_w, ev, tris, uvpx, W, H, width, threads=None):
     """Decision 55: the UV islands (of these triangles, uvpx in target pixels) where the curvature width covers fewer
     than CURV_MIN_PX texture pixels: (count, islands, their share of the 3D area, the width that reaches CURV_MIN_PX on
-    every island), or None when none."""
+    every island), or None when none. threads: the UV islands' in C++ (core.uv_islands)."""
     if not len(tris):
         return None
     a3 = core.tri_areas_3d(pos_w, tris)
     a2 = np.abs(core.tri_areas_2d(uvpx))
-    isl = core.uv_islands(core.weld_ids(ev['co'])[tris], uvpx / np.array([W, H], dtype=np.float64))
+    isl = core.uv_islands(core.weld_ids(ev['co'])[tris], uvpx / np.array([W, H], dtype=np.float64), threads=threads)
     n = int(isl.max()) + 1
     A3, A2 = np.bincount(isl, a3, n), np.bincount(isl, a2, n)
     ok = (A3 > 1e-16) & (A2 > 0)
@@ -297,6 +304,9 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
     band_rows target rows at a time (with a halo for the padding); the file is written row by row. Held for the whole
     target: the AO (uint16) and three masks, 8 bytes per target pixel; nothing in proportion to a master."""
     t0 = time.time()
+    why = core.native_copy().unavailable()  # apply-native-copy decision 6: the DLL and libjxl are required
+    if why:
+        return dict(material=material.name, error=f'AO Bake not available: {why}')
     scene = context.scene
     folder = store.bake_folder()
     settings = settings or material.fss_ao_apply
@@ -307,6 +317,7 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
     # decision 46: the darker side of convex sharp edges brightened toward the edge (m; at least a texel), or None
     soften_width = float(scene.fss_ao_bake.soften_width) if scene.fss_ao_bake.soften_edges and not curv else None
     fill = core.CURV_FLAT if curv else 65535  # where no master is
+    threads = int(scene.fss_ao_bake.threads)  # the C++ work's threads (ao_bake_copy.threads_of: 0 is Auto)
     row = store._state['sets'].get(material.name)
     if row is None:
         return dict(material=material.name, error='not in the last Refresh (press Refresh)')
@@ -319,10 +330,12 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
     masters = store.read_index(folder).get('masters', {}) if folder else {}
     depsgraph = context.evaluated_depsgraph_get()
     report = dict(material=material.name, path=target.path, size=[W, H], target=target.kind, layout=target.layout,
-                  copied=[], white=[], outdated=[], narrow=[], faces_under_4x=0, faces=0, stacked_px=0, softened_px=0,
+                  copied=[], white=[], outdated=[], mesh_changed=[], narrow=[], faces_under_4x=0, faces=0, stacked_px=0, softened_px=0,
                   soften_mm=None if soften_width is None else round(soften_width * 1000, 3), warnings=target.warnings,
-                  backup=target.backup, per_object=objects is not None, band_rows=int(band_rows), copy=None)
-    copies = {}  # which copy ran (apply-native-copy journal): 'native' (C++, its threads) or 'numpy' (why)
+                  backup=target.backup, per_object=objects is not None, band_rows=int(band_rows), copy=None, open=None,
+                  png=None)
+    copies = {}  # the copy's threads (apply-native-copy journal: C++)
+    opens = {}  # who opened the masters (apply-native-copy journal, Session 4): 'C++ (n threads)'
     pending = []  # padding (flat index, value, step), written once every face of the set is known
     written = np.zeros((H, W), bool)
     cover = np.zeros((H, W), bool)
@@ -336,6 +349,16 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
         for yb in range(y0, y0 + h, band_rows):
             yield yb, min(y0 + h, yb + band_rows), max(y0, yb - halo), min(y0 + h, yb + band_rows + halo)
 
+    # Session 54: with the selection applied, the other objects of the set matter only where the applied objects'
+    # padding can go, inside the applied objects' crops: their faces are rasterized there only
+    near = None
+    if objects is not None:
+        near = []
+        for stem in chosen:
+            _o, ev_c, uv_c, in_c = _set_tris(store._state['items'][stem], material, depsgraph)
+            if uv_c is not None and in_c.any():
+                near.append(_crop(uv_c[np.nonzero(in_c)[0]] * np.array([W, H], dtype=np.float64), W, H, pad + 4))
+            del ev_c, uv_c, in_c
     for k, stem in enumerate(stems):
         item = store._state['items'][stem]
         yield 'master', k, len(stems), item['name']
@@ -353,23 +376,32 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
         if mine:
             report['faces'] += int(len(np.unique(ev['poly'][tri_ids])))
             entry = masters.get(stem)
-            mh = core.mesh_hash(ev)
-            usable = entry is not None and entry.get('mesh_hash') == mh and store.has_files(folder, stem)
+            # decision 73: a master whose mesh changed since its bake is applied anyway (reported); white only
+            # where there is no master
+            # decision 6: a master the C++ code does not read (a PNG image, schema 1) is white, to be baked again
+            unreadable = entry is not None and bool(core.master_unreadable(folder, stem)
+                                                    or (curv and core.master_unreadable(folder, stem, 'curv')))
+            usable = entry is not None and not unreadable and store.has_files(folder, stem)
             if curv and usable and not os.path.isfile(core.master_paths(folder, stem, 'curv')[0]):
                 usable = False
             if not usable:
-                why = ('missing' if entry is None or not store.has_files(folder, stem) else
-                       'mesh changed' if entry.get('mesh_hash') != mh else 'no curvature baked')
+                why = (core.REBAKE if unreadable else 'missing' if entry is None or not store.has_files(folder, stem)
+                       else 'no curvature baked')
                 report['white'].append((item['name'], why, int(len(np.unique(ev['poly'][tri_ids])))))
-        # the faces of the set (also of the objects not chosen): no padding goes there
-        for yb, yb1, _h0, _h1 in bands(crop):
-            own, _cnt = core.raster_window(uvpx_all[tri_ids], w, yb1 - yb, 1, x0, yb)
-            inside = own >= 0
-            cover[yb:yb1, x0:x0 + w] |= inside
-            if mine and not usable:
-                Q[yb:yb1, x0:x0 + w][inside] = fill
-                written[yb:yb1, x0:x0 + w] |= inside
-            del own, _cnt
+            elif entry.get('mesh_hash') != core.mesh_hash(ev):
+                report['mesh_changed'].append(item['name'])
+        # the faces of the set (also of the objects not chosen): no padding goes there; an object not chosen only
+        # where it overlaps an applied object's crop (Session 54)
+        windows = [crop] if mine or near is None else [r for r in (_overlap(crop, c) for c in near) if r]
+        for wx0, _wy0, ww, _wh in windows:
+            for yb, yb1, _h0, _h1 in bands((wx0, _wy0, ww, _wh)):
+                own, _cnt = core.raster_window(uvpx_all[tri_ids], ww, yb1 - yb, 1, wx0, yb, threads=threads)
+                inside = own >= 0
+                cover[yb:yb1, wx0:wx0 + ww] |= inside
+                if mine and not usable:
+                    Q[yb:yb1, wx0:wx0 + ww][inside] = fill
+                    written[yb:yb1, wx0:wx0 + ww] |= inside
+                del own, _cnt
         if not mine or not usable:
             continue
         if entry.get('surround_hash') != item['surround_hash'] and not curv:
@@ -378,16 +410,29 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
         if curv and baked_w is not None and baked_w != round(float(scene.fss_ao_bake.curv_width), 6):
             report['warnings'].append(f"{item['name']}: curvature baked at {entry['curvature']['width'] * 1000:g} mm, "
                                       f"the setting is {scene.fss_ao_bake.curv_width * 1000:g} mm (re-bake)")
-        master = core.open_master(folder, stem, kind=kind)
+        why = 'missing'
+        try:
+            master = core.open_master(folder, stem, kind=kind, threads=int(scene.fss_ao_bake.threads))
+        except core.MasterUnreadable:  # replaced by one the C++ code does not read since Refresh (decision 6)
+            master, why = None, core.REBAKE
         if master is None:  # the files went away since Refresh: white, as a missing master
-            report['white'].append((item['name'], 'missing', int(len(np.unique(ev['poly'][tri_ids])))))
+            report['white'].append((item['name'], why, int(len(np.unique(ev['poly'][tri_ids])))))
             for yb, yb1, _h0, _h1 in bands(crop):
-                own, _cnt = core.raster_window(uvpx_all[tri_ids], w, yb1 - yb, 1, x0, yb)
+                own, _cnt = core.raster_window(uvpx_all[tri_ids], w, yb1 - yb, 1, x0, yb, threads=threads)
                 Q[yb:yb1, x0:x0 + w][own >= 0] = fill
                 written[yb:yb1, x0:x0 + w] |= own >= 0
             continue
+        if master.get('open'):
+            opens.setdefault(master['open'], None)
         try:
             src = master['tri_src']
+            if len(src) and int(src.max()) >= len(ev['tris']):  # decision 73: fewer triangles than baked
+                report['white'].append((item['name'], 'triangles changed', int(len(np.unique(ev['poly'][tri_ids])))))
+                for yb, yb1, _h0, _h1 in bands(crop):
+                    own, _cnt = core.raster_window(uvpx_all[tri_ids], w, yb1 - yb, 1, x0, yb, threads=threads)
+                    Q[yb:yb1, x0:x0 + w][own >= 0] = fill
+                    written[yb:yb1, x0:x0 + w] |= own >= 0
+                continue
             pos_w, cn_w = core.to_world(ev)
             tris = ev['tris'][src]
             uvpx = uvpx_all[src]
@@ -403,7 +448,7 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
                     pos_w, tris, uvpx, tisl, master, (x0, hy0, w, hy1 - hy0), core.K_MIN, pad, outside_mode='tri',
                     kmax=core.K_MAX, surface_cos=core.SURFACE_COS, same_face=False, ctx=ctx, soften=sctx,
                     threads=int(scene.fss_ao_bake.threads))
-                copies.setdefault(info['copy'], info['copy_threads'] if info['copy'] == 'native' else info['copy_why'])
+                copies.setdefault(info['copy'], info['copy_threads'])
                 r = slice(yb - hy0, yb1 - hy0)
                 out, owner_c, steps = out[r], owner_c[r], steps[r]
                 report['stacked_px'] += int((count_c[r] > 1).sum())
@@ -423,7 +468,8 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
             report['faces_under_4x'] += int(len(np.unique(ev['poly'][src[sel][low]])))
             if curv:  # decision 55: islands where the width is under CURV_MIN_PX texture pixels
                 got = narrow_islands(pos_w, ev, tris[sel], uvpx[sel], W, H,
-                                     float(baked_w if baked_w is not None else scene.fss_ao_bake.curv_width))
+                                     float(baked_w if baked_w is not None else scene.fss_ao_bake.curv_width),
+                                     threads=threads)
                 if got:
                     report['narrow'].append((item['name'],) + got)
             report.setdefault('page_loads', []).append([int(p.loads) for p in master.get('pages', ())])
@@ -443,17 +489,20 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
         Hs, Ws = target.orm[0].shape[:2]
         for uv_t, ev, tri_ids in label_parts:
             wt = core.weld_ids(ev['co'])[ev['tris'][tri_ids]]
-            isl = core.uv_islands(wt, uv_t)
+            isl = core.uv_islands(wt, uv_t, threads=threads)
             parts_src.append((uv_t * np.array([Ws, Hs]), isl))
             parts_dst.append((uv_t * np.array([W, H]), isl))
-        return core.island_labels(parts_src, Ws, Hs, pad * max(Ws / W, 1)), core.island_labels(parts_dst, W, H, pad)
+        return (core.island_labels(parts_src, Ws, Hs, pad * max(Ws / W, 1), threads=threads),
+                core.island_labels(parts_dst, W, H, pad, threads=threads))
 
     gb = target.green_blue(labels) if target.kind != 'ORM' and target.fresh and target.layout == 'ORM' else None
     if target.kind != 'ORM':
         os.makedirs(os.path.dirname(target.path), exist_ok=True)
     channels = target.base.shape[2] if target.base is not None else 3
     tmp = target.path + '.tmp'
-    writer = core.PngRowWriter(tmp, W, H, 16, channels)
+    # apply-native-copy journal decisions 4 and 6: the C++ writer
+    writer = core.png_writer(tmp, W, H, 16, channels, threads=int(scene.fss_ao_bake.threads))
+    report['png'] = writer.by
     try:
         for top in range(0, H, 256):  # rows from the top
             yield 'write', top, H, os.path.basename(target.path)
@@ -480,10 +529,9 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
             image.reload()
     report.update(written_px=int(written.sum()), seconds=round(time.time() - t0, 2), kind=kind)
     if copies:
-        parts = [f"C++ ({v} thread{'s' if v != 1 else ''})" if k == 'native' else f'numpy ({v})'
-                 for k, v in sorted(copies.items())]
-        report['copy'] = ' and '.join(parts)
-        report['copy_backends'] = sorted(copies)
+        report['copy'] = ' and '.join(f"C++ ({v} thread{'s' if v != 1 else ''})" for _k, v in sorted(copies.items()))
+    if opens:
+        report['open'] = ' and '.join(sorted(opens))
     return report
 
 
@@ -530,6 +578,8 @@ def report_lines(rep):
     if rep['white']:
         lines.append(f"  {'flat' if rep.get('kind') == 'curv' else 'white'} (no up-to-date master): "
                      + ', '.join(f'{n} ({why})' for n, why, _f in rep['white']))
+    if rep.get('mesh_changed'):
+        lines.append('  mesh changed since its bake, applied anyway: ' + ', '.join(rep['mesh_changed']))
     if rep['outdated']:
         lines.append('  surroundings changed, re-bake recommended: ' + ', '.join(rep['outdated']))
     for name, k, n, share, need in rep.get('narrow', ()):
@@ -540,6 +590,4 @@ def report_lines(rep):
     if rep.get('soften_mm') is not None:
         lines.append(f"  sharp edges softened ({rep['soften_mm']:g} mm, at least a texel): {rep['softened_px']} px")
     lines += [f'  {w}' for w in rep['warnings']]
-    if rep.get('copy') and 'numpy' in rep.get('copy_backends', ()):
-        lines.append(f"  copy: {rep['copy']}")
     return lines

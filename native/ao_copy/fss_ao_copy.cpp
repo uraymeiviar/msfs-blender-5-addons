@@ -12,6 +12,10 @@
 
 #include "fss_ao_copy.h"
 
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -81,10 +85,10 @@ struct Tri {
 
 // floor(v) + add, saturated far beyond any pixel (only bounds the bins)
 inline int64_t bound(double v, int64_t add) {
-    const double far = 4e18;
+    const double lim = 4e18;
     double f = std::floor(v);
-    if (f < -far) return -(int64_t)4000000000000000000;
-    if (f > far) return (int64_t)4000000000000000000;
+    if (f < -lim) return -(int64_t)4000000000000000000;
+    if (f > lim) return (int64_t)4000000000000000000;
     return (int64_t)f + add;
 }
 
@@ -324,11 +328,193 @@ struct Bins {
     }
 };
 
+// _soften's numpy operations on arrays (numpy 2.3's SIMD loops, measured: tests/_work/ao_copy/s11_probe.py):
+// np.maximum / np.minimum propagate NaN and give the second value when the two are equal; np.clip keeps x when it
+// equals a bound; np.add.reduce of three values is ((0 + a) + b) + c
+inline double vmax(double a, double b) { return (a != a) ? a : ((b != b) ? b : (a > b ? a : b)); }
+inline double vmin(double a, double b) { return (a != a) ? a : ((b != b) ? b : (a < b ? a : b)); }
+inline double vclip(double x, double lo, double hi) {
+    if (x != x) return x;
+    double m = x < lo ? lo : x;
+    return m > hi ? hi : m;
+}
+inline double dot3(const double *a, const double *b) { return ((0.0 + a[0] * b[0]) + a[1] * b[1]) + a[2] * b[2]; }
+
+bool soften_ok(const fss_ao_soften *s, int64_t n_tris) {
+    if (!s || s->n_edges < 0 || s->n_tris != n_tris || s->n_verts < 0 || !s->start || !s->Wt || !s->pos || !s->tris)
+        return false;
+    if (s->n_edges > 0 && (!s->E || !s->A || !s->B || !s->mX || !s->mY || !s->hX || !s->hY || !s->convex))
+        return false;
+    if (s->start[0] != 0) return false;
+    for (int64_t t = 0; t < n_tris; t++)
+        if (s->start[t + 1] < s->start[t]) return false;
+    const int64_t nc = s->start[n_tris];
+    if (nc > 0 && !s->cand) return false;
+    for (int64_t c = 0; c < nc; c++)
+        if (s->cand[c] < 0 || s->cand[c] >= s->n_edges) return false;
+    for (int64_t e = 0; e < s->n_edges; e++) {
+        const int64_t *r = s->E + 6 * e;
+        if (r[0] < 0 || r[0] >= n_tris || r[3] < 0 || r[3] >= n_tris) return false;
+        for (int k : {1, 2, 4, 5})
+            if (r[k] < 0 || r[k] > 2) return false;
+    }
+    for (int64_t i = 0; i < 3 * n_tris; i++)
+        if (s->tris[i] < 0 || s->tris[i] >= s->n_verts) return false;
+    return true;
+}
+
+// numpy's x ** 3 on float64 is the C runtime's pow (npy_pow), the one of the process: ucrtbase.dll. The static C
+// runtime's pow of this DLL can differ from it in the last bit (measured, Session 11), so _soften's (1 - x) ** 3 calls
+// ucrtbase's, loaded from System32 for the call and freed after it.
+typedef double (*pow_fn)(double, double);
+
+struct CrtPow {
+    HMODULE lib = nullptr;
+    pow_fn fn = nullptr;
+    CrtPow() {
+        lib = LoadLibraryExW(L"ucrtbase.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (lib) fn = reinterpret_cast<pow_fn>(reinterpret_cast<void *>(GetProcAddress(lib, "pow")));
+    }
+    ~CrtPow() {
+        if (lib) FreeLibrary(lib);
+    }
+    CrtPow(const CrtPow &) = delete;
+    CrtPow &operator=(const CrtPow &) = delete;
+};
+
+// _bary3 of one point p in the triangle of corners q0, q1, q2: clamped onto it
+inline void bary3(const double *p, const double *q0, const double *q1, const double *q2, double bc[3]) {
+    double v0[3], v1[3], v2[3];
+    for (int d = 0; d < 3; d++) {
+        v0[d] = q1[d] - q0[d];
+        v1[d] = q2[d] - q0[d];
+        v2[d] = p[d] - q0[d];
+    }
+    const double d00 = dot3(v0, v0), d01 = dot3(v0, v1), d11 = dot3(v1, v1);
+    const double d20 = dot3(v2, v0), d21 = dot3(v2, v1);
+    const double den = vmax(d00 * d11 - d01 * d01, 1e-30);
+    const double v = (d11 * d20 - d01 * d21) / den;
+    const double w = (d00 * d21 - d01 * d20) / den;
+    bc[0] = vmax(1.0 - v - w, 0.0);
+    bc[1] = vmax(v, 0.0);
+    bc[2] = vmax(w, 0.0);
+    const double s = vmax(((0.0 + bc[0]) + bc[1]) + bc[2], 1e-30);
+    bc[0] /= s;
+    bc[1] /= s;
+    bc[2] /= s;
+}
+
 }  // namespace
 
 extern "C" {
 
 FSS_AO_COPY_API int32_t fss_ao_copy_version(void) { return FSS_AO_COPY_VERSION; }
+
+FSS_AO_COPY_API int32_t fss_ao_copy_soften(const fss_ao_master *master, const fss_ao_soften *soften, int64_t n,
+                                           const int64_t *tri_ids, const double *P3, const double *vals,
+                                           int64_t threads, double *out, int64_t *changed) {
+    if (!master_ok(master) || !changed || n < 0 || threads < 1 || threads > 1024) return FSS_AO_COPY_E_ARGS;
+    *changed = 0;
+    if (!soften_ok(soften, master->n_tris)) return FSS_AO_COPY_E_ARGS;
+    if (n == 0) return FSS_AO_COPY_OK;
+    if (!tri_ids || !P3 || !vals || !out) return FSS_AO_COPY_E_ARGS;
+    for (int64_t i = 0; i < n; i++)
+        if (tri_ids[i] < 0 || tri_ids[i] >= master->n_tris) return FSS_AO_COPY_E_ARGS;
+    try {
+        const CrtPow crt;
+        if (!crt.fn) return FSS_AO_COPY_E_LIBRARY;
+        const pow_fn cpow = crt.fn;
+        const Master m(master);
+        const fss_ao_soften &sc = *soften;
+        const double *tn = master->tri_normal;
+        int64_t nthreads = std::max<int64_t>(1, std::min<int64_t>(threads, (n + PX_CHUNK - 1) / PX_CHUNK));
+        std::vector<int64_t> counts((size_t)nthreads, 0);
+        int32_t rc = parallel(n, nthreads, [&](int64_t b, int64_t e_, int64_t tid) {
+            int64_t done_n = 0;
+            for (int64_t i = b; i < e_; i++) {
+                const int64_t s = tri_ids[i];
+                const int64_t c0 = sc.start[s], c1 = sc.start[s + 1];
+                if (c1 <= c0) {
+                    out[i] = vals[i];
+                    continue;
+                }
+                const double *p = P3 + 3 * i;
+                const double W = sc.Wt[s];
+                double add = 0.0, cadd = 0.0;
+                for (int64_t c = c0; c < c1; c++) {
+                    const int64_t e = sc.cand[c];
+                    const int64_t *E = sc.E + 6 * e;
+                    const double *a = sc.A + 3 * e, *bb = sc.B + 3 * e;
+                    double ab[3], pa[3];
+                    for (int d = 0; d < 3; d++) {
+                        ab[d] = bb[d] - a[d];
+                        pa[d] = p[d] - a[d];
+                    }
+                    const double u = vclip(dot3(pa, ab) / vmax(dot3(ab, ab), 1e-30), 0.0, 1.0);
+                    double q[3], pq[3];
+                    for (int d = 0; d < 3; d++) {
+                        q[d] = a[d] + ab[d] * u;
+                        pq[d] = p[d] - q[d];
+                    }
+                    const double dist = std::sqrt(dot3(pq, pq));
+                    const double cx = dot3(tn + 3 * s, tn + 3 * E[0]);
+                    const double cy = dot3(tn + 3 * s, tn + 3 * E[3]);
+                    const bool on_x = cx >= cy;
+                    const double *mm = on_x ? sc.mX + 3 * e : sc.mY + 3 * e;
+                    const bool keep = (vmax(cx, cy) >= sc.surface_cos) && (dot3(pq, mm) >= -1e-3 * W) && (dist < W);
+                    if (!keep) continue;
+                    bool cl = false;
+                    double bx[3] = {0.0, 0.0, 0.0}, by[3] = {0.0, 0.0, 0.0};
+                    bx[E[1]] = 1.0 - u;
+                    bx[E[2]] += u;
+                    by[E[4]] = 1.0 - u;
+                    by[E[5]] += u;
+                    const double vx = m.read(E[0], bx[0], bx[1], bx[2], true, cl);
+                    const double vy = m.read(E[3], by[0], by[1], by[2], true, cl);
+                    const double delta = on_x ? vy - vx : vx - vy;
+                    const double x = dist / W;
+                    const double fade = 1.0 - x * x * (3.0 - 2.0 * x);
+                    const bool cv = sc.convex[e] != 0;
+                    const double gain = (cv && delta > 0) ? delta * fade : 0.0;
+                    add = (gain > add) ? gain : add;  // np.maximum.at (no NaN reaches it, both values >= 0)
+                    if (cv) continue;
+                    // concave: the slopes away from the edge, read half a width in (at most 0.9 of each face's
+                    // height over the edge)
+                    double ac[3];
+                    for (int d = 0; d < 3; d++) ac[d] = a[d] + (bb[d] - a[d]) * u;
+                    const double pd = vmax(vmin(0.5 * W, 0.9 * vmin(sc.hX[e], sc.hY[e])), 1e-9);
+                    double pr[2];
+                    for (int side = 0; side < 2; side++) {
+                        const int64_t t = side == 0 ? E[0] : E[3];
+                        const double *mv = side == 0 ? sc.mX + 3 * e : sc.mY + 3 * e;
+                        double pt[3], bc[3];
+                        for (int d = 0; d < 3; d++) pt[d] = ac[d] + mv[d] * pd;
+                        const int64_t *tv = sc.tris + 3 * t;
+                        bary3(pt, sc.pos + 3 * tv[0], sc.pos + 3 * tv[1], sc.pos + 3 * tv[2], bc);
+                        pr[side] = m.read(t, bc[0], bc[1], bc[2], true, cl);
+                    }
+                    const double s_own = ((on_x ? pr[0] : pr[1]) - (on_x ? vx : vy)) / pd;
+                    const double s_other = ((on_x ? pr[1] : pr[0]) - (on_x ? vy : vx)) / pd;
+                    const double corr = 0.5 * delta * fade + 0.5 * (s_own + s_other) * (W / 3.0) * cpow(1.0 - x, 3.0);
+                    cadd = cadd + corr;
+                }
+                const bool done = (add > 1e-9) || (std::fabs(cadd) > 1e-9);
+                out[i] = done ? vclip(vals[i] + add + cadd, 0.0, 1.0) : vals[i];
+                done_n += done ? 1 : 0;
+            }
+            counts[(size_t)tid] += done_n;
+        });
+        if (rc != FSS_AO_COPY_OK) return rc;
+        int64_t total = 0;
+        for (int64_t c : counts) total += c;
+        *changed = total;
+    } catch (const std::bad_alloc &) {
+        return FSS_AO_COPY_E_MEMORY;
+    } catch (...) {
+        return FSS_AO_COPY_E_INTERNAL;
+    }
+    return FSS_AO_COPY_OK;
+}
 
 FSS_AO_COPY_API double fss_ao_copy_sum(const double *a, int64_t n) {
     if (!a || n <= 0) return 0.0;
@@ -385,7 +571,7 @@ FSS_AO_COPY_API int32_t fss_ao_copy_raster(const double *uvpx, int64_t n_tris, i
 FSS_AO_COPY_API int32_t fss_ao_copy_inside(const fss_ao_master *master, const double *uvpx, int64_t n_px,
                                            const int64_t *px, const int64_t *owner, const int64_t *level,
                                            const int64_t *origin, int64_t threads, double *out, int64_t *clamped) {
-    if (!master_ok(master) || !uvpx || !clamped || n_px < 0 || threads < 1 || threads > 64) return FSS_AO_COPY_E_ARGS;
+    if (!master_ok(master) || !uvpx || !clamped || n_px < 0 || threads < 1 || threads > 1024) return FSS_AO_COPY_E_ARGS;
     *clamped = 0;
     if (n_px == 0) return FSS_AO_COPY_OK;
     if (!px || !owner || !level || !origin || !out) return FSS_AO_COPY_E_ARGS;
@@ -479,7 +665,7 @@ FSS_AO_COPY_API int32_t fss_ao_copy_inside(const fss_ao_master *master, const do
 FSS_AO_COPY_API int32_t fss_ao_copy_padding(const fss_ao_master *master, int64_t n_px, const int64_t *px,
                                             const int64_t *src, const double *tri_uv, const int64_t *level,
                                             int64_t threads, double *out, int64_t *clamped) {
-    if (!master_ok(master) || !clamped || n_px < 0 || threads < 1 || threads > 64) return FSS_AO_COPY_E_ARGS;
+    if (!master_ok(master) || !clamped || n_px < 0 || threads < 1 || threads > 1024) return FSS_AO_COPY_E_ARGS;
     *clamped = 0;
     if (n_px == 0) return FSS_AO_COPY_OK;
     if (!px || !src || !tri_uv || !level || !out) return FSS_AO_COPY_E_ARGS;

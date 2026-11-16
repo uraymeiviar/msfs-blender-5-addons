@@ -12,7 +12,8 @@ and no other software is needed. Both directions keep decision 33's paging, so m
   image-out callback as pieces of rows, in the decoder's order (not top to bottom); the caller's sink places them.
 
 16-bit grey only (one colour channel, no alpha), as the masters are (decision 18). If the DLLs cannot be loaded
-(another OS, a missing file, or FSS_AO_BAKE_NO_JXL set for tests), available() is False and the caller writes PNG.
+(another OS, a missing file, or FSS_AO_BAKE_NO_JXL set for tests), available() is False and the AO Bake is not
+available (apply-native-copy decision 6: the panel says why, the bake and Apply refuse).
 """
 
 import ctypes
@@ -30,10 +31,8 @@ DLLS = ('brotlicommon.dll', 'brotlidec.dll', 'brotlienc.dll', 'jxl_cms.dll', 'jx
 DISABLE_ENV = 'FSS_AO_BAKE_NO_JXL'  # tests: behave as if the library could not be loaded
 EFFORT = 7  # libjxl's effort (1 fastest .. 10). Session 27, the 214 Mpx floor: efforts 1 and 3 larger than the PNG,
 #             5 40 % smaller, 7 43 % smaller in 3.9 s and 0.16 GB peak
-THREADS = 12  # at most the bake's thread setting
-DECODE_THREADS = 1  # Apply's decode into tiled scratch files: the Python callback is the limit, and one thread keeps
-#                     the decoder's groups in order (Session 27, 856 Mpx: 1 thread 171.7 s, 0.18 GB peak, 2 rows of
-#                     tiles open; 12 threads 181.2 s, 0.43 GB, 26 rows open)
+CPUS = os.cpu_count() or 2  # the PC's logical processors
+THREADS = max(2, CPUS // 2)  # Threads 0, Auto (apply-native-copy decision 5): half the logical processors, at least 2
 READ_CHUNK = 4 << 20  # bytes of the file handed to the decoder at a time
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -197,8 +196,15 @@ class JxlError(OSError):
     """The library is not loaded, or a file is not encoded or decoded (an OSError, so Apply reports it per set)."""
 
 
+def threads_of(threads):
+    """The threads of a job: 0 or None Auto (THREADS), else the number asked, at most the PC's logical processors (the
+    same rule as ao_bake_copy.threads_of)."""
+    n = int(threads or 0)
+    return THREADS if n <= 0 else max(1, min(n, max(CPUS, THREADS)))
+
+
 def _runner(thr, threads):
-    n = max(1, min(int(threads or THREADS), THREADS))
+    n = threads_of(threads)
     return thr.JxlThreadParallelRunnerCreate(None, n), n
 
 
@@ -334,7 +340,7 @@ def encode_raw(raw_path, W, H, out_path, effort=EFFORT, threads=THREADS, stats=N
 
 
 class Writer:
-    """A 16-bit grey JPEG XL master written from rows handed top first (as PngRowWriter takes them): the rows go to
+    """A 16-bit grey JPEG XL master written from rows handed top first (as ao_bake_copy.PngWriter takes them): the rows go to
     <path>.raw, close() encodes it into path and deletes it, abort() deletes both."""
 
     def __init__(self, path, W, H, effort=EFFORT, threads=THREADS):

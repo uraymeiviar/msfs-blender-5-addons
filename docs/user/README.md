@@ -227,6 +227,8 @@ For tiling patterns (brushed metal, fabric, grip), use tri-planar projection ins
 
 Bake ambient occlusion once the texture set's packing is final: a bake follows the UVs. Move moving parts away from their panels before baking, so no shadow is baked under a button that moves, and leave clickspots, collision meshes and decals out of the bake.
 
+If the **Bake** panel's first line reads **Not available:** with a reason, the add-on could not load its bake libraries (`fss_ao_copy.dll` or the JPEG XL library in its `lib` folder): the panel's buttons stay greyed and nothing is baked or applied until the add-on is installed again in full.
+
 Instanced parts (screws, identical knobs) share their texture and get generic AO in it; unique AO per copy needs a second UV map and gives up the instancing. See "AO Versus Instancing" in `baking.md`.
 
 **Redo when:** the UVs of a textured set change: bakes are redone and the painting carried over. This step is why changes to the earlier steps get expensive.

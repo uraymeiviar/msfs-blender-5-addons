@@ -23,7 +23,8 @@ skirt's, with UVs relative to the tile, into a tile-sized image (Cycles clips a 
 paged (decision 33, Session 23): a row of tiles is a band; the bands are baked from the top, and once a band is baked
 the band above it is composed (it now has its halo) and written to <stem>.ao.map and, for the AO, to a raw scratch file
 row by row, then dropped; only two bands are held, never the whole master. At the end the AO is encoded as lossless
-JPEG XL, <stem>.ao.jxl (decision 37; PNG, <stem>.ao.png, when the library cannot be loaded, logged once), then
+JPEG XL, <stem>.ao.jxl (decision 37; apply-native-copy decision 6: without libjxl or fss_ao_copy.dll the job fails
+at its start, the reason in the log and the status), then
 <stem>.ao.npz (the layout); index.json gets the master's entry with the tile size, the peak working set and the
 image's format, size and encoding time.
 
@@ -970,8 +971,10 @@ def bake_item(item, coll):
         # paged (decision 33): bands from the top, each composed and written once the band below it is baked
         tp = time.time()
         times['tiles'] = 0.0
-        yield from core.bake_paged(m, tile, bake_tile, files.write_rows, counts)
+        yield from core.bake_paged(m, tile, bake_tile, files.write_rows, counts, threads=int(SET['threads']))
         t_compose = time.time() - tp - times['tiles']
+        log(f"  {item['name']}: composed by {core.compose_by(int(SET['threads']))} in {t_compose:.2f} s, the map "
+            f"written by {getattr(files.map, 'by', 'Python')}")
         t_core, t_skirt = times['core'], times['skirt']
         counts['image_px'] = int(W * H)
         meta = dict(schema=core.SCHEMA, key=item['key'], kind=item['kind'], name=item['name'], object=obj.name,
@@ -1371,13 +1374,21 @@ def main():
         + (f" ({BUDGET_SOURCE}; physical {total / gb:.1f} GB, free {avail / gb:.1f} GB)" if total else
            f' ({BUDGET_SOURCE})'))
     state.update(budget_gb=round(BUDGET / gb, 2), budget_source=BUDGET_SOURCE)
-    lib = core.jxl()  # decision 37: JPEG XL masters; PNG when the library cannot be loaded, said once
-    if lib.available():
-        state.update(master_format='jxl', jxl_library=lib.version())
-        log(f'masters as lossless JPEG XL (libjxl {lib.version()}, effort {lib.EFFORT})')
-    else:
-        state.update(master_format='png', jxl_error=lib.error())
-        log(f'masters as PNG: the JPEG XL library could not be loaded ({lib.error()})')
+    why = core.native_copy().unavailable()  # apply-native-copy decision 6: fss_ao_copy.dll and libjxl are required
+    if why:
+        reason = f'AO Bake not available: {why}'
+        log(reason)
+        state.update(state='failed', reason=reason, current='')
+        for item in ITEMS:
+            state['results'].append(dict(status='failed', reason=reason, key=item['key'], name=item['name'],
+                                         seconds=0.0))
+        write_status()
+        if not bpy.app.background:
+            bpy.ops.wm.quit_blender()
+        return
+    lib = core.jxl()  # decision 37: JPEG XL masters
+    state.update(master_format='jxl', jxl_library=lib.version())
+    log(f'masters as lossless JPEG XL (libjxl {lib.version()}, effort {lib.EFFORT})')
     _run['coll'] = setup_scene()
     start_baker()
     write_status()

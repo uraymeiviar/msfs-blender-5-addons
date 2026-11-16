@@ -2,9 +2,9 @@
 decisions 12 to 18, 21 and 27; P32 to P35).
 
 - Storage (decisions 13, 18, 21): `<blend_name>.bake/` beside the .blend holds index.json (schema, settings, each
-  master's keys) and per master `<stem>.ao.jxl` (16-bit grey, lossless JPEG XL, decision 37; `<stem>.ao.png` from
-  0.55 or when the JPEG XL library cannot be loaded), `<stem>.ao.map` (filled pixels and the face map, written row by
-  row; Session 23) and `<stem>.ao.npz` (the layout). A master belongs to an
+  master's keys) and per master `<stem>.ao.jxl` (16-bit grey, lossless JPEG XL, decision 37; a `<stem>.ao.png` of
+  0.55, or one baked without the JPEG XL library, counts as missing: apply-native-copy decision 6), `<stem>.ao.map`
+  (filled pixels and the face map, written row by row; Session 23) and `<stem>.ao.npz` (the layout). A master belongs to an
   object, or to a mesh that several objects share (self-shading only, P35). Its stem is the name made safe for the file
   system plus a short hash of the name (ao_bake_core.safe_stem).
 - Staleness (decision 17, P33): mesh changed when the hash of the evaluated triangles, positions and corner normals
@@ -18,12 +18,15 @@ decisions 12 to 18, 21 and 27; P32 to P35).
   faces. Moving ones too (decision 59): Refresh steps through the frames of the file's animation once (motion()) and
   compares every object's placement; an occluder rigid to the object (both static, or moving together) shades it as
   placed; one that moves against it (or the object against it) is placed at each of the object's poses, spread over
-  their animation, and averaged (one pose: the current frame). A mover whose motion cannot be sampled (a driver only,
+  their animation, and averaged (one pose: the current frame). Near means within the AO distance (decisions 15 and
+  64 and 65): the world boxes' gap first, then the gap of the objects' own boxes as placed (rotated with the
+  object): at the current frame for one pose, else at each sampled frame, near when near at any of them. A mover whose motion cannot be sampled (a driver only,
   or the Animated tag without keys that move it) casts no AO, as before. A shared mesh gets its self-shading only.
 - Options (decisions 34 and 35; a scene default and a per-object override, `fss_ao_bake` on the object): an object
   with something moving against it is baked in N poses spread over that motion's frames and averaged (N = 1: the
   current frame, decision 59); the occluders are the
-  scene rule, the object alone (Self only) or the object's custom list (posed with the target). Changing one makes the
+  scene rule, the object alone (Self only) or Custom: the scene rule when its Scene as occluder is on, else none,
+  minus the list's ignored objects, plus its added ones (decision 60; posed with the target). Changing one makes the
   master "surroundings changed"; at one pose and the scene rule the hashes are those of 0.57.
 - The bake (decisions 12 and 36, P34) runs in a second Blender (ao_bake_runner.py), hidden or with its window, on a
   snapshot of the current state (a copy of the open file written into the bake folder, unsaved changes included, the
@@ -108,19 +111,20 @@ def write_index(folder, index):
 
 
 def master_files(folder, stem):
-    """(image, npz) of a master: its .ao.jxl, or its .ao.png (0.55, or no JPEG XL library); its third file,
-    <stem>.ao.map (schema 2), is in core.master_paths."""
+    """(image, npz) of a master: its .ao.jxl, or its .ao.png when only that exists (0.55, or baked without the JPEG XL
+    library; not read any more, decision 6); its third file, <stem>.ao.map (schema 2), is in core.master_paths."""
     image, _mp, npz = core.master_paths(folder, stem)
     return image, npz
 
 
 def has_files(folder, stem):
-    """The master's files are there: the image (.ao.jxl or .ao.png), the .npz and the .ao.map (a master of schema 1
-    has its per-pixel data in the .npz instead)."""
-    png, mp, npz = core.master_paths(folder, stem)
-    if not (os.path.isfile(png) and os.path.isfile(npz)):
+    """The master's files are there and the C++ code reads them: the image (.ao.jxl), the .npz and the .ao.map. A
+    master it does not read (an .ao.png, schema 1 with its per-pixel data in the .npz; apply-native-copy decision 6,
+    core.master_unreadable) counts as missing: Refresh grades it to be baked again."""
+    image, mp, npz = core.master_paths(folder, stem)
+    if not (os.path.isfile(image) and os.path.isfile(npz) and os.path.isfile(mp)):
         return False
-    return os.path.isfile(mp) or core.has_maps_in_npz(npz)
+    return core.master_unreadable(folder, stem) is None
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -364,19 +368,76 @@ def shared_instance(mesh, copies):
     return sorted(copies, key=lambda o: o.name)[0]
 
 
-def custom_occluders(obj, view_layer):
-    """Decision 35: the objects of the object's custom list that can occlude (meshes with faces in the view layer, not
-    the object itself), by name, sorted."""
+def custom_refs(obj):
+    """Decisions 60 and 63: the object's Custom list by object name: (ignore, with its children); an object listed
+    twice is ignored when one of its items ignores it."""
+    refs = {}
+    for ref in getattr(getattr(obj, 'fss_ao_bake', None), 'custom', ()):
+        o = ref.object
+        if o is None:
+            continue
+        ignore, children = refs.get(o.name, (False, False))
+        refs[o.name] = (ignore or bool(getattr(ref, 'ignore', False)),
+                        children or bool(getattr(ref, 'children', False)))
+    return refs
+
+
+def custom_state(refs, o):
+    """Decision 63: what the Custom list says about object `o`: 'ADD', 'IGNORE' or None. An item on the object
+    itself decides; else the nearest parent whose item has With its children on."""
+    entry = refs.get(o.name)
+    if entry is not None:
+        return 'IGNORE' if entry[0] else 'ADD'
+    p = o.parent
+    while p is not None:
+        entry = refs.get(p.name)
+        if entry is not None and entry[1]:
+            return 'IGNORE' if entry[0] else 'ADD'
+        p = p.parent
+    return None
+
+
+def custom_state_chain(refs, chain):
+    """custom_state by names: `chain` is the object's name and its parents' names, nearest first (Session 53: the
+    panel's tree draws without looking objects up by name, which scans every object)."""
+    entry = refs.get(chain[0])
+    if entry is not None:
+        return 'IGNORE' if entry[0] else 'ADD'
+    for name in chain[1:]:
+        entry = refs.get(name)
+        if entry is not None and entry[1]:
+            return 'IGNORE' if entry[0] else 'ADD'
+    return None
+
+
+def custom_occluders(obj, view_layer, scene_names=()):
+    """Decisions 35, 60 and 63: the occluders of a Custom object, by name, sorted: `scene_names` (the scene rule's
+    occluders, given when Scene as occluder is on) minus the objects the list ignores, plus the objects it adds that
+    can occlude (meshes with faces in the view layer, not the object itself). An item with With its children on
+    covers the object's children at every depth; an item nearer to an object wins."""
     settings = getattr(obj, 'fss_ao_bake', None)
     if settings is None:
         return []
-    names = set()
+    refs = custom_refs(obj)
+    candidates = {n: view_layer.objects.get(n) for n in refs}
     for ref in settings.custom:
-        o = ref.object
-        if (o is not None and o != obj and o.type == 'MESH' and o.data is not None and len(o.data.polygons)
-                and o.name in view_layer.objects):
-            names.add(o.name)
-    return sorted(names)
+        if ref.object is not None and getattr(ref, 'children', False):
+            candidates.update((c.name, c) for c in ref.object.children_recursive)
+    names = set(scene_names) if getattr(settings, 'custom_scene', False) else set()
+    occ = set()
+    for n in names | set(candidates):
+        o = candidates.get(n) or view_layer.objects.get(n)
+        if o is None or o == obj:
+            continue
+        state = custom_state(refs, o)
+        if state == 'IGNORE':
+            continue
+        if n in names:
+            occ.add(n)
+        elif (state == 'ADD' and o.type == 'MESH' and o.data is not None and len(o.data.polygons)
+                and n in view_layer.objects):
+            occ.add(n)
+    return sorted(occ)
 
 
 def _visible_meshes(view_layer):
@@ -473,33 +534,13 @@ def motion(scene, view_layer, objs):
     return dict(frames=frames, index=index, M=M, moving=moving)
 
 
-def moves_against(mo, a, b):
-    """Decision 59: b's placement relative to a changes over the sampled frames (one moves, the other does not, or
-    both move differently). a, b: names in motion() mo."""
-    ia, ib = mo['index'][a], mo['index'][b]
-    if not (mo['moving'][ia] or mo['moving'][ib]):
-        return False
-    Ma, Mb = mo['M'][ia], mo['M'][ib]
-    rel = np.linalg.inv(Ma[0]) @ Mb[0]  # b in a's space at the current frame
-    return bool(np.abs(Ma @ rel - Mb).max() > MOTION_TOL)
-
-
-def _swept_box(obj, mats):
-    """The world box of the object over these placements (k, 4, 4)."""
-    c = np.array([tuple(v) for v in obj.bound_box], dtype=np.float64)
-    w = np.einsum('kij,nj->kni', mats[:, :3, :3], c) + mats[:, None, :3, 3]
-    return w.reshape(-1, 3).min(axis=0), w.reshape(-1, 3).max(axis=0)
-
-
 def texture_size(material):
     from .uv_marks import texture_size as size_of
     return size_of(material)
 
 
-def _world_box(obj):
-    M = np.array(obj.matrix_world, dtype=np.float64)
-    c = np.array([tuple(v) for v in obj.bound_box], dtype=np.float64) @ M[:3, :3].T + M[:3, 3]
-    return c.min(axis=0), c.max(axis=0)
+# an object's axes further from square than this (a shear from a parent's scale): its world box only (decision 64)
+ORTHO_TOL = 1e-4
 
 
 def denoise_opts(scene):
@@ -524,7 +565,8 @@ def denoise_opts(scene):
 def settings_dict(scene):
     s = scene.fss_ao_bake
     return dict(ao_distance=round(float(s.distance), 6), samples=int(s.samples), device=s.device,
-                threads=int(s.threads), sample_split=s.sample_quality == 'SPLIT', curvature=bool(s.curvature),
+                threads=core.native_copy().threads_of(s.threads),  # decision 5 of apply-native-copy: 0 is Auto
+                sample_split=s.sample_quality == 'SPLIT', curvature=bool(s.curvature),
                 curv_width=round(float(s.curv_width), 6), denoise=denoise_opts(scene),
                 baker=s.baker, optix_samples=int(s.optix_samples))  # OptiX baker decisions 22, 24
 
@@ -565,22 +607,16 @@ def _hash(obj):
 # Refresh: the items to bake, their hashes and grades
 # ---------------------------------------------------------------------------------------------------------------------
 
-def refresh(context, relink=True):
-    """Computes every master's keys and grade against index.json; links renamed masters again. Returns _state."""
-    scene = context.scene
-    view_layer = context.view_layer
-    depsgraph = context.evaluated_depsgraph_get()
-    folder = bake_folder()
-    index = read_index(folder, use_cache=False) if folder else dict(masters={})
-    meshes = _visible_meshes(view_layer)
-    excluded = {}
-    baked = []
-    for obj in meshes:
-        why = bake_exclusion(obj, scene)
-        if why:
-            excluded[obj.name] = why
-        else:
-            baked.append(obj)
+RULE_STATS = {}  # the last pass's scene rule: how close a gap came to its distance (fss_ao_near_stats), the pairs
+
+
+def _rule_tools(scene, view_layer, meshes, baked):
+    """The scene rule's state for one pass (decisions 15, 59, 64 and 65): the candidates, their motion and boxes.
+    Returns dict(candidates, occluders, mo, moving, unknown, obj_of, near, prepare, against, prepare_against);
+    near(obj, 'now' or 'swept', distance) gives the object's occluders by name, sorted; prepare(queries) computes the
+    near() of many (obj, which, distance) in one call; against(obj, names) the names that move against obj
+    (decision 59), prepare_against(pairs) many (name, name) pairs in one call. The geometry is the C++ DLL's
+    (ao_bake_copy.SceneRule, bake-post-native journal Session 5), on the bake's Threads."""
     candidates = sorted(set(baked) | {o for o in meshes if is_occluder(o, scene)}, key=lambda o: o.name)
     mo = motion(scene, view_layer, candidates)  # decision 59: who moves, and against whom
 
@@ -599,21 +635,124 @@ def refresh(context, relink=True):
         if o is None:
             o = by_name[name] = bpy.data.objects[name]
         return o
-    boxes = {o.name: _world_box(o) for o in candidates}  # at the current frame
-    # over the sampled frames: what a moving object comes near during the poses
-    swept = {o.name: (_swept_box(o, mo['M'][mo['index'][o.name]]) if moving(o) else boxes[o.name]) for o in candidates}
+    # decisions 15, 64 and 65 in C++: each candidate's bound_box and its world matrix now; motion()'s placements at
+    # the sampled frames (mo['M'][:, 0] is the current frame). The DLL makes the world boxes (now, and swept over the
+    # sampled frames for a moving one) and the own boxes (an object whose axes are not square, a shear, keeps its world
+    # box only)
+    corners = np.array([[tuple(v) for v in o.bound_box] for o in candidates], dtype=np.float64).reshape(-1, 8, 3)
+    now = np.array([np.array(o.matrix_world, dtype=np.float64) for o in candidates]).reshape(-1, 4, 4)
     occ_names = [o.name for o in occluders]
-    occ_box = {k: (np.array([bx[n][0] for n in occ_names]).reshape(-1, 3),
-                   np.array([bx[n][1] for n in occ_names]).reshape(-1, 3)) for k, bx in (('now', boxes),
-                                                                                         ('swept', swept))}
-    occ_key = {}  # an occluder's part of the surroundings key, once per Refresh
+    occ_pos = {n: i for i, n in enumerate(occ_names)}
+    geo = core.native_copy().SceneRule(corners, now, mo['M'], mo['moving'], [mo['index'][n] for n in occ_names],
+                                       ORTHO_TOL, MOTION_TOL)
+    threads = int(scene.fss_ao_bake.threads)  # decision 5 of apply-native-copy: 0 is Auto
+    found = {}  # (name, which, distance): (occluder names, {name: gap})
+    moved = {}  # (name, name): moves against
+    RULE_STATS.clear()
 
-    def near(obj, which, distance):
-        """The occluders whose box is within the distance of the object's (core.box_gap, all at once)."""
-        lo, hi = (swept if which == 'swept' else boxes)[obj.name]
-        olo, ohi = occ_box[which]
-        gap = np.maximum(np.maximum(lo[None] - ohi, olo - hi[None]), 0.0).max(axis=1) if len(occ_names) else []
-        return sorted(n for n, g in zip(occ_names, np.asarray(gap).tolist()) if g <= distance and n != obj.name)
+    def note(st):
+        for k, v in st.items():
+            if k.startswith('closest'):
+                RULE_STATS[k] = min(RULE_STATS.get(k, float('inf')), v)
+            else:
+                RULE_STATS[k] = RULE_STATS.get(k, 0) + v
+
+    def prepare(queries):
+        """near() of many objects in one call: queries [(obj, 'now' or 'swept', distance)]."""
+        todo = list({(o.name, w, d): (o, w, d) for o, w, d in queries if (o.name, w, d) not in found}.values())
+        if not todo:
+            return
+        res = geo.near([mo['index'][o.name] for o, _w, _d in todo], [1 if w == 'swept' else 0 for _o, w, _d in todo],
+                       [d for _o, _w, d in todo], [occ_pos.get(o.name, -1) for o, _w, _d in todo], threads)
+        for (o, w, d), (idx, gap) in zip(todo, res):
+            names = [occ_names[i] for i in idx.tolist()]
+            found[(o.name, w, d)] = (names, dict(zip(names, gap.tolist())))
+        note(geo.stats)
+
+    def near(obj, which, distance, gaps=None):
+        """The occluders within the distance of the object (decisions 15, 64 and 65): their world boxes' gap first
+        ('swept': over the sampled frames of a moving one), then the gap of the objects' own boxes as placed: at the
+        current frame ('now'), else at each sampled frame, the smallest counting (one frame when neither moves). With
+        `gaps` (a dict), each occluder's gap is put in it (decision 70: the larger of the two boxes' gaps, in metres;
+        0 where the boxes touch)."""
+        if (obj.name, which, distance) not in found:
+            prepare([(obj, which, distance)])
+        names, g = found[(obj.name, which, distance)]
+        if gaps is not None:
+            gaps.update(g)
+        return sorted(names)
+
+    def prepare_against(pairs):
+        """Decision 59 for many (object name, occluder name) pairs in one call."""
+        todo = sorted({p for p in pairs if p not in moved})
+        if not todo:
+            return
+        res, singular = geo.moves([(mo['index'][a], mo['index'][b]) for a, b in todo], threads)
+        moved.update(zip(todo, [None if s else r for r, s in zip(res.tolist(), singular.tolist())]))
+        note(geo.stats)
+
+    def against(obj, names):
+        """Decision 59: the names (in motion()) whose placement relative to the object changes over the sampled frames
+        (one moves, the other does not, or both move differently)."""
+        prepare_against([(obj.name, n) for n in names])
+        if any(moved[(obj.name, n)] is None for n in names):  # its matrix singular (a zero scale), as before
+            raise np.linalg.LinAlgError('Singular matrix')
+        return [n for n in names if moved[(obj.name, n)]]
+    return dict(candidates=candidates, occluders=occluders, mo=mo, moving=moving, unknown=unknown, obj_of=obj_of,
+                near=near, prepare=prepare, against=against, prepare_against=prepare_against)
+
+
+def detect_occluders(context, objs):
+    """Decision 68: the scene rule alone for these objects (the Detected tree's Refresh): their occluders by the rule,
+    as Refresh finds them, written into _state['scene_rule'] (a new dict, so the panel's tree cache sees the change);
+    no hashes, no grades. Returns the names done (objects that get a master)."""
+    scene, view_layer = context.scene, context.view_layer
+    meshes = _visible_meshes(view_layer)
+    baked = [o for o in meshes if not bake_exclusion(o, scene)]
+    tools = _rule_tools(scene, view_layer, meshes, baked)
+    names = {o.name for o in baked}
+    rule = dict(_state.get('scene_rule') or {})
+    rule_gap = dict(_state.get('scene_gap') or {})
+    done = []
+    plan = []
+    for obj in objs:
+        if obj.name not in names:
+            continue
+        copies = sorted((u for u in baked if u.data is obj.data), key=lambda u: u.name)
+        distance = item_distance(copies[0] if len(copies) > 1 else obj, scene)
+        plan.append((obj, 'swept' if pose_count(obj, scene) > 1 else 'now', distance))
+    tools['prepare'](plan)  # every object's scene rule in one call into the DLL
+    for obj, which, distance in plan:
+        rule_gap[obj.name] = {}
+        rule[obj.name] = tools['near'](obj, which, distance, rule_gap[obj.name])
+        done.append(obj.name)
+    _state['scene_rule'], _state['scene_gap'] = rule, rule_gap
+    _state['rule_gen'] = _state.get('rule_gen', 0) + 1
+    return done
+
+
+def refresh(context, relink=True):
+    """Computes every master's keys and grade against index.json; links renamed masters again. Returns _state."""
+    scene = context.scene
+    view_layer = context.view_layer
+    depsgraph = context.evaluated_depsgraph_get()
+    folder = bake_folder()
+    index = read_index(folder, use_cache=False) if folder else dict(masters={})
+    meshes = _visible_meshes(view_layer)
+    excluded = {}
+    baked = []
+    for obj in meshes:
+        why = bake_exclusion(obj, scene)
+        if why:
+            excluded[obj.name] = why
+        else:
+            baked.append(obj)
+    tools = _rule_tools(scene, view_layer, meshes, baked)
+    candidates, occluders, mo, obj_of, near = (tools[k] for k in ('candidates', 'occluders', 'mo', 'obj_of', 'near'))
+    moving, unknown = tools['moving'], tools['unknown']
+    occ_key = {}  # an occluder's part of the surroundings key, once per Refresh
+    scene_rule = {}  # decisions 60 and 62: each baked object's scene-rule occluders (names, sorted), for the panel
+    scene_gap = {}  # decision 70: their gaps {name: metres}, for the panel's distance column
     geo = {}
     evs = {}
 
@@ -622,14 +761,36 @@ def refresh(context, relink=True):
             evs[obj.name] = core.evaluated_triangles(obj, depsgraph, uv_names)
         return evs[obj.name]
 
+    threads = int(scene.fss_ao_bake.threads)
+
     def geo_hash(obj):
         if obj.name not in geo:
-            geo[obj.name] = core.mesh_hash(ev_of(obj))
+            geo[obj.name] = core.mesh_hash(ev_of(obj), threads)
         return geo[obj.name]
 
     users = {}
     for obj in baked:
         users.setdefault(obj.data, []).append(obj)
+    # the scene rule of every baked object, then the motion of every (object, occluder) pair, each in one call into the
+    # DLL (bake-post-native journal Session 5): each object at its master's AO distance (a shared mesh's first copy's)
+    plan = {}  # name: (which, distance)
+    for objs in users.values():
+        d = item_distance(sorted(objs, key=lambda o: o.name)[0], scene)
+        for o in objs:
+            plan[o.name] = ('swept' if pose_count(o, scene) > 1 else 'now', d)
+    tools['prepare']([(o, *plan[o.name]) for o in baked])
+    chosen = {}  # name: (mode, the scene rule's occluders, the occluders)
+    for o in baked:
+        mode = occluder_mode(o, scene)
+        rule = near(o, *plan[o.name])
+        if mode == 'SELF':
+            occ = []
+        elif mode == 'CUSTOM':  # decision 60: the scene rule (when on) minus the ignored, plus the added
+            occ = custom_occluders(o, view_layer, rule)
+        else:
+            occ = rule
+        chosen[o.name] = (mode, rule, occ)
+    tools['prepare_against']([(o.name, n) for o in baked for n in chosen[o.name][2] if n in mo['index']])
     base = _surround_settings(scene)
     frame = scene.frame_current
     items = {}
@@ -648,17 +809,16 @@ def refresh(context, relink=True):
         """One object's occluders within its master's AO distance (a moving one's box over its motion), poses and
         surroundings key (decisions 15, 34, 35, 51, 59): (mode, occluder names, pose frames or None, pose note, posed
         occluder names, key, the occluders moving against it, the poses' frame range)."""
-        mode = occluder_mode(obj, scene)
         frames, pose_note, rng = None, '', None
-        if mode == 'SELF':
-            occ = []
-        elif mode == 'CUSTOM':
-            occ = custom_occluders(obj, view_layer)
-        else:  # several poses: what comes near over the motion; one pose: what is near at the current frame
-            occ = near(obj, 'swept' if pose_count(obj, scene) > 1 else 'now', distance)
+        # the scene rule: several poses, what comes near over the motion; one pose, what is near at the current frame.
+        # Kept for every object for the panel's Detected list (decision 62), whatever its occluders
+        scene_gap[obj.name] = {}
+        near(obj, *plan[obj.name], scene_gap[obj.name])
+        mode, rule, occ = chosen[obj.name]
+        scene_rule[obj.name] = list(rule)
         known = [n for n in occ if n in mo['index']]
         posed = [n for n in known if moving(obj_of(n))]  # placed at each pose frame
-        against = [n for n in known if obj.name in mo['index'] and moves_against(mo, obj.name, n)]
+        against = tools['against'](obj, known)
         if against:
             involved = ([obj] if moving(obj) else []) + [obj_of(n) for n in against if moving(obj_of(n))]
             frames, pose_note, rng = motion_frames(obj, scene, involved, mo['frames'])
@@ -762,7 +922,8 @@ def refresh(context, relink=True):
         item['dn_grade'] = dn_grade(item, masters.get(stem), folder, dn_want)
     _state.update(items=items, by_object=by_object, excluded=excluded, refreshed=time.time(), folder=folder,
                   relinked=relinked, sets=texture_set_rows(items, masters), curv_width=width,
-                  dn_want=dn_want, motion_frames=len(mo['frames']), moving=int(mo['moving'].sum()))
+                  dn_want=dn_want, motion_frames=len(mo['frames']), moving=int(mo['moving'].sum()),
+                  scene_rule=scene_rule, scene_gap=scene_gap, rule_gen=_state.get('rule_gen', 0) + 1)
     return _state
 
 
@@ -781,7 +942,7 @@ def curv_grade(item, entry, folder, width):
     if item['grade'] in ('MISSING', 'MESH'):
         return 'NEEDS_AO'
     c = (entry or {}).get('curvature')
-    if not c or not os.path.isfile(core.master_paths(folder, item['key'], 'curv')[0]):
+    if not c or not os.path.isfile(core.image_paths(folder, item['key'], 'curv')[0]):  # .curv.jxl (decision 6)
         return 'MISSING'
     if round(float(c.get('width', -1.0)), 6) != round(float(width), 6):
         return 'WIDTH'
@@ -798,7 +959,7 @@ def dn_grade(item, entry, folder, want):
         have.setdefault('method', 'FILTER')  # denoised before the method choice: the Surface Filter
     if have == want:
         return 'UP_TO_DATE'
-    if have is not None and not os.path.isfile(core.master_paths(folder, item['key'], 'ao.raw')[0]):
+    if have is not None and not os.path.isfile(core.image_paths(folder, item['key'], 'ao.raw')[0]):
         return 'NEEDS_AO'
     return 'STALE'
 
