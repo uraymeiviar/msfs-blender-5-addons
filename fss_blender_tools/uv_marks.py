@@ -27,7 +27,7 @@ import bpy
 import numpy as np
 from bpy.app.handlers import persistent
 
-from . import uv_pack, visibility_core  # uv_pack imports this module too (density, direction, sizes)
+from . import uv_fill, uv_pack, visibility_core  # uv_pack imports this module too (density, direction, sizes)
 from .tags import _editable
 
 # On an object: the own density mark, a factor range [min, max] (one factor when min == max)
@@ -1288,6 +1288,15 @@ def _summary(result):
     return text
 
 
+def _packer_missing(operator):
+    """Report and return True when the C++ packer cannot be loaded: Pack and Check refuse to run without it (native
+    UV packer decision 13, no Python fallback)."""
+    reason = uv_fill.error()
+    if reason is not None:
+        operator.report({'ERROR'}, f'Pack and Check cannot run: {reason}. Reinstall the add-on')
+    return reason is not None
+
+
 class FSS_OT_UvPackTextureSet(bpy.types.Operator):
     bl_idname = 'fss.uv_pack_texture_set'
     bl_label = 'Pack Texture Set'
@@ -1303,6 +1312,8 @@ class FSS_OT_UvPackTextureSet(bpy.types.Operator):
 
     def execute(self, context):
         global _progress
+        if _packer_missing(self):
+            return {'CANCELLED'}
         material = bpy.data.materials.get(self.material)
         if material is None:
             self.report({'ERROR'}, f"No material '{self.material}'")
@@ -1371,6 +1382,8 @@ class _SetRunner:
 
     def execute(self, context):
         global _progress, _cancel_requested
+        if _packer_missing(self):
+            return {'CANCELLED'}
         self._sets = self._choose(context)
         self._selected = self._report_selected(context)
         self._done = []

@@ -1338,8 +1338,7 @@ def test_fill_footprints():
     T = rng.uniform(0, 40, (400, 3, 2))
     T[:50, 2] = T[:50, 0] + (T[:50, 1] - T[:50, 0]) * 0.3  # lines
     T[50:60, 1:] = T[50:60, 0:1]  # points
-    rows, x0, x1 = uv_fill.spans(T)
-    mask = uv_fill.solid_mask(rows, x0, x1)
+    mask = uv_fill.solid_mask_of(T)  # the C++ footprint
     w = rng.dirichlet((1, 1, 1), (len(T), 200))
     P = np.einsum('nsv,nvi->nsi', w, T).reshape(-1, 2)
     cy, cx = np.floor(P[:, 1]).astype(int), np.floor(P[:, 0]).astype(int)
@@ -1373,6 +1372,86 @@ def test_fill_footprints():
     assert np.abs(uv_pack.tri_area(moved) - uv_pack.tri_area(tri)).max() < 1e-6
     print(f"PASS: test_fill_footprints (conservative spans for triangles, lines and points; 119 shapes placed, gap "
           f"{metrics['min_gap_px']:.2f} px for {gap} px, areas unchanged)")
+
+
+def _reference_fill():
+    """tests/uv_fill_reference.py: the Python placement the C++ library replaced (native UV packer step b)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('uv_fill_reference', REPO_ROOT / 'tests' / 'uv_fill_reference.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_fill_native_matches_reference():
+    # the C++ placement and repair give the Python reference's layouts exactly: same turns, same offsets
+    ref = _reference_fill()
+    assert uv_fill.error() is None, uv_fill.error()
+    rng = np.random.default_rng(11)
+    T = rng.uniform(0, 60, (300, 3, 2))
+    T[:40, 2] = T[:40, 0] + (T[:40, 1] - T[:40, 0]) * 0.4
+    T[40:50, 1:] = T[40:50, 0:1]
+    assert np.array_equal(uv_fill.solid_mask_of(T), ref.solid_mask(*ref.spans(T)))
+    cases = 0
+    for seed in range(12):
+        rng = np.random.default_rng(100 + seed)
+        n = int(rng.integers(20, 160))
+        tri, isl = [], []
+        for i in range(n):
+            x, y = rng.uniform(-300, 2400, 2)
+            a, b = rng.uniform(3, 260, 2)
+            c = rng.uniform(0.05, 1.0)
+            tri += [[(x, y), (x + a, y), (x + a, y + b * c)], [(x, y), (x + a, y + b * c), (x + a * c, y + b)]]
+            isl += [i, i]
+            if i % 7 == 3:  # a ring: islands go inside
+                tri += [[(x, y + b), (x + a, y + b), (x + a, y + b + 6)], [(x, y + b), (x + 6, y + b), (x, y - 40)]]
+                isl += [i, i]
+        tri, isl = np.array(tri, np.float64), np.array(isl)
+        active = rng.random(n) > 0.05
+        can_turn = rng.random(n) > 0.3
+        gap = float(rng.choice([2.0, 4.0, 8.1, 16.0]))
+        fixed = (rng.random(n) > 0.85) if seed % 2 else None
+        a = uv_fill.place(tri, isl, n, active, can_turn, gap, fixed)
+        b = ref.place(tri, isl, n, active, can_turn, gap, fixed)
+        assert (a is None) == (b is None), seed
+        if a is not None:
+            for x_, y_ in zip(a, b):
+                assert np.array_equal(x_, y_), (seed, 'place')
+        limit = 2048.0 if seed % 3 else (1600.0, 900.0)
+        fixed_r = (rng.random(n) > 0.8) if seed % 2 == 0 else None
+        a = uv_fill.repair(tri, isl, n, active, can_turn, gap, limit, fixed_r)
+        b = ref.repair(tri, isl, n, active, can_turn, gap, limit, fixed_r)
+        for x_, y_ in zip(a[:5], b[:5]):
+            assert np.array_equal(x_, y_), (seed, 'repair')
+        assert a[5] == b[5], (seed, 'repair area')
+        cases += 1
+    print(f"PASS: test_fill_native_matches_reference (footprints of 300 triangles, lines and points; {cases} random "
+          f"sets placed and repaired, rings, turns, pinned islands, square and oblong limits: identical to the Python "
+          f"reference)")
+
+
+def test_refuses_without_library():
+    # no Python fallback (native UV packer decision 13): without the C++ library Pack and Check refuse, UVs untouched
+    reset()
+    m = mat('NOLIB', 1024)
+    obj = quad_obj('NOLIB', [(0, 0, 1, 1), (2, 0, 1, 1)], mats=[m, m])
+    before = uvs(obj).copy()
+    saved = dict(uv_fill._lib)
+    uv_fill._lib.update(tried=True, dll=None, error='the C++ packer (fss_uv_pack.dll) could not be loaded: test')
+    try:
+        for op in (lambda: bpy.ops.fss.uv_pack_texture_set(material='NOLIB'), bpy.ops.fss.uv_pack_check_all):
+            try:
+                result = op()
+            except RuntimeError as exc:  # background Blender raises the operator's ERROR report
+                assert 'cannot run' in str(exc), exc
+            else:
+                assert result == {'CANCELLED'}, result
+    finally:
+        uv_fill._lib.clear()
+        uv_fill._lib.update(saved)
+    assert np.array_equal(uvs(obj), before)
+    assert uv_fill.error() is None
+    print("PASS: test_refuses_without_library (Pack and Check All refuse with the reason, UVs unchanged)")
 
 
 def test_fill_fallbacks():
@@ -1963,6 +2042,8 @@ def main():
     test_island_override()
     test_layout_corner()
     test_fill_footprints()
+    test_fill_native_matches_reference()
+    test_refuses_without_library()
     test_fill_ring()
     test_fill_directions()
     test_fill_fallbacks()
