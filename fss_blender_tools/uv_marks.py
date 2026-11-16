@@ -41,7 +41,11 @@ DIRECTION_MARK_PROP = 'fss_uv_direction_mark'  # the table's pulldown, read from
 SKIP_AUTOSEAM_KEY = 'fss_uv_skip_autoseam'
 KEEP_UVS_PROP = 'fss_uv_keep_uvs'  # on a material: its texture set is not packed (decision 116)
 MATERIAL_FACTOR_PROP = 'fss_uv_material_density'  # on a material: the density factor of all its islands (decision 146)
-KEEP_PINNED_PROP = 'fss_uv_keep_pinned'  # on the scene: islands with a pinned UV keep their UVs (decision 157)
+KEEP_PINNED_PROP = 'fss_uv_keep_pinned'  # on a material: its islands with a pinned UV keep their UVs (decisions 157, 159)
+SET_OPEN_PROP = 'fss_uv_set_open'  # on a material: its block in the texture set list is open
+AREA_USE_PROP = 'fss_uv_area_use'  # on a material: Pack and Check place the set into its target area (decision 158)
+AREA_PROP = 'fss_uv_area'  # on a material: the target area (x, y, width, height), in UV 0 to 1
+OVERFLOW_AT_PROP = 'fss_uv_overflow_at'  # on a material: where the islands that do not fit the area start (u, v)
 MATERIAL_TICK_PROP = 'fss_uv_material_density_use'  # the Material row's tick: unticked, the factor stays but is ignored
 MATERIAL_VIS_PROP = 'fss_uv_material_use_visibility'  # off on a material: its islands ignore visibility, on all objects
 VISIBILITY_ICON = 'LIGHT_SUN'  # the table's switch, highlighted while it is off: the islands count as fully lit
@@ -72,7 +76,7 @@ MIN_VISIBILITY = 0.01
 FULLY_SEEN = 0.9999  # a seen share counted as the whole island (areas are rounded)
 DEFAULT_PARTLY_SEEN = 1.0  # Island Value already follows the lit part (UV decision 132)
 MAX_LISTED = 5  # nested marks shown in the panel
-LIST_ROWS = 5  # rows the texture set list shows before it scrolls (the artist can drag it longer)
+LIST_ROWS = 5  # rows the Check Results list shows before it scrolls (the artist can drag it longer)
 DIRECTIONS = [
     ('FREE', 'Free', 'No mark: as the nearest marked parent, any angle when none is marked'),
     ('UPRIGHT', 'Upright', 'Islands keep their orientation (brushed metal, grain, text)'),
@@ -83,7 +87,8 @@ DIRECTION_IDS = {item[0] for item in DIRECTIONS}
 TICK_COLUMN = 0.13  # the table's columns: the tick and icon, then shares of the rest
 VALUE_COLUMN, DIRECTION_COLUMN, NAME_COLUMN = 0.25, 0.25, 0.5
 CHECK_COLUMN = 0.16
-SET_NAME_COLUMN, SET_SIZE_COLUMN, SET_MARGIN_COLUMN, SET_PACK_COLUMN = 0.42, 0.21, 0.16, 0.21  # the texture set rows
+SET_PACK_COLUMN = 0.21  # the texture set blocks' head: the Pack button's share
+SET_NAME_SHARE, SET_HEAD_PADDING = 0.8, 70  # the name's share of the rest (after tick, arrow, select), pixels taken
 TABLE_ICONS = {'SCENE': 'SCENE_DATA', 'ZONE': 'OUTLINER_OB_EMPTY', 'PARENT': 'ORIENTATION_PARENT', 'MATERIAL': 'MATERIAL',
                'OBJECT': 'OBJECT_DATA', 'ISLANDS': 'UV_ISLANDSEL'}
 TABLE_HINTS = {
@@ -136,9 +141,31 @@ def target_density(scene=None):
     return DEFAULT_TARGET if scene is None else scene.fss_uv_target_density
 
 
-def keep_pinned(scene):
-    """Keep Pinned Islands (decision 157): Pack and Check leave every island with a pinned UV as it is."""
-    return bool(getattr(scene, KEEP_PINNED_PROP, False)) if scene is not None else False
+def keep_pinned(material):
+    """Keep Pinned Islands of a texture set (decisions 157, 159): Pack and Check leave every island with a pinned UV as it
+    is. The set's last choice, on by default."""
+    return bool(getattr(material, KEEP_PINNED_PROP, True)) if material is not None else True
+
+
+def target_area(material, size):
+    """(x, y, width, height) in UV that a texture set is packed into, on whole pixels of its size: the whole texture
+    unless Target Area is ticked (decision 158). Width and height are at least one pixel and stay inside the texture."""
+    if material is None or not getattr(material, AREA_USE_PROP, False):
+        return (0.0, 0.0, 1.0, 1.0)
+    x, y, w, h = (float(v) for v in getattr(material, AREA_PROP))
+    x = min(max(round(x * size), 0), size - 1)
+    y = min(max(round(y * size), 0), size - 1)
+    w = min(max(round(w * size), 1), size - x)
+    h = min(max(round(h * size), 1), size - y)
+    return (x / size, y / size, w / size, h / size)
+
+
+def overflow_at(material):
+    """(u, v) where the islands that do not fit the target area start, or None without a target area: beyond the
+    area's right edge."""
+    if material is None or not getattr(material, AREA_USE_PROP, False):
+        return None
+    return tuple(float(v) for v in getattr(material, OVERFLOW_AT_PROP))
 
 
 def pack_corner(scene):
@@ -967,21 +994,6 @@ def last_result_text(material, short=False):
     return uv_pack.result_text(result) + ('' if result['written'] else ' (checked)')
 
 
-def texture_set_rows(context, materials):
-    """(flags, order) of the texture set list over bpy.data.materials (FSS_UL_TextureSets.filter_items): shown are the
-    materials of the selection, in texture_set_materials' order. Only reads, as drawing must."""
-    position = {material.as_pointer(): index for index, material in enumerate(texture_set_materials(context))}
-    flags, order = [], []
-    rest = len(position)
-    for material in materials:
-        index = position.get(material.as_pointer())
-        flags.append(0 if index is None else 1)
-        if index is None:
-            index, rest = rest, rest + 1
-        order.append(index)
-    return flags, order
-
-
 def _get_active_index(wm):
     """The list's active row is kept by material name: adding a material moves the indices of bpy.data.materials,
     the name stays (a renamed material falls back to the first row)."""
@@ -1015,7 +1027,7 @@ class FSS_OT_UvCheckSelect(bpy.types.Operator):
         width, height = result['extent_px']
         material = bpy.data.materials.get(properties.material)
         lines = [properties.material, f"Last run: {uv_pack.result_text(result)}{'' if result['written'] else ' (checked)'}",
-                 f"Layout {width:.0f} x {height:.0f} px of {result['size']} x {result['size']}, "
+                 f"Layout {width:.0f} x {height:.0f} px of {uv_pack.area_text(result)}, "
                  f"the islands cover {result['fill_current_pct']:.0f} %",
                  f"Density at {result['t'] * 100:.0f} % of its range"]
         return chr(10).join(lines + (set_problems(material) if material else []) + ['Click: select the objects that use it'])
@@ -1044,7 +1056,10 @@ class FSS_UL_CheckResults(bpy.types.UIList):
                       icon='ERROR' if over else 'RESTRICT_SELECT_OFF', emboss=False).material = item.name
         width, height = result['extent_px']
         used.alert = over
-        used.progress(factor=result_used(result), type='BAR', text=f"{width:.0f} x {height:.0f} / {result['size']}")
+        size = result['size']
+        _x, _y, w, h = result.get('area', (0.0, 0.0, 1.0, 1.0))
+        of = f'{size}' if (w, h) == (1.0, 1.0) else f'{round(w * size)} x {round(h * size)}'  # the target area
+        used.progress(factor=result_used(result), type='BAR', text=f"{width:.0f} x {height:.0f} / {of}")
         room.alert = over
         room.label(text='full' if result['mode'] == 'fit' else f'x{result_room(result):.2f}')
 
@@ -1058,50 +1073,68 @@ class FSS_UL_CheckResults(bpy.types.UIList):
         return flags, order
 
 
-class FSS_UL_TextureSets(bpy.types.UIList):
-    """The texture sets of the selection (decision 121): a list over bpy.data.materials that shows only the
-    selection's materials, so nothing is written while drawing."""
-    bl_idname = 'FSS_UL_texture_sets'
-
-    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
-        kept = uv_pack.is_kept(item)
-        tick, name, size, gap, pack = _cells(layout, SET_NAME_COLUMN, SET_SIZE_COLUMN, SET_MARGIN_COLUMN, SET_PACK_COLUMN)
-        tick.prop(item, KEEP_UVS_PROP, text='', invert_checkbox=True)
-        tick.operator('fss.materials_select', text='', icon='RESTRICT_SELECT_OFF', emboss=False).material = item.name
-        for cell in (name, size, gap):
-            cell.active = not kept
-        name.alignment = 'LEFT'
-        text = _fitted(context, item.name, (1.0 - TICK_COLUMN) * SET_NAME_COLUMN, LIST_PADDING)
-        name.operator(FSS_OT_UvTextureSetInfo.bl_idname, text=text, icon='ERROR' if set_problems(item) else 'NONE',
-                      emboss=False).material = item.name
-        size.prop(item, SIZE_PROP, text='')
-        gap.prop(item, 'fss_uv_margin_px', text='')
-        pack.enabled = not kept
-        pack.operator(FSS_OT_UvPackTextureSet.bl_idname, text='Pack').material = item.name
-
-    def filter_items(self, context, data, propname):
-        items = getattr(data, propname)
-        flags, order = texture_set_rows(context, items)
-        flags = [self.bitflag_filter_item if shown else 0 for shown in flags]
-        if self.filter_name:
-            named = bpy.types.UI_UL_list.filter_items_by_name(self.filter_name, self.bitflag_filter_item, items, 'name')
-            flags = [flag & by_name for flag, by_name in zip(flags, named)]
-        return flags, order
+def draw_texture_set(layout, context, material):
+    """One texture set of the selection as a block (decision 159): the head (the Pack All tick, open or closed, select
+    its objects, the name, Pack), and while open its settings for the next run: size, margin, Keep Pinned Islands and
+    Target Area with the area. A click on the name highlights the set; the Problems list below shows it."""
+    kept = uv_pack.is_kept(material)
+    is_open = getattr(material, SET_OPEN_PROP)
+    box = layout.box()
+    head = box.split(factor=1.0 - SET_PACK_COLUMN, align=True)
+    left = head.row(align=True)
+    left.prop(material, KEEP_UVS_PROP, text='', invert_checkbox=True)
+    left.prop(material, SET_OPEN_PROP, text='', emboss=False,
+              icon='DISCLOSURE_TRI_DOWN' if is_open else 'DISCLOSURE_TRI_RIGHT')
+    left.operator('fss.materials_select', text='', icon='RESTRICT_SELECT_OFF', emboss=False).material = material.name
+    name = left.row(align=True)
+    name.active = not kept
+    name.alignment = 'LEFT'
+    name.operator(FSS_OT_UvTextureSetInfo.bl_idname, emboss=False,
+                  text=_fitted(context, material.name, (1.0 - SET_PACK_COLUMN) * SET_NAME_SHARE, SET_HEAD_PADDING),
+                  icon='ERROR' if set_problems(material) else 'NONE',
+                  depress=material.name == context.window_manager.fss_uv_pack_active_name).material = material.name
+    pack = head.row(align=True)
+    pack.enabled = not kept
+    pack.operator(FSS_OT_UvPackTextureSet.bl_idname, text='Pack').material = material.name
+    if not is_open:
+        return
+    body = box.column()
+    body.active = not kept
+    sizes = body.row(align=True)
+    sizes.prop(material, SIZE_PROP, text='Size')
+    sizes.prop(material, 'fss_uv_margin_px', text='Margin')
+    body.prop(material, KEEP_PINNED_PROP)
+    body.prop(material, AREA_USE_PROP)
+    if getattr(material, AREA_USE_PROP):
+        _draw_target_area(body, material)
 
 
 def _draw_texture_sets(layout, context):
     materials = texture_set_materials(context)
-    box = layout.box()
     if not materials:
-        box.label(text='Select objects to list their texture sets', icon='INFO')
+        layout.box().label(text='Select objects to list their texture sets', icon='INFO')
         return
-    box.template_list(FSS_UL_TextureSets.bl_idname, '', bpy.data, 'materials', context.window_manager,
-                      'fss_uv_pack_active', rows=min(len(materials), LIST_ROWS))
+    column = layout.column(align=True)
+    for material in materials:
+        draw_texture_set(column, context, material)
     ticked = sum(1 for material in materials if not uv_pack.is_kept(material))
-    box.prop(context.scene, KEEP_PINNED_PROP)
-    row = box.row()
+    row = layout.row()
     row.enabled = ticked > 0
     row.operator(FSS_OT_UvPackAll.bl_idname, text=f'Pack All ({ticked})', icon='UV')
+
+
+def _draw_target_area(layout, material):
+    """A set's target area and overflow position (decision 158), in UV."""
+    column = layout.column(align=True)
+    split = column.split(factor=0.66)
+    split.label(text='Area')
+    split.label(text='Overflow at')
+    for first, second, other, names in ((0, 2, 0, ('x', 'w', 'u')), (1, 3, 1, ('y', 'h', 'v'))):
+        split = column.split(factor=0.66, align=True)
+        pair = split.row(align=True)
+        pair.prop(material, AREA_PROP, index=first, text=names[0])
+        pair.prop(material, AREA_PROP, index=second, text=names[1])
+        split.prop(material, OVERFLOW_AT_PROP, index=other, text=names[2])
 
 
 def _store_result(result):
@@ -1130,9 +1163,10 @@ def result_room(result):
 
 
 def result_used(result):
-    """The share of the texture the layout's bounding box takes, 0 to 1."""
+    """The share of the texture (or of its target area) the layout's bounding box takes, 0 to 1."""
     width, height = result['extent_px']
-    return min(width * height / max(result['size'] ** 2, 1), 1.0)
+    _x, _y, w, h = result.get('area', (0.0, 0.0, 1.0, 1.0))
+    return min(width * height / max(w * h * result['size'] ** 2, 1), 1.0)
 
 
 def is_stale(result):
@@ -1560,7 +1594,7 @@ class FSS_PT_UvMarksImageEditorAdvanced(_PackingAdvanced, bpy.types.Panel):
 
 
 CLASSES = (FSS_OT_UvTableHint, FSS_OT_UvTextureSetInfo, FSS_OT_UvSelectObject, FSS_OT_UvSetSkipAutoseam, FSS_OT_UvPackTextureSet,
-           FSS_OT_UvPackCheckAll, FSS_OT_UvPackAll, FSS_OT_UvPackCancel, FSS_OT_UvCheckSelect, FSS_UL_TextureSets, FSS_UL_CheckResults,
+           FSS_OT_UvPackCheckAll, FSS_OT_UvPackAll, FSS_OT_UvPackCancel, FSS_OT_UvCheckSelect, FSS_UL_CheckResults,
            FSS_PT_UvMarks, FSS_PT_UvMarksImageEditor, FSS_PT_UvMarksResults, FSS_PT_UvMarksImageEditorResults,
            FSS_PT_UvMarksAdvanced, FSS_PT_UvMarksImageEditorAdvanced)
 HANDLERS = ((bpy.app.handlers.load_post, _on_load_post),
@@ -1604,10 +1638,6 @@ def register():
                     '0.75: scaled by the seen share, biased towards visible. 0.5: scaled by the seen share of its area. '
                     '0.25: biased towards scaling down. 0: only an island seen whole counts, any other gets the minimum. '
                     'Lower saves texture but blurs the part you see. Used by Pack and Check All, with no new Update Visibility')
-    setattr(bpy.types.Scene, KEEP_PINNED_PROP, bpy.props.BoolProperty(
-        name='Keep Pinned Islands', default=False, update=_marks_changed,
-        description='Islands with a pinned UV keep their place, turn and size, and the others are packed around them. '
-                    'Off: pinned islands are packed like any other (their pins stay)'))
     bpy.types.Scene.fss_uv_pack_corner = bpy.props.EnumProperty(
         name='Layout Corner', items=PACK_CORNERS, default='BOTTOM_LEFT',
         description='The corner of the texture Pack moves each layout to, as one block. Changes the UVs at the next '
@@ -1630,6 +1660,25 @@ def register():
         name='Keep UVs', default=False, update=_marks_changed,
         description='Leave this texture set out of Pack and Check All and keep its UVs (fur and hair cards, decal '
                     'sheets, colliders). In the packing table: unticked')
+    setattr(bpy.types.Material, KEEP_PINNED_PROP, bpy.props.BoolProperty(
+        name='Keep Pinned Islands', default=True, update=_marks_changed,
+        description='Islands with a pinned UV keep their place, turn and size. Without a Target Area the others are '
+                    'packed around them. Off: pinned islands are packed like any other (their pins stay)'))
+    setattr(bpy.types.Material, SET_OPEN_PROP, bpy.props.BoolProperty(
+        name='Show Settings', default=True, description="Show or hide this texture set's settings"))
+    setattr(bpy.types.Material, AREA_USE_PROP, bpy.props.BoolProperty(
+        name='Target Area', default=False, update=_marks_changed,
+        description='Pack this texture set into an area of its texture instead of the whole texture, at the same '
+                    'density. The area counts as empty: nothing already there is avoided, kept pinned islands '
+                    'included. Islands that do not fit go to the overflow position'))
+    setattr(bpy.types.Material, AREA_PROP, bpy.props.FloatVectorProperty(
+        name='Target Area', size=4, default=(0.0, 0.0, 1.0, 1.0), min=0.0, max=1.0, precision=3, step=1,
+        update=_marks_changed, description='The area the islands are packed into: x, y of its lower left corner, '
+                                           'width and height, in UV (0 to 1)'))
+    setattr(bpy.types.Material, OVERFLOW_AT_PROP, bpy.props.FloatVectorProperty(
+        name='Overflow Position', size=2, default=(1.0, 1.0), min=0.0, max=1.0, precision=3, step=1,
+        update=_marks_changed, description='Where the islands that do not fit the area start, in UV (0 to 1): from '
+                                           'there in columns to the right, each as high as the area'))
     setattr(bpy.types.Material, MATERIAL_TICK_PROP, bpy.props.BoolProperty(
         name='Use Material Factor', default=True, update=_marks_changed,
         description='Use the texel density factor of this material. Unticked, the number is kept but ignored'))
@@ -1673,9 +1722,9 @@ def unregister():
     del bpy.types.WindowManager.fss_uv_pack_active_name
     for name, _color in BAR_COLORS.values():
         delattr(bpy.types.WindowManager, name)
-    for name in (MATERIAL_VIS_PROP, MATERIAL_FACTOR_PROP, MATERIAL_TICK_PROP, KEEP_UVS_PROP, 'fss_uv_margin_px', SIZE_PROP):
+    for name in (SET_OPEN_PROP, KEEP_PINNED_PROP, OVERFLOW_AT_PROP, AREA_PROP, AREA_USE_PROP, MATERIAL_VIS_PROP, MATERIAL_FACTOR_PROP, MATERIAL_TICK_PROP, KEEP_UVS_PROP, 'fss_uv_margin_px', SIZE_PROP):
         delattr(bpy.types.Material, name)
-    for name in (KEEP_PINNED_PROP, 'fss_uv_density_freedom_max', 'fss_uv_density_freedom_min', 'fss_uv_pack_corner', 'fss_uv_partly_seen_value', 'fss_uv_target_density'):
+    for name in ('fss_uv_density_freedom_max', 'fss_uv_density_freedom_min', 'fss_uv_pack_corner', 'fss_uv_partly_seen_value', 'fss_uv_target_density'):
         delattr(bpy.types.Scene, name)
     for name in (DIRECTION_MARK_PROP, USE_VISIBILITY_PROP, FACTOR_PROP, MAX_PROP, MIN_PROP, OWN_PROP):
         delattr(bpy.types.Object, name)

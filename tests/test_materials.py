@@ -599,7 +599,7 @@ def test_keep_uvs():
     def packing():
         """What the Packing section draws for the same material (selected and active)."""
         calls = []
-        uv_marks.FSS_UL_TextureSets.draw_item(None, bpy.context, _Layout(calls), bpy.data, material, 0, None, '', 0)
+        uv_marks.draw_texture_set(_Layout(calls), bpy.context, material)
         tip = uv_marks.FSS_OT_UvTextureSetInfo.description(bpy.context, SimpleNamespace(material=material.name))
         props = [args for name, args, kwargs in calls if name == 'prop' and args[1] == uv_marks.KEEP_UVS_PROP]
         return tip.split(chr(10)), props

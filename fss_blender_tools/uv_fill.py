@@ -387,13 +387,16 @@ def place(tri, tri_isl, n, active, can_turn, gap, fixed=None):
     return None
 
 
-def repair(tri, tri_isl, n, active, can_turn, gap, limit, fixed=None):
+def repair(tri, tri_isl, n, active, can_turn, gap, limit, fixed=None, aside=None):
     """Islands of a layout that lie outside the texture (0 to limit pixels), wholly or in part, moved into its free space
     (decision 156). The islands inside stay where they are; the others go, largest first, into the best free place
     inside, a quarter turn allowed where can_turn, keeping the gap to every island and half of it to the texture's
     edges; an island that fits nowhere is skipped. The ones left go into columns beyond the right edge, wholly
     outside, so that none covers part of the texture. Their scale never changes. fixed: pinned islands, which never
     move; an island inside the texture that comes closer to one than the gap is moved as if it were outside.
+    limit: the texture's side in pixels, or (width, height) of the target area (decision 158), which then stands for
+    the texture; aside: (x, y) in pixels where the columns of the islands left outside start, by default just beyond
+    the right edge.
 
     tri (m, 3, 2) in pixels with tri_isl per triangle. Returns (moved, turns, origin, offset, outside, outside area in
     px^2): moved and outside per island; turns, origin and offset as apply takes them."""
@@ -411,23 +414,26 @@ def repair(tri, tri_isl, n, active, can_turn, gap, limit, fixed=None):
     e1, e2 = tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]
     area = np.bincount(tri_isl, weights=0.5 * np.abs(e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0]), minlength=n)
     fixed = np.zeros(n, bool) if fixed is None else fixed & active
-    inside = active & ~fixed & (lo >= 0.0).all(1) & (hi <= limit).all(1)
+    lim = np.broadcast_to(np.asarray(limit, np.float64), (2,))  # (x, y)
+    inside = active & ~fixed & (lo >= 0.0).all(1) & (hi <= lim).all(1)
     out = active & ~fixed & ~inside
     moved = np.zeros(n, bool)
     turns = np.zeros(n, np.int64)
     offset = lo.copy()
     if not out.any() and not fixed.any():
         return moved, turns, lo, offset, out, 0.0
-    cell = cell_size(limit, gap)
+    cell = cell_size(float(lim.max()), gap)
     reach = reach_table(round(gap / cell, 6))
     shift = max(len(reach) - 1, reach[0]) + 1
     half = int(math.ceil(0.5 * gap / cell))
     first = shift + half  # half the gap to the texture's low edges
-    wall = shift + int(math.floor(limit / cell)) + half  # the first cell beyond the texture and half the gap
+    # the first cell beyond the texture and half the gap, in x and in y
+    wall_x, wall_y = (shift + int(math.floor(v / cell)) + half for v in lim)
+    wall = max(wall_x, wall_y)
     grid = Grid(wall + shift + BLOCK)
     cells = grid.cells
-    grid.paint(np.ones((cells, cells - wall), bool), 0, wall)
-    grid.paint(np.ones((cells - wall, wall), bool), wall, 0)
+    grid.paint(np.ones((cells, cells - wall_x), bool), 0, wall_x)
+    grid.paint(np.ones((cells - wall_y, wall_x), bool), wall_y, 0)
     if fixed.any():
         # the pinned islands, and around each the cells an island must keep clear of
         forbidden = np.zeros((cells, cells), bool)
@@ -467,7 +473,7 @@ def repair(tri, tri_isl, n, active, can_turn, gap, limit, fixed=None):
                 continue
             low = np.array([(pos[2] + shape.pad - shift) * cell, (pos[1] + shape.pad - shift) * cell])
             extent = np.ptp(turned(local, t).reshape(-1, 2), axis=0)
-            if (low < 0.0).any() or (low + extent > limit).any():
+            if (low < 0.0).any() or (low + extent > lim).any():
                 continue
             rank = (pos[0], not pos[3], -pos[4] / max(len(shape.ring[0]), 1), pos[1] + pos[2], t)
             if best is None or rank < best[0]:
@@ -480,14 +486,15 @@ def repair(tri, tri_isl, n, active, can_turn, gap, limit, fixed=None):
         moved[i] = True
         turns[i] = shape.turn
         offset[i] = low - shape.low
-    # what fits nowhere: in columns beyond the right edge, as they are
-    x = limit + gap
-    y = 0.5 * gap
+    # what fits nowhere: in columns beyond the right edge (or from `aside` on), as they are, each column as high as
+    # the texture
+    x0, y0 = (lim[0] + gap, 0.5 * gap) if aside is None else (float(aside[0]) + 0.5 * gap, float(aside[1]) + 0.5 * gap)
+    x, y = x0, y0
     column = 0.0
     for i in left:
-        if y + size[i, 1] > limit and y > 0.5 * gap:
+        if y + size[i, 1] > y0 - 0.5 * gap + lim[1] and y > y0:
             x += column + gap
-            y = 0.5 * gap
+            y = y0
             column = 0.0
         offset[i] = (x, y)
         moved[i] = True

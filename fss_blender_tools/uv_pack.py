@@ -665,7 +665,16 @@ class TextureSet:
         self.use_repair = True  # move islands outside the texture into its free space (uv_fill.repair, decision 156)
         self.pinned = (np.concatenate(pinned) if pinned else np.zeros(0, bool)) & ~self.zero_area
         # Keep Pinned Islands (decision 157): they keep their UVs, the others are packed around them
-        self.fixed = self.pinned & uv_marks.keep_pinned(scene)
+        self.fixed = self.pinned & uv_marks.keep_pinned(material)
+        self.aside = np.zeros(self.n, bool)  # kept pinned islands outside the target area: left out of the layout
+        self.off = self.zero_area.copy()  # islands that take no part in the layout (set again in build_temp)
+        # the target area (decision 158): the layout is made in its frame, (0, 0) at its lower left corner, and moved
+        # there when written; the area stands for the texture in every fit test
+        self.area = uv_marks.target_area(material, self.size)
+        self.origin = np.array(self.area[:2], np.float64)
+        self.area_px = np.array(self.area[2:], np.float64) * self.size
+        at = uv_marks.overflow_at(material)
+        self.overflow_at = None if at is None else np.array(at, np.float64)
         self.no_area_objects = sorted(set(self.no_area_objects))
 
     def objects(self):
@@ -763,6 +772,25 @@ class TextureSet:
         self.tri_isl = np.concatenate(ti_all)
         self.seg_loops = np.concatenate(bl_t) if bl_t else np.zeros((0, 2), np.int64)
         self.seg_isl = np.concatenate(bl_i) if bl_i else np.zeros(0, np.int64)
+        if self.fixed.any() and self.overflow_at is not None:
+            # with a target area the area is packed as if empty (decision 159): every kept pinned island keeps its UVs
+            # and is left out of the layout, as an island without UV area is
+            self.aside = self.fixed.copy()
+            self.fixed = np.zeros(self.n, bool)
+            self.off = self.zero_area | self.aside
+        elif self.fixed.any():
+            # (without a target area the area is the whole texture) a kept pinned island not wholly inside it is no
+            # obstacle: it keeps its UVs and is left out of the layout
+            lo = np.full((self.n, 2), np.inf)
+            hi = np.full((self.n, 2), -np.inf)
+            np.minimum.at(lo, self.loop_isl, self.uv0)
+            np.maximum.at(hi, self.loop_isl, self.uv0)
+            x, y, w, h = self.area
+            eps = 1e-6
+            inside = (lo >= np.array([x, y]) - eps).all(1) & (hi <= np.array([x + w, y + h]) + eps).all(1)
+            self.aside = self.fixed & ~inside
+            self.fixed = self.fixed & inside
+            self.off = self.zero_area | self.aside
 
     def remove_temp(self):
         if self.obj is not None:
@@ -822,8 +850,8 @@ class TextureSet:
 
     def pack(self, t, shape_method='CONCAVE'):
         """Pack at density t; returns (final UVs, k, extent px (x, y), prepared UVs)."""
-        if not (~self.zero_area & ~self.fixed).any():  # every island kept: nothing to pack
-            Q = self.uv0.copy()
+        if not (~self.off & ~self.fixed).any():  # every island kept: nothing to pack
+            Q = self._kept(self.uv0.copy())
             return (Q, *self._extent(Q), Q)
         P, r = self._prepared_uv(t)
         a = ANCHOR_PX / self.size
@@ -841,7 +869,7 @@ class TextureSet:
             'uv', np.concatenate([P, quads.reshape(-1, 2), anchors]).astype(np.float32).ravel())
         # faces packed: the real faces of normal islands, the proxy quads of proxy islands, the anchors; zero-area
         # islands are not packed (Blender packs only selected faces and leaves the others untouched: measured)
-        packed = ~self.zero_area & ~self.fixed  # pinned islands kept (decision 157) are not packed either
+        packed = ~self.off & ~self.fixed  # pinned islands kept (decision 157) are not packed either
         fsel = np.concatenate([(packed & ~self.proxy)[self.face_island], packed & self.proxy, np.ones(2, bool)])
         me.polygons.foreach_set('select', fsel)
         vsel = np.zeros(len(me.vertices), bool)
@@ -893,25 +921,34 @@ class TextureSet:
             ca, sa = np.cos(ang[li]), np.sin(ang[li])
             d = P[pl] - c0[li]
             Q[pl] = np.stack([ca * d[:, 0] - sa * d[:, 1], sa * d[:, 0] + ca * d[:, 1]], 1) + c1[li]
-        zl = (self.zero_area | self.fixed)[self.loop_isl]
-        Q[zl] = self.uv0[zl]
+        Q = self._kept(Q)
         k, ext = self._extent(Q)
         return Q, k, ext, P
 
+    def _kept(self, Q):
+        """Q with the islands that are not packed at their own UVs: those without UV area and those set aside as they
+        are, the kept pinned islands in the target area's frame."""
+        zl = self.off[self.loop_isl]
+        Q[zl] = self.uv0[zl]
+        fl = self.fixed[self.loop_isl]
+        Q[fl] = self.uv0[fl] - self.origin
+        return Q
+
     def _extent(self, Q):
-        """(k, extent px (x, y)) of a layout: how far the packed islands reach from the UV origin."""
-        Qp = Q[~self.zero_area[self.loop_isl]]
+        """(k, extent px (x, y)) of a layout: how far the packed islands reach from the area's corner; k against the
+        target area (the whole texture without one, decision 158)."""
+        Qp = Q[~self.off[self.loop_isl]]
         ext = Qp.max(0) * self.size
         if Qp.min() < -1e-7:
             ext = ext + np.maximum(0, -Qp.min(0) * self.size)
-        return float(ext.max()) / self.size, ext
+        return float((ext / self.area_px).max()), ext
 
     def fill(self, Q):
         """The same islands at the same scale, placed on the raster so that small islands use the free space inside
         and beside the large ones (uv_fill), from the orientation Pack Islands gave them: Upright and Flip islands do
         not turn; every other island may turn by 90 degrees, in a Quarter set as well. Returns (UVs, k, extent px), or
         None when the raster could not hold them."""
-        laid = ~self.zero_area
+        laid = ~self.off
         keep = laid & ~self.fixed
         if not keep.any():
             return None
@@ -927,12 +964,13 @@ class TextureSet:
     def repair(self, Q):
         """The islands of layout Q outside the texture moved into its free space (uv_fill.repair, decision 156). Returns
         (UVs, islands placed inside, islands left outside (a mask), their area in px^2), or None when none was outside."""
-        keep = ~self.zero_area
+        keep = ~self.off
         px = self.px(Q)
         kt = keep[self.tri_isl]
+        aside = None if self.overflow_at is None else (self.overflow_at - self.origin) * self.size  # in the area's frame
         moved, turns, origin, offset, outside, outside_px2 = uv_fill.repair(
-            px[self.TLt][kt], self.tri_isl[kt], self.n, keep, ~self.upright, self.margin_px + MARGIN_EXTRA, self.size,
-            fixed=self.fixed)
+            px[self.TLt][kt], self.tri_isl[kt], self.n, keep, ~self.upright, self.margin_px + MARGIN_EXTRA,
+            self.area_px, fixed=self.fixed, aside=aside)
         if not moved.any():
             return None
         F = uv_fill.apply(px, self.loop_isl, moved, turns, origin, offset) / self.size
@@ -1033,8 +1071,10 @@ def pack_set(ts, progress=None):
             shape = 'AABB'
     row.update(mode=mode, packs=packs, shape_method=shape, filled=res['filled'], repaired=res['repaired'],
                placed_islands=res['placed'], outside_islands=res['outside'],
-               outside_area_pct=100.0 * res['outside_px2'] / float(ts.size * ts.size),
-               pinned_islands=int(ts.pinned.sum()), kept_pinned=bool(ts.fixed.any()),
+               outside_area_pct=100.0 * res['outside_px2'] / float(ts.area_px.prod()),
+               pinned_islands=int(ts.pinned.sum()), kept_pinned=bool((ts.fixed | ts.aside).any()),
+               pinned_aside=int(ts.aside.sum()), area=list(ts.area),
+               overflow_at=None if ts.overflow_at is None else ts.overflow_at.tolist(),
                pinned_conflicts=int(pinned_violations + pinned_overlaps),
                proxy_islands=0 if res['filled'] else int(ts.proxy.sum()))
     return res, mode, row
@@ -1047,13 +1087,13 @@ def evaluate(ts, res):
     px = ts.px(res['Q'])
     tri = px[ts.TLt]
     seg = px[ts.seg_loops]
-    kt = ~ts.zero_area[ts.tri_isl]
-    ks = ~ts.zero_area[ts.seg_isl]
+    kt = ~ts.off[ts.tri_isl]
+    ks = ~ts.off[ts.seg_isl]
     m, offenders = layout_metrics(tri[kt], ts.tri_isl[kt], seg[ks], ts.seg_isl[ks], ts.n, ts.margin_px)
     # density per island against its range (degenerate, collapsed and zero-area islands have none)
     a_uv = np.bincount(ts.tri_isl, weights=tri_area(tri), minlength=ts.n)
     d = np.sqrt(a_uv / np.maximum(ts.a3, 1e-30))
-    ok = ~ts.degenerate & ~ts.collapsed & ~ts.zero_area & ~ts.fixed  # a kept pinned island keeps its density
+    ok = ~ts.degenerate & ~ts.collapsed & ~ts.off & ~ts.fixed  # a kept pinned island keeps its density
     dev = np.maximum(np.where(d < ts.lo, (ts.lo - d) / ts.lo, 0.0), np.where(d > ts.hi, (d - ts.hi) / ts.hi, 0.0))[ok]
     big = a_uv[ok] >= 100.0
     up_err = 0.0
@@ -1068,13 +1108,13 @@ def evaluate(ts, res):
             up_err = float(np.abs(ang).max())
     k = res['k']
     need, fits = needed_size(k, ts.size)
-    area_px = float(a_uv[~ts.zero_area].sum())
+    area_px = float(a_uv[~ts.off].sum())
     m.update({
         't': res['t'], 'k': k, 'extent_px': [float(res['ext'][0]), float(res['ext'][1])],
         'needed_size': need, 'fits_8192': fits,
         # fill of the needed size; beyond 8192 of the layout's k square (never above 100 % unless islands overlap)
         'fill_pct': 100.0 * area_px / ((need if need else k * ts.size) ** 2),
-        'fill_current_pct': 100.0 * area_px / (ts.size * ts.size),
+        'fill_current_pct': 100.0 * area_px / float(ts.area_px.prod()),  # of the target area
         'density_out_of_range_max': float(dev.max()) if len(dev) else 0.0,
         'density_out_of_range_max_ge100px': float(dev[big].max()) if big.any() else 0.0,
         'density_out_of_range_mean': float((dev * ts.a3[ok]).sum() / max(ts.a3[ok].sum(), 1e-30)) if len(dev) else 0.0,
@@ -1084,22 +1124,28 @@ def evaluate(ts, res):
 
 
 def aligned_to_corner(ts, Q, corner, outside=None):
-    """The layout Q moved as one block to a corner of the texture, by whole pixels, as far from that corner's edges as
-    the layout was from the origin's. Islands without UV area keep their UVs (they do not take part in the layout).
-    BOTTOM_LEFT, the layout's own corner, moves nothing. outside: the islands left beyond the edge (decision 156), which
-    move along but do not count for the block's bounds."""
-    keep = ~ts.zero_area[ts.loop_isl]
+    """The layout Q (in the target area's frame) moved as one block to a corner of the area, by whole pixels, as far
+    from that corner's edges as the layout was from the origin's, and then into the area (decision 158). Islands
+    without UV area and kept pinned islands keep their UVs. BOTTOM_LEFT, the layout's own corner, moves nothing.
+    outside: the islands left beyond the edge (decision 156), which move along but do not count for the block's bounds;
+    with an overflow position they stay where the repair put them."""
+    keep = ~ts.off[ts.loop_isl]
     bounds = keep if outside is None else keep & ~outside[ts.loop_isl]
     if not bounds.any():  # every island beyond the edge
         bounds = keep
     lo, hi = Q[bounds].min(0), Q[bounds].max(0)
+    width, height = ts.area[2:]
     shift = np.zeros(2)
     if corner.endswith('RIGHT'):
-        shift[0] = np.floor((1.0 - lo[0] - hi[0]) * ts.size) / ts.size
+        shift[0] = np.floor((width - lo[0] - hi[0]) * ts.size) / ts.size
     if corner.startswith('TOP'):
-        shift[1] = np.floor((1.0 - lo[1] - hi[1]) * ts.size) / ts.size
+        shift[1] = np.floor((height - lo[1] - hi[1]) * ts.size) / ts.size
     moved = Q.copy()
-    moved[keep] += shift
+    block = keep if outside is None or ts.overflow_at is None else keep & ~outside[ts.loop_isl]
+    moved[block] += shift
+    moved[keep] += ts.origin
+    fl = ts.fixed[ts.loop_isl]
+    moved[fl] = ts.uv0[fl]  # exactly as they were
     return moved
 
 
@@ -1365,6 +1411,20 @@ def _shared_lines(r):
     return lines
 
 
+def has_area(r):
+    """A result packed into a target area smaller than the texture (decision 158)."""
+    return tuple(r.get('area', (0.0, 0.0, 1.0, 1.0))) != (0.0, 0.0, 1.0, 1.0)
+
+
+def area_text(r):
+    """The texture, or the target area in pixels: 'x 0 y 512, 1024 x 512 of 2048'."""
+    size = r['size']
+    if not has_area(r):
+        return f'{size} x {size}'
+    x, y, w, h = (round(v * size) for v in r['area'])
+    return f'x {x} y {y}, {w} x {h} of {size}'
+
+
 def _set_block(r, selected=None):
     lines = [f"## {r['set']}: {result_text(r)}"]
     if r['mode'] == 'kept':
@@ -1383,7 +1443,7 @@ def _set_block(r, selected=None):
         f"  t {r['t']:.3f}, k {r['k']:.3f} (layout {r['extent_px'][0]:.0f} x {r['extent_px'][1]:.0f} px), "
         f"needed {need_text}",
         f"  Fill {r['fill_pct']:.1f} % of {'the needed size' if need else 'the layout'} "
-        f"({r['fill_current_pct']:.1f} % of {size} x {size})",
+        f"({r['fill_current_pct']:.1f} % of {area_text(r)})",
         f"  Smallest gap {'more than 2 x margin' if gap is None else f'{gap:.2f} px'}; "
         f"margin violations {r['margin_violations']}, overlapping triangle pairs {r['overlap_tri_pairs']}",
         f"  Density outside its range: max {100 * r['density_out_of_range_max']:.2f} % "
@@ -1394,6 +1454,13 @@ def _set_block(r, selected=None):
         + (f", {r['upright_islands']} upright" if r['upright_islands'] else '')
         + (', quarter turns only' if r['quarter'] else ''),
     ]
+    if has_area(r):
+        lines.append(f"  Target area {area_text(r)}; k and the needed size against it"
+                     + (f"; islands that do not fit start at u {r['overflow_at'][0]:.3f}, v {r['overflow_at'][1]:.3f}"
+                        if r.get('overflow_at') else ''))
+    if r.get('pinned_aside'):
+        lines.append(f"  {r['pinned_aside']} kept pinned island(s) left as they are, not in the layout"
+                     + (': the target area is packed as if empty' if has_area(r) else ': outside the texture'))
     if r.get('pinned_islands'):
         if r.get('kept_pinned'):
             lines.append(f"  Pinned islands kept as they are: {r['pinned_islands']}; the others packed around them"
@@ -1403,8 +1470,10 @@ def _set_block(r, selected=None):
             lines.append(f"  {r['pinned_islands']} pinned island(s) packed like the others (Keep Pinned Islands is off)")
     if r.get('repaired'):
         lines.append(f"  Islands outside the texture moved into its free space: {r['placed_islands']}"
-                     + (f"; {r['outside_islands']} fit nowhere and lie beyond the right edge "
-                        f"({r['outside_area_pct']:.1f} % of the texture's area)" if r['outside_islands'] else ''))
+                     + (f"; {r['outside_islands']} fit nowhere and lie "
+                        f"{'at the overflow position' if r.get('overflow_at') else 'beyond the right edge'} "
+                        f"({r['outside_area_pct']:.1f} % of the {'target area' if has_area(r) else 'texture'}'s area)"
+                        if r['outside_islands'] else ''))
     if r.get('corner', 'BOTTOM_LEFT') != 'BOTTOM_LEFT':
         lines.append(f"  Layout moved to the corner {uv_marks.corner_label(r['corner'])}")
     if r['zero_area_islands']:

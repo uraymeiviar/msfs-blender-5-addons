@@ -190,7 +190,7 @@ def test_keep_pinned():
     pins[:2] = True  # two corners of the first quad
     me.uv_layers.active.pin.foreach_set('value', pins)
     before = uvs(obj).copy()
-    scene.fss_uv_keep_pinned = True
+    assert m.fss_uv_keep_pinned, 'Keep Pinned Islands is on by default'
     scene.fss_uv_pack_corner = 'TOP_RIGHT'
     r = uv_pack.pack(m)
     after = uvs(obj)
@@ -203,7 +203,7 @@ def test_keep_pinned():
     report = chr(10).join(uv_pack._set_block(r))
     assert 'Pinned islands kept as they are: 1' in report, report
     # Off: packed like the others, and the pins stay
-    scene.fss_uv_keep_pinned = False
+    m.fss_uv_keep_pinned = False
     r = uv_pack.pack(m)
     assert not r['kept_pinned'] and r['pinned_islands'] == 1 and ok(r), r
     assert not np.allclose(uvs(obj)[:4], before[:4]), "Keep Pinned Islands off: the pinned island is packed"
@@ -211,7 +211,8 @@ def test_keep_pinned():
     got = np.zeros(len(me.loops), bool)
     me.uv_layers.active.pin.foreach_get('value', got)
     assert np.array_equal(got, pins), "the pins themselves must stay"
-    # The tick sits above Pack All
+    # The tick sits in the set's block, above Pack All
+    m.fss_uv_keep_pinned = True
     obj.select_set(True)
     bpy.context.view_layer.objects.active = obj
     calls, _labels = draw_panel()
@@ -220,6 +221,95 @@ def test_keep_pinned():
     scene.fss_uv_pack_corner = 'BOTTOM_LEFT'
     print("PASS: test_keep_pinned (pinned island unchanged, four packed around it at 20.48 px/cm, corner not moved; "
           "off: packed, pins kept; the tick above Pack All)")
+
+
+def test_target_area():
+    """Decision 158: a texture set with Target Area is packed into that part of its texture at the same density; the
+    islands that do not fit start at the overflow position; a kept pinned island outside the area stays out of it."""
+    reset()
+    scene = bpy.context.scene
+    m = mat('AREA', 1024)
+    assert uv_marks.target_area(m, 1024) == (0.0, 0.0, 1.0, 1.0) and uv_marks.overflow_at(m) is None
+    m.fss_uv_area_use = True
+    m.fss_uv_area = (0.9, 0.2, 0.5, 0.3)  # wider than what is left of the texture: clamped, on whole pixels
+    x, y, w, h = uv_marks.target_area(m, 1024)
+    assert (round(x * 1024), round(y * 1024), round(w * 1024), round(h * 1024)) == (922, 205, 102, 307), (x, y, w, h)
+    area = (0.5, 0.25, 0.25, 0.5)  # 256 x 512 px
+    m.fss_uv_area = area
+    m.fss_uv_overflow_at = (0.0, 0.8)
+    lo_a, hi_a = np.array(area[:2]), np.array(area[:2]) + np.array(area[2:])
+    # four quads of 5 cm (102.4 px): inside the area, at the density
+    rects = [(i * 0.2, 0, 0.05, 0.05) for i in range(4)]
+    obj = quad_obj('AREA', rects, mats=[m] * 4)
+    for corner in ('BOTTOM_LEFT', 'TOP_RIGHT'):
+        scene.fss_uv_pack_corner = corner
+        r = uv_pack.pack(m)
+        uv = uvs(obj)
+        assert r['mode'] == 'underflow' and ok(r) and r['k'] <= 1.0 and r['area'] == list(area), r
+        assert (uv >= lo_a - 1e-6).all() and (uv <= hi_a + 1e-6).all(), (corner, uv.min(0), uv.max(0))
+        for q in uv.reshape(-1, 4, 2) * 1024:
+            assert abs(quad_density(q, 5.0, 5.0) - 20.48) / 20.48 < 1e-4
+        if corner == 'TOP_RIGHT':  # the far corner of the area, not of the texture
+            assert (hi_a - uv.max(0) < 16 / 1024).all(), uv.max(0)
+        else:
+            assert (uv.min(0) - lo_a < 16 / 1024).all(), uv.min(0)
+    assert 'Target area x 512 y 256, 256 x 512 of 1024' in chr(10).join(uv_pack._set_block(r)), uv_pack._set_block(r)
+    assert abs(uv_marks.result_used(r) - r['extent_px'][0] * r['extent_px'][1] / (256 * 512)) < 1e-9
+    scene.fss_uv_pack_corner = 'BOTTOM_LEFT'
+    # a quad of 20 cm (409.6 px) fits nowhere in the area: it goes to the overflow position, the others stay inside
+    bpy.data.objects.remove(obj)
+    rects = [(i * 0.2, 0, 0.05, 0.05) for i in range(4)] + [(2, 0, 0.2, 0.2)]
+    obj = quad_obj('AREA_OVER', rects, mats=[m] * 5)
+    r = uv_pack.pack(m)
+    uv = uvs(obj)
+    assert r['mode'] == 'overflow' and r['outside_islands'] == 1, r
+    assert (uv[:16] >= lo_a - 1e-6).all() and (uv[:16] <= hi_a + 1e-6).all(), (uv[:16].min(0), uv[:16].max(0))
+    big = uv[16:]
+    assert (big.min(0) >= np.array([0.0, 0.8]) - 1e-6).all() and (big.min(0) < np.array([0.0, 0.8]) + 16 / 1024).all(), big
+    assert abs(quad_density(big * 1024, 20.0, 20.0) - 20.48) / 20.48 < 1e-4
+    assert 'at the overflow position' in chr(10).join(uv_pack._set_block(r))
+    # Keep Pinned Islands (decision 159): pinned islands keep their UVs and are no obstacle, inside the area too; the
+    # others go into the area as if it were empty, and the layout corner applies
+    bpy.data.objects.remove(obj)
+    rects = [(i * 0.2, 0, 0.05, 0.05) for i in range(4)] + [(2, 0, 0.1, 0.1), (3, 0, 0.1, 0.1)]
+    uv_rects = [(0.0, 0.0, 0.05, 0.05)] * 4 + [(0.05, 0.05, 0.2, 0.2), (0.55, 0.3, 0.1, 0.1)]
+    obj = quad_obj('AREA_PIN', rects, mats=[m] * 6, uv_rects=uv_rects)
+    me = obj.data
+    if len(me.uv_layers.active.pin) == 0:
+        me.attributes.new(name='.pn.' + me.uv_layers.active.name, type='BOOLEAN', domain='CORNER')
+    pins = np.zeros(len(me.loops), bool)
+    pins[[16, 20]] = True  # one pinned island outside the area, one inside it
+    me.uv_layers.active.pin.foreach_set('value', pins)
+    before = uvs(obj).copy()
+    assert m.fss_uv_keep_pinned
+    scene.fss_uv_pack_corner = 'TOP_LEFT'
+    r = uv_pack.pack(m)
+    uv = uvs(obj)
+    assert np.array_equal(uv[16:], before[16:]) and r['pinned_aside'] == 2 and r['kept_pinned'], r
+    assert r['mode'] == 'underflow' and ok(r) and r['corner'] == 'TOP_LEFT', r
+    assert (uv[:16] >= lo_a - 1e-6).all() and (uv[:16] <= hi_a + 1e-6).all(), (uv[:16].min(0), uv[:16].max(0))
+    assert uv[:16, 0].min() - lo_a[0] < 16 / 1024 and hi_a[1] - uv[:16, 1].max() < 16 / 1024, uv[:16]  # top left
+    assert 'the target area is packed as if empty' in chr(10).join(uv_pack._set_block(r))
+    scene.fss_uv_pack_corner = 'BOTTOM_LEFT'
+    # the panel: the highlighted set's tick beside Keep Pinned Islands, its grid when ticked
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    bpy.context.window_manager.fss_uv_pack_active_name = m.name
+    calls, labels = draw_panel()
+    props = [(args[1], kw.get('index')) for name, args, kw in calls if name == 'prop' and args[0] == m]
+    assert ('fss_uv_area_use', None) in props, props
+    assert [p for p in props if p[0] in ('fss_uv_area', 'fss_uv_overflow_at')] == [
+        ('fss_uv_area', 0), ('fss_uv_area', 2), ('fss_uv_overflow_at', 0),
+        ('fss_uv_area', 1), ('fss_uv_area', 3), ('fss_uv_overflow_at', 1)], props
+    names = [(name, args[1] if name == 'prop' else args[0]) for name, args, _kw in calls if name in ('prop', 'operator')]
+    assert names.index(('prop', uv_marks.AREA_USE_PROP)) < names.index(('operator', 'fss.uv_pack_all')), names
+    m.fss_uv_area_use = False
+    calls, labels = draw_panel()
+    assert not [1 for name, args, kw in calls if name == 'prop' and args[1] == 'fss_uv_area'], 'no grid when unticked'
+    bpy.context.window_manager.fss_uv_pack_active_name = ''
+    print("PASS: test_target_area (clamped on pixels; 4 quads inside the area at 20.48 px/cm on two corners; overflow "
+          "at its position; pinned islands inside and outside the area kept and no obstacle, the corner applied; the "
+          "grid when ticked)")
 
 
 def test_exact_density():
@@ -580,9 +670,9 @@ def draw_panel(cls_name='FSS_PT_uv_marks'):
 
 
 def draw_row(material):
-    """The texture set list's row of a material, through FSS_UL_TextureSets.draw_item."""
+    """The block of a texture set in the Packing section (decision 159), through uv_marks.draw_texture_set."""
     calls = []
-    uv_marks.FSS_UL_TextureSets.draw_item(None, bpy.context, _Layout(calls), bpy.data, material, 0, None, '', 0)
+    uv_marks.draw_texture_set(_Layout(calls), bpy.context, material)
     return calls
 
 
@@ -594,27 +684,36 @@ def test_panel_rows():
     r = uv_pack.measure(shared)
     uv_marks._results['SHARED'] = r
     calls, labels = draw_panel()
-    lists = [(args, kw) for name, args, kw in calls if name == 'template_list']
-    assert lists == [(('FSS_UL_texture_sets', '', bpy.data, 'materials', bpy.context.window_manager,
-                       'fss_uv_pack_active'), {'rows': 3})], lists  # as many rows as sets, up to 5
-    # the list's rows: the selection's texture sets, the active object's first
+    assert not [1 for name, _a, _kw in calls if name == 'template_list'], "no list: a block per texture set"
+    # the blocks: the selection's texture sets, the active object's first
     assert [m_.name for m_ in uv_marks.texture_set_materials(bpy.context)] == ['SHARED', 'PRIVATE', 'FUR']
+    blocks = [args[1].material for name, args, _kw in calls if name == '_op' and args[0] == 'fss.uv_pack_texture_set']
+    assert blocks == ['SHARED', 'PRIVATE', 'FUR'], blocks
     assert not [label for label in labels if label and label.startswith('Texture set: ')] and 'Last run' not in labels
-    material_props = {uv_marks.MATERIAL_TICK_PROP, uv_marks.MATERIAL_FACTOR_PROP, uv_marks.MATERIAL_VIS_PROP}  # the Material rows
-    assert not [1 for name, args, _kw in calls if name == 'prop' and isinstance(args[0], bpy.types.Material) and args[1] not in material_props]
     ops = [kw.get('text') for name, _a, kw in calls if name == 'operator' and kw.get('text')]
-    # SHARED and PRIVATE; FUR is Keep UVs; no row highlighted, so the Problems list has a hint and no Recheck
-    assert ops == ['Check', 'SHARED', 'PRIVATE', 'SEL_A', 'Pack All (2)'], ops
+    # the table's Material rows SHARED and PRIVATE, the object, then the blocks; FUR is Keep UVs; no set highlighted,
+    # so the Problems list has a hint and no Recheck
+    assert ops == ['Check', 'SHARED', 'PRIVATE', 'SEL_A', 'SHARED', 'Pack', 'PRIVATE', 'Pack', 'FUR', 'Pack',
+                   'Pack All (2)'], ops
     assert "Click a texture set's name to see its problems" in labels, labels
     for material, kept in ((shared, False), (private, False), (fur, True)):
         row = draw_row(material)
-        props = [(args[1], kw) for name, args, kw in row if name == 'prop']
-        assert props == [('fss_uv_keep_uvs', {'text': '', 'invert_checkbox': True}), ('fss_uv_texture_size', {'text': ''}),
-                         ('fss_uv_margin_px', {'text': ''})], props
+        props = [args[1] for name, args, kw in row if name == 'prop']
+        assert props == ['fss_uv_keep_uvs', 'fss_uv_set_open', 'fss_uv_texture_size', 'fss_uv_margin_px',
+                         'fss_uv_keep_pinned', 'fss_uv_area_use'], props
         texts = [kw.get('text') for name, _a, kw in row if name == 'operator']
         assert texts == ['', material.name, 'Pack'], texts
         packs = [args[1].material for name, args, _kw in row if name == '_op' and args[0] == 'fss.uv_pack_texture_set']
         assert packs == [material.name], packs
+    # a closed block shows only its head
+    private.fss_uv_set_open = False
+    assert [args[1] for name, args, kw in draw_row(private) if name == 'prop'] == ['fss_uv_keep_uvs', 'fss_uv_set_open']
+    private.fss_uv_set_open = True
+    # the highlighted set's name is drawn pressed
+    bpy.context.window_manager.fss_uv_pack_active_name = 'PRIVATE'
+    pressed = [kw.get('depress') for name, _a, kw in draw_row(private) if name == 'operator' and kw.get('text') == 'PRIVATE']
+    assert pressed == [True], pressed
+    bpy.context.window_manager.fss_uv_pack_active_name = ''
     # the name's tooltip: the last run and what is wrong; the warning icon
     tip = uv_marks.FSS_OT_UvTextureSetInfo.description(bpy.context, SimpleNamespace(material='SHARED'))
     assert uv_pack.result_text(r) + ' (checked)' in tip and tip.startswith('SHARED'), tip
@@ -658,8 +757,9 @@ def test_panel_rows():
         uv_marks._progress = None
     # half of the second of three sets
     assert [abs(kw['factor'] - 0.5) < 1e-9 for name, _a, kw in calls if name == 'progress'] == [True], calls
-    print("PASS: test_panel_rows (a table of 3 texture sets with tick, select, size, margin and Pack; the last run in "
-          "the tooltip; Pack All (2); progress only while running)")
+    print("PASS: test_panel_rows (a block per texture set with tick, open, select, name and Pack, then size, margin, "
+          "Keep Pinned Islands and Target Area; closed shows the head; the highlighted name pressed; the last run in the "
+          "tooltip; Pack All (2); progress only while running)")
 
 
 def test_check_results():
@@ -788,23 +888,13 @@ def test_texture_set_list():
         obj.select_set(obj in (a, b))
     bpy.context.view_layer.objects.active = b
     expected = ['EXTRA_B'] + [f'MANY_{index}' for index in range(7)]
-    flags, order = uv_marks.texture_set_rows(bpy.context, bpy.data.materials)
-    materials = list(bpy.data.materials)
-    assert sorted(order) == list(range(len(materials))), order  # a permutation: Blender's new index per item
-    shown = [materials[i].name for _o, i in sorted((order[i], i) for i in range(len(materials)) if flags[i])]
-    assert shown == expected, shown
-    # through the list class (as Blender calls it while drawing), with the name filter
-    bit = 1 << 30  # UIList.bitflag_filter_item (UILST_FLT_ITEM), an instance attribute only
-    ul = SimpleNamespace(bitflag_filter_item=bit, filter_name='')
-    flt, neworder = uv_marks.FSS_UL_TextureSets.filter_items(ul, bpy.context, bpy.data, 'materials')
-    assert sorted(m_.name for m_, f in zip(materials, flt) if f) == sorted(expected) and neworder == order
-    ul.filter_name = 'MANY_1'
-    flt, _order = uv_marks.FSS_UL_TextureSets.filter_items(ul, bpy.context, bpy.data, 'materials')
-    assert [m_.name for m_, f in zip(materials, flt) if f] == ['MANY_1'], flt
-    # drawing wrote nothing: the material count and the active index are unchanged
+    assert [m_.name for m_ in uv_marks.texture_set_materials(bpy.context)] == expected
+    # drawing wrote nothing: the material count and the active index are unchanged; a block per set, in that order
     before = (len(bpy.data.materials), bpy.context.window_manager.fss_uv_pack_active)
     calls, labels = draw_panel()
     assert (len(bpy.data.materials), bpy.context.window_manager.fss_uv_pack_active) == before
+    blocks = [args[1].material for name, args, _kw in calls if name == '_op' and args[0] == 'fss.uv_pack_texture_set']
+    assert blocks == expected, blocks
     assert not [label for label in labels if label and 'more' in label], labels
     # the active row is kept by name: a new material moving the indices of bpy.data.materials keeps it
     wm = bpy.context.window_manager
@@ -814,19 +904,15 @@ def test_texture_set_list():
     assert wm.fss_uv_pack_active != index_before and bpy.data.materials[wm.fss_uv_pack_active].name == 'MANY_3'
     bpy.data.materials['MANY_3'].name = 'MANY_3_RENAMED'  # a renamed material has no highlighted row any more
     assert wm.fss_uv_pack_active == -1
-    # A button on each row selects the objects using that row's material; the panel below the list has none
-    calls = []
-    uv_marks.FSS_UL_TextureSets.draw_item(None, bpy.context, _Layout(calls), bpy.data, bpy.data.materials['EXTRA_B'], 0, None, '', 0)
-    buttons = [args[1] for name, args, _kw in calls if name == '_op' and args[0] == 'fss.materials_select']
-    assert [button.material for button in buttons] == ['EXTRA_B'], calls
-    calls, _labels = draw_panel()
-    below_list = calls[[name for name, _args, _kw in calls].index('template_list'):]  # the table's Material rows are above it
-    assert not any(name in ('operator', '_op') and args[0] == 'fss.materials_select' for name, args, _kw in below_list), below_list
+    # A button on each block selects the objects using that set's material
+    buttons = [args[1] for name, args, _kw in draw_row(bpy.data.materials['EXTRA_B'])
+               if name == '_op' and args[0] == 'fss.materials_select']
+    assert [button.material for button in buttons] == ['EXTRA_B'], buttons
     assert bpy.ops.fss.materials_select(material='EXTRA_B') == {'FINISHED'}
     assert [obj.name for obj in bpy.context.selected_objects] == ['MANY_B'] and bpy.context.view_layer.objects.active.name == 'MANY_B'
     print(f"PASS: test_texture_set_list ({len(expected)} texture sets of 2 selected objects listed, the active "
-          "object's first; NOT_SELECTED filtered out; the name filter works; drawing writes nothing; the active row "
-          "follows its material when indices move)")
+          "object's first; NOT_SELECTED left out; drawing writes nothing; the highlighted set follows its material "
+          "when indices move)")
 
 
 def test_uv_editor_panel():
@@ -1882,6 +1968,7 @@ def main():
     test_fill_fallbacks()
     test_repair()
     test_keep_pinned()
+    test_target_area()
     test_exact_density()
     test_material_factor()
     test_underflow_and_sizes()

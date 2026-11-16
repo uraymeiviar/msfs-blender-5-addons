@@ -319,10 +319,12 @@ def test_panel():
     assert not any(owner == scene and name == uv_marks.OWN_PROP for owner, name, _text in props)
     texts = [kwargs.get('text') for name, _args, kwargs in calls if name == 'operator' and kwargs.get('text')]
     # top to bottom: scene, zone, marked parent, direct parent, object; then the texture set (EMPTY_ROOT_TEST is above the zone)
-    # no texture set row highlighted: the Problems list has only its hint
-    assert texts == ['Check', 'FWD', 'DOOR_L', 'PANEL', 'KNOB_MAT_0', 'KNOB', 'Pack All (7)'], texts
+    # a block per texture set (name, Pack); no texture set highlighted: the Problems list has only its hint
+    blocks = [text for index in range(7) for text in (f'KNOB_MAT_{index}', 'Pack')]
+    assert texts == ['Check', 'FWD', 'DOOR_L', 'PANEL', 'KNOB_MAT_0', 'KNOB'] + blocks + ['Pack All (7)'], texts
     # every icon of a row is a button with a tooltip
-    hints = [kwargs['icon'] for name, _args, kwargs in calls if name == 'operator' and kwargs.get('emboss') is False]
+    hints = [kwargs['icon'] for name, _args, kwargs in calls if name == 'operator' and kwargs.get('emboss') is False
+             and kwargs['icon'] in uv_marks.TABLE_ICONS.values()]
     assert hints == ['SCENE_DATA', 'OUTLINER_OB_EMPTY', 'ORIENTATION_PARENT', 'ORIENTATION_PARENT', 'MATERIAL', 'OBJECT_DATA',
                      'UV_ISLANDSEL'], hints
     assert all(uv_marks.FSS_OT_UvTableHint.description(bpy.context, SimpleNamespace(kind=kind))
@@ -333,9 +335,9 @@ def test_panel():
     assert colors == {'fss_uv_bar_track', 'fss_uv_bar_range', 'fss_uv_bar_mark'}, colors
     headings = [label for label in labels if label == 'Scene' or (label or '').startswith(('Object: ', 'Texture set: '))]
     assert headings == [], headings
-    # all 7 texture sets are in the list (a UIList over bpy.data.materials, filtered to the selection's)
-    assert [name for name, _args, _kwargs in calls].count('template_list') == 1 and not [
-        label for label in labels if label and label.startswith('... ')], labels
+    # all 7 texture sets have a block (decision 159), none cut off
+    packs = [kwargs.get('text') for name, _args, kwargs in calls if name == 'operator' and kwargs.get('text') == 'Pack']
+    assert len(packs) == 7 and not [label for label in labels if label and label.startswith('... ')], labels
     assert [m.name for m in uv_marks.texture_set_materials(bpy.context)] == [f'KNOB_MAT_{index}' for index in range(7)]
     # An unticked mark keeps its row, but no longer counts in the Result
     setattr(o['door'], uv_marks.OWN_PROP, False)
