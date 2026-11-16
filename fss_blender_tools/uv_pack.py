@@ -1,5 +1,5 @@
-"""UV packing per texture set: Blender's Pack Islands wrapped in our own steps (journal 20261019.automated-uv-unwrap.md,
-decisions 112 to 121; the method was measured with tests/uv_prototype/pack_density_proto.py, Sessions 97 and 98).
+"""UV packing per texture set with the FSS packer (journal 20261019.automated-uv-unwrap.md, decisions 112 to 121; the
+native UV packer journal 20261116.native-uv-packer.md, which replaced Blender's Pack Islands in step c).
 
 A texture set is every face of one material over all mesh objects of the view layer, selected or not (decisions 100
 and 114), with the mesh's active UV map; a mesh shared by several objects is packed once, with the material slots of
@@ -17,10 +17,11 @@ the others are packed around it. When written, the layout moves as one block to 
 scene's corner (decision 123, aligned_to_corner); k, the gaps and the densities are measured before that and do not
 change, and a layout that does not fit then spills past the edges opposite that corner.
 
-Packing runs on a temporary mesh per set with Pack Islands at scale=False, so the source objects' selection, modes,
-pins and active UV maps are never touched. Every pack of the search then places the same islands on a raster (uv_fill),
-into the free space inside closed shapes and beside large islands, which Pack Islands does not use; of the two layouts
-the smaller counts. pack() writes only the UVs of the set's faces back; measure() writes nothing. Islands without UV area (lines, points) are left out and keep their UVs. Textures are square (decision
+Packing works on arrays of the set's UVs, so the source objects' selection, modes, pins and active UV maps are never
+touched. Every pack of the search places the islands on a raster (uv_fill, in C++), into the free space between and
+inside each other, each island turned as its direction allows (native UV packer decisions 10 and 20): Upright not at
+all, Flip by 180 degrees, Quarter in 90-degree steps, Eighth in 45-degree steps, Free straightened by its tightest box
+and then as Quarter. pack() writes only the UVs of the set's faces back; measure() writes nothing. Islands without UV area (lines, points) are left out and keep their UVs. Textures are square (decision
 120). Triangles with 3D area but no UV area inside islands that have UV area (needles) push islands far out of the
 layout; the packer still packs and the report lists them (decision 118). The core takes a material, not the
 selection, so any way of choosing a texture set can call it. No UI here: the operators and the panel rows are in
@@ -38,14 +39,13 @@ from . import uv_fill, uv_marks, visibility_core  # uv_marks imports this module
 REPORT_TEXT_NAME = 'FSS Packing Report'
 MIN_SIZE, MAX_SIZE = 256, 8192  # square texture sizes (decisions 9, 110 and 120)
 GAP_TOL = 1e-3  # px: a gap below margin - GAP_TOL is a violation
-MARGIN_EXTRA = 0.1  # px added to the requested gap (Blender's ADD margin came out 0.016 px short of 2 x margin at 64 px)
-ANCHOR_PX = 0.5  # size of the two anchor triangles that set the ORIGINAL_AABB region, in px
+MARGIN_EXTRA = 0.1  # px added to the requested gap, so that rounding never leaves a gap just short of the margin
 ZERO_AREA_PX2 = 1e-6  # UV area in px^2 at or below which an island is a line or a point
 FLAT_RATIO = 1e-5  # UV area / UV bbox diagonal^2 at or below which an island is a line (Blender rescales those)
 COLLAPSE_Q = 20.0  # UV bbox diagonal / (3D bbox diagonal x density) at the area-based scale: above it, collapsed
-PROXY_ROUNDS = 3  # rounds of packing offending islands through their bounding box before the AABB fallback
+SCALE_PACKS = 10  # Scale to Fill: packs at most in the search for the largest scale that fits
+SCALE_TOL = 0.002  # Scale to Fill: the search stops when the largest fitting scale is known to this part
 PROGRESS_READ, PROGRESS_MEASURE, PROGRESS_WRITE = 0.05, 0.9, 0.95  # of a set's bar: where these stages begin
-FILL_MIN_GAIN = 1e-3  # the raster's layout counts when its side is smaller by this part (a single island: no reason)
 FACE_AREA_MIN_CM2 = 1e-6  # world-space face area in cm^2 at or below which a face has no area (decision 117)
 # UV area in px^2 of the set's texture at or below which a triangle with 3D area has none in UV (decision 118), the
 # island threshold applied per triangle (with FLAT_RATIO for lines, MeshData.uv_zero_faces). Measured on the cockpit:
@@ -513,8 +513,13 @@ def uv_zero_faces(md, users, faces, size, cm2_per_bu2):
     return faces[hit], len(np.unique(isl[hit]))
 
 
+# the turn set of each direction mark (uv_fill): Free islands are straightened first and then turn as Quarter ones
+TURN_SETS = {'UPRIGHT': uv_fill.UPRIGHT, 'FLIP': uv_fill.FLIP, 'QUARTER': uv_fill.QUARTER, 'EIGHTH': uv_fill.EIGHTH,
+             'FREE': uv_fill.QUARTER}
+
+
 class TextureSet:
-    """One material's islands with their density ranges, packed on a temporary mesh."""
+    """One material's islands with their density ranges and the arrays the packer works on."""
 
     def __init__(self, material, parts, scene, vis_cache):
         self.name = material.name if material is not None else '(no material)'
@@ -522,11 +527,15 @@ class TextureSet:
         self.size = uv_marks.texture_size(material)
         self.margin_px = int(uv_marks.margin(material))
         target = uv_marks.target_density(scene)
+        self.target = target
+        self.scale_fill = uv_marks.scale_to_fill(material)  # native UV packer decisions 9 and 19
+        self.scale = None  # with Scale to Fill: the factor of the pack being made
+        self.priority = uv_marks.priority(material)  # native UV packer decisions 18 and 21
+        self.groups = 0  # objects whose islands the last pack kept together
         material_factor = uv_marks.material_density(material)  # the same on every island of the set (decision 146)
         bu_cm = _cm_per_unit(scene)
         cm2 = bu_cm * bu_cm
         self.parts = parts
-        self.me = self.obj = None
         rows = []  # per island: part index, A_uv (px^2), A3 (cm^2), lo, hi, direction, UV bbox diag, 3D bbox diag
         self.face_isl = []  # per part: global island id per part face
         self.bl = []  # per part: boundary loops
@@ -635,10 +644,14 @@ class TextureSet:
         self.a3 = np.array([r[2] for r in rows])
         self.lo = np.array([r[3] for r in rows])
         self.hi = np.array([r[4] for r in rows])
+        # Scale to Fill (native UV packer decision 19): every mark at its Min (the scene's Min left out), the material
+        # factor, the visibility and a multiplier set by hand; facing and the Max are not used
+        scene_low = uv_marks.scene_freedom(scene)[0]
         self.vis = np.concatenate(factors) if factors else np.zeros(0)
         self.facing = np.concatenate(facings) if facings else np.zeros(0)
         self.override = np.concatenate(overrides) if overrides else np.zeros(0)
         self.override_mixed = np.concatenate(override_mixed) if override_mixed else np.zeros(0, bool)
+        self.fill_density = np.where(self.override > 0.0, self.lo, self.lo / max(scene_low, 1e-12))
         self.dirs = np.array([r[5] for r in rows])
         self.cur = np.sqrt(self.a_uv / np.maximum(self.a3, 1e-30))  # px/cm as the UVs sit on the texture
         self.p_uv = np.array([r[6] for r in rows])
@@ -658,16 +671,19 @@ class TextureSet:
         self.zero_area = without_uv_area(self.a_uv, self.p_uv)
         # triangles without UV area inside islands that have UV area (decision 118): packed, and reported
         self.uv_zero = (np.concatenate(uv_zero) if uv_zero else np.zeros(0, bool)) & ~self.zero_area
-        self.upright = np.isin(self.dirs, ['UPRIGHT', 'FLIP'])  # FLIP: pinned as UPRIGHT (no 180-degree rule)
+        self.upright = self.dirs == 'UPRIGHT'
         self.quarter = bool((self.dirs == 'QUARTER').any())
-        self.proxy = np.zeros(self.n, bool)  # islands packed through their proxy quad
-        self.use_fill = True  # try the raster layout next to Pack Islands' (uv_fill)
+        self.turn_set = np.array([TURN_SETS.get(d, uv_fill.QUARTER) for d in self.dirs.tolist()], np.uint8)
+        self.base = np.zeros(self.n)  # the angle that straightens a Free island (set in build_layout)
+        self.fallbacks = 0  # packs the raster could not hold: the islands left on shelves
+        self.member = np.full(self.n, -1, np.int64)  # per island the group of the last pack, -1: free
+        self.group_turn = np.zeros(0, np.uint8)  # per group the turn set of its rectangle
         self.use_repair = True  # move islands outside the texture into its free space (uv_fill.repair, decision 156)
         self.pinned = (np.concatenate(pinned) if pinned else np.zeros(0, bool)) & ~self.zero_area
         # Keep Pinned Islands (decision 157): they keep their UVs, the others are packed around them
         self.fixed = self.pinned & uv_marks.keep_pinned(material)
         self.aside = np.zeros(self.n, bool)  # kept pinned islands outside the target area: left out of the layout
-        self.off = self.zero_area.copy()  # islands that take no part in the layout (set again in build_temp)
+        self.off = self.zero_area.copy()  # islands that take no part in the layout (set again in build_layout)
         # the target area (decision 158): the layout is made in its frame, (0, 0) at its lower left corner, and moved
         # there when written; the area stands for the texture in every fit test
         self.area = uv_marks.target_area(material, self.size)
@@ -694,20 +710,17 @@ class TextureSet:
                 best[o.name] = max(best.get(o.name, 0.0), float(span[i]))
         return [name for name, _span in sorted(best.items(), key=lambda item: (-item[1], item[0]))]
 
-    # ---- temporary mesh ------------------------------------------------------------------------------------------
-    def build_temp(self):
-        verts, loops_v, loop_uv, face_start, face_isl = [], [], [], [], []
-        self.loop_src = []  # per part: original loop indices in temp loop order
-        voff = 0
+    # ---- the arrays of the layout ----------------------------------------------------------------------------------
+    def build_layout(self):
+        """The set's loops, triangles and boundary segments in one order (the parts one after the other), the islands
+        set aside, and the angle that straightens each Free island."""
+        loop_uv, face_start, face_isl = [], [], []
+        self.loop_src = []  # per part: original loop indices in the layout's loop order
         loff = 0
         for pi, (md, users, faces) in enumerate(self.parts):
             fmask = np.zeros(md.nf, bool)
             fmask[faces] = True
             lsel = np.flatnonzero(fmask[md.loop_face])
-            used, vremap = np.unique(md.LV[lsel], return_inverse=True)
-            M = np.array(users[0].matrix_world, dtype=np.float64)
-            verts.append(md.CO[used] @ M[:3, :3].T + M[:3, 3])
-            loops_v.append(vremap.ravel() + voff)
             loop_uv.append(md.UV[lsel])
             # faces of the part in loop order (loop_start ascending)
             fo = faces[np.argsort(md.PS[faces])]
@@ -716,41 +729,17 @@ class TextureSet:
             fi[faces] = self.face_isl[pi]
             face_isl.append(fi[fo])
             self.loop_src.append(lsel)
-            voff += len(used)
             loff += len(lsel)
         nl = loff
         self.n_loops = nl
         self.face_island = np.concatenate(face_isl)
         nf = len(self.face_island)
-        # one proxy quad per island (its bounding box, packed instead of the island when Blender's hull of the
-        # island fails), then two anchor triangles (set the ORIGINAL_AABB region)
-        n = self.n
-        self.n_extra = 4 * n + 6
-        V = np.concatenate(verts + [np.zeros((4 * n + 6, 3))])
-        LVt = np.concatenate(loops_v + [np.arange(voff, voff + 4 * n + 6)])
-        FS = np.concatenate(face_start + [nl + 4 * np.arange(n), np.array([nl + 4 * n, nl + 4 * n + 3])])
-        self.uv0 = np.concatenate(loop_uv)  # original UVs of the set, temp loop order
-        self.loop_face_t = np.repeat(np.arange(nf), np.diff(np.concatenate([FS[:nf], [nl]])))
+        FS = np.concatenate(face_start)
+        self.uv0 = np.concatenate(loop_uv)  # original UVs of the set, in the layout's loop order
+        self.loop_face_t = np.repeat(np.arange(nf), np.diff(np.concatenate([FS, [nl]])))
         self.loop_isl = self.face_island[self.loop_face_t]
-        me = bpy.data.meshes.new('FSS_PACK_TMP')
-        self.me = me
-        me.vertices.add(len(V))
-        me.vertices.foreach_set('co', V.astype(np.float32).ravel())
-        me.loops.add(nl + 4 * n + 6)
-        me.loops.foreach_set('vertex_index', LVt.astype(np.int32))
-        me.polygons.add(nf + n + 2)
-        me.polygons.foreach_set('loop_start', FS.astype(np.int32))
-        me.update(calc_edges=True)
-        me.uv_layers.new(name='UVMap')
-        ev = np.zeros(len(me.edges) * 2, np.int64)
-        me.edges.foreach_get('vertices', ev)
-        self.edge_verts = ev.reshape(-1, 2)
-        self.loop_vert_t = LVt  # vertex of each temp loop
-        self.loop_count_t = np.diff(np.concatenate([FS, [nl + 4 * n + 6]]))  # loops per temp face
-        self.obj = bpy.data.objects.new('FSS_PACK_TMP', me)
-        bpy.context.scene.collection.objects.link(self.obj)
         # triangles: the source meshes' own triangulation (a concave or folded UV n-gon has a different area under
-        # another triangulation), mapped to temp loops
+        # another triangulation), mapped to the layout's loops
         tl_all, ti_all, bl_t, bl_i = [], [], [], []
         off = 0
         for pi, lsel in enumerate(self.loop_src):
@@ -791,21 +780,28 @@ class TextureSet:
             self.aside = self.fixed & ~inside
             self.fixed = self.fixed & inside
             self.off = self.zero_area | self.aside
-
-    def remove_temp(self):
-        if self.obj is not None:
-            bpy.data.objects.remove(self.obj)
-        if self.me is not None:
-            bpy.data.meshes.remove(self.me)
-        self.obj = self.me = None
-        bpy.context.view_layer.update()  # else the view layer still lists the removed object (as None)
+        # Free islands straightened by their tightest box (native UV packer decision 20); the scale of a pack does not
+        # change the angle
+        free = (self.dirs == 'FREE') & ~self.off & ~self.fixed
+        if free.any():
+            self.base = uv_fill.straighten(self.px(self.uv0)[self.TLt], self.tri_isl, self.n, free)
 
     def px(self, uv):
         """UV -> pixels of the set's texture."""
         return uv * self.size
 
     def densities(self, t):
+        if self.scale is not None:  # Scale to Fill: one factor on the ratios, t not used
+            return self.fill_density * self.scale
         return self.lo + t * (self.hi - self.lo)
+
+    def ranges(self):
+        """(low, high) density per island that the layout must keep: the range, or with Scale to Fill the scaled
+        density."""
+        if self.scale is not None:
+            d = self.fill_density * self.scale
+            return d, d
+        return self.lo, self.hi
 
     def island_scale(self, t):
         """Linear UV scale per island for density t, 1.0 for degenerate islands."""
@@ -848,82 +844,106 @@ class TextureSet:
         P = P - lo[li] + off[li]
         return P, max(float(P[:, 0].max()), float(P[:, 1].max())) + g
 
-    def pack(self, t, shape_method='CONCAVE'):
-        """Pack at density t; returns (final UVs, k, extent px (x, y), prepared UVs)."""
+    def pack(self, t):
+        """Pack at density t with the FSS packer (uv_fill.place): every island that is not kept, at its density, turned as
+        its direction allows, around the kept pinned islands. Returns (final UVs, k, extent px (x, y), prepared UVs: the
+        islands scaled, as they were before the placement turned them). Should the raster hold no layout, the islands
+        stay on the shelves of the preparation, apart but loose (counted in fallbacks)."""
         if not (~self.off & ~self.fixed).any():  # every island kept: nothing to pack
             Q = self._kept(self.uv0.copy())
             return (Q, *self._extent(Q), Q)
-        P, r = self._prepared_uv(t)
-        a = ANCHOR_PX / self.size
-        anchors = np.array([[0, 0], [a, 0], [0, a], [r - a, r], [r, r - a], [r, r]], dtype=np.float64)
-        n = self.n
-        lo = np.full((n, 2), np.inf)
-        hi = np.full((n, 2), -np.inf)
-        np.minimum.at(lo, self.loop_isl, P)
-        np.maximum.at(hi, self.loop_isl, P)
-        lo = np.where(np.isfinite(lo), lo, 0.0)
-        hi = np.where(np.isfinite(hi), hi, 0.0)
-        quads = np.stack([lo, np.stack([hi[:, 0], lo[:, 1]], 1), hi, np.stack([lo[:, 0], hi[:, 1]], 1)], 1)
-        me = self.me
-        me.uv_layers['UVMap'].data.foreach_set(
-            'uv', np.concatenate([P, quads.reshape(-1, 2), anchors]).astype(np.float32).ravel())
-        # faces packed: the real faces of normal islands, the proxy quads of proxy islands, the anchors; zero-area
-        # islands are not packed (Blender packs only selected faces and leaves the others untouched: measured)
-        packed = ~self.off & ~self.fixed  # pinned islands kept (decision 157) are not packed either
-        fsel = np.concatenate([(packed & ~self.proxy)[self.face_island], packed & self.proxy, np.ones(2, bool)])
-        me.polygons.foreach_set('select', fsel)
-        vsel = np.zeros(len(me.vertices), bool)
-        vsel[self.loop_vert_t[np.repeat(fsel, self.loop_count_t)]] = True
-        me.vertices.foreach_set('select', vsel)
-        me.edges.foreach_set('select', vsel[self.edge_verts].all(1))
-        pins = np.zeros(self.n_loops + self.n_extra, bool)
-        use_pin = bool(self.upright.any())
-        if use_pin:
-            pins[:self.n_loops] = self.upright[self.loop_isl]
-            pins[self.n_loops:self.n_loops + 4 * n] = np.repeat(self.upright, 4)
-        if len(me.uv_layers['UVMap'].pin) == 0:  # the pin layer exists only once something is pinned
-            me.attributes.new(name='.pn.UVMap', type='BOOLEAN', domain='CORNER')
-        me.uv_layers['UVMap'].pin.foreach_set('value', pins)
-        vl = bpy.context.view_layer
-        for o in vl.objects:
-            if o.select_get():
-                o.select_set(False)
-        vl.objects.active = self.obj
-        self.obj.select_set(True)
-        tool = bpy.context.scene.tool_settings
-        sel_mode = tuple(tool.mesh_select_mode)
-        tool.mesh_select_mode = (False, False, True)
-        bpy.ops.object.mode_set(mode='EDIT')
-        try:
-            # margin ADD with scale=False leaves the margin around each island: the gap is twice the margin
-            bpy.ops.uv.pack_islands(udim_source='ORIGINAL_AABB', rotate=True,
-                                    rotate_method='CARDINAL' if self.quarter else 'ANY', scale=False,
-                                    merge_overlap=True, margin_method='ADD',
-                                    margin=(self.margin_px + MARGIN_EXTRA) * 0.5 / self.size,
-                                    pin=use_pin, pin_method='ROTATION', shape_method=shape_method)
-        finally:
-            bpy.ops.object.mode_set(mode='OBJECT')
-            tool.mesh_select_mode = sel_mode
-        out = np.zeros((self.n_loops + self.n_extra) * 2, np.float32)
-        me.uv_layers['UVMap'].data.foreach_get('uv', out)
-        out = out.reshape(-1, 2).astype(np.float64)
-        Q = out[:self.n_loops].copy()
-        if self.proxy.any():
-            # a proxy island follows its quad's rigid move (rotation of the first edge, move of the centre)
-            q1 = out[self.n_loops:self.n_loops + 4 * n].reshape(-1, 4, 2)
-            e0 = quads[:, 1] - quads[:, 0]
-            e1 = q1[:, 1] - q1[:, 0]
-            ang = np.arctan2(e1[:, 1], e1[:, 0]) - np.arctan2(e0[:, 1], e0[:, 0])
-            c0 = quads.mean(1)
-            c1 = q1.mean(1)
-            pl = self.proxy[self.loop_isl] & ~self.zero_area[self.loop_isl]
-            li = self.loop_isl[pl]
-            ca, sa = np.cos(ang[li]), np.sin(ang[li])
-            d = P[pl] - c0[li]
-            Q[pl] = np.stack([ca * d[:, 0] - sa * d[:, 1], sa * d[:, 0] + ca * d[:, 1]], 1) + c1[li]
-        Q = self._kept(Q)
+        P = self._kept(self._prepared_uv(t)[0])
+        laid = ~self.off
+        keep = laid & ~self.fixed
+        px = self.px(P)
+        groups = self._groups(keep, px)
+        self.groups = len(groups)
+        self.member = np.full(self.n, -1, np.int64)
+        self.group_turn = np.zeros(0, np.uint8)
+        if groups:
+            F = self._place_grouped(px, laid, keep, groups)
+        else:
+            kt = laid[self.tri_isl]
+            placed = uv_fill.place(px[self.TLt][kt], self.tri_isl[kt], self.n, keep, self.turn_set,
+                                   self.margin_px + MARGIN_EXTRA, fixed=self.fixed, base=self.base)
+            F = None if placed is None else uv_fill.apply(px, self.loop_isl, keep, *placed, base=self.base)
+        if F is None:
+            self.fallbacks += 1
+            Q = P.copy()
+        else:
+            if not self.fixed.any():
+                # the raster starts the layout at a whole cell beyond half the gap: slid back as one block to half the
+                # gap exactly (the gaps between islands do not change)
+                moving = keep[self.loop_isl]
+                F[moving] -= np.maximum(F[moving].min(0) - 0.5 * (self.margin_px + MARGIN_EXTRA), 0.0)
+            Q = self._kept(F / self.size)
         k, ext = self._extent(Q)
         return Q, k, ext, P
+
+    def _groups(self, keep, px):
+        """Object priority (native UV packer decisions 18 and 21): per object (a mesh, packed once for all its users)
+        the islands that stay together, its largest first until they hold the priority's share of its island area; 1:
+        every island, 0: none. A group of fewer than two islands is none. px: the scaled layout (pixels)."""
+        p = self.priority
+        if p <= 0.0:
+            return []
+        area = np.bincount(self.tri_isl, weights=tri_area(px[self.TLt]), minlength=self.n)
+        groups = []
+        for part in np.unique(self.part_of[keep]).tolist():
+            ids = np.flatnonzero(keep & (self.part_of == part))
+            ids = ids[np.lexsort((ids, -area[ids]))]
+            if p < 1.0:
+                a = area[ids]
+                before = np.cumsum(a) - a
+                ids = ids[before < p * a.sum()]
+            if len(ids) >= 2:
+                groups.append(ids)
+        return groups
+
+    def _place_grouped(self, px, laid, keep, groups):
+        """The layout (pixels, every loop) with each group packed on its own into its tightest layout, and then the
+        groups' rectangles placed as boxes with the islands that are free, around the kept pinned islands. A group's
+        rectangle turns only as all its islands may: Upright when one is, else Flip when one is, else Quarter. None when
+        a raster could not hold a layout."""
+        n = self.n
+        gap = self.margin_px + MARGIN_EXTRA
+        member = np.full(n, -1, np.int64)
+        F = px.copy()
+        rects, rect_turn = [], []
+        for g, ids in enumerate(groups):
+            member[ids] = g
+            inside = np.zeros(n, bool)
+            inside[ids] = True
+            kt = inside[self.tri_isl]
+            placed = uv_fill.place(px[self.TLt][kt], self.tri_isl[kt], n, inside, self.turn_set, gap, base=self.base)
+            if placed is None:
+                return None
+            lp = inside[self.loop_isl]
+            F[lp] = uv_fill.apply(px[lp], self.loop_isl[lp], inside, *placed, base=self.base)
+            lo, hi = F[lp].min(0), F[lp].max(0)
+            rects += [[lo, (hi[0], lo[1]), hi], [lo, hi, (lo[0], hi[1])]]
+            sets = self.turn_set[ids]
+            rect_turn.append(uv_fill.UPRIGHT if (sets == uv_fill.UPRIGHT).any()
+                             else uv_fill.FLIP if (sets == uv_fill.FLIP).any() else uv_fill.QUARTER)
+        G = len(groups)
+        self.member = member
+        self.group_turn = np.array(rect_turn, np.uint8)
+        free = keep & (member < 0)
+        kt = (laid & (member < 0))[self.tri_isl]  # the free islands and the kept pinned ones
+        tri = np.concatenate([px[self.TLt][kt], np.array(rects, np.float64)])
+        tri_isl = np.concatenate([self.tri_isl[kt], n + np.repeat(np.arange(G), 2)])
+        active = np.concatenate([free, np.ones(G, bool)])
+        base = np.concatenate([self.base, np.zeros(G)])
+        placed = uv_fill.place(tri, tri_isl, n + G, active, np.concatenate([self.turn_set, rect_turn]).astype(np.uint8),
+                               gap, fixed=np.concatenate([self.fixed, np.zeros(G, bool)]), base=base)
+        if placed is None:
+            return None
+        out = px.copy()
+        lf = free[self.loop_isl]
+        out[lf] = uv_fill.apply(px[lf], self.loop_isl[lf], active, *placed, base=base)
+        lg = (member >= 0)[self.loop_isl]
+        out[lg] = uv_fill.apply(F[lg], n + member[self.loop_isl[lg]], active, *placed, base=base)
+        return out
 
     def _kept(self, Q):
         """Q with the islands that are not packed at their own UVs: those without UV area and those set aside as they
@@ -943,47 +963,35 @@ class TextureSet:
             ext = ext + np.maximum(0, -Qp.min(0) * self.size)
         return float((ext / self.area_px).max()), ext
 
-    def fill(self, Q):
-        """The same islands at the same scale, placed on the raster so that small islands use the free space inside
-        and beside the large ones (uv_fill), from the orientation Pack Islands gave them: Upright and Flip islands do
-        not turn; every other island may turn by 90 degrees, in a Quarter set as well. Returns (UVs, k, extent px), or
-        None when the raster could not hold them."""
-        laid = ~self.off
-        keep = laid & ~self.fixed
-        if not keep.any():
-            return None
-        px = self.px(Q)
-        kt = laid[self.tri_isl]
-        placed = uv_fill.place(px[self.TLt][kt], self.tri_isl[kt], self.n, keep, ~self.upright,
-                               self.margin_px + MARGIN_EXTRA, fixed=self.fixed)
-        if placed is None:
-            return None
-        F = uv_fill.apply(px, self.loop_isl, keep, *placed) / self.size
-        return (F, *self._extent(F))
-
     def repair(self, Q):
-        """The islands of layout Q outside the texture moved into its free space (uv_fill.repair, decision 156). Returns
-        (UVs, islands placed inside, islands left outside (a mask), their area in px^2), or None when none was outside."""
-        keep = ~self.off
+        """The islands of layout Q outside the texture moved into its free space (uv_fill.repair, decision 156); the islands
+        of a group of the last pack (Object Priority) move as one piece, turned as its rectangle may. Returns (UVs,
+        islands placed inside, islands left outside (a mask), their area in px^2), or None when none was outside."""
+        n = self.n
+        G = len(self.group_turn)
+        unit = np.where(self.member >= 0, n + self.member, np.arange(n))  # per island: itself or its group
+        keep = np.concatenate([~self.off & (self.member < 0), np.ones(G, bool)])
         px = self.px(Q)
-        kt = keep[self.tri_isl]
+        kt = (~self.off)[self.tri_isl]
         aside = None if self.overflow_at is None else (self.overflow_at - self.origin) * self.size  # in the area's frame
         moved, turns, origin, offset, outside, outside_px2 = uv_fill.repair(
-            px[self.TLt][kt], self.tri_isl[kt], self.n, keep, ~self.upright, self.margin_px + MARGIN_EXTRA,
-            self.area_px, fixed=self.fixed, aside=aside)
+            px[self.TLt][kt], unit[self.tri_isl[kt]], n + G, keep, np.concatenate([self.turn_set, self.group_turn]),
+            self.margin_px + MARGIN_EXTRA, self.area_px, fixed=np.concatenate([self.fixed, np.zeros(G, bool)]),
+            aside=aside)
         if not moved.any():
             return None
-        F = uv_fill.apply(px, self.loop_isl, moved, turns, origin, offset) / self.size
-        return F, int((moved & ~outside).sum()), outside, outside_px2
+        F = uv_fill.apply(px, unit[self.loop_isl], moved, turns, origin, offset) / self.size
+        moved_isl, outside_isl = moved[unit], outside[unit]
+        return F, int((moved_isl & ~outside_isl).sum()), outside_isl, outside_px2
 
 
-def search(ts, shape_method, progress=None):
+def search(ts, progress=None):
     """Decision 156 (replacing the search of decision 113): pack at t = 1, the top of every island's range; islands outside
     the texture go into its free space (repair). Still some outside: pack once more at t = 0, every island at the bottom
     of its range, and repair again; still some outside: overflow. Never a density between them. Returns (the chosen pack,
     packs, mode)."""
     packs = []
-    most = 2
+    most = SCALE_PACKS if ts.scale_fill else 2
 
     def share(done):
         # of the bar: between reading the islands and measuring; a set that fits at once jumps ahead, as it should
@@ -991,18 +999,11 @@ def search(ts, shape_method, progress=None):
 
     def run(t):
         if progress is not None:
-            progress(f'Trying layout {len(packs) + 1} of at most {most}, at {t * 100:.0f} % of the density range', share(len(packs)))
-        Q, k, ext, P = ts.pack(t, shape_method=shape_method)
+            where = (f'scale x{ts.scale:.3f}' if ts.scale is not None else f'at {t * 100:.0f} % of the density range')
+            progress(f'Trying layout {len(packs) + 1} of at most {most}, {where}', share(len(packs)))
+        Q, k, ext, P = ts.pack(t)
         packs.append(t)
-        filled = None
-        if ts.use_fill:
-            if progress is not None:
-                progress(f'Placing islands into free space, layout {len(packs)}', share(len(packs) - 0.5))
-            filled = ts.fill(Q)
-        if filled is not None and filled[1] < k * (1.0 - FILL_MIN_GAIN):
-            r = {'t': t, 'Q': filled[0], 'k': filled[1], 'ext': filled[2], 'pre': P, 'filled': True}
-        else:
-            r = {'t': t, 'Q': Q, 'k': k, 'ext': ext, 'pre': P, 'filled': False}
+        r = {'t': t, 'Q': Q, 'k': k, 'ext': ext, 'pre': P}
         r.update(repaired=False, placed=0, outside=0, outside_px2=0.0, outside_isl=None)
         if (r['k'] > 1.0 or ts.fixed.any()) and ts.use_repair:  # kept pinned islands: also clear them
             if progress is not None:
@@ -1022,6 +1023,8 @@ def search(ts, shape_method, progress=None):
     def fits(r):
         return r['outside'] == 0 and r['k'] <= 1.0 + 1e-9
 
+    if ts.scale_fill:
+        return _search_scale(ts, run, fits, packs)
     r1 = run(1.0)
     if fits(r1):
         return r1, len(packs), 'underflow'
@@ -1031,16 +1034,44 @@ def search(ts, shape_method, progress=None):
     return r0, len(packs), 'fit' if fits(r0) else 'overflow'
 
 
+def _search_scale(ts, run, fits, packs):
+    """Scale to Fill (native UV packer decision 9): the largest scale of the density ratios at which every island that
+    is not kept fits the texture (or the target area). The layout grows about as the scale does: each pack aims just
+    inside from the last k, within the bracket of the largest scale that fitted and the smallest that did not, halved
+    when the aim leaves it. At most SCALE_PACKS packs; ends when the bracket is within SCALE_TOL. Returns (the chosen
+    pack, packs, 'scaled'), or the last pack and 'overflow' when no scale fitted."""
+    good = bad = None
+    scale = 1.0
+    r = None
+    for _ in range(SCALE_PACKS):
+        ts.scale = scale
+        r = run(1.0)
+        r['scale'] = scale
+        if fits(r):
+            if good is None or scale > good['scale']:
+                good = r
+        elif bad is None or scale < bad:
+            bad = scale
+        low = good['scale'] if good is not None else 0.0
+        if good is not None and bad is not None and bad <= low * (1.0 + SCALE_TOL):
+            break
+        aim = scale / max(r['k'], 1e-9) * (1.0 - 0.5 * SCALE_TOL)
+        if bad is not None and not low < aim < bad:
+            aim = math.sqrt(low * bad) if low > 0.0 else 0.5 * bad
+        elif bad is None and aim <= low * (1.0 + SCALE_TOL):
+            aim = low * 1.1  # the layout did not grow with the scale (kept pinned islands set its side): step up
+        scale = aim
+    if good is None:
+        ts.scale = r['scale']
+        return r, len(packs), 'overflow'
+    ts.scale = good['scale']
+    return good, len(packs), 'scaled'
+
+
 def pack_set(ts, progress=None):
-    """Search (decision 113) with Blender's CONCAVE shapes, then measure the layout. Islands named in a margin
-    violation or an overlap are packed through their proxy quad (bounding box; the island follows the quad's rigid
-    move) in the next round, up to PROXY_ROUNDS more rounds; then the whole set falls back to AABB shapes, whose
-    margin is exact. Measured on the cockpit: Blender's concave and convex margins cut corners (6.2 to 7.9 px for
-    8.1 px requested), and zero-area triangles inside an island are left out of its hull (the island lands on
-    others). Returns (chosen pack, mode, metrics)."""
-    packs = 0
-    shape = 'CONCAVE'
-    rounds = 0
+    """The search of decision 156, then the measure of the chosen layout. The raster keeps the gap by construction, so
+    there is one round (Blender's Pack Islands needed proxy islands and an AABB fallback). Returns (chosen pack, mode,
+    metrics)."""
     # pinned islands kept as the artist left them (decision 157): their own gaps and overlaps are not the packer's
     pinned_violations = pinned_overlaps = 0
     if ts.fixed.any():
@@ -1050,33 +1081,18 @@ def pack_set(ts, progress=None):
         base, _offenders = layout_metrics(px0[ts.TLt][kt], ts.tri_isl[kt], px0[ts.seg_loops][ks], ts.seg_isl[ks], ts.n,
                                           ts.margin_px)
         pinned_violations, pinned_overlaps = base['margin_violations'], base['overlap_tri_pairs']
-    keep_repair = bool(ts.fixed.any())  # it is what clears the kept pinned islands
-    while True:
-        res, n, mode = search(ts, shape, progress)
-        packs += n
-        if progress is not None:
-            progress('Measuring the layout', PROGRESS_MEASURE)
-        row, offenders = evaluate(ts, res)
-        clean = (row['margin_violations'] <= pinned_violations and row['overlap_tri_pairs'] <= pinned_overlaps)
-        if clean or (shape == 'AABB' and not res['filled'] and (not res['repaired'] or keep_repair)):
-            break
-        if res['filled'] or (res['repaired'] and not keep_repair):  # the raster's footprints should rule this out
-            ts.use_fill = ts.use_fill and not res['filled']
-            ts.use_repair = ts.use_repair and not res['repaired']
-        elif rounds < PROXY_ROUNDS:
-            ts.proxy[sorted(set(offenders) - set(np.flatnonzero(ts.fixed).tolist()))] = True
-            rounds += 1
-        else:
-            ts.proxy[:] = False
-            shape = 'AABB'
-    row.update(mode=mode, packs=packs, shape_method=shape, filled=res['filled'], repaired=res['repaired'],
-               placed_islands=res['placed'], outside_islands=res['outside'],
-               outside_area_pct=100.0 * res['outside_px2'] / float(ts.area_px.prod()),
+    res, packs, mode = search(ts, progress)
+    if progress is not None:
+        progress('Measuring the layout', PROGRESS_MEASURE)
+    row, _offenders = evaluate(ts, res)
+    row.update(mode=mode, packs=packs, scale_fill=ts.scale_fill, scale=ts.scale,
+               target_reached=None if ts.scale is None else ts.target * ts.scale, repaired=res['repaired'], placed_islands=res['placed'],
+               outside_islands=res['outside'], outside_area_pct=100.0 * res['outside_px2'] / float(ts.area_px.prod()),
                pinned_islands=int(ts.pinned.sum()), kept_pinned=bool((ts.fixed | ts.aside).any()),
                pinned_aside=int(ts.aside.sum()), area=list(ts.area),
                overflow_at=None if ts.overflow_at is None else ts.overflow_at.tolist(),
-               pinned_conflicts=int(pinned_violations + pinned_overlaps),
-               proxy_islands=0 if res['filled'] else int(ts.proxy.sum()))
+               pinned_conflicts=int(pinned_violations + pinned_overlaps), fallbacks=ts.fallbacks,
+               straightened_islands=int((ts.base != 0.0).sum()), priority=ts.priority, priority_groups=ts.groups)
     return res, mode, row
 
 
@@ -1094,7 +1110,8 @@ def evaluate(ts, res):
     a_uv = np.bincount(ts.tri_isl, weights=tri_area(tri), minlength=ts.n)
     d = np.sqrt(a_uv / np.maximum(ts.a3, 1e-30))
     ok = ~ts.degenerate & ~ts.collapsed & ~ts.off & ~ts.fixed  # a kept pinned island keeps its density
-    dev = np.maximum(np.where(d < ts.lo, (ts.lo - d) / ts.lo, 0.0), np.where(d > ts.hi, (d - ts.hi) / ts.hi, 0.0))[ok]
+    low, high = ts.ranges()
+    dev = np.maximum(np.where(d < low, (low - d) / low, 0.0), np.where(d > high, (d - high) / high, 0.0))[ok]
     big = a_uv[ok] >= 100.0
     up_err = 0.0
     if ts.upright.any():
@@ -1293,7 +1310,6 @@ def _run(material, write, progress=None, vis_cache=None):
         bpy.ops.object.mode_set(mode='OBJECT')
     ts = None
     try:
-        context.scene.tool_settings.use_uv_select_sync = True  # the temporary mesh's face selection is its UV selection
         if progress is not None:
             progress('Reading the islands', 0.0)
         parts, conflicts = gather(context.view_layer, material)
@@ -1305,7 +1321,7 @@ def _run(material, write, progress=None, vis_cache=None):
             result['mode'] = 'empty'
             result['zero_area_islands'] = int(ts.zero_area.sum()) if ts else 0
             return result
-        ts.build_temp()
+        ts.build_layout()
         res, mode, row = pack_set(ts, progress)
         result.update(row)
         result.update({
@@ -1325,16 +1341,13 @@ def _run(material, write, progress=None, vis_cache=None):
             write_back(ts, dict(res, Q=aligned_to_corner(ts, res['Q'], corner, res.get('outside_isl'))))
             result.update(written=True, corner=corner)
     finally:
-        if ts is not None:
-            ts.remove_temp()
         _restore_state(context, state)
         result['time_s'] = time.perf_counter() - t0
     return result
 
 
 def measure(material, progress=None, vis_cache=None):
-    """Pack the texture set of `material` on a temporary mesh and return the result, without writing UVs (decision
-    115). progress: optional function(stage text, fraction of the set done), called before each Blender pack; vis_cache: {mesh name:
+    """Pack the texture set of `material` and return the result, without writing UVs (decision 115). progress: optional function(stage text, fraction of the set done), called before each Blender pack; vis_cache: {mesh name:
     visibility data} kept over several sets."""
     return _run(material, False, progress, vis_cache)
 
@@ -1364,6 +1377,8 @@ def result_text(result):
         return f"needs x{result['k']:.2f}: {need} x {need}" + (f", {outside} island(s) outside" if outside else '')
     fill = result['fill_current_pct']
     text = f"fits {fill:.0f} %" if fill >= 9.5 else f"fits {fill:.1f} %"
+    if mode == 'scaled':
+        text = f"scaled x{result['scale']:.2f}, " + text
     return text + (f', {need} x {need} would do' if need != result['size'] else '')
 
 
@@ -1373,6 +1388,9 @@ def _mode_text(result):
         return mode
     if mode == 'overflow':
         return 'overflow' if result['fits_8192'] else f'overflow, does not fit even at {MAX_SIZE}'
+    if mode == 'scaled':
+        return (f"scaled to fill: x{result['scale']:.3f} the density ratios, target density "
+                f"{result['target_reached']:.2f} px/cm")
     return {'underflow': 'underflow (at the top of the ranges)', 'fit': 'fit'}[mode]
 
 
@@ -1449,11 +1467,15 @@ def _set_block(r, selected=None):
         f"  Density outside its range: max {100 * r['density_out_of_range_max']:.2f} % "
         f"({100 * r['density_out_of_range_max_ge100px']:.3f} % for islands of 100 px^2 or more)",
         f"  Islands {r['islands']}; "
-        + ('placed into free space' if r['filled'] else f"Pack Islands, shapes {r['shape_method']}")
-        + (f", {r['proxy_islands']} packed by their bounding box" if r['proxy_islands'] else '')
+        + 'placed by the FSS packer'
         + (f", {r['upright_islands']} upright" if r['upright_islands'] else '')
+        + (f", {r['straightened_islands']} free ones straightened" if r.get('straightened_islands') else '')
+        + (f", {r['fallbacks']} layout(s) the raster could not hold, left on shelves" if r.get('fallbacks') else '')
         + (', quarter turns only' if r['quarter'] else ''),
     ]
+    if r.get('priority'):
+        lines.append(f"  Object priority {r['priority']:.2f}: the islands of {r['priority_groups']} object(s) packed "
+                     f"together ({100 * r['priority']:.0f} % of each object's island area, its largest islands)")
     if has_area(r):
         lines.append(f"  Target area {area_text(r)}; k and the needed size against it"
                      + (f"; islands that do not fit start at u {r['overflow_at'][0]:.3f}, v {r['overflow_at'][1]:.3f}"

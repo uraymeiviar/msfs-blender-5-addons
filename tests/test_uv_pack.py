@@ -129,7 +129,7 @@ def test_repair():
     tri_isl = np.array(tri_isl)
     n = len(names)
     moved, turns, origin, offset, outside, outside_px2 = uv_fill.repair(
-        tri, tri_isl, n, np.ones(n, bool), np.ones(n, bool), gap, limit)
+        tri, tri_isl, n, np.ones(n, bool), np.full(n, uv_fill.QUARTER, np.uint8), gap, limit)
     assert moved.tolist() == [False, False, True, True, True], moved
     assert outside.tolist() == [False, False, False, True, False] and outside_px2 == 2500.0, (outside, outside_px2)
     points = uv_fill.apply(tri.reshape(-1, 2), np.repeat(tri_isl, 3), moved, turns, origin, offset).reshape(-1, 3, 2)
@@ -152,7 +152,8 @@ def test_repair():
                 assert np.hypot(*d) >= gap * (1 - 1e-9), (a, b, boxes[a], boxes[b])
     # Nothing outside: nothing moves
     inside = tri_isl < 2
-    nothing = uv_fill.repair(tri[inside], tri_isl[inside], 2, np.ones(2, bool), np.ones(2, bool), gap, limit)
+    nothing = uv_fill.repair(tri[inside], tri_isl[inside], 2, np.ones(2, bool), np.full(2, uv_fill.QUARTER, np.uint8), gap,
+                             limit)
     assert not nothing[0].any() and not nothing[4].any()
     print("PASS: test_repair (half-outside and below-origin islands placed inside with the gap, the large one beyond the edge)")
 
@@ -167,8 +168,8 @@ def test_keep_pinned():
                    np.float64)
     tri_isl = np.repeat(np.arange(3), 2)
     fixed = np.array([True, False, False])
-    moved, turns, origin, offset, outside, _area = uv_fill.repair(tri, tri_isl, 3, np.ones(3, bool), np.ones(3, bool), gap,
-                                                                  limit, fixed=fixed)
+    moved, turns, origin, offset, outside, _area = uv_fill.repair(tri, tri_isl, 3, np.ones(3, bool),
+                                                                  np.full(3, uv_fill.QUARTER, np.uint8), gap, limit, fixed=fixed)
     assert moved.tolist() == [False, True, False] and not outside.any(), (moved, outside)
     points = uv_fill.apply(tri.reshape(-1, 2), np.repeat(tri_isl, 3), moved, turns, origin, offset).reshape(-1, 3, 2)
     boxes = [(points[tri_isl == i].reshape(-1, 2).min(0), points[tri_isl == i].reshape(-1, 2).max(0)) for i in range(3)]
@@ -312,6 +313,119 @@ def test_target_area():
           "grid when ticked)")
 
 
+def test_scale_to_fill():
+    """Native UV packer decisions 9 and 19: with Scale to Fill the islands scale by one factor until the set fills its
+    texture (or the target area); the ratios between them stay, every mark at its Min; kept pinned islands do not scale."""
+    reset(0.5, 2.0)  # the scene's Min and Max are not used
+    m = mat('SCALE', 1024)
+    assert not uv_marks.scale_to_fill(m)
+    a = quad_obj('SCALE_A', [(i * 0.2, 0, 0.05, 0.05) for i in range(6)], mats=[m] * 6)
+    b = quad_obj('SCALE_B', [(i * 0.2, 1, 0.05, 0.05) for i in range(6)], mats=[m] * 6)
+    b.fss_uv_density_own, b.fss_uv_density_min, b.fss_uv_density_max = True, 2.0, 3.0  # its Min: twice A's
+    plain = uv_pack.measure(m)
+    assert plain['mode'] == 'fit' and plain['scale'] is None, plain  # fits at the bottom of the ranges
+    m.fss_uv_scale_fill = True
+    r = uv_pack.pack(m)
+    assert r['mode'] == 'scaled' and r['scale_fill'] and ok(r) and r['k'] <= 1.0, r
+    assert r['k'] > 1.0 - 2 * uv_pack.SCALE_TOL - 0.02, r['k']  # the set fills the texture (up to one island's step)
+    da = [quad_density(q, 5.0, 5.0) for q in uvs(a).reshape(-1, 4, 2) * 1024]
+    db = [quad_density(q, 5.0, 5.0) for q in uvs(b).reshape(-1, 4, 2) * 1024]
+    assert max(da) / min(da) < 1 + 1e-6 and max(db) / min(db) < 1 + 1e-6, (da, db)
+    assert abs(db[0] / da[0] - 2.0) < 1e-5, (da[0], db[0])  # the ratio of the Mins, no facing, no Max
+    assert abs(da[0] - 20.48 * r['scale']) / da[0] < 1e-5 and abs(r['target_reached'] - da[0]) < 1e-3, (da, r)
+    assert r['scale'] > 1.0 and r['packs'] <= uv_pack.SCALE_PACKS, r
+    text = chr(10).join(uv_pack._set_block(r))
+    assert 'scaled to fill' in text and uv_pack.result_text(r).startswith('scaled x'), text
+    # into a target area: the set fills the area instead
+    m.fss_uv_area_use = True
+    m.fss_uv_area = (0.0, 0.0, 0.5, 0.5)
+    r2 = uv_pack.measure(m)
+    assert r2['mode'] == 'scaled' and ok(r2) and abs(r2['scale'] / r['scale'] - 0.5) < 0.1, (r2['scale'], r['scale'])
+    m.fss_uv_area_use = False
+    m.fss_uv_scale_fill = False
+    r3 = uv_pack.measure(m)
+    assert r3['mode'] == 'fit' and r3['k'] < r['k'], r3
+    print(f"PASS: test_scale_to_fill (x{r['scale']:.3f}, k {r['k']:.4f} in {r['packs']} packs, ratio of the Mins 2.0 "
+          f"kept; in a quarter area x{r2['scale']:.3f}; off: fit at k {r3['k']:.3f})")
+
+
+def test_eighth_mark():
+    # Eighth islands turn in 45-degree steps only; the mark is the fifth direction
+    reset()
+    assert [d[0] for d in uv_marks.DIRECTIONS] == ['FREE', 'UPRIGHT', 'FLIP', 'QUARTER', 'EIGHTH']
+    m = mat('EIGHTH')
+    obj = quad_obj('EIGHTH', [(i * 0.3, 0, 0.3, 0.02) for i in range(12)] + [(0, 1, 0.5, 0.5)], mats=[m] * 13)
+    obj.fss_uv_direction_mark = 'EIGHTH'
+    assert obj['fss_uv_direction'] == 'EIGHTH'
+    r = uv_pack.pack(m)
+    angles = turn_of(uvs(obj).reshape(-1, 4, 2))
+    assert ok(r) and np.abs(angles - np.round(angles / 45.0) * 45.0).max() < 1e-3, angles
+    for q, (w, h) in zip(uvs(obj).reshape(-1, 4, 2) * 4096, [(30, 2)] * 12 + [(50, 50)]):
+        assert abs(quad_density(q, w, h) - 20.48) / 20.48 < 1e-4
+    print(f"PASS: test_eighth_mark (13 islands in 45-degree steps, turns used {sorted(set(np.round(angles).tolist()))}, "
+          f"densities kept)")
+
+
+def test_object_priority():
+    """Native UV packer decisions 18 and 21: at 1 each object's islands lie in their own rectangle, apart from the
+    other object's; at 0 they mix; between, the object's largest islands (that share of its island area) stay together."""
+    reset()
+    m = mat('PRIO')  # 4096 px: everything fits, no repair
+    assert uv_marks.priority(m) == 0.0
+
+    def islands(y):  # one large island and twelve small ones, the small ones in a row beside it
+        return [(0, y, 0.5, 0.5)] + [(1.2 + 0.3 * i, y, 0.15, 0.1 + 0.02 * (i % 3)) for i in range(12)]
+
+    a = quad_obj('PRIO_A', islands(0), mats=[m] * 13)
+    b = quad_obj('PRIO_B', islands(3), mats=[m] * 13)
+
+    def boxes():
+        out = []
+        for obj in (a, b):
+            q = uvs(obj).reshape(-1, 4, 2) * 4096
+            out.append((q.reshape(-1, 2).min(0), q.reshape(-1, 2).max(0), q))
+        return out
+
+    def apart(box_a, box_b):
+        d = np.maximum(np.maximum(box_b[0] - box_a[1], box_a[0] - box_b[1]), 0.0)
+        return float(np.hypot(*d))
+
+    free = uv_pack.pack(m)
+    assert ok(free) and free['priority'] == 0.0 and free['priority_groups'] == 0, free
+    mixed = apart(*boxes())
+    m.fss_uv_priority = 1.0
+    r = uv_pack.pack(m)
+    assert ok(r) and r['priority_groups'] == 2 and r['k'] <= 1.0 and not r['repaired'], r
+    gap = apart(*boxes())
+    assert gap >= uv_marks.margin(m) - 1e-6, gap  # the two objects' rectangles do not meet
+    assert any('Object priority 1.00' in line for line in uv_pack._set_block(r))
+    for _lo, _hi, q in boxes():  # only moved and turned
+        assert abs(quad_density(q[0], 50, 50) - 20.48) / 20.48 < 1e-4
+    # an overflow at 2048 px: the repair moves each group as one piece, the objects stay apart and each keeps its shape
+    shape = [q.mean(1) - q[0].mean(0) for _lo, _hi, q in boxes()]  # the quads' centres
+    m.fss_uv_texture_size = '2048'
+    over = uv_pack.pack(m)
+    assert over['repaired'] and over['margin_violations'] == 0 and over['overlap_tri_pairs'] == 0, over
+    after = boxes()
+    assert apart(after[0][:2], after[1][:2]) >= uv_marks.margin(m) - 1e-6
+    for before, (_lo, _hi, q) in zip(shape, after):
+        # the same arrangement (moved, maybe turned): each island as far from the object's large island as before;
+        # sorted, since islands of equal size may trade places
+        d0 = np.sort(np.linalg.norm(before, axis=1))  # pixels of the 4096 texture
+        d1 = np.sort(np.linalg.norm(q.mean(1) - q[0].mean(0), axis=1) * 2048 / 4096)  # boxes() scales by 4096
+        assert np.abs(d0 - d1).max() < 1e-3, np.abs(d0 - d1).max()
+    m.fss_uv_texture_size = '4096'
+    m.fss_uv_priority = 0.5  # the large island holds most of each object's area: it alone stays, no group
+    half = uv_pack.measure(m)
+    assert ok(half) and half['priority_groups'] == 0, half
+    m.fss_uv_priority = 0.95  # the large island and the largest small ones
+    most = uv_pack.measure(m)
+    assert ok(most) and most['priority_groups'] == 2, most
+    print(f"PASS: test_object_priority (0: the objects' boxes {mixed:.0f} px apart (they mix), k {free['k']:.3f}; 1: "
+          f"two rectangles {gap:.1f} px apart, k {r['k']:.3f}; 0.5: no group of two; 0.95: two groups, k "
+          f"{most['k']:.3f}; an overflow at 2048 px repaired with each group whole and apart; 0 violations)")
+
+
 def test_exact_density():
     reset()
     m = mat('EXACT')
@@ -447,13 +561,17 @@ def test_directions():
     for obj in (up, fl):
         q = uvs(obj).reshape(-1, 4, 2)
         e = q[:, 1] - q[:, 0]
-        angles.append(float(np.abs(np.arctan2(e[:, 1], e[:, 0])).max()))
-    assert max(angles) < 1e-4 and r['upright_rotation_err_rad'] < 1e-4 and r['upright_islands'] == 3 and ok(r), r
+        a = np.abs(np.arctan2(e[:, 1], e[:, 0]))
+        if obj is fl:  # Flip: no turn or 180 degrees
+            a = np.minimum(a, np.abs(np.pi - a))
+        angles.append(float(a.max()))
+    assert max(angles) < 1e-4 and r['upright_rotation_err_rad'] < 1e-4 and r['upright_islands'] == 2 and ok(r), r
     assert not r['quarter']
     up['fss_uv_direction'] = 'QUARTER'
     r = uv_pack.measure(m)
     assert r['quarter'] and ok(r), r
-    print(f"PASS: test_directions (UPRIGHT and FLIP keep their rotation, {max(angles):.1e} rad; QUARTER packs CARDINAL)")
+    print(f"PASS: test_directions (UPRIGHT keeps its rotation, FLIP turns by 0 or 180 degrees, {max(angles):.1e} rad; "
+          f"QUARTER packs)")
 
 
 def test_linked_and_split():
@@ -522,7 +640,7 @@ def test_zero_area_and_spike():
     # the spikes are needles (3D area, no UV area) inside islands with area (decision 118)
     assert ok(r) and r['uv_zero_islands'] == 6 and r['uv_zero_objects'] == ['SPK'], r
     print(f"PASS: test_zero_area_and_spike (line island kept unchanged; spike set gap {r['min_gap_px']:.2f} px, "
-          f"0 overlaps, {r['shape_method']}, 6 needle islands reported)")
+          f"0 overlaps, 6 needle islands reported)")
 
 
 def build_shared():
@@ -700,7 +818,7 @@ def test_panel_rows():
         row = draw_row(material)
         props = [args[1] for name, args, kw in row if name == 'prop']
         assert props == ['fss_uv_keep_uvs', 'fss_uv_set_open', 'fss_uv_texture_size', 'fss_uv_margin_px',
-                         'fss_uv_keep_pinned', 'fss_uv_area_use'], props
+                         'fss_uv_keep_pinned', 'fss_uv_scale_fill', 'fss_uv_priority', 'fss_uv_area_use'], props
         texts = [kw.get('text') for name, _a, kw in row if name == 'operator']
         assert texts == ['', material.name, 'Pack'], texts
         packs = [args[1].material for name, args, _kw in row if name == '_op' and args[0] == 'fss.uv_pack_texture_set']
@@ -1222,18 +1340,6 @@ def ring_obj(name, m, outer=1.0, inner=0.6, y=0.0):
     return quad_obj(name, None, mesh=me)
 
 
-def plain_k(m):
-    """k of the same set with Pack Islands alone (the layout before the raster step)."""
-    parts, _conflicts = uv_pack.gather(bpy.context.view_layer, m)
-    ts = uv_pack.TextureSet(m, parts, bpy.context.scene, {})
-    ts.use_fill = False
-    ts.build_temp()
-    try:
-        return uv_pack.pack_set(ts)[2]
-    finally:
-        ts.remove_temp()
-
-
 def inside_ring(ring, obj, m):
     """How many of the object's quads (4 corners each) lie inside the ring's hole, with the set's gap."""
     q = uvs(ring).reshape(-1, 4, 2) * 4096
@@ -1246,21 +1352,17 @@ def inside_ring(ring, obj, m):
 
 
 def test_fill_ring():
-    # 25 squares fit the ring's hole. Pack Islands (CONCAVE) uses the hole too, but leaves one square out and the layout
-    # grows beyond the ring; the step gets all of them in
+    # 25 squares fit the ring's hole: the packer puts all of them inside, and the layout is the ring (Pack Islands, which
+    # the packer replaced, left one out and grew beyond the ring)
     reset()
     m = mat('RING')
     ring = ring_obj('RING', m)
     small = quad_obj('SMALL', [(2 + 0.2 * (i % 5), 0.2 * (i // 5), 0.1, 0.1) for i in range(25)], mats=[m] * 25)
-    plain = plain_k(m)
-    assert not plain['filled'] and plain['margin_violations'] == 0, plain
-    assert max(plain['extent_px']) > 2048 * 1.05, plain  # Pack Islands: the layout is larger than the ring
     measured = uv_pack.measure(m)
     before = uvs(small).copy()
     r = uv_pack.pack(m)
-    assert r['filled'] and r['k'] == measured['k'] and np.abs(uvs(small) - before).max() > 1e-3, r
-    assert r['k'] < plain['k'] and ok(r), (r['k'], plain['k'], r)
-    assert r['margin_violations'] == 0 and r['overlap_tri_pairs'] == 0, r
+    assert r['k'] == measured['k'] and np.abs(uvs(small) - before).max() > 1e-3, r
+    assert ok(r) and r['margin_violations'] == 0 and r['overlap_tri_pairs'] == 0 and r['fallbacks'] == 0, r
     inside = inside_ring(ring, small, m)
     assert inside == 25, inside
     assert max(r['extent_px']) < 2048 * 1.01, r  # the layout is the ring
@@ -1269,7 +1371,7 @@ def test_fill_ring():
     d = [quad_density(p, 10, 10) for p in q]
     assert max(abs(x - 20.48) for x in d) / 20.48 < 1e-4, d
     report_row = uv_pack._set_block(r)
-    assert any('placed into free space' in line for line in report_row), report_row
+    assert any('placed by the FSS packer' in line for line in report_row), report_row
     # the same input gives the same layout: a set rebuilt the same way
     first = uvs(small).copy()
     reset()
@@ -1278,8 +1380,8 @@ def test_fill_ring():
     small = quad_obj('SMALL', [(2 + 0.2 * (i % 5), 0.2 * (i // 5), 0.1, 0.1) for i in range(25)], mats=[m] * 25)
     uv_pack.pack(m)
     assert np.array_equal(first, uvs(small)), 'not deterministic'
-    print(f"PASS: test_fill_ring (25 of 25 squares inside the ring; k {plain['k']:.3f} with Pack Islands alone, "
-          f"{r['k']:.3f} with the step; gap {r['min_gap_px']:.2f} px, 0 violations, 0 overlaps; deterministic)")
+    print(f"PASS: test_fill_ring (25 of 25 squares inside the ring, k {r['k']:.3f}; gap {r['min_gap_px']:.2f} px, "
+          f"0 violations, 0 overlaps; deterministic)")
 
 
 def turn_of(q):
@@ -1288,48 +1390,48 @@ def turn_of(q):
     return np.degrees(np.arctan2(e[:, 1], e[:, 0]))
 
 
+def tilt_uvs(obj, degrees):
+    """Turn each quad's UVs of obj about its own centre."""
+    me = obj.data
+    uv = uvs(obj).reshape(-1, 4, 2)
+    c = uv.mean(1, keepdims=True)
+    a = math.radians(degrees)
+    R = np.array([[math.cos(a), -math.sin(a)], [math.sin(a), math.cos(a)]])
+    me.uv_layers.active.data.foreach_set('uv', ((uv - c) @ R.T + c).reshape(-1).astype(np.float32))
+    me.update()
+
+
 def test_fill_directions():
-    # Upright and Flip islands moved by the step keep their rotation, in a set without Quarter
+    # Upright islands never turn; Flip ones by 0 or 180 degrees; Quarter ones in 90-degree steps; Free ones are
+    # straightened by their tightest box first (native UV packer decision 20)
     reset()
     m = mat('FILL_DIR')
     ring = ring_obj('DIR_RING', m)
-    # 25 squares, as in test_fill_ring: Pack Islands leaves one out of the hole
     up = quad_obj('DIR_UP', [(2 + 0.3 * i, 0, 0.1, 0.1) for i in range(10)], mats=[m] * 10)
     up['fss_uv_direction'] = 'UPRIGHT'
     fl = quad_obj('DIR_FLIP', [(2 + 0.3 * i, 1, 0.1, 0.1) for i in range(10)], mats=[m] * 10)
     fl['fss_uv_direction'] = 'FLIP'
-    free = quad_obj('DIR_FREE', [(2 + 0.3 * i, 2, 0.1, 0.1) for i in range(5)], mats=[m] * 5)
-    plain = plain_k(m)
-    r = uv_pack.pack(m)
-    assert r['filled'] and r['k'] < plain['k'] and ok(r), (r, plain['k'])
-    assert r['upright_rotation_err_rad'] < 1e-4 and r['upright_islands'] == 20 and not r['quarter'], r
-    for obj in (up, fl):
-        angles = turn_of(uvs(obj).reshape(-1, 4, 2))
-        assert np.abs(angles).max() < 1e-3, (obj.name, angles)
-    inside = inside_ring(ring, up, m) + inside_ring(ring, fl, m)
-    assert inside == 20, inside  # the marked islands were moved into the ring, without a turn
-    # the free islands may have turned, by whatever Pack Islands gave and steps of 90 degrees; their size stays
-    q = uvs(free).reshape(-1, 4, 2) * 4096
-    assert max(abs(quad_density(p, 10, 10) - 20.48) for p in q) / 20.48 < 1e-4
-    # a Quarter island: every island of the set turns in steps of 90 degrees, Upright ones not at all
-    reset()
-    m = mat('FILL_QUARTER')
-    ring = ring_obj('Q_RING', m)
-    quarter = quad_obj('Q_TURN', [(2 + 0.3 * i, 0, 0.1, 0.1) for i in range(10)], mats=[m] * 10)
+    quarter = quad_obj('DIR_QUARTER', [(2 + 0.3 * i, 2, 0.1, 0.05) for i in range(10)], mats=[m] * 10)
     quarter['fss_uv_direction'] = 'QUARTER'
-    up = quad_obj('Q_UP', [(2 + 0.3 * i, 1, 0.1, 0.1) for i in range(5)], mats=[m] * 5)
-    up['fss_uv_direction'] = 'UPRIGHT'
-    free = quad_obj('Q_FREE', [(2 + 0.3 * i, 2, 0.1, 0.1) for i in range(10)], mats=[m] * 10)
-    plain = plain_k(m)
+    free = quad_obj('DIR_FREE', [(2 + 0.3 * i, 3, 0.1, 0.05) for i in range(5)], mats=[m] * 5)
+    tilt_uvs(free, 30.0)  # tilted: straightened by the packer
     r = uv_pack.pack(m)
-    assert r['filled'] and r['quarter'] and r['k'] < plain['k'] and ok(r), (r, plain['k'])
-    for obj in (quarter, free, ring):
+    assert ok(r) and r['upright_rotation_err_rad'] < 1e-4 and r['upright_islands'] == 10, r
+    assert r['straightened_islands'] == 5 and r['fallbacks'] == 0, r
+
+    def off_steps(obj, step):
         angles = turn_of(uvs(obj).reshape(-1, 4, 2))
-        off = np.abs(angles - np.round(angles / 90.0) * 90.0)
-        assert off.max() < 1e-3, (obj.name, angles)
+        return float(np.abs(angles - np.round(angles / step) * step).max())
+
     assert np.abs(turn_of(uvs(up).reshape(-1, 4, 2))).max() < 1e-3
-    print(f"PASS: test_fill_directions (Upright and Flip moved into the ring without a turn; in a Quarter set every "
-          f"island in 90-degree steps, Upright ones unturned; k {plain['k']:.3f} -> {r['k']:.3f})")
+    assert off_steps(fl, 180.0) < 1e-3 and off_steps(quarter, 90.0) < 1e-3 and off_steps(free, 90.0) < 1e-3
+    inside = inside_ring(ring, up, m) + inside_ring(ring, fl, m)
+    assert inside == 20, inside  # the marked islands were moved into the ring
+    for obj, w, h in ((quarter, 10, 5), (free, 10, 5)):  # their size stays
+        q = uvs(obj).reshape(-1, 4, 2) * 4096
+        assert max(abs(quad_density(p, w, h) - 20.48) for p in q) / 20.48 < 1e-4, obj.name
+    print(f"PASS: test_fill_directions (Upright unturned, Flip in 180-degree steps, Quarter in 90-degree steps, five "
+          f"Free islands tilted by 30 degrees straightened; k {r['k']:.3f})")
 
 
 def test_fill_footprints():
@@ -1357,7 +1459,7 @@ def test_fill_footprints():
     isl = np.array(isl)
     active = np.ones(120, bool)
     active[7] = False  # not placed: stays where it is
-    t, origin, offset = uv_fill.place(tri[isl != 7], isl[isl != 7], 120, active, np.ones(120, bool), gap)
+    t, origin, offset = uv_fill.place(tri[isl != 7], isl[isl != 7], 120, active, np.full(120, uv_fill.QUARTER, np.uint8), gap)
     moved = uv_fill.apply(tri.reshape(-1, 2), np.repeat(isl, 3), active, t, origin, offset).reshape(-1, 3, 2)
     assert np.array_equal(moved[isl == 7], tri[isl == 7])
     keep = isl != 7
@@ -1384,7 +1486,8 @@ def _reference_fill():
 
 
 def test_fill_native_matches_reference():
-    # the C++ placement and repair give the Python reference's layouts exactly: same turns, same offsets
+    # for islands that do not turn, the C++ placement and repair give the Python reference's layouts exactly (step b;
+    # the turns of step c are not in the reference)
     ref = _reference_fill()
     assert uv_fill.error() is None, uv_fill.error()
     rng = np.random.default_rng(11)
@@ -1408,25 +1511,25 @@ def test_fill_native_matches_reference():
                 isl += [i, i]
         tri, isl = np.array(tri, np.float64), np.array(isl)
         active = rng.random(n) > 0.05
-        can_turn = rng.random(n) > 0.3
+        rng.random(n)  # (the turns the reference allowed: drawn to keep the sets as they were)
         gap = float(rng.choice([2.0, 4.0, 8.1, 16.0]))
         fixed = (rng.random(n) > 0.85) if seed % 2 else None
-        a = uv_fill.place(tri, isl, n, active, can_turn, gap, fixed)
-        b = ref.place(tri, isl, n, active, can_turn, gap, fixed)
+        a = uv_fill.place(tri, isl, n, active, None, gap, fixed, powers=(uv_fill.BOX_POWER,))  # the reference's order
+        b = ref.place(tri, isl, n, active, np.zeros(n, bool), gap, fixed)
         assert (a is None) == (b is None), seed
         if a is not None:
             for x_, y_ in zip(a, b):
                 assert np.array_equal(x_, y_), (seed, 'place')
         limit = 2048.0 if seed % 3 else (1600.0, 900.0)
         fixed_r = (rng.random(n) > 0.8) if seed % 2 == 0 else None
-        a = uv_fill.repair(tri, isl, n, active, can_turn, gap, limit, fixed_r)
-        b = ref.repair(tri, isl, n, active, can_turn, gap, limit, fixed_r)
+        a = uv_fill.repair(tri, isl, n, active, None, gap, limit, fixed_r)
+        b = ref.repair(tri, isl, n, active, np.zeros(n, bool), gap, limit, fixed_r)
         for x_, y_ in zip(a[:5], b[:5]):
             assert np.array_equal(x_, y_), (seed, 'repair')
         assert a[5] == b[5], (seed, 'repair area')
         cases += 1
     print(f"PASS: test_fill_native_matches_reference (footprints of 300 triangles, lines and points; {cases} random "
-          f"sets placed and repaired, rings, turns, pinned islands, square and oblong limits: identical to the Python "
+          f"sets placed and repaired, rings, pinned islands, square and oblong limits, no turns: identical to the Python "
           f"reference)")
 
 
@@ -1454,51 +1557,29 @@ def test_refuses_without_library():
     print("PASS: test_refuses_without_library (Pack and Check All refuse with the reason, UVs unchanged)")
 
 
-def test_fill_fallbacks():
-    # Pack Islands alone still works with its proxy islands and the AABB fallback
+def test_pack_fallback():
+    # should the raster hold no layout, the islands stay on the shelves of the preparation: apart, at their densities,
+    # and the report says so
     reset()
-    m = mat('SPIKES', 1024)
-    verts, faces, uv_co = [], [], []
-    for i in range(6):
-        b = len(verts)
-        x = i * 1.0
-        verts += [(x, 0, 0), (x + 0.2, 0, 0), (x + 0.2, 0.2, 0), (x, 0.2, 0), (x + 0.5, 0.1, 0)]
-        faces += [(b, b + 1, b + 2, b + 3), (b + 1, b + 4, b + 2)]
-        uv_co += [(0.0, 0.0), (0.2, 0.0), (0.2, 0.2), (0.0, 0.2), (0.2, 1.0)]
-    me = bpy.data.meshes.new('SPIKES')
-    me.from_pydata(verts, [], faces)
-    uvl = me.uv_layers.new(name='UVMap')
-    lv = np.zeros(len(me.loops), np.int64)
-    me.loops.foreach_get('vertex_index', lv)
-    uvl.data.foreach_set('uv', (np.array(uv_co) * 0.1)[lv].ravel())
-    me.materials.append(m)
-    quad_obj('SPIKES', None, mesh=me)
-    quad_obj('SPIKES_SMALL', [(i * 0.3, 3, 0.04 + 0.01 * (i % 4), 0.05) for i in range(40)], mats=[m] * 40)
-    plain = plain_k(m)
-    assert not plain['filled'] and plain['margin_violations'] == 0 and plain['overlap_tri_pairs'] == 0, plain
-    # the step found wanting (never measured; it is what the check after the search is for): Pack Islands takes over
-    original = uv_pack.TextureSet.fill
+    m = mat('SHELVES', 1024)
+    quad_obj('SHELF', [(i * 0.3, 3, 0.04 + 0.01 * (i % 4), 0.05) for i in range(40)], mats=[m] * 40)
+    original = uv_fill.place
     calls = []
 
-    def broken(self, Q):
+    def nothing(*args, **kwargs):
         calls.append(1)
-        li = self.loop_isl
-        lo = np.full((self.n, 2), np.inf)
-        np.minimum.at(lo, li, Q)
-        F = Q - lo[li]  # every island at the origin: all of them overlap
-        return F, 1e-3, np.array([1.0, 1.0])
+        return None
 
-    uv_pack.TextureSet.fill = broken
+    uv_fill.place = nothing
     try:
         r = uv_pack.measure(m)
     finally:
-        uv_pack.TextureSet.fill = original
-    assert calls and not r['filled'] and r['margin_violations'] == 0 and r['overlap_tri_pairs'] == 0, r
-    # the step on the same set: the needles count in its footprints
+        uv_fill.place = original
+    assert calls and r['fallbacks'] == len(calls) and ok(r), r
+    assert any('could not hold' in line for line in uv_pack._set_block(r))
     r = uv_pack.measure(m)
-    assert r['filled'] and r['k'] <= plain['k'] and ok(r), (r, plain['k'])
-    print(f"PASS: test_fill_fallbacks (Pack Islands alone: k {plain['k']:.3f}, {plain['proxy_islands']} proxy islands, "
-          f"{plain['shape_method']}; a broken step falls back to it; with the step k {r['k']:.3f}, 0 violations)")
+    assert r['fallbacks'] == 0 and ok(r), r
+    print(f"PASS: test_pack_fallback (no raster layout: {len(calls)} pack(s) left on shelves, 0 violations, reported)")
 
 
 def test_layout_corner():
@@ -2046,10 +2127,13 @@ def main():
     test_refuses_without_library()
     test_fill_ring()
     test_fill_directions()
-    test_fill_fallbacks()
+    test_pack_fallback()
     test_repair()
     test_keep_pinned()
     test_target_area()
+    test_scale_to_fill()
+    test_eighth_mark()
+    test_object_priority()
     test_exact_density()
     test_material_factor()
     test_underflow_and_sizes()

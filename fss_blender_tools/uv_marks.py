@@ -43,6 +43,8 @@ KEEP_UVS_PROP = 'fss_uv_keep_uvs'  # on a material: its texture set is not packe
 MATERIAL_FACTOR_PROP = 'fss_uv_material_density'  # on a material: the density factor of all its islands (decision 146)
 KEEP_PINNED_PROP = 'fss_uv_keep_pinned'  # on a material: its islands with a pinned UV keep their UVs (decisions 157, 159)
 SET_OPEN_PROP = 'fss_uv_set_open'  # on a material: its block in the texture set list is open
+SCALE_PROP = 'fss_uv_scale_fill'  # on a material: Pack and Check scale the set to fill its texture (packer decision 9)
+PRIORITY_PROP = 'fss_uv_priority'  # on a material: how much of each object's islands stay together (decisions 18, 21)
 AREA_USE_PROP = 'fss_uv_area_use'  # on a material: Pack and Check place the set into its target area (decision 158)
 AREA_PROP = 'fss_uv_area'  # on a material: the target area (x, y, width, height), in UV 0 to 1
 OVERFLOW_AT_PROP = 'fss_uv_overflow_at'  # on a material: where the islands that do not fit the area start (u, v)
@@ -82,6 +84,7 @@ DIRECTIONS = [
     ('UPRIGHT', 'Upright', 'Islands keep their orientation (brushed metal, grain, text)'),
     ('FLIP', 'Flip', 'Islands may only turn by 180 degrees'),
     ('QUARTER', 'Quarter', 'Islands may only turn in 90-degree steps'),
+    ('EIGHTH', 'Eighth', 'Islands may only turn in 45-degree steps'),
 ]
 DIRECTION_IDS = {item[0] for item in DIRECTIONS}
 TICK_COLUMN = 0.13  # the table's columns: the tick and icon, then shares of the rest
@@ -145,6 +148,17 @@ def keep_pinned(material):
     """Keep Pinned Islands of a texture set (decisions 157, 159): Pack and Check leave every island with a pinned UV as it
     is. The set's last choice, on by default."""
     return bool(getattr(material, KEEP_PINNED_PROP, True)) if material is not None else True
+
+
+def scale_to_fill(material):
+    """Scale to Fill of a texture set (native UV packer decisions 9 and 19): the set's last choice, off by default."""
+    return bool(getattr(material, SCALE_PROP, False)) if material is not None else False
+
+
+def priority(material):
+    """Object Priority of a texture set (native UV packer decisions 18 and 21), 0 to 1: the set's last choice, 0 by
+    default."""
+    return float(min(max(getattr(material, PRIORITY_PROP, 0.0), 0.0), 1.0)) if material is not None else 0.0
 
 
 def target_area(material, size):
@@ -1029,7 +1043,8 @@ class FSS_OT_UvCheckSelect(bpy.types.Operator):
         lines = [properties.material, f"Last run: {uv_pack.result_text(result)}{'' if result['written'] else ' (checked)'}",
                  f"Layout {width:.0f} x {height:.0f} px of {uv_pack.area_text(result)}, "
                  f"the islands cover {result['fill_current_pct']:.0f} %",
-                 f"Density at {result['t'] * 100:.0f} % of its range"]
+                 (f"Scaled to fill: x{result['scale']:.3f} the target density" if result['mode'] == 'scaled'
+                  else f"Density at {result['t'] * 100:.0f} % of its range")]
         return chr(10).join(lines + (set_problems(material) if material else []) + ['Click: select the objects that use it'])
 
     @classmethod
@@ -1061,7 +1076,7 @@ class FSS_UL_CheckResults(bpy.types.UIList):
         of = f'{size}' if (w, h) == (1.0, 1.0) else f'{round(w * size)} x {round(h * size)}'  # the target area
         used.progress(factor=result_used(result), type='BAR', text=f"{width:.0f} x {height:.0f} / {of}")
         room.alert = over
-        room.label(text='full' if result['mode'] == 'fit' else f'x{result_room(result):.2f}')
+        room.label(text='full' if result['mode'] in ('fit', 'scaled') else f'x{result_room(result):.2f}')
 
     def filter_items(self, context, data, propname):
         items = getattr(data, propname)
@@ -1104,6 +1119,8 @@ def draw_texture_set(layout, context, material):
     sizes.prop(material, SIZE_PROP, text='Size')
     sizes.prop(material, 'fss_uv_margin_px', text='Margin')
     body.prop(material, KEEP_PINNED_PROP)
+    body.prop(material, SCALE_PROP)
+    body.prop(material, PRIORITY_PROP, slider=True)
     body.prop(material, AREA_USE_PROP)
     if getattr(material, AREA_USE_PROP):
         _draw_target_area(body, material)
@@ -1158,8 +1175,8 @@ def measured_results():
 
 def result_room(result):
     """How far the density could rise with the layout still fitting: the layout grows about as the density does, so 1 / k.
-    A set the packer already had to lower inside its range has none. Below 1: an overflow, how far it would have to drop."""
-    return 1.0 if result['mode'] == 'fit' else 1.0 / max(result['k'], 1e-9)
+    A set the packer already had to lower inside its range has none, nor has a set scaled to fill. Below 1: an overflow, how far it would have to drop."""
+    return 1.0 if result['mode'] in ('fit', 'scaled') else 1.0 / max(result['k'], 1e-9)
 
 
 def result_used(result):
@@ -1516,7 +1533,7 @@ class _PackingSection:
         layout = self.layout
         scene = context.scene
         if _progress is not None:
-            # Pack or Check All in progress: only the progress (the active object may be the temporary mesh)
+            # Pack or Check All in progress: only the progress
             _draw_progress(layout)
             return
         if _migration:
@@ -1677,6 +1694,19 @@ def register():
         name='Keep Pinned Islands', default=True, update=_marks_changed,
         description='Islands with a pinned UV keep their place, turn and size. Without a Target Area the others are '
                     'packed around them. Off: pinned islands are packed like any other (their pins stay)'))
+    setattr(bpy.types.Material, SCALE_PROP, bpy.props.BoolProperty(
+        name='Scale to Fill', default=False, update=_marks_changed,
+        description='Scale the islands so that the set fills its texture (or the Target Area) with the least gap. '
+                    'Their densities keep their ratios: zone, parent and object marks at their Min, the material '
+                    'factor, visibility and multipliers set by hand; the target density is the free number. Kept '
+                    'pinned islands do not scale'))
+    setattr(bpy.types.Material, PRIORITY_PROP, bpy.props.FloatProperty(
+        name='Object Priority', default=0.0, min=0.0, max=1.0, precision=2, step=10, subtype='FACTOR',
+        update=_marks_changed,
+        description="How much of each object's islands stay together. 1: each object's islands are packed into their "
+                    "own rectangle, and the rectangles into the texture. 0: every island is packed freely. Between: "
+                    "that share of an object's island area, its largest islands, stays together; the others fill the "
+                    "gaps"))
     setattr(bpy.types.Material, SET_OPEN_PROP, bpy.props.BoolProperty(
         name='Show Settings', default=True, description="Show or hide this texture set's settings"))
     setattr(bpy.types.Material, AREA_USE_PROP, bpy.props.BoolProperty(
@@ -1735,7 +1765,7 @@ def unregister():
     del bpy.types.WindowManager.fss_uv_pack_active_name
     for name, _color in BAR_COLORS.values():
         delattr(bpy.types.WindowManager, name)
-    for name in (SET_OPEN_PROP, KEEP_PINNED_PROP, OVERFLOW_AT_PROP, AREA_PROP, AREA_USE_PROP, MATERIAL_VIS_PROP, MATERIAL_FACTOR_PROP, MATERIAL_TICK_PROP, KEEP_UVS_PROP, 'fss_uv_margin_px', SIZE_PROP):
+    for name in (SET_OPEN_PROP, SCALE_PROP, PRIORITY_PROP, KEEP_PINNED_PROP, OVERFLOW_AT_PROP, AREA_PROP, AREA_USE_PROP, MATERIAL_VIS_PROP, MATERIAL_FACTOR_PROP, MATERIAL_TICK_PROP, KEEP_UVS_PROP, 'fss_uv_margin_px', SIZE_PROP):
         delattr(bpy.types.Material, name)
     for name in ('fss_uv_density_freedom_max', 'fss_uv_density_freedom_min', 'fss_uv_pack_corner', 'fss_uv_partly_seen_value', 'fss_uv_target_density'):
         delattr(bpy.types.Scene, name)

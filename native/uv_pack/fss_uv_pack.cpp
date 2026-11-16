@@ -1,9 +1,12 @@
-// fss_uv_pack: the raster placement of UV islands for fss_blender_tools (native UV packer journal, step b).
+// fss_uv_pack: the raster placement of UV islands for fss_blender_tools (native UV packer journal, steps b and c).
 //
-// A port of fss_blender_tools/uv_fill.py (Grid, Shape, _place_once and the loop of repair) with the same rules, the
+// Step b ported fss_blender_tools/uv_fill.py (Grid, Shape, _place_once and the loop of repair) with the same rules, the
 // same order of every search and tie-break and the same floating point operations, so the layouts equal the Python
-// code's (tests/uv_fill_reference.py keeps that code for the comparison). Python keeps the cheap setup (the order of the
-// islands, the cell size, the reach table) and calls these functions for the work.
+// code's for islands that do not turn (tests/uv_fill_reference.py keeps that code for the comparison). Step c added the
+// turns: each island has a turn set (Upright, Flip, Quarter, Eighth) and a base angle (a Free island straightened by
+// its tightest box); the turns are tried in the maintainer's order of preference, no turn, 180, 90 and 270, then the
+// 45-degree ones, which also breaks ties. Python keeps the cheap setup (the order of the islands, the cell size, the
+// reach table) and calls these functions for the work.
 //
 // Built with /fp:precise and without /arch:AVX2 (no FMA contraction), as fss_ao_copy.
 
@@ -24,6 +27,13 @@ constexpr int N_LEVELS = 6;
 constexpr int RING_SAMPLES = 200;
 constexpr int TOUCH_STEPS = 4;
 constexpr int MAX_CANDIDATES = 2048;
+constexpr double PI = 3.14159265358979323846;
+// the turns in eighths (45 degrees) in the order of preference (native UV packer decision 20), and how many of them
+// each turn set allows: Upright 1, Flip 2 (0, 180), Quarter 4 (and 90, 270), Eighth 8 (and the 45-degree ones)
+constexpr int EIGHTHS[8] = {0, 4, 2, 6, 1, 3, 5, 7};
+constexpr int TURN_COUNT[4] = {1, 2, 4, 8};
+
+int turn_count(uint8_t turn_set) { return TURN_COUNT[turn_set < 4 ? turn_set : 0]; }
 
 typedef std::vector<uint8_t> Bytes;
 
@@ -44,6 +54,19 @@ inline void turned(double x, double y, int turns, double &ox, double &oy) {
     case 2: ox = -x; oy = -y; break;
     default: ox = y; oy = -x; break;
     }
+}
+
+// A point turned by base + eighths x 45 degrees counter-clockwise: exact (uv_fill.turned) when base is 0 and the turn
+// a multiple of 90 degrees, else with the cosine and sine of the angle (as uv_fill.apply)
+inline void rotated(double x, double y, double base, int eighths, double &ox, double &oy) {
+    if (base == 0.0 && eighths % 2 == 0) {
+        turned(x, y, eighths / 2, ox, oy);
+        return;
+    }
+    const double a = base + (double)eighths * (PI / 4.0);
+    const double c = std::cos(a), s = std::sin(a);
+    ox = c * x - s * y;
+    oy = s * x + c * y;
 }
 
 // uv_fill.spans + solid_mask: the cells the triangles T (k x 3 x 2, in cells, not negative) touch
@@ -187,7 +210,7 @@ void ring_of(const Mask &mask, std::vector<int> &ry, std::vector<int> &rx) {
 }
 
 struct Shape {
-    int turn = 0;
+    int turn = 0;  // in eighths, after the base angle
     double low_x = 0, low_y = 0;
     Mask solid, mask;
     int inner_h = 0, inner_w = 0, pad = 0;
@@ -196,14 +219,15 @@ struct Shape {
     std::vector<int> ry, rx;
 };
 
-// uv_fill.Shape: local (k x 3 x 2, pixels from the island's low corner) at one turn
-void make_shape(const double *local, size_t k, int turn, double cell, const std::vector<int> &reach, Shape &s) {
+// uv_fill.Shape: local (k x 3 x 2, pixels from the island's low corner) at base + turn eighths
+void make_shape(const double *local, size_t k, double base, int turn, double cell, const std::vector<int> &reach,
+                Shape &s) {
     s.turn = turn;
     std::vector<double> T(k * 6);
     double lx = INFINITY, ly = INFINITY;
     for (size_t i = 0; i < k * 3; ++i) {
         double ox, oy;
-        turned(local[i * 2], local[i * 2 + 1], turn, ox, oy);
+        rotated(local[i * 2], local[i * 2 + 1], base, turn, ox, oy);
         T[i * 2] = ox; T[i * 2 + 1] = oy;
         lx = std::min(lx, ox); ly = std::min(ly, oy);
     }
@@ -492,9 +516,10 @@ FSS_UV_API int32_t fss_uv_solid(const double *T, int64_t k, uint8_t *out, int64_
 }
 
 FSS_UV_API int32_t fss_uv_place_once(const double *tri, const int64_t *start, int64_t n, const double *lo,
-                                     const int64_t *order, int64_t n_order, const uint8_t *can_turn, double gap,
-                                     double cell, const int32_t *reach, int64_t n_reach, int64_t grid_cells,
-                                     const int64_t *fixed_ids, int64_t n_fixed, int32_t *turns, double *offset) {
+                                     const int64_t *order, int64_t n_order, const uint8_t *turn_set,
+                                     const double *base, double gap, double cell, const int32_t *reach,
+                                     int64_t n_reach, int64_t grid_cells, const int64_t *fixed_ids, int64_t n_fixed,
+                                     int32_t *turns, double *offset) {
     (void)n;
     try {
         const std::vector<int> rv = reach_vec(reach, n_reach);
@@ -521,9 +546,9 @@ FSS_UV_API int32_t fss_uv_place_once(const double *tri, const int64_t *start, in
             Shape best_shape;
             Found best_pos;
             int64_t bk0 = 0; bool bk1 = false; double bk2 = 0; int64_t bk3 = 0; int bk4 = 0;
-            for (int t = 0; t < (can_turn[i] ? 2 : 1); ++t) {
+            for (int t = 0; t < turn_count(turn_set[i]); ++t) {
                 Shape shape;
-                make_shape(local.data(), k, t, cell, rv, shape);
+                make_shape(local.data(), k, base[i], EIGHTHS[t], cell, rv, shape);
                 Found pos = grid.find(shape, extent, first);
                 if (!pos.ok) continue;
                 int64_t k0 = pos.lowest; bool k1 = !pos.inside;
@@ -551,8 +576,9 @@ FSS_UV_API int32_t fss_uv_place_once(const double *tri, const int64_t *start, in
 
 FSS_UV_API int32_t fss_uv_repair(const double *tri, const int64_t *start, int64_t n, const double *lo,
                                  const double *key, uint8_t *inside, const uint8_t *fixed, const uint8_t *active,
-                                 const uint8_t *can_turn, double gap, double cell, const int32_t *reach,
-                                 int64_t n_reach, int64_t half, double lim_x, double lim_y, uint8_t *moved,
+                                 const uint8_t *turn_set, const double *base, double gap, double cell,
+                                 const int32_t *reach, int64_t n_reach, int64_t half, double lim_x, double lim_y,
+                                 uint8_t *moved,
                                  int32_t *turns, double *offset, int64_t *left, int64_t *n_left) {
     (void)gap;  // the columns of the islands left outside are laid out in Python
     try {
@@ -632,9 +658,9 @@ FSS_UV_API int32_t fss_uv_repair(const double *tri, const int64_t *start, int64_
             Found best_pos;
             double best_low[2] = {0, 0};
             int64_t bk0 = 0; bool bk1 = false; double bk2 = 0; int64_t bk3 = 0; int bk4 = 0;
-            for (int t = 0; t < (can_turn[i] ? 2 : 1); ++t) {
+            for (int t = 0; t < turn_count(turn_set[i]); ++t) {
                 Shape shape;
-                make_shape(local.data(), k, t, cell, rv, shape);
+                make_shape(local.data(), k, base[i], EIGHTHS[t], cell, rv, shape);
                 Found pos = grid.find(shape, wall, first);
                 if (!pos.ok) continue;
                 double low_x = (double)(pos.x + shape.pad - shift) * cell;
@@ -643,7 +669,7 @@ FSS_UV_API int32_t fss_uv_repair(const double *tri, const int64_t *start, int64_
                 double mnx = INFINITY, mny = INFINITY, mxx = -INFINITY, mxy = -INFINITY;
                 for (size_t j = 0; j < k * 3; ++j) {
                     double ox, oy;
-                    turned(local[j * 2], local[j * 2 + 1], t, ox, oy);
+                    rotated(local[j * 2], local[j * 2 + 1], base[i], EIGHTHS[t], ox, oy);
                     mnx = std::min(mnx, ox); mxx = std::max(mxx, ox); mny = std::min(mny, oy); mxy = std::max(mxy, oy);
                 }
                 if (low_x < 0.0 || low_y < 0.0 || low_x + (mxx - mnx) > lim_x || low_y + (mxy - mny) > lim_y) continue;
@@ -665,6 +691,56 @@ FSS_UV_API int32_t fss_uv_repair(const double *tri, const int64_t *start, int64_
             offset[i * 2 + 1] = best_low[1] - best_shape.low_y;
         }
         *n_left = nl;
+        return 1;
+    } catch (...) {
+        return -1;
+    }
+}
+
+// The area of the box of points P (k x 2) turned by angle a (radians)
+static double box_area(const double *P, size_t k, double a) {
+    const double c = std::cos(a), s = std::sin(a);
+    double mnx = INFINITY, mny = INFINITY, mxx = -INFINITY, mxy = -INFINITY;
+    for (size_t i = 0; i < k; ++i) {
+        const double x = c * P[i * 2] - s * P[i * 2 + 1], y = s * P[i * 2] + c * P[i * 2 + 1];
+        mnx = std::min(mnx, x); mxx = std::max(mxx, x); mny = std::min(mny, y); mxy = std::max(mxy, y);
+    }
+    return (mxx - mnx) * (mxy - mny);
+}
+
+FSS_UV_API int32_t fss_uv_straighten(const double *tri, const int64_t *start, int64_t n, const uint8_t *active,
+                                     double *base) {
+    try {
+        const double deg = PI / 180.0;
+        for (int64_t i = 0; i < n; ++i) {
+            base[i] = 0.0;
+            const size_t k = (size_t)(start[i + 1] - start[i]) * 3;
+            if (!active[i] || k == 0) continue;
+            const double *P = tri + start[i] * 6;
+            const double a0 = box_area(P, k, 0.0);
+            if (!(a0 > 0.0)) continue;  // a line or a point: nothing to straighten
+            // 36 steps of 10 degrees, then 1 degree around the best, then 0.1 degree (decision 10)
+            double best = 0.0, best_area = a0;
+            for (int step = 1; step < 36; ++step) {
+                const double a = step * 10.0 * deg, ar = box_area(P, k, a);
+                if (ar < best_area) { best = a; best_area = ar; }
+            }
+            for (double width : {1.0, 0.1}) {
+                const double centre = best;
+                for (int step = -9; step <= 9; ++step) {
+                    if (step == 0) continue;
+                    const double a = centre + step * width * deg, ar = box_area(P, k, a);
+                    if (ar < best_area) { best = a; best_area = ar; }
+                }
+            }
+            // the box repeats every 90 degrees: the smallest turn that gives it, in (-45, 45] degrees; none when the
+            // gain is only rounding
+            if (best_area >= a0 * (1.0 - 1e-9)) continue;
+            double q = std::fmod(best, PI / 2.0);
+            if (q > PI / 4.0) q -= PI / 2.0;
+            if (q <= -PI / 4.0) q += PI / 2.0;
+            base[i] = q;
+        }
         return 1;
     } catch (...) {
         return -1;
