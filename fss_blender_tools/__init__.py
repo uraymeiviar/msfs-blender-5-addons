@@ -24,6 +24,8 @@ if "name_check" in locals():
     tags = importlib.reload(tags)
     merge = importlib.reload(merge)
     uv_fill = importlib.reload(uv_fill)
+    uv_align = importlib.reload(uv_align)
+    uv_align_draw = importlib.reload(uv_align_draw)
     uv_pack = importlib.reload(uv_pack)
     uv_marks = importlib.reload(uv_marks)
     uv_problems = importlib.reload(uv_problems)
@@ -43,11 +45,12 @@ if "name_check" in locals():
     ao_bake = importlib.reload(ao_bake)
 else:
     from . import (ao_bake, ao_bake_apply, ao_bake_core, ao_bake_store, autorefresh, checks, empty_bounds, lod_rules, lod_model, lod, materials, merge, name_check, panels, tags, texture_sets,
-                   tools, uv_autoseam, uv_fill, uv_heatmap, uv_islands, uv_marks, uv_pack, uv_problems, visibility,
+                   tools, uv_align, uv_align_draw, uv_autoseam, uv_fill, uv_heatmap, uv_islands, uv_marks, uv_pack,
+                   uv_problems, visibility,
                    visibility_core)
 
 # panels first: it documents the sidebar layout (it registers no panel since UV Tools was dissolved)
-MODULES = (panels, tools, empty_bounds, lod, tags, merge, uv_marks, uv_problems, uv_islands, materials, texture_sets, uv_autoseam, uv_heatmap, visibility, ao_bake, name_check,
+MODULES = (panels, tools, empty_bounds, lod, tags, merge, uv_marks, uv_align, uv_align_draw, uv_problems, uv_islands, materials, texture_sets, uv_autoseam, uv_heatmap, visibility, ao_bake, name_check,
            checks, autorefresh)
 
 # The glTF exporter looks this name up on every enabled add-on: merge groups are merged in its pre-export hook

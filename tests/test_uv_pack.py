@@ -37,7 +37,7 @@ while repo_root_str in sys.path:
 sys.path.insert(0, repo_root_str)
 
 import fss_blender_tools  # noqa: E402
-from fss_blender_tools import (checks, uv_autoseam, uv_fill, uv_islands, uv_marks, uv_pack,  # noqa: E402
+from fss_blender_tools import (checks, uv_align, uv_align_draw, uv_autoseam, uv_fill, uv_islands, uv_marks, uv_pack,  # noqa: E402
                                uv_problems, visibility_core)
 
 fss_blender_tools.register()
@@ -424,6 +424,185 @@ def test_object_priority():
     print(f"PASS: test_object_priority (0: the objects' boxes {mixed:.0f} px apart (they mix), k {free['k']:.3f}; 1: "
           f"two rectangles {gap:.1f} px apart, k {r['k']:.3f}; 0.5: no group of two; 0.95: two groups, k "
           f"{most['k']:.3f}; an overflow at 2048 px repaired with each group whole and apart; 0 violations)")
+
+
+def mark_face_edge(obj, face, kind):
+    """Mark the edge from a face's first corner to its second with a UV Align kind (1 to 3), in Object Mode."""
+    me = obj.data
+    attribute = me.attributes.get(uv_align.ALIGN_KEY) or me.attributes.new(uv_align.ALIGN_KEY, 'INT', 'EDGE')
+    attribute.data[me.loops[me.polygons[face].loop_start].edge_index].value = kind
+
+
+def first_edge_angle(obj, face, size=4096):
+    q = uvs(obj).reshape(-1, 4, 2)[face] * size
+    e = q[1] - q[0]
+    return math.degrees(math.atan2(e[1], e[0]))
+
+
+def test_uv_align():
+    """Native UV packer decisions 7 and 12: edges marked Horizontal, Vertical or Either turn their island to that axis,
+    with the turn that fits all of them best (weighted by UV length); what stays off by more than 0.5 degrees is
+    reported. Marked in Edit Mode from the Edge menus."""
+    deg = math.radians
+    turn, off = uv_align.best_fit([deg(10)], [1.0], [uv_align.HORIZONTAL])
+    assert abs(math.degrees(turn) + 10) < 0.02 and off < deg(0.02), (turn, off)
+    turn, _off = uv_align.best_fit([deg(80)], [1.0], [uv_align.VERTICAL])
+    assert abs(math.degrees(turn) - 10) < 0.02, turn
+    turn, _off = uv_align.best_fit([deg(50)], [1.0], [uv_align.EITHER])  # the nearer axis: 90 degrees
+    assert abs(math.degrees(turn) - 40) < 0.02, turn
+    turn, off = uv_align.best_fit([deg(10), deg(12)], [1.0, 3.0], [uv_align.HORIZONTAL] * 2)  # weighted by length
+    assert abs(math.degrees(turn) + 11.5) < 0.02 and abs(math.degrees(off) - 1.5) < 0.02, (turn, off)
+    # the operators, on the edges selected in Edit Mode; Clear removes the attribute with the last mark
+    reset()
+    m = mat('ALIGN')
+    obj = quad_obj('ALIGN', [(0, 0, 0.2, 0.1), (1, 0, 0.2, 0.1)], mats=[m, m])
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+    bpy.ops.object.mode_set(mode='EDIT')
+    import bmesh
+    bm = bmesh.from_edit_mesh(obj.data)
+    for e in bm.edges:
+        e.select = e.index in (0, 1)
+    bmesh.update_edit_mesh(obj.data)
+    # in the UV editor without sync selection, the edges selected there (on the loops)
+    bm.faces.ensure_lookup_table()
+    for face in bm.faces:
+        for loop in face.loops:
+            loop.uv_select_edge_set(False)
+    picked = bm.faces[1].loops[0]
+    picked.uv_select_edge_set(True)
+    assert [e.index for e in uv_align._selected_edges(bm, True)] == [picked.edge.index]
+    assert bpy.ops.fss.uv_mark_align(kind='VERTICAL') == {'FINISHED'}
+    bpy.ops.object.mode_set(mode='OBJECT')
+    marks = uv_align.edge_marks(obj.data)
+    assert marks is not None and marks[:2].tolist() == [2, 2] and not marks[2:].any(), marks
+    bpy.ops.object.mode_set(mode='EDIT')
+    assert bpy.ops.fss.uv_clear_align() == {'FINISHED'}
+    bpy.ops.object.mode_set(mode='OBJECT')
+    assert uv_align.edge_marks(obj.data) is None and obj.data.attributes.get(uv_align.ALIGN_KEY) is None
+    for menu in uv_align.MENUS:
+        assert uv_align._menu in getattr(bpy.types, menu)._dyn_ui_initialize(), menu
+    # Pack: an Upright island tilted by 30 degrees with its first edge marked Horizontal comes out level
+    reset()
+    m = mat('ALIGN_PACK')
+    obj = quad_obj('ALIGN_UP', [(0, 0, 0.3, 0.1), (1, 0, 0.1, 0.1)], mats=[m, m])
+    obj['fss_uv_direction'] = 'UPRIGHT'
+    tilt_uvs(obj, 30.0)
+    mark_face_edge(obj, 0, uv_align.HORIZONTAL)
+    other = quad_obj('ALIGN_VERT', [(3, 0, 0.3, 0.1)], mats=[m])  # Quarter with a Vertical edge: 90 or 270 degrees
+    other['fss_uv_direction'] = 'QUARTER'
+    tilt_uvs(other, 20.0)
+    mark_face_edge(other, 0, uv_align.VERTICAL)
+    r = uv_pack.pack(m)
+    a0, a1, a2 = first_edge_angle(obj, 0), first_edge_angle(obj, 1), first_edge_angle(other, 0)
+    assert min(abs(a0), abs(abs(a0) - 180)) < 0.01, a0  # level, and Upright: not turned further
+    assert abs(a1 - 30.0) < 1e-3, a1  # the unmarked Upright island keeps its tilt
+    assert abs(abs(a2) - 90.0) < 0.01, a2
+    assert ok(r) and r['aligned_islands'] == 2 and r['align_off_edges'] == 0 and r['upright_rotation_err_rad'] < 1e-4, r
+    assert any('UV Align: 2 island(s)' in line for line in uv_pack._set_block(r))
+    q = uvs(obj).reshape(-1, 4, 2)[0] * 4096
+    assert abs(quad_density(q, 30, 10) - 20.48) / 20.48 < 1e-4
+    # two edges of one quad that meet at a right angle, both Horizontal: no turn holds both; 45 degrees each, reported
+    reset()
+    m = mat('ALIGN_BAD')
+    bad = quad_obj('ALIGN_BAD', [(0, 0, 0.2, 0.2)], mats=[m])
+    me = bad.data
+    attribute = me.attributes.new(uv_align.ALIGN_KEY, 'INT', 'EDGE')
+    start = me.polygons[0].loop_start
+    for corner in (0, 1):
+        attribute.data[me.loops[start + corner].edge_index].value = uv_align.HORIZONTAL
+    r = uv_pack.measure(m)
+    assert r['align_off_edges'] == 2 and abs(r['align_off_max_deg'] - 45.0) < 0.05, r
+    assert r['align_off_objects'] == ['ALIGN_BAD'], r['align_off_objects']
+    assert any('2 edge(s) more than 0.5 degrees off their axis' in line for line in uv_pack._set_block(r))
+    print(f"PASS: test_uv_align (best fit by length, Either to the nearer axis; Mark Vertical and Clear from Edit Mode; "
+          f"an Upright island tilted 30 degrees packed level ({a0:.3f}), a Quarter one vertical ({a2:.3f}); two "
+          f"perpendicular Horizontal edges reported 45 degrees off)")
+
+
+def test_uv_align_overlay():
+    """Decision 12, second delivery: the overlay's geometry (dashed lines and the symbols), the cache that follows
+    edits, Select UV Align Edges and the Show toggle."""
+    import bmesh
+    # dashes: whole dashes and gaps stretched to the line, from end to end
+    d = uv_align_draw.dashes((0.0, 0.0), (50.0, 0.0), 50.0)
+    assert len(d) == 5 and np.allclose(d[0][0], (0, 0)) and np.allclose(d[-1][1], (50, 0)), d
+    on = sum(float(np.linalg.norm(q - p)) for p, q in d)
+    assert abs(on - 5 * 50.0 * 0.6 / (5 - 0.4)) < 1e-9, on  # 5 dashes of 6 / 10 of a step, 5 - 0.4 steps long
+    assert len(uv_align_draw.dashes((0, 0), (3, 0), 3.0)) == 1  # shorter than a dash: one line
+    centre, right, up = np.zeros(3), np.array([1.0, 0, 0]), np.array([0, 1.0, 0])
+    assert [len(uv_align_draw.symbol(k, centre, right, up)) for k in (1, 2, 3)] == [1, 1, 2]
+    reset()
+    m = mat('OVERLAY')
+    obj = quad_obj('OVERLAY', [(0, 0, 0.1, 0.1), (1, 0, 0.1, 0.1)], mats=[m, m])
+    mark_face_edge(obj, 0, uv_align.HORIZONTAL)
+    mark_face_edge(obj, 1, uv_align.EITHER)
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+    bpy.ops.object.mode_set(mode='EDIT')
+    def fresh():  # what the draw handlers get: a depsgraph update drops the copies, the timer refreshes them
+        bpy.context.view_layer.update()
+        assert obj.data.name not in uv_align_draw._cache
+        uv_align_draw.refresh([obj])
+        return uv_align_draw._cache[obj.data.name]
+
+    data = fresh()
+    assert sorted(data['kind'].tolist()) == [uv_align.HORIZONTAL, uv_align.EITHER], data
+    # the refresh's temporary mesh does not drop the copies again (it would refresh without end)
+    bpy.context.view_layer.update()
+    assert uv_align_draw._cache.get(obj.data.name) is data
+    # the 3D view: a view straight down the z axis, 1000 x 1000 px for 2 x 2 world units (0.1 m is 50 px)
+    P = np.diag([1.0, 1.0, 1.0, 1.0])
+    pts = uv_align_draw.lines_3d([obj], P, np.array([0, 0, 10.0]), np.array([0, 0, -1.0]), np.array([1.0, 0, 0]),
+                                 np.array([0, 1.0, 0]), (1000, 1000), False)
+    # each edge 50 px: 5 dashes; symbols: 1 stroke (Horizontal) and 2 (Either)
+    assert len(pts) == 2 * (5 + 5 + 1 + 2), len(pts)
+    assert all(abs(p[2] - uv_align_draw.NUDGE) < 1e-9 for p in pts)  # towards the eye
+    # the UV editor: with UV sync every face shows; without, only the selected faces
+    to_px = lambda u, v: (u * 1000.0, v * 1000.0)  # noqa: E731
+    assert len(uv_align_draw.lines_uv([obj], True, to_px)) > 0
+    bpy.ops.mesh.select_all(action='DESELECT')
+    fresh()
+    assert uv_align_draw.lines_uv([obj], False, to_px) == []
+    # Select UV Align Edges: the two marked edges
+    assert bpy.ops.fss.uv_select_align() == {'FINISHED'}
+    bm = bmesh.from_edit_mesh(obj.data)
+    layer = bm.edges.layers.int.get(uv_align.ALIGN_KEY)
+    assert sorted(e.index for e in bm.edges if e.select) == sorted(e.index for e in bm.edges if e[layer])
+    # a new mark: the depsgraph update drops the copies and the overlay shows three edges
+    for e in bm.edges:
+        e.select = not e[layer] and e.index == max(i.index for i in bm.edges if not i[layer])
+    bmesh.update_edit_mesh(obj.data)
+    del bm, layer
+    assert bpy.ops.fss.uv_mark_align(kind='VERTICAL') == {'FINISHED'}
+    assert len(fresh()['kind']) == 3, uv_align_draw._cache
+    # the artist's crashes: Edit Mode left and entered (Blender frees and rebuilds the edit mesh) and the UVs moved,
+    # then a draw. The copies follow the moved UVs and hold only numpy arrays, no BMesh data
+    x0 = uv_align_draw._cache[obj.data.name]['uv_a'][:, 0].copy()
+    for _round in range(3):
+        bpy.ops.object.mode_set(mode='OBJECT')
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_all(action='SELECT')
+        bm = bmesh.from_edit_mesh(obj.data)
+        uv = bm.loops.layers.uv.active
+        for face in bm.faces:
+            for loop in face.loops:
+                loop[uv].uv.x += 0.01
+        bmesh.update_edit_mesh(obj.data)
+        del bm, uv
+        data = fresh()
+        assert uv_align_draw.lines_uv([obj], True, to_px)
+    assert np.allclose(data['uv_a'][:, 0], x0 + 0.03), (data['uv_a'][:, 0], x0)
+    assert all(isinstance(v, np.ndarray) for d in uv_align_draw._cache.values() if d for v in d.values())
+    bpy.ops.object.mode_set(mode='OBJECT')
+    wm = bpy.context.window_manager
+    assert getattr(wm, uv_align_draw.SHOW_PROP) is True
+    setattr(wm, uv_align_draw.SHOW_PROP, False)
+    assert not uv_align_draw.show()
+    setattr(wm, uv_align_draw.SHOW_PROP, True)
+    print(f"PASS: test_uv_align_overlay (5 dashes on 50 px, symbols 1 / 1 / 2 strokes; 3D lines {len(pts) // 2} "
+          f"nudged to the eye; UV lines with sync, none for unselected faces without; Select UV Align Edges; the "
+          f"copies follow a new mark and UVs moved across Edit Mode toggles, no refresh loop; Show toggles)")
 
 
 def test_exact_density():
@@ -2134,6 +2313,8 @@ def main():
     test_scale_to_fill()
     test_eighth_mark()
     test_object_priority()
+    test_uv_align()
+    test_uv_align_overlay()
     test_exact_density()
     test_material_factor()
     test_underflow_and_sizes()

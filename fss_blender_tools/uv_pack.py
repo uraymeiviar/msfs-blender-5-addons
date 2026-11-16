@@ -34,7 +34,7 @@ import time
 import bpy
 import numpy as np
 
-from . import uv_fill, uv_marks, visibility_core  # uv_marks imports this module too (its operators call pack and measure)
+from . import uv_align, uv_fill, uv_marks, visibility_core  # uv_marks imports this module too (its operators call pack and measure)
 
 REPORT_TEXT_NAME = 'FSS Packing Report'
 MIN_SIZE, MAX_SIZE = 256, 8192  # square texture sizes (decisions 9, 110 and 120)
@@ -785,6 +785,48 @@ class TextureSet:
         free = (self.dirs == 'FREE') & ~self.off & ~self.fixed
         if free.any():
             self.base = uv_fill.straighten(self.px(self.uv0)[self.TLt], self.tri_isl, self.n, free)
+        self._align()
+
+    def _align(self):
+        """UV Align marks (native UV packer decisions 7 and 12): the marked segments of the set (loop to next loop in the
+        layout's order), and per island with any the turn that fits them best (its base angle, in place of a Free
+        island's straightening); from there it turns only as keeps them on their axes, never more than its direction
+        allows. Kept pinned islands and islands left out are not turned."""
+        seg_a, seg_b, kinds = [], [], []
+        off = 0
+        for pi, lsel in enumerate(self.loop_src):
+            md = self.parts[pi][0]
+            marks = uv_align.edge_marks(md.me)
+            if marks is not None:
+                edge = np.zeros(md.nl, np.int64)
+                md.me.loops.foreach_get('edge_index', edge)
+                kind = marks[edge[lsel]]
+                hit = np.flatnonzero(kind)
+                seg_a.append(hit + off)
+                seg_b.append(np.searchsorted(lsel, md.next[lsel[hit]]) + off)
+                kinds.append(kind[hit])
+            off += len(lsel)
+        self.align_seg = (np.stack([np.concatenate(seg_a), np.concatenate(seg_b)], 1) if seg_a
+                          else np.zeros((0, 2), np.int64))
+        self.align_kind = np.concatenate(kinds) if kinds else np.zeros(0, np.int32)
+        self.align_isl = self.loop_isl[self.align_seg[:, 0]]
+        self.aligned = np.zeros(self.n, bool)
+        if not len(self.align_kind):
+            return
+        P = self.px(self.uv0)
+        d = P[self.align_seg[:, 1]] - P[self.align_seg[:, 0]]
+        length = np.linalg.norm(d, axis=1)
+        angle = np.arctan2(d[:, 1], d[:, 0])
+        movable = ~self.off & ~self.fixed
+        for i in np.unique(self.align_isl).tolist():
+            sel = (self.align_isl == i) & (length > 1e-9)
+            if not movable[i] or not sel.any():
+                continue
+            self.base[i], _off = uv_align.best_fit(angle[sel], length[sel], self.align_kind[sel])
+            self.aligned[i] = True
+            axis = uv_fill.FLIP if np.isin(self.align_kind[sel], [uv_align.HORIZONTAL, uv_align.VERTICAL]).any() \
+                else uv_fill.QUARTER
+            self.turn_set[i] = min(int(self.turn_set[i]), axis)
 
     def px(self, uv):
         """UV -> pixels of the set's texture."""
@@ -1092,7 +1134,7 @@ def pack_set(ts, progress=None):
                pinned_aside=int(ts.aside.sum()), area=list(ts.area),
                overflow_at=None if ts.overflow_at is None else ts.overflow_at.tolist(),
                pinned_conflicts=int(pinned_violations + pinned_overlaps), fallbacks=ts.fallbacks,
-               straightened_islands=int((ts.base != 0.0).sum()), priority=ts.priority, priority_groups=ts.groups)
+               straightened_islands=int(((ts.base != 0.0) & ~ts.aligned).sum()), priority=ts.priority, priority_groups=ts.groups)
     return res, mode, row
 
 
@@ -1118,11 +1160,20 @@ def evaluate(ts, res):
         e_new = seg[:, 1] - seg[:, 0]
         pre_seg = ts.px(res['pre'])[ts.seg_loops]
         e_old = pre_seg[:, 1] - pre_seg[:, 0]
-        sel = ts.upright[ts.seg_isl] & (np.linalg.norm(e_old, axis=1) > 1e-3)
+        # an Upright island turned by its UV Align edges is measured by them instead (below)
+        sel = (ts.upright & ~ts.aligned)[ts.seg_isl] & (np.linalg.norm(e_old, axis=1) > 1e-3)
         if sel.any():
             ang = np.arctan2(e_old[sel, 0] * e_new[sel, 1] - e_old[sel, 1] * e_new[sel, 0],
                              (e_old[sel] * e_new[sel]).sum(1))
             up_err = float(np.abs(ang).max())
+    # UV Align: how far each marked segment of a packed island lies from its axis (decision 12)
+    align_off = np.zeros(0)
+    on = ts.aligned[ts.align_isl]
+    if on.any():
+        d = px[ts.align_seg[on, 1]] - px[ts.align_seg[on, 0]]
+        good = np.linalg.norm(d, axis=1) > 1e-9
+        align_off = np.degrees(np.abs(uv_align.residual(np.arctan2(d[good, 1], d[good, 0]), ts.align_kind[on][good])))
+    off_isl = np.unique(ts.align_isl[on][np.flatnonzero(good)[align_off > uv_align.MAX_OFF_DEG]]) if on.any() else []
     k = res['k']
     need, fits = needed_size(k, ts.size)
     area_px = float(a_uv[~ts.off].sum())
@@ -1136,6 +1187,10 @@ def evaluate(ts, res):
         'density_out_of_range_max_ge100px': float(dev[big].max()) if big.any() else 0.0,
         'density_out_of_range_mean': float((dev * ts.a3[ok]).sum() / max(ts.a3[ok].sum(), 1e-30)) if len(dev) else 0.0,
         'upright_rotation_err_rad': up_err,
+        'aligned_islands': int(ts.aligned.sum()), 'align_edges': int(len(align_off)),
+        'align_off_edges': int((align_off > uv_align.MAX_OFF_DEG).sum()),
+        'align_off_max_deg': float(align_off.max()) if len(align_off) else 0.0,
+        'align_off_objects': ts.objects_of(np.isin(np.arange(ts.n), off_isl)),
     })
     return m, offenders
 
@@ -1473,6 +1528,11 @@ def _set_block(r, selected=None):
         + (f", {r['fallbacks']} layout(s) the raster could not hold, left on shelves" if r.get('fallbacks') else '')
         + (', quarter turns only' if r['quarter'] else ''),
     ]
+    if r.get('aligned_islands'):
+        lines.append(f"  UV Align: {r['aligned_islands']} island(s) turned by {r['align_edges']} marked edge(s); "
+                     + (f"{r['align_off_edges']} edge(s) more than {uv_align.MAX_OFF_DEG} degrees off their axis "
+                        f"(up to {r['align_off_max_deg']:.2f}): {_names(r['align_off_objects'])}"
+                        if r['align_off_edges'] else f"every one within {uv_align.MAX_OFF_DEG} degrees of its axis"))
     if r.get('priority'):
         lines.append(f"  Object priority {r['priority']:.2f}: the islands of {r['priority_groups']} object(s) packed "
                      f"together ({100 * r['priority']:.0f} % of each object's island area, its largest islands)")
