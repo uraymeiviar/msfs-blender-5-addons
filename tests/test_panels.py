@@ -131,7 +131,7 @@ class _Layout:
 
     def __getattr__(self, name):
         def call(*args, **kwargs):
-            if name == 'progress':
+            if name in ('progress', 'prop'):
                 kwargs['_alert'] = self.alert
             self.calls.append((name, args, kwargs))
             if name == 'operator':
@@ -844,7 +844,7 @@ def build_names(scene, obj):
 AO_OPERATORS = {'ao_bake_refresh', 'ao_run', 'ao_object_step', 'ao_bake_start', 'ao_bake_select', 'ao_bake_tree_set',
                 'ao_bake_detect', 'ao_bake_tree_fold', 'ao_bake_tree_select', 'ao_bake_tree_highlight',
                 'ao_bake_tree_select_all', 'ao_bake_tree_highlight_all', 'ao_bake_tree_toggle',
-                'ao_bake_custom_occluders', 'ao_apply'}  # every AO Bake operator but the two Cancels
+                'ao_bake_custom_occluders', 'ao_apply', 'ao_fetch_vertex_color'}  # all but the two Cancels
 
 
 def _drawn():
@@ -1010,6 +1010,239 @@ def test_ao_one_instance_box():
           f'{seen["poses before a Refresh"]})')
 
 
+def test_ao_channel_toggles():
+    """AO bake decisions 79, 82, 84, 85 and 87: the Run panel draws one grid of ticks (checkboxes, not toggles), a row
+    each for AO, CM, Albedo, Roughness, Metal and Emissive, Bake Selected left and Apply right (the channels off by
+    default); an Apply tick is alert when a selected master's grade of it is mesh changed, and the warning line counts
+    them; the Object box lists the material channels its master has (from the last Refresh), one line each with its
+    grade, and none it does not have; a shared mesh with two copies selected shows Bake Copy (the copy its albedo,
+    roughness and metal are baked from) only while one of those is ticked to bake (not for Emissive alone, decision
+    87; One Instance shows it anyway, decision 77)."""
+    from fss_blender_tools import ao_bake, ao_bake_store as store
+    groups = store.core.CHANNEL_GROUPS
+    s = bpy.context.scene.fss_ao_bake
+    assert not any(getattr(s, f'{w}_{g}') for w in ('bake', 'apply') for g in groups)
+    assert s.bake_ao and s.apply_ao and not s.curvature and not s.apply_cm
+    grid_props = ['bake_ao', 'apply_ao', 'curvature', 'apply_cm'] + [f'{w}_{g}' for g in groups
+                                                                      for w in ('bake', 'apply')]
+
+    def run_grid():
+        calls = []
+        bpy.types.FSS_PT_ao_run.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+        ticks = [(args[1], kwargs) for name, args, kwargs in calls if name == 'prop' and args[1] in grid_props]
+        labels = [kwargs.get('text') for name, _args, kwargs in calls if name == 'label']
+        return calls, ticks, labels
+    calls, ticks, _labels = run_grid()
+    toggles = [p for p, _kw in ticks]
+    assert toggles == grid_props, toggles  # decision 84: AO to Emissive, Bake left, Apply right
+    assert not any(kw.get('toggle') for name, _a, kw in calls if name == 'prop'), 'a toggle button is drawn'
+    assert sum(1 for name, _a, _kw in calls if name == 'grid_flow') == 1
+    n_sel = len(bpy.context.selected_objects)
+    texts = [kw.get('text') for _p, kw in ticks]
+    assert texts[4] == f'Albedo Bake Selected ({n_sel})', texts
+    assert texts[11].startswith(f'Apply Emissive to Texture ({n_sel} objs, '), texts
+    names = [s.bl_rna.properties[f'bake_{g}'].name for g in groups]
+    assert names == ['Albedo', 'Roughness', 'Metal', 'Emissive'], names
+    # Channel Samples (Session 64): 64 by default, drawn with the baker's settings, in the job's settings
+    assert s.channel_samples == 64, s.channel_samples
+    bake_calls = []
+    ao_bake._draw_bake(_Layout(bake_calls), bpy.context, s)
+    assert 'channel_samples' in [args[1] for name, args, _kw in bake_calls if name == 'prop'], bake_calls
+    assert store.settings_dict(bpy.context.scene)['channel_samples'] == 64
+    mat = bpy.data.materials.new('PANEL_CH_MAT')
+    me = bpy.data.meshes.new('PANEL_CH_MESH')
+    me.from_pydata([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [], [(0, 1, 2)])
+    me.uv_layers.new(name='UVMap')
+    me.materials.append(mat)
+    a = bpy.data.objects.new('CH_A', me)
+    b = bpy.data.objects.new('CH_B', me)
+    for i, o in enumerate((a, b)):
+        o.location = (3.0 * i, 20.0, 0.0)
+        bpy.context.scene.collection.objects.link(o)
+    bpy.context.view_layer.update()
+
+    def box(selected, active):
+        _select(selected, active)
+        calls = []
+        ao_bake._draw_object(_Layout(calls), bpy.context)
+        return ([args[1] for name, args, _kwargs in calls if name == 'prop'],
+                [kwargs.get('text') for name, _args, kwargs in calls if name == 'label'])
+
+    def lines(labels):
+        return [t for t in labels if t and t.split(':')[0] in ('Albedo', 'Roughness', 'Metal', 'Emissive')]
+    saved = dict(store._state)
+    seen = {}
+    try:
+        _props, labels = box([a], a)
+        assert lines(labels) == [], labels  # before a Refresh
+        store._state.update(items={'k': dict(users=['CH_A', 'CH_B'],
+                                             ch_grades={'albedo': 'UP_TO_DATE', 'rough': 'MESH'})},
+                            by_object={'CH_A': 'k', 'CH_B': 'k'})
+        _props, labels = box([a], a)
+        assert lines(labels) == ['Albedo: up to date', 'Roughness: mesh changed'], labels
+        seen['two channels'] = lines(labels)
+        # decision 85: an Apply tick alert where a selected master's grade of it is mesh changed, and the warning
+        _select([a], a)
+        s.apply_rough = s.apply_albedo = True
+        _calls, ticks, labels = run_grid()
+        alert = {p: kw['_alert'] for p, kw in ticks}
+        assert alert['apply_rough'] and not alert['apply_albedo'] and not alert['apply_ao'], alert
+        assert not alert['bake_rough'], alert
+        warn = [t for t in labels if t and 'applied anyway' in t]
+        assert warn == ['1 mesh changed since its bake: applied anyway'], labels
+        s.apply_rough = False
+        _calls, ticks, labels = run_grid()
+        assert not any(kw['_alert'] for _p, kw in ticks), ticks
+        assert not [t for t in labels if t and 'applied anyway' in t], labels
+        s.apply_albedo = False
+        seen['alert'] = f"Apply Roughness alert, '{warn[0]}'"
+        store._state['items']['k']['ch_grades'] = {}
+        _props, labels = box([a], a)
+        assert lines(labels) == [], labels
+        # Bake Copy for a shared mesh's channels (Average): only while a channel is ticked to bake
+        props, _labels = box([a, b], a)
+        assert 'bake_copy' not in props, props
+        s.bake_emis = True  # decision 87: the emissive is combined over the copies, no copy to choose
+        props, _labels = box([a, b], a)
+        assert 'bake_copy' not in props, props
+        s.bake_emis = False
+        s.bake_albedo = True
+        props, _labels = box([a, b], a)
+        assert props.count('bake_copy') == 1, props
+        props, _labels = box([a], a)
+        assert 'bake_copy' not in props, props  # one copy selected
+        seen['Bake Copy'] = 'with Albedo ticked and two copies selected'
+    finally:
+        s.bake_albedo = s.bake_emis = s.apply_rough = s.apply_albedo = False
+        store._state.clear()
+        store._state.update(saved)
+        for o in (a, b):
+            bpy.data.objects.remove(o)
+        bpy.data.meshes.remove(me)
+        bpy.data.materials.remove(mat)
+    print(f"PASS: test_ao_channel_toggles (Run grid: {len(toggles)} checkboxes {toggles}, none a toggle; "
+          f"{seen['alert']}; the Object box: {seen['two channels']}, none without; Bake Copy {seen['Bake Copy']}, "
+          f"not with Emissive alone)")
+
+
+def test_ao_vertex_color_rows():
+    """AO bake decisions 88, 89 and 95: under the Run grid, one row per ticked Bake of AO, Albedo, Roughness, Metal and
+    Emissive (in that order) with its vertex colour source checkbox, and Overwrite / Multiply expanded only while the
+    source is ticked; none for a channel whose Bake is not ticked; off and Multiply by default; the job's
+    settings carry the ticked sources. Decision 91: Read (Second Color Attribute by default, or Active Attribute)
+    drawn once, after the rows, only while a drawn source is ticked, and carried in the job's settings."""
+    from fss_blender_tools import ao_bake_store as store
+    s = bpy.context.scene.fss_ao_bake
+    vc = ('ao', 'albedo', 'rough', 'metal', 'emis')
+    assert not any(getattr(s, f'vc_{g}') for g in vc)
+    assert all(getattr(s, f'vc_{g}_mode') == 'MULTIPLY' for g in vc)
+    names = [s.bl_rna.properties[f'vc_{g}'].name for g in vc]
+    assert names == ['AO from Vertex Color Red', 'Albedo from Vertex Color', 'Roughness from Vertex Color Green',
+                     'Metal from Vertex Color Blue', 'Emissive from Vertex Color'], names
+    keep = {p_: getattr(s, p_) for p_ in ('bake_ao', 'bake_albedo', 'bake_rough', 'bake_metal', 'bake_emis')}
+
+    def rows():
+        calls = []
+        bpy.types.FSS_PT_ao_run.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+        return [(args[1], bool(kw.get('expand'))) for name, args, kw in calls
+                if name == 'prop' and args[1].startswith('vc_')]
+    seen = {}
+    try:
+        for p_ in keep:
+            setattr(s, p_, False)
+        assert rows() == [], rows()
+        s.bake_emis = True
+        assert rows() == [('vc_emis', False)], rows()  # decision 95: the Emissive source
+        s.bake_ao = s.bake_rough = True
+        assert rows() == [('vc_ao', False), ('vc_rough', False), ('vc_emis', False)], rows()
+        enum = s.bl_rna.properties['vc_attribute'].enum_items
+        assert s.vc_attribute == 'SECOND' and enum['SECOND'].name == 'Second Color Attribute' and \
+            enum['ACTIVE'].name == 'Active Attribute'
+        s.vc_rough = True
+        assert rows() == [('vc_ao', False), ('vc_rough', False), ('vc_rough_mode', True), ('vc_emis', False),
+                          ('vc_attribute', True)], rows()
+        s.bake_albedo = s.bake_metal = True
+        got = rows()
+        assert got == [('vc_ao', False), ('vc_albedo', False), ('vc_rough', False), ('vc_rough_mode', True),
+                       ('vc_metal', False), ('vc_emis', False), ('vc_attribute', True)], got
+        seen['all ticked'] = [n for n, _e in got]
+        s.bake_rough = False  # its source stays ticked but its row goes with its Bake tick, and Read with it
+        assert rows() == [('vc_ao', False), ('vc_albedo', False), ('vc_metal', False), ('vc_emis', False)], rows()
+        s.vc_emis = True
+        assert ('vc_emis_mode', True) in rows() and ('vc_attribute', True) in rows(), rows()
+        assert store.settings_dict(bpy.context.scene)['vertex_color'] == {'rough': 'MULTIPLY', 'emis': 'MULTIPLY'}
+        s.vc_emis = False
+        assert store.settings_dict(bpy.context.scene)['vertex_color'] == {'rough': 'MULTIPLY'}
+        s.vc_ao, s.vc_ao_mode = True, 'OVERWRITE'
+        assert store.settings_dict(bpy.context.scene)['vertex_color'] == {'ao': 'OVERWRITE', 'rough': 'MULTIPLY'}
+        assert ('vc_attribute', True) in rows()  # the AO's source ticked
+        s.vc_attribute = 'ACTIVE'
+        assert store.settings_dict(bpy.context.scene)['vc_attribute'] == 'ACTIVE'
+    finally:
+        for p_, v in keep.items():
+            setattr(s, p_, v)
+        for g in vc:
+            setattr(s, f'vc_{g}', False)
+            setattr(s, f'vc_{g}_mode', 'MULTIPLY')
+        s.vc_attribute = 'SECOND'
+    print(f"PASS: test_ao_vertex_color_rows (rows {seen['all ticked']}; the mode expanded only with its source "
+          f"ticked, Read once while a drawn source is ticked; the Emissive row while Bake Emissive is ticked; the "
+          f"job's settings carry the ticked sources and Read)")
+
+
+def test_ao_fetch_buttons():
+    """AO bake decision 93: Fetch Albedo, Fetch ORM and Fetch Emis drawn in the Run panel as one row, always (no Bake
+    ticked too), greyed with the reason before a Refresh and without a master in the selection."""
+    from fss_blender_tools import ao_bake, ao_bake_store as store
+    s = bpy.context.scene.fss_ao_bake
+    props = ('bake_ao', 'curvature') + tuple(f'bake_{g}' for g in store.core.CHANNEL_GROUPS)
+    keep = {p_: getattr(s, p_) for p_ in props}
+
+    def draw():
+        calls = []
+        bpy.types.FSS_PT_ao_run.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+        fetch = [(kw.get('text'), kw['_op']) for name, args, kw in calls
+                 if name == 'operator' and args[0] == 'fss.ao_fetch_vertex_color']
+        labels = [kw.get('text') for name, _a, kw in calls if name == 'label']
+        return [t for t, _o in fetch], [o.what for _t, o in fetch], labels
+    saved = dict(store._state)
+    seen = {}
+    try:
+        for p_ in keep:
+            setattr(s, p_, False)
+        store._state['refreshed'] = None
+        ops, whats, labels = draw()
+        assert ops == ['Fetch Albedo', 'Fetch ORM', 'Fetch Emis'] and whats == ['ALBEDO', 'ORM', 'EMIS'], (ops, whats)
+        assert 'Fetch: press Refresh first' in labels, labels
+        seen['before a Refresh'] = 'Fetch: press Refresh first'
+        assert ao_bake.fetch_problems(bpy.context) == {w: 'press Refresh first' for w in ('ALBEDO', 'ORM', 'EMIS')}
+        me = bpy.data.meshes.new('PANEL_FETCH_MESH')
+        me.from_pydata([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [], [(0, 1, 2)])
+        o = bpy.data.objects.new('FETCH_A', me)
+        bpy.context.scene.collection.objects.link(o)
+        try:
+            _select([o], o)
+            store._state.update(refreshed=1.0, items={'k': dict(grade='UP_TO_DATE', ch_grades={'rough': 'MESH'},
+                                                                 sets=[])}, by_object={'FETCH_A': 'k'})
+            fp = ao_bake.fetch_problems(bpy.context)
+            assert fp == {'ALBEDO': 'no Albedo master in the selection', 'ORM': '',
+                          'EMIS': 'no Emis master in the selection'}, fp
+            _ops, _w, labels = draw()
+            line = [t for t in labels if t and t.startswith('Fetch: ')]
+            assert line == ['Fetch: no Albedo master in the selection; no Emis master in the selection'], labels
+            seen['ORM only'] = line[0]
+        finally:
+            bpy.data.objects.remove(o)
+            bpy.data.meshes.remove(me)
+    finally:
+        for p_, v in keep.items():
+            setattr(s, p_, v)
+        store._state.clear()
+        store._state.update(saved)
+    print(f"PASS: test_ao_fetch_buttons (three buttons {ops}, drawn with no Bake ticked; {seen['before a Refresh']}; "
+          f"an AO master alone: '{seen['ORM only']}')")
+
+
 def main():
     test_layout()
     test_draw_all()
@@ -1022,6 +1255,9 @@ def main():
     test_rename_meshes()
     test_ao_bake_unavailable()  # apply-native-copy decision 6
     test_ao_one_instance_box()  # AO bake decision 77
+    test_ao_channel_toggles()  # AO bake decisions 79, 82, 84, 85 and 87
+    test_ao_vertex_color_rows()  # AO bake decisions 88, 89, 91 and 95
+    test_ao_fetch_buttons()  # AO bake decision 93
     print("ALL TESTS PASSED")
 
 

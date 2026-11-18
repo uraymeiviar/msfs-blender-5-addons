@@ -47,11 +47,34 @@ makes its window's preview from the tiles it bakes (decision 29). The curvature 
 baker too. Its samples are the job's optix_samples (decision 24). When it cannot
 start, or fails on a master, that master and the rest of the job bake with Cycles, and the log says why (decision 22).
 The index entry records the baker that made the master (decision 23).
+
+The layout (decision 81): while the mesh is unchanged (the index entry's mesh hash) a bake keeps the master's layout,
+built again at its stored density whatever the texture set's UVs or size are now; a new layout (no master, the mesh
+changed, or the stored one cannot be built again) removes what was baked into the old one and does not fit.
+
+Material channels (decisions 79 to 83; channel_item): after the AO, or alone, the job item's chosen channels (albedo,
+roughness, metal, emissive) baked from the object's material as Cycles shades it: per tile a temporary mesh of the
+master's triangles (core and skirt, as the AO's) with every UV map and attribute of the evaluated mesh at its corners
+and the master's UV as the active map (the render UV map stays the mesh's own), each material copied with the source
+of its Principled BSDF's socket routed to an Emission shader (albedo before the MSFS AO multiply), one EMIT bake per
+channel; one 16-bit grey JPEG XL image per component in the master's layout, albedo and emissive sRGB-encoded. A
+shared mesh's channels come from the copy the job names; its emissive, unless Copies is One Instance, from every
+copy, combined per pixel as the AO's copies (decision 87). A material without such a BSDF bakes black for that
+channel, and its texture set is listed as skipped in the entry (Apply keeps its pixels). No occluders, poses or denoise.
+
+Vertex colour sources (decisions 88 to 92; the job's settings['vertex_color'], {group: OVERWRITE or MULTIPLY}): the
+AO (red), roughness (green), metal (blue) or albedo (RGB) baked through the same channel path from the mesh's second
+colour attribute (settings['vc_attribute'] SECOND), or its active one (ACTIVE), read by name (an Emission shader fed by
+a Color Attribute node, the same material on every slot; the values linear for every attribute type): no trace, no
+material. Multiply multiplies the master's current image of the channel in the kept layout (decision 81), onto 1.0
+where there is none. The AO's: Overwrite removes the raw bake and the product; Multiply of a traced AO keeps the
+product of its multiplies as <stem>.ao_vc.jxl, so a later denoise-only run gives the denoised raw bake times it.
 """
 import importlib.util
 import json
 import math
 import os
+import shutil
 import sys
 import time
 import traceback
@@ -649,8 +672,10 @@ def bake_item(item, coll):
     if D <= 0:
         return dict(status='skipped', reason='no face with UV area')
     tb = time.time()
-    m = core.build_master(pos, tris, cnm, D, gutter=core.GUTTER, order=core.ORDER, mirror_open=core.MIRROR_OPEN,
-                          fold_split=core.FOLD_SPLIT)
+    # decision 81: the master's layout is kept while its mesh is unchanged (its density, whatever the UVs are now)
+    m, kept, old_entry = layout_for(item, mh, tri_src, pos, tris, cnm, D)
+    if kept:
+        D = m['density']
     m['corner_pairs'] = core.corner_pairs(m, pos, tris)  # decision 57
     t_build = time.time() - tb
     W, H = m['W'], m['H']
@@ -984,6 +1009,8 @@ def bake_item(item, coll):
         ts = time.time()
         files.finish(m, tri_src, meta)
         finished = True
+        if not kept:  # decision 81: a new layout; the material channels of the old one no longer fit
+            _remove_files([p for g in core.CHANNEL_GROUPS for p in core.channel_paths(FOLDER, item['key'], g)])
         _remove_files([os.path.join(FOLDER, item['key'] + core.THUMB_EXT)])  # decision 31: no thumbnail any more
         t_save = time.time() - ts
         if item.get('cm', SET.get('curvature')):  # decision 54: the curvature master in this layout, from geometry
@@ -1000,6 +1027,7 @@ def bake_item(item, coll):
                 except OSError:
                     pass
         _remove_files(core.image_paths(FOLDER, item['key'], 'ao.raw'))  # decision 56: the new bake is the raw one
+        _remove_files(core.image_paths(FOLDER, item['key'], 'ao_vc'))  # decision 89: a trace drops the product
         if SET.get('denoise'):
             dn = denoise(item, pos, tris, cnm)
     finally:
@@ -1055,6 +1083,8 @@ def bake_item(item, coll):
                  compose=counts, image=files.stats)
     if item.get('combine') == 'ONE' and item.get('copies'):  # decision 77: the copy One Instance was baked from
         entry['instance'] = item['copies'][0]['object']
+    if kept and (old_entry or {}).get('channels'):  # decision 81: the material channels in the kept layout stay
+        entry['channels'] = old_entry['channels']
     update_index(entry)
     res = dict(status='baked', W=int(W), H=int(H), tile=int(tile), n_tiles=int(n), bake_s=round(t_core + t_skirt, 3),
                total_s=round(time.time() - t0, 3), peak_working_set_gb=entry['tiles']['peak_working_set_gb'],
@@ -1095,6 +1125,45 @@ def _remove_files(paths):
             os.remove(p)
         except OSError:
             pass
+
+
+def kept_layout(key, mh, tri_src):
+    """Decision 81: the master's stored layout (core._layout of its .ao.npz) and its index entry when the entry's
+    mesh hash is the item's and its .ao.npz (not of schema 1) and .ao.map are there with these triangles; else
+    (None, entry)."""
+    old = _index_entry(key)
+    if old is None or old.get('mesh_hash') != mh:
+        return None, old
+    _img, mp, npz = core.master_paths(FOLDER, key)
+    if not (os.path.isfile(mp) and os.path.isfile(npz)) or core.has_maps_in_npz(npz):
+        return None, old
+    try:
+        with np.load(npz) as z:
+            lay = core._layout(z)
+    except (OSError, ValueError, KeyError):
+        return None, old
+    if not np.array_equal(np.asarray(lay['tri_src'], np.int64), np.asarray(tri_src, np.int64)):
+        return None, old
+    return lay, old
+
+
+def layout_for(item, mh, tri_src, pos, tris, cnm, D):
+    """Decision 81: (m, kept, old entry). While the mesh is unchanged the master keeps its layout, whatever the
+    texture set's UVs or size are now: built again at its stored density (the skirt is not stored) and used when it
+    equals the stored one; otherwise (no master, the mesh changed, or it cannot be built again: said in the log) a new
+    layout at density D."""
+    lay, old = kept_layout(item['key'], mh, tri_src)
+    kw = dict(gutter=core.GUTTER, order=core.ORDER, mirror_open=core.MIRROR_OPEN, fold_split=core.FOLD_SPLIT)
+    if lay is not None:
+        m = core.build_master(pos, tris, cnm, float(lay['density']), **kw)
+        why = core.same_layout(m, lay)
+        if not why:
+            if abs(float(lay['density']) - float(D)) > 1e-9 * max(float(D), 1.0):
+                log(f"  {item['name']}: its layout kept ({float(lay['density']):.6g} px/m; the UVs now give "
+                    f"{float(D):.6g})")
+            return m, True, old
+        log(f"  {item['name']}: its layout could not be built again ({why}): a new layout")
+    return core.build_master(pos, tris, cnm, D, **kw), False, old
 
 
 def write_curvature(item, m, pos, tris, cn, width):
@@ -1172,6 +1241,35 @@ def undenoise(item):
     return False
 
 
+def multiply_product(item, entry):
+    """Rule item 4 of decision 88's hand-off: a master whose AO was multiplied by a vertex colour (ao_source MULTIPLY)
+    gets its product (<stem>.ao_vc.jxl) again after a denoise-only run: the master times the product, per pixel.
+    Returns True when it did. The images are read whole (not paged)."""
+    key = item['key']
+    vc = core.image_paths(FOLDER, key, 'ao_vc')[0]
+    img = core.master_paths(FOLDER, key)[0]
+    if (entry.get('ao_source') or {}).get('mode') != 'MULTIPLY' or not os.path.isfile(vc) or not img.endswith('.jxl'):
+        return False
+    lib = core.jxl()
+    a, b = lib.read_whole(img), lib.read_whole(vc)
+    if a.shape != b.shape:
+        log(f"  {item['name']}: the vertex colour product is {b.shape[1]} x {b.shape[0]} px, the master "
+            f"{a.shape[1]} x {a.shape[0]}: not applied")
+        return False
+    w_ = core.ChannelWriter(FOLDER, key, 'ao', a.shape[1], a.shape[0], threads=int(SET['threads']))
+    try:
+        for y in range(0, a.shape[0], 256):
+            w_.write_rows(core.quantize16(a[y:y + 256] / 65535.0 * (b[y:y + 256] / 65535.0)), None)
+        w_.encode()
+        w_.commit()
+    except BaseException:
+        w_.abort()
+        raise
+    log(f"  {item['name']}: the vertex colour product ({', '.join(entry['ao_source'].get('attributes') or ())}) "
+        f"multiplied again")
+    return True
+
+
 def curvature_item(item, coll=None):
     """Decisions 55, 56: without rays, the curvature master (cm) and the denoise (dn) of a master whose AO master is
     up to date in mesh: in its layout (its .ao.npz: the master UVs and the triangles), from the baked file's geometry.
@@ -1219,7 +1317,709 @@ def curvature_item(item, coll=None):
         entry['denoise'] = dn
         update_index(entry)
         done.append('denoise')
+        if multiply_product(item, entry):  # decision 89: the AO's vertex colour multiplies kept
+            done.append('vertex colour product')
     return dict(status='updated', what=done, total_s=round(time.time() - t0, 3))
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Material channels (decisions 79 to 83): the object's material as Cycles shades it, baked into the master's layout
+# ---------------------------------------------------------------------------------------------------------------------
+
+CH_SAMPLES = (int(os.environ.get('FSS_AO_BAKE_CHANNEL_SAMPLES') or 0)  # tests: other samples
+              or int(SET.get('channel_samples') or 0) or core.CHANNEL_SAMPLES)  # the Channel Samples setting
+APPLY_AO_GROUP = '.Apply AO Group'  # the MSFS material multiplies the base colour by the occlusion there
+CH_SOCKETS = {'albedo': 'Base Color', 'rough': 'Roughness', 'metal': 'Metallic', 'emis': 'Emission Color'}
+CH_BAKE_UV = 'FSS_CHANNEL_BAKE_UV'
+CH_SKIP_ATTRS = {'position', 'material_index', 'sharp_face', 'sharp_edge', 'custom_normal'}
+CH_TYPES = {'FLOAT': ('value', 1, np.float32), 'INT': ('value', 1, np.int32), 'INT8': ('value', 1, np.int32),
+            'BOOLEAN': ('value', 1, bool), 'FLOAT2': ('vector', 2, np.float32),
+            'FLOAT_VECTOR': ('vector', 3, np.float32), 'FLOAT_COLOR': ('color', 4, np.float32),
+            'BYTE_COLOR': ('color', 4, np.float32)}
+
+
+def _through_reroutes(sock):
+    """The socket feeding `sock` past reroute nodes, or None when unlinked."""
+    while sock is not None and sock.is_linked:
+        link = sock.links[0]
+        if link.from_node.type == 'REROUTE':
+            sock = link.from_node.inputs[0]
+            continue
+        return link.from_socket
+    return None
+
+
+def principled_of(material):
+    """Rule item 1: (the Principled BSDF that feeds the Material Output's Surface, its output node) in the material's
+    tree, or (None, why)."""
+    nt = getattr(material, 'node_tree', None)
+    if nt is None:
+        return None, 'no node tree'
+    outs = [n for n in nt.nodes if n.type == 'OUTPUT_MATERIAL' and n.target in ('ALL', 'CYCLES')]
+    out = next((n for n in outs if n.is_active_output), outs[0] if outs else None)
+    if out is None:
+        return None, 'no Material Output'
+    src = _through_reroutes(out.inputs['Surface'])
+    if src is None or src.node.type != 'BSDF_PRINCIPLED':
+        return None, 'no Principled BSDF on the Material Output'
+    return src.node, out
+
+
+def _is_apply_ao(node):
+    tree = getattr(node, 'node_tree', None) if node.type == 'GROUP' else None
+    return tree is not None and (tree.name == APPLY_AO_GROUP or tree.name.startswith(APPLY_AO_GROUP + '.'))
+
+
+def channel_material(material, group, image):
+    """Rule items 1 and 2: a temporary copy of the material whose Material Output's Surface is an Emission shader
+    (strength 1) fed by what reaches the Principled BSDF's socket of the group (albedo: before the MSFS AO multiply),
+    with an Image Texture node of `image` active for the bake; (copy, '') or (None, why) without such a BSDF."""
+    p, out = principled_of(material)
+    if p is None:
+        return None, out
+    mat = material.copy()
+    mat.name = f'FSS_CH_{group}_{material.name}'
+    nt = mat.node_tree
+    p, out = principled_of(mat)
+    sock = p.inputs[CH_SOCKETS[group]]
+    src = _through_reroutes(sock)
+    if group == 'albedo' and src is not None and _is_apply_ao(src.node):
+        sock = src.node.inputs[0]  # the colour before the group multiplies it by the occlusion
+        src = _through_reroutes(sock)
+    em = nt.nodes.new('ShaderNodeEmission')
+    em.inputs['Strength'].default_value = 1.0
+    if src is not None:
+        nt.links.new(src, em.inputs['Color'])
+    else:
+        v = sock.default_value
+        em.inputs['Color'].default_value = (tuple(v)[:3] + (1.0,)) if hasattr(v, '__len__') else (v, v, v, 1.0)
+    for name in ('Surface', 'Volume'):
+        for link in list(out.inputs[name].links):
+            nt.links.remove(link)
+    nt.links.new(em.outputs[0], out.inputs['Surface'])
+    tex = nt.nodes.new('ShaderNodeTexImage')
+    tex.image = image
+    nt.nodes.active = tex
+    return mat, ''
+
+
+def _black_material(image):
+    """Faces of a texture set skipped for a channel (no Principled BSDF) bake black; Apply keeps their pixels."""
+    mat = bpy.data.materials.new('FSS_CH_SKIPPED')
+    mat.use_nodes = True
+    nt = mat.node_tree
+    for n in list(nt.nodes):
+        nt.nodes.remove(n)
+    out = nt.nodes.new('ShaderNodeOutputMaterial')
+    em = nt.nodes.new('ShaderNodeEmission')
+    em.inputs['Color'].default_value = (0.0, 0.0, 0.0, 1.0)
+    nt.links.new(em.outputs[0], out.inputs['Surface'])
+    tex = nt.nodes.new('ShaderNodeTexImage')
+    tex.image = image
+    nt.nodes.active = tex
+    return mat
+
+
+def channel_source(obj, dg, tri_src):
+    """Rule item 2: per master triangle (tri_src, loop triangles of the evaluated mesh) its corners' object-space
+    positions and corner normals, its material index and every UV map, colour and generic attribute of the evaluated
+    mesh at its corners (point, corner and face domains), so a bake mesh carries what the material reads. Returns a
+    dict, or raises ValueError when the evaluated mesh has another triangulation."""
+    me = bpy.data.meshes.new_from_object(obj.evaluated_get(dg), preserve_all_data_layers=True, depsgraph=dg)
+    try:
+        me.calc_loop_triangles()
+        nt = len(me.loop_triangles)
+        if len(tri_src) and int(np.max(tri_src)) >= nt:
+            raise ValueError(f'{obj.name}: {nt} triangles, the master has more')
+        loops = np.empty(nt * 3, np.int64)
+        me.loop_triangles.foreach_get('loops', loops)
+        verts = np.empty(nt * 3, np.int64)
+        me.loop_triangles.foreach_get('vertices', verts)
+        poly = np.empty(nt, np.int64)
+        me.loop_triangles.foreach_get('polygon_index', poly)
+        mat = np.empty(nt, np.int64)
+        me.loop_triangles.foreach_get('material_index', mat)
+        L = np.asarray(tri_src, np.int64)
+        loops, verts = loops.reshape(nt, 3)[L], verts.reshape(nt, 3)[L]
+        co = np.empty(len(me.vertices) * 3, np.float32)
+        me.vertices.foreach_get('co', co)
+        cn = np.empty(len(me.loops) * 3, np.float32)
+        me.corner_normals.foreach_get('vector', cn)
+        uv_names = [layer.name for layer in me.uv_layers]
+        render_uv = next((layer.name for layer in me.uv_layers if layer.active_render), None)
+        colors = {a.name for a in me.color_attributes}
+        try:
+            active_color = me.color_attributes.active_color_name
+            render_color = me.color_attributes.default_color_name
+        except AttributeError:
+            active_color = render_color = ''
+        attrs = []
+        for a in me.attributes:
+            info = CH_TYPES.get(a.data_type)
+            if (a.name.startswith('.') or a.name in CH_SKIP_ATTRS or info is None
+                    or a.domain not in ('POINT', 'CORNER', 'FACE')):
+                continue
+            prop, C, dt = info
+            buf = np.empty(len(a.data) * C, dt)
+            a.data.foreach_get(prop, buf)
+            buf = buf.reshape(-1, C).astype(np.float32)
+            idx = verts if a.domain == 'POINT' else loops if a.domain == 'CORNER' else np.repeat(poly[L][:, None], 3, 1)
+            kind = 'uv' if a.name in uv_names else 'color' if a.name in colors else 'attr'
+            attrs.append((a.name, kind, {1: 'FLOAT', 2: 'FLOAT2', 3: 'FLOAT_VECTOR', 4: 'FLOAT_COLOR'}[C], buf[idx]))
+        bake_uv = CH_BAKE_UV
+        while bake_uv in me.attributes:
+            bake_uv += '_'
+        src = dict(co=co.reshape(-1, 3)[verts].astype(np.float64), cn=cn.reshape(-1, 3)[loops].astype(np.float64),
+                   mat=mat[L], attrs=attrs, render_uv=render_uv, active_color=active_color, render_color=render_color,
+                   bake_uv=bake_uv, n_uv=len(uv_names))
+    finally:
+        bpy.data.meshes.remove(me)
+    data = obj.data
+    src['texspace'] = (tuple(data.texspace_location), tuple(data.texspace_size)) if hasattr(data, 'texspace_size') \
+        else None
+    return src
+
+
+def _bary3(p, a, b, c):
+    """Barycentric weights (n, 3) of points p (n, 3) in the triangles (a, b, c), each (n, 3)."""
+    v0, v1, v2 = b - a, c - a, p - a
+    d00, d01, d11 = (v0 * v0).sum(-1), (v0 * v1).sum(-1), (v1 * v1).sum(-1)
+    d20, d21 = (v2 * v0).sum(-1), (v2 * v1).sum(-1)
+    den = d00 * d11 - d01 * d01
+    den = np.where(np.abs(den) > 1e-30, den, 1e-30)
+    v = (d11 * d20 - d01 * d21) / den
+    w = (d00 * d21 - d01 * d20) / den
+    return np.stack([1.0 - v - w, v, w], axis=-1)
+
+
+def channel_mesh(name, src, idx, B, tile_uv, materials):
+    """A bake mesh of master triangles idx (B: per corner the weights (n, 3, 3) of the source triangle's corners, for
+    the skirt; None: the triangle itself) with the source's attributes at its corners, the master's UV relative to the
+    tile as the active UV map and the mesh's own render UV map still the render one (Image Texture nodes without a UV
+    Map node read it)."""
+    def at(a):
+        a = a[idx]
+        return a if B is None else np.einsum('nkj,njc->nkc', B, a)
+    n = len(idx)
+    co = at(src['co'])
+    cn = at(src['cn'])
+    cn /= np.maximum(np.linalg.norm(cn, axis=2, keepdims=True), 1e-30)
+    me = bpy.data.meshes.new(name)
+    me.from_pydata(co.reshape(-1, 3).tolist(), [], np.arange(n * 3).reshape(-1, 3).tolist())
+    me.update(calc_edges=True)
+    if len(me.polygons) != n:
+        raise RuntimeError(f'{name}: from_pydata kept {len(me.polygons)} of {n} faces')
+    me.polygons.foreach_set('material_index', np.asarray(src['mat'][idx], np.int32))
+    for aname, kind, dtype, vals in src['attrs']:
+        v = np.ascontiguousarray(at(vals), np.float32)
+        if kind == 'uv':
+            layer = me.uv_layers.new(name=aname)
+            layer.uv.foreach_set('vector', v.ravel())
+        elif kind == 'color':
+            ca = me.color_attributes.new(aname, 'FLOAT_COLOR', 'CORNER')
+            ca.data.foreach_set('color', v.ravel())
+        else:
+            ga = me.attributes.new(aname, dtype, 'CORNER')
+            ga.data.foreach_set({'FLOAT': 'value', 'FLOAT_COLOR': 'color'}.get(dtype, 'vector'), v.ravel())
+    bake = me.uv_layers.new(name=src['bake_uv'])
+    if bake is None:
+        raise RuntimeError(f"{name}: no UV map can be added beside its {src['n_uv']}")
+    bake.uv.foreach_set('vector', np.asarray(tile_uv, np.float32).ravel())
+    me.uv_layers.active = bake
+    if src['render_uv'] and src['render_uv'] in me.uv_layers:
+        me.uv_layers[src['render_uv']].active_render = True
+    try:
+        if src['active_color']:
+            me.color_attributes.active_color_name = src['active_color']
+        if src['render_color']:
+            me.color_attributes.default_color_name = src['render_color']
+    except (AttributeError, TypeError):
+        pass
+    if src.get('texspace'):
+        me.use_auto_texspace = False
+        me.texspace_location, me.texspace_size = src['texspace']
+    me.shade_smooth()
+    me.normals_split_custom_set(cn.reshape(-1, 3).tolist())
+    for m_ in materials:
+        me.materials.append(m_)
+    me.update()
+    return me
+
+
+def bake_emit(obj, img, px, samples):
+    """One Cycles EMIT bake of obj into img (pre-filled with -1, margin 0), in the bake's own scene; the RGB (h, w, 3)
+    of each pixel, -1 where none was baked."""
+    scene = BAKE['scene']
+    view_layer = scene.view_layers[0]
+    scene.cycles.samples = int(samples)
+    scene.cycles.seed = core.SEEDS[0]
+    clear_image(img, px)
+    for o in view_layer.objects:
+        if o is not None:
+            o.select_set(False, view_layer=view_layer)
+    obj.select_set(True, view_layer=view_layer)
+    view_layer.objects.active = obj
+    rb = scene.render.bake
+    rb.margin = 0
+    rb.use_clear = False
+    rb.use_selected_to_active = False
+    rb.target = 'IMAGE_TEXTURES'
+    sel = [obj]
+    with bpy.context.temp_override(scene=scene, view_layer=view_layer, active_object=obj, object=obj,
+                                   selected_objects=sel, selected_editable_objects=sel):
+        bpy.ops.object.bake(type='EMIT', margin=0, margin_type='ADJACENT_FACES', use_clear=False,
+                            use_selected_to_active=False, target='IMAGE_TEXTURES')
+    w, h = img.size
+    img.pixels.foreach_get(px)
+    return px.reshape(h, w, 4)[:, :, :3].copy()
+
+
+VC = dict(SET.get('vertex_color') or {})  # decisions 88 to 90: {group: 'OVERWRITE' or 'MULTIPLY'}
+VC_ATTRIBUTE = SET.get('vc_attribute') or 'SECOND'  # decision 91: the second colour attribute, or the active one
+VC_COMP = {'ao': 0, 'rough': 1, 'metal': 2, 'albedo': None, 'emis': None}  # the colour's component (None: RGB)
+VC_NAMES = {'ao': 'AO from Vertex Color Red', 'rough': 'Roughness from Vertex Color Green',
+            'metal': 'Metal from Vertex Color Blue', 'albedo': 'Albedo from Vertex Color',
+            'emis': 'Emissive from Vertex Color'}  # decision 95: the emissive too
+KINDS = dict(core.CHANNEL_KINDS, ao=('ao',))  # the images of a group (the AO: the master's own)
+NAMES = dict(core.CHANNEL_NAMES, ao='AO')
+
+
+def source_color(obj, dg):
+    """Decisions 90 and 91: (name, data type, why) of the colour attribute the vertex colour sources read: the second
+    of the original mesh's Color Attributes list (SECOND, whatever is active or render) or its active one (ACTIVE),
+    found on the evaluated mesh by its name; (None, None, why) without one."""
+    ca = obj.data.color_attributes
+    if VC_ATTRIBUTE == 'ACTIVE':
+        try:
+            a = ca.active_color
+        except AttributeError:
+            a = None
+        if a is None:
+            return None, None, 'no colour attribute'
+    else:
+        if len(ca) < 2:
+            return None, None, 'no second colour attribute'
+        a = ca[1]
+    ev = obj.evaluated_get(dg).data
+    if getattr(ev, 'color_attributes', None) is None or ev.color_attributes.get(a.name) is None:
+        return None, None, f'{a.name} not on the evaluated mesh'
+    return a.name, a.data_type, ''
+
+
+def vc_material(attr, group, image):
+    """Decision 88: an Emission shader (strength 1) fed by a Color Attribute node of `attr` (its component for the AO,
+    roughness and metal, the colour for the albedo), with an Image Texture node of `image` active for the bake."""
+    mat = bpy.data.materials.new(f'FSS_VC_{group}')
+    mat.use_nodes = True
+    nt = mat.node_tree
+    for n in list(nt.nodes):
+        nt.nodes.remove(n)
+    out = nt.nodes.new('ShaderNodeOutputMaterial')
+    em = nt.nodes.new('ShaderNodeEmission')
+    em.inputs['Strength'].default_value = 1.0
+    ca = nt.nodes.new('ShaderNodeVertexColor')
+    ca.layer_name = attr
+    comp = VC_COMP[group]
+    if comp is None:
+        nt.links.new(ca.outputs['Color'], em.inputs['Color'])
+    else:
+        sep = nt.nodes.new('ShaderNodeSeparateColor')
+        nt.links.new(ca.outputs['Color'], sep.inputs[0])
+        nt.links.new(sep.outputs[comp], em.inputs['Color'])
+    nt.links.new(em.outputs[0], out.inputs['Surface'])
+    tex = nt.nodes.new('ShaderNodeTexImage')
+    tex.image = image
+    nt.nodes.active = tex
+    return mat
+
+
+REC709 = np.array([0.2126, 0.7152, 0.0722], np.float32)  # decision 87: the luminance of linear RGB
+
+
+def combine_copies(arrs, combine):
+    """Decision 87: a shared mesh's emissive over its copies' bakes (each (h, w, 3), linear, -1 where none was baked;
+    the copies cover the same pixels): AVERAGE the mean; LIGHTEST and DARKEST the colour of the copy whose luminance
+    (Rec. 709) is the highest or lowest at that pixel, its three components together (the first copy on a tie)."""
+    st = np.stack(arrs)
+    if combine in ('LIGHTEST', 'DARKEST'):
+        y = st @ REC709
+        pick = (np.argmax if combine == 'LIGHTEST' else np.argmin)(y, axis=0)
+        return np.take_along_axis(st, pick[None, :, :, None], axis=0)[0]
+    return st.mean(axis=0)
+
+
+def channel_item(item, coll, ao=False):
+    """Decisions 79 to 81: the material channels the job asks for (item['channels']) baked from the object's
+    material as Cycles shades it (EMIT through an Emission shader on a copy of each material), from the copy
+    item['channel_object'] names (rule item 6), into the master's layout: the stored one while the mesh is unchanged,
+    else a new one, which removes the master's AO, curvature and other channels (they no longer fit). The core and
+    the skirt of each tile as the AO's, the composition as the AO's without the corner rule. Decision 87: a shared
+    mesh's emissive (Copies not One Instance) baked from every copy (its own material slots) and combined per pixel
+    (combine_copies). Decisions 88 to 90: a group whose vertex colour source is ticked (VC) from the active colour
+    attribute instead of the material, Overwrite or Multiply; ao: the AO from the vertex colour too (into the master's
+    own image). A generator like bake_item."""
+    t0 = time.time()
+    groups = (['ao'] if ao else []) + [g for g in core.CHANNEL_GROUPS if g in (item.get('channels') or ())]
+    obj = bpy.data.objects.get(item['object'])
+    if obj is None or obj.type != 'MESH':
+        return dict(status='skipped', reason='object not in the baked file')
+    key = item['key']
+    dg = bpy.context.evaluated_depsgraph_get()
+    uv_name = item['uv']
+    ev = core.evaluated_triangles(obj, dg, [uv_name])
+    if uv_name not in ev['uv']:
+        return dict(status='skipped', reason=f'no UV map {uv_name} in the baked file')
+    mh = core.mesh_hash(ev)
+    sizes = item['tex_size']
+    skip = set(item['skip_slots'])
+    sel = np.array([(m_ not in skip) and (str(int(m_)) in sizes) for m_ in ev['mat'].tolist()], dtype=bool)
+    tri_src = np.nonzero(sel)[0]
+    if not len(tri_src):
+        return dict(status='skipped', reason='no face of a texture set')
+    pos_w, _ = core.to_world(ev)
+    used = np.unique(ev['tris'][tri_src])
+    shift = (pos_w[used].min(axis=0) + pos_w[used].max(axis=0)) / 2  # as the AO bake moves it
+    pos, cn = core.to_world(ev, shift)
+    tris, cnm = ev['tris'][tri_src], cn[tri_src]
+    size = np.array([float(sizes[str(int(m_))]) for m_ in ev['mat'][tri_src]])
+    D = core.master_density(pos, tris, ev['uv'][uv_name][tri_src] * size[:, None, None])
+    if D <= 0:
+        return dict(status='skipped', reason='no face with UV area')
+    # rule item 6: a shared mesh's channels from one copy (the bake's choice); its mesh must be the master's
+    src_obj, notes = obj, []
+    want = item.get('channel_object')
+    if want and want != obj.name:
+        o = bpy.data.objects.get(want)
+        if o is not None and o.type == 'MESH' and core.mesh_hash(core.evaluated_triangles(o, dg)) == mh:
+            src_obj = o
+        else:
+            notes.append(f'{want}: not the same evaluated mesh, baked from {obj.name}')
+    # decision 87: a shared mesh's emissive from each copy, combined as the AO's copies (not One Instance)
+    combine = item.get('combine') if item.get('copies') else None
+    emis_copies = []
+    # decision 95: a vertex colour emissive is the mesh's, the same for every copy: not combined
+    if 'emis' in groups and combine and combine != 'ONE' and 'emis' not in VC:
+        for c in item['copies']:
+            o = bpy.data.objects.get(c['object'])
+            if o is None or o.type != 'MESH':
+                notes.append(f"{c['object']}: not in the baked file, its emissive left out")
+            elif o is not obj and core.mesh_hash(core.evaluated_triangles(o, dg)) != mh:
+                notes.append(f'{o.name}: not the same evaluated mesh, its emissive left out')
+            else:
+                emis_copies.append(o)
+        emis_copies = emis_copies or [src_obj]
+    # decisions 88 to 91: the groups from the source colour attribute; without one they are skipped for this object
+    vc = {g: VC[g] for g in groups if g in VC and g in VC_COMP}
+    vc_attr, vc_type, vc_why = source_color(src_obj, dg) if vc else (None, None, '')
+    vc_skipped = []
+    if vc and vc_attr is None:
+        vc_skipped = list(vc)
+        for g in vc_skipped:
+            notes.append(f'{VC_NAMES[g]} skipped: {src_obj.name}: {vc_why}')
+            log(f"  {item['name']}: {VC_NAMES[g]} skipped ({src_obj.name}: {vc_why})")
+        groups = [g for g in groups if g not in vc]
+        vc = {}
+        if not groups:
+            return dict(status='skipped', reason='; '.join(notes), vc_skipped=vc_skipped)
+    tb = time.time()
+    m, kept, old = layout_for(item, mh, tri_src, pos, tris, cnm, D)
+    t_build = time.time() - tb
+    W, H = m['W'], m['H']
+    src = channel_source(src_obj, dg, tri_src)
+    # decision 89: Multiply onto the master's current image of the group (the kept layout); without one, onto 1.0
+    old_ch = (old or {}).get('channels') or {}
+    old_src = (old or {}).get('ao_source') or {}
+    mult, eff = {}, {}
+    for g, mode in vc.items():
+        paths = [core.image_paths(FOLDER, key, k)[0] for k in KINDS[g]]
+        have = kept and all(os.path.isfile(p_) for p_ in paths) and (g == 'ao' or g in old_ch)
+        if mode == 'MULTIPLY' and have:
+            mult[g] = paths
+            eff[g] = 'MULTIPLY'
+        else:
+            eff[g] = 'OVERWRITE'
+            if mode == 'MULTIPLY':
+                why = 'a new layout (the mesh changed)' if not kept and old else 'no master of it'
+                notes.append(f'{VC_NAMES[g]}: Multiply with {why}, as Overwrite')
+                log(f"  {item['name']}: {VC_NAMES[g]} Multiply with {why}: multiplied onto 1.0 (as Overwrite)")
+    # the AO's product of its multiplies since the last trace or Overwrite (rule item 4)
+    ao_traced = 'ao' in mult and old_src.get('mode') != 'OVERWRITE'
+    vc_prev = core.image_paths(FOLDER, key, 'ao_vc')[0]
+    vc_prev = vc_prev if ao_traced and old_src.get('mode') == 'MULTIPLY' and os.path.isfile(vc_prev) else None
+    # the skirt's corners as weights of their source triangle's corners (build_master's skirt_src, its 3D points)
+    S = len(m['skirt_pos'])
+    if S:
+        P = pos[tris[m['skirt_src']]]
+        Bs = np.stack([_bary3(m['skirt_pos'][:, k], P[:, 0], P[:, 1], P[:, 2]) for k in range(3)], axis=1)
+    else:
+        Bs = np.zeros((0, 3, 3))
+    ws0, _peak0 = core.process_memory()
+    forced = int(JOB.get('tile_px') or 0)
+    tile = forced or core.choose_tile(W, H, BUDGET, ws0 or 0, views=1)[0]
+    tiles = core.tile_grid(W, H, tile)
+    n = len(tiles)
+    # the components' images and writers: the first writes the map and the layout (a new layout) or compares its
+    # codes with the stored map (a kept one)
+    kinds = [(g, c, k) for g in groups for c, k in enumerate(KINDS[g])]
+    writers, mats_made, temps_img = [], [], []
+    vc_writer = None
+    group_mats, skipped = {}, {}
+    finished = False
+    try:
+        for j, (g, c, k) in enumerate(kinds):
+            writers.append(core.ChannelWriter(FOLDER, key, k, W, H, threads=int(SET['threads']),
+                                              map_mode=(None if j else ('check' if kept else 'write'))))
+        # per group, the materials of the copy's slots routed to an Emission shader (temporary copies)
+        slot_mats = [s.material for s in src_obj.material_slots]
+        used_slots = sorted(set(int(v) for v in np.unique(src['mat']).tolist()))
+        holder = new_float_image('FSS_CH_TILE', 4, 4)
+        temps_img.append(holder)
+
+        def routed(slots_, g):  # the slots' materials routed to the channel's Emission shader
+            lst = []
+            for si, mat in enumerate(slots_):
+                cp, why = (channel_material(mat, g, holder) if mat is not None else (None, 'no material'))
+                if cp is None:
+                    if si in used_slots and mat is not None and mat.name not in skipped.get(g, ()):
+                        skipped.setdefault(g, []).append(mat.name)
+                        log(f"  {item['name']}: {NAMES[g]} skipped for {mat.name} ({why})")
+                    cp = _black_material(holder)
+                mats_made.append(cp)
+                lst.append(cp)
+            if not lst:
+                lst = [_black_material(holder)]
+                mats_made.extend(lst)
+            return lst
+
+        for g in groups:
+            if g in vc:  # decision 88: the same vertex colour material on every slot
+                vm = vc_material(vc_attr, g, holder)
+                mats_made.append(vm)
+                group_mats[g] = [vm] * max(1, len(slot_mats))
+            else:
+                group_mats[g] = routed(slot_mats, g)
+        copy_mats = [(o, routed([s_.material for s_ in o.material_slots], 'emis')) for o in emis_copies]
+        log(f"  {item['name']}: {', '.join(NAMES[g] for g in groups)} from {src_obj.name}, master {W} x "
+            f"{H} px ({'its layout kept' if kept else 'a new layout'}), tile {tile} px, {n} tile(s), "
+            f"{CH_SAMPLES} samples")
+        if copy_mats:
+            log(f"    Emissive from {len(copy_mats)} copies ({combine.lower()}): "
+                + ', '.join(o.name for o, _l in copy_mats))
+        if vc:
+            log(f"    from the colour attribute {vc_attr} ({vc_type}, {VC_ATTRIBUTE.lower()}): "
+                + ', '.join(f'{VC_NAMES[g]} ({eff[g].lower()})' for g in vc))
+        state.update(tile=0, n_tiles=n, size=[int(W), int(H)], tile_px=int(tile))
+        write_status()
+        core_tris = m['core_tris']
+        cuv = m['muv'][core_tris]
+        times = dict(bake=0.0)
+        done = [0]
+
+        def set_image(img):
+            for lst in list(group_mats.values()) + [l_ for _o, l_ in copy_mats]:
+                for mat in lst:
+                    mat.node_tree.nodes.active.image = img
+
+        def bake_tile(i, rect, vals, baked):
+            x0, y0, w, h = rect
+            done[0] += 1
+            state['tile'] = done[0]
+            write_status()
+            off = np.array([x0, y0], dtype=np.float64)
+            wh = np.array([w, h], dtype=np.float64)
+            csel = core.tris_in_window(cuv, x0, y0, w, h)
+            ssel = core.tris_in_window(m['skirt_uv'], x0, y0, w, h) if S else np.zeros(0, dtype=np.int64)
+            if len(csel) or len(ssel):
+                img = new_float_image('FSS_CH_TILE', w, h)
+                px = np.empty(w * h * 4, dtype=np.float32)
+                objs = []
+                try:
+                    set_image(img)
+                    first = group_mats[groups[0]]
+                    if len(csel):
+                        me = channel_mesh('FSS_CH_CORE', src, core_tris[csel], None, (cuv[csel] - off) / wh, first)
+                        objs.append(('core', temp_object(coll, 'FSS_CH_CORE', me)))
+                    if len(ssel):
+                        me = channel_mesh('FSS_CH_SKIRT', src, m['skirt_src'][ssel], Bs[ssel],
+                                          (m['skirt_uv'][ssel] - off) / wh, first)
+                        objs.append(('skirt', temp_object(coll, 'FSS_CH_SKIRT', me)))
+                    for o in (o for _k, o in objs):
+                        o.matrix_world = src_obj.matrix_world  # Object and Position coordinates as the original's
+                    rect_ok = core.rect_window(m['rects'], x0, y0, w, h) >= 0
+                    j = 0
+                    for g in groups:
+                        got = {}
+                        if g == 'emis' and copy_mats:  # decision 87: each copy, combined per pixel
+                            per = []
+                            for o_c, lst_c in copy_mats:
+                                got_c = {}
+                                for part, o in objs:
+                                    o.matrix_world = o_c.matrix_world
+                                    for si, mat in enumerate(lst_c):
+                                        o.data.materials[si] = mat
+                                    tb_ = time.time()
+                                    got_c[part] = bake_emit(o, img, px, CH_SAMPLES)
+                                    times['bake'] += time.time() - tb_
+                                per.append(got_c)
+                            got = {part: combine_copies([p_[part] for p_ in per], combine) for part, _o in objs}
+                            for _part, o in objs:
+                                o.matrix_world = src_obj.matrix_world
+                        for part, o in ([] if got else objs):
+                            for si, mat in enumerate(group_mats[g]):
+                                o.data.materials[si] = mat
+                            tb_ = time.time()
+                            got[part] = bake_emit(o, img, px, CH_SAMPLES)
+                            times['bake'] += time.time() - tb_
+                        A, B = got.get('core'), got.get('skirt')
+                        cm = A[:, :, 0] >= 0 if A is not None else np.zeros((h, w), bool)
+                        sm = ((~cm) & (B[:, :, 0] >= 0) & rect_ok) if B is not None else np.zeros((h, w), bool)
+                        # albedo and emissive sRGB-encoded; the other data linear as it is (decision 92: a
+                        # vertex colour's value as the node gives it, a byte colour's too)
+                        srgb = g in ('albedo', 'emis')
+                        enc = core.srgb_encode if srgb else (lambda v: np.clip(v, 0.0, 1.0))
+                        for c in range(len(KINDS[g])):
+                            if A is not None:
+                                vals[j][cm] = core.quantize16(enc(A[:, :, c][cm]))
+                            if B is not None:
+                                vals[j][sm] = core.quantize16(enc(B[:, :, c][sm]))
+                            baked[j] |= cm | sm
+                            j += 1
+                finally:
+                    _remove([o for _k, o in objs])
+                    set_image(holder)
+                    bpy.data.images.remove(img)
+            yield done[0]
+        # decision 89: Multiply: each row times the current image's (the albedo in linear), the product of the AO's
+        # multiplies kept; pixels this bake does not fill keep their old value. The current images are read whole.
+        lib = core.jxl()
+        if ao_traced:
+            vc_writer = core.ChannelWriter(FOLDER, key, 'ao_vc', W, H, threads=int(SET['threads']))
+        prev = lib.read_whole(vc_prev) if vc_prev else None
+
+        def rows_of(j, g, c):
+            w_ = writers[j]
+            if g not in mult:
+                return w_.write_rows
+            cur = lib.read_whole(mult[g][c])
+            at = [0]
+
+            def rows(values, codes):
+                y0, n_ = at[0], values.shape[0]
+                at[0] += n_
+                o_ = cur[y0:y0 + n_]
+                filled = core.code_filled(codes)
+                a_, b_ = o_.astype(np.float64) / 65535.0, values.astype(np.float64) / 65535.0
+                if g in ('albedo', 'emis'):  # the colours multiplied in linear
+                    prod = core.srgb_encode(core.srgb_decode(a_) * core.srgb_decode(b_))
+                else:
+                    prod = a_ * b_
+                w_.write_rows(np.where(filled, core.quantize16(prod), o_).astype(np.uint16), codes)
+                if g == 'ao' and vc_writer is not None:
+                    pv = prev[y0:y0 + n_].astype(np.float64) / 65535.0 if prev is not None else 1.0
+                    vc_writer.write_rows(np.where(filled, core.quantize16(pv * b_), 65535).astype(np.uint16), None)
+            return rows
+        tp = time.time()
+        counts = yield from core.bake_paged_multi(m, tile, len(kinds), bake_tile,
+                                                  [rows_of(j, g, c) for j, (g, c, _k) in enumerate(kinds)],
+                                                  threads=int(SET['threads']))
+        t_compose = time.time() - tp - times['bake']
+        for w_ in writers + ([vc_writer] if vc_writer is not None else []):
+            w_.encode()
+        meta = dict(schema=core.SCHEMA, key=key, kind=item['kind'], name=item['name'], object=obj.name, mesh_hash=mh,
+                    **core.method_settings())
+        if not kept:  # decision 81: a new layout; what was baked into the old one is removed
+            _remove_files(list(core.image_paths(FOLDER, key)) + list(core.image_paths(FOLDER, key, 'curv'))
+                          + list(core.image_paths(FOLDER, key, 'ao.raw')) + [os.path.join(FOLDER, key + core.THUMB_EXT)]
+                          + list(core.image_paths(FOLDER, key, 'ao_vc'))
+                          + [p for g in core.CHANNEL_GROUPS for p in core.channel_paths(FOLDER, key, g)])
+        raw = core.image_paths(FOLDER, key, 'ao.raw')[0]
+        if ao_traced and not os.path.isfile(raw):  # the traced AO before the multiply: what a denoise starts from
+            shutil.copy2(core.image_paths(FOLDER, key)[0], raw)
+        for j, w_ in enumerate(writers):
+            w_.commit(m, tri_src, meta)
+        if vc_writer is not None:
+            vc_writer.commit()
+        if 'ao' in groups and not ao_traced:  # an AO from the vertex colour alone: no raw bake, no product
+            _remove_files(list(core.image_paths(FOLDER, key, 'ao.raw')) + list(core.image_paths(FOLDER, key, 'ao_vc')))
+        finished = True
+    finally:
+        if not finished:
+            for w_ in writers + ([vc_writer] if vc_writer is not None else []):
+                w_.abort()
+        for mat in mats_made:
+            if mat.name in bpy.data.materials:
+                bpy.data.materials.remove(mat)
+        for img in temps_img:
+            if img.name in bpy.data.images:
+                bpy.data.images.remove(img)
+    differs = writers[0].map_differs if kept else 0
+    if kept and differs:
+        log(f"  {item['name']}: {differs} px of the stored map differ from this bake's coverage")
+    stamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    entry = _index_entry(key) if kept else None
+    if entry is None:  # a new layout: an entry of the layout and the channels only (AO missing, decision 81)
+        entry = dict(key=key, kind=item['kind'], name=item['name'], object=obj.name, mesh=obj.data.name,
+                     mesh_hash=mh, density=float(m['density']), W=int(W), H=int(H), tris=int(len(tri_src)),
+                     islands=int(m['n_islands']), uv=uv_name, method=core.METHOD, schema=core.SCHEMA, baked_at=stamp)
+    ch = dict(entry.get('channels') or {})
+    for g in groups:
+        if g == 'ao':
+            continue
+        ch[g] = dict(mesh_hash=mh, baked_at=stamp, samples=int(CH_SAMPLES), object=src_obj.name,
+                     skipped=sorted(skipped.get(g, [])), map_differs_px=int(differs))
+        if g in vc:  # rule item 5: the source; a bake from the material drops it (the entry written anew)
+            ch[g]['source'] = dict(vertex_color=vc_attr, attribute=VC_ATTRIBUTE, mode=eff[g])
+    if 'ao' in groups:  # rule item 4: the AO from the vertex colour
+        attrs = (list(old_src.get('attributes') or ()) if 'ao' in mult else []) + [vc_attr]
+        entry['ao_source'] = dict(vertex_color=vc_attr, attribute=VC_ATTRIBUTE,
+                                  mode='MULTIPLY' if ao_traced else 'OVERWRITE', attributes=attrs)
+        if not ao_traced:
+            entry['denoise'] = None
+        entry.update(mesh_hash=mh, baked_at=stamp)
+    if 'emis' in groups and combine and 'emis' not in vc:  # decision 87: how a shared emissive was combined
+        ch['emis'].update(combine=combine,
+                          copies=[o.name for o, _l in copy_mats] if copy_mats else [src_obj.name])
+    entry['channels'] = ch
+    update_index(entry)
+    for g, names in sorted(skipped.items()):
+        notes.append(f"{NAMES[g]} skipped for {', '.join(names)} (no Principled BSDF on the Material "
+                     f"Output)")
+    log(f"  {item['name']}: channels composed in {t_compose:.2f} s, baked in {times['bake']:.2f} s; layout "
+        f"{t_build:.2f} s; {len(kinds)} images")
+    res = dict(status='baked', W=int(W), H=int(H), tile=int(tile), n_tiles=int(n), bake_s=round(times['bake'], 3),
+               total_s=round(time.time() - t0, 3), baker='Cycles', channels=groups, layout_kept=bool(kept),
+               map_differs_px=int(differs))
+    if vc or vc_skipped:
+        res['vertex_color'] = dict(attribute=vc_attr, type=vc_type, read=VC_ATTRIBUTE, modes=eff, skipped=vc_skipped)
+    if notes:
+        res['note'] = '; '.join(notes)
+    return res
+
+
+def run_item(item, coll):
+    """One job item (a generator, as bake_item): its AO (with curvature and denoise), or its curvature and denoise
+    alone, then its material channels (decision 79)."""
+    res = None
+    vc_ao = item.get('ao', True) and 'ao' in VC  # decision 88: the AO from the vertex colour, not traced
+    if item.get('ao', True) and not vc_ao:
+        res = yield from bake_item(item, coll)
+    elif not vc_ao and (item.get('cm') or item.get('dn') or not item.get('channels')):
+        res = yield from curvature_item(item, coll)
+    if (vc_ao or item.get('channels')) and (res is None or res.get('status') in ('baked', 'updated')):
+        got = yield from channel_item(item, coll, ao=vc_ao)
+        if vc_ao and item.get('cm') and got.get('status') == 'baked':  # the curvature as before (from geometry)
+            cres = yield from curvature_item(dict(item, cm=True, dn=False), coll)
+            if cres.get('status') != 'updated':
+                got['note'] = '; '.join(x for x in (got.get('note'), f"curvature: {cres.get('reason')}") if x)
+        if res is None or got.get('status') != 'baked':
+            note = '; '.join(x for x in ((res or {}).get('note'), got.get('note')) if x)
+            res = dict(got, **({'note': note} if note else {}))
+        else:
+            res['channels'] = got['channels']
+            note = '; '.join(x for x in (res.get('note'), got.get('note')) if x)
+            if note:
+                res['note'] = note
+    return res
 
 
 _run = dict(i=0, coll=None, gen=None, t=None, tiles_done=0)
@@ -1257,8 +2057,8 @@ def step():
         state['current'] = ITEMS[i]['name']
         state.update(tile=0, n_tiles=0, pose=0, n_poses=0, copy=0, n_copies=0, copy_pose=0, copy_poses=0)
         write_status()
-        run = bake_item if ITEMS[i].get('ao', True) else curvature_item  # decision 55
-        _run.update(t=time.time(), gen=run(ITEMS[i], _run['coll']), tiles_done=0)
+        # decision 55: the AO, or the curvature and denoise alone; decision 79: then the material channels
+        _run.update(t=time.time(), gen=run_item(ITEMS[i], _run['coll']), tiles_done=0)
     item = ITEMS[_run['i']]
     gen = _run['gen']
     if _run['tiles_done'] and os.path.exists(CANCEL):
@@ -1281,7 +2081,7 @@ def step():
     except NativeFailed as exc:  # decision 22: this master again with Cycles, and the rest of the job
         traceback.print_exc()
         native_failed(f"{item['name']}, {exc}", exc.__cause__ or exc)
-        _run.update(gen=bake_item(item, _run['coll']), tiles_done=0)
+        _run.update(gen=run_item(item, _run['coll']), tiles_done=0)
         return True
     except Exception as exc:  # noqa: BLE001
         traceback.print_exc()

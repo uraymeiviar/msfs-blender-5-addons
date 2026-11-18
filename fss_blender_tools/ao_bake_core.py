@@ -2245,10 +2245,172 @@ def master_paths(folder, stem, kind='ao'):
 
 
 def all_master_files(folder, stem):
-    """Every file a master can have (for a rename)."""
+    """Every file a master can have (for a rename): the AO's, and its material channels' (decision 79)."""
     base = os.path.join(folder, stem)
     return [base + ext for ext in ('.ao.jxl', '.ao.png', '.ao.map', '.ao.npz', THUMB_EXT, '.curv.jxl', '.curv.png',
-                                   '.ao.raw.jxl', '.ao.raw.png')]
+                                   '.ao.raw.jxl', '.ao.raw.png')] + [p for g in CHANNEL_GROUPS
+                                                                     for p in channel_paths(folder, stem, g)]
+
+
+# Material channels (auto-bake decisions 79 to 83): a master's albedo, roughness, metal and emissive, baked from the
+# object's material as Cycles shades it, one 16-bit grey JPEG XL image per component beside <stem>.ao.jxl in its
+# layout (.ao.npz, .ao.map): <stem>.albedo_r.jxl and so on. Albedo and emissive sRGB-encoded (as their textures),
+# roughness and metal linear.
+CHANNEL_GROUPS = ('albedo', 'rough', 'metal', 'emis')
+CHANNEL_KINDS = {'albedo': ('albedo_r', 'albedo_g', 'albedo_b'), 'rough': ('rough',), 'metal': ('metal',),
+                 'emis': ('emis_r', 'emis_g', 'emis_b')}
+CHANNEL_SRGB = {'albedo': True, 'rough': False, 'metal': False, 'emis': True}
+CHANNEL_NAMES = {'albedo': 'Albedo', 'rough': 'Roughness', 'metal': 'Metal', 'emis': 'Emissive'}
+CHANNEL_SAMPLES = 64  # Cycles samples per master pixel of a material channel, for a job without the setting
+
+
+def channel_paths(folder, stem, group):
+    """The images of a material channel group (decision 79): <stem>.<kind>.jxl per component."""
+    base = os.path.join(folder, stem)
+    return [base + f'.{k}.jxl' for k in CHANNEL_KINDS[group]]
+
+
+def srgb_encode(linear):
+    """Scene-linear values 0..1 as sRGB-encoded values 0..1 (the IEC 61966-2-1 curve Blender's sRGB space uses)."""
+    x = np.clip(np.asarray(linear, dtype=np.float64), 0.0, 1.0)
+    return np.where(x <= 0.0031308, x * 12.92, 1.055 * np.power(x, 1.0 / 2.4) - 0.055)
+
+
+def srgb_decode(encoded):
+    """sRGB-encoded values 0..1 as scene-linear values."""
+    x = np.clip(np.asarray(encoded, dtype=np.float64), 0.0, 1.0)
+    return np.where(x <= 0.04045, x / 12.92, np.power((x + 0.055) / 1.055, 2.4))
+
+
+def write_layout(npz, m, tri_src, meta):
+    """The layout file (.ao.npz) as MasterWriter.finish writes it."""
+    with open(npz, 'wb') as f:
+        np.savez_compressed(f, muv=m['muv'], island=m['island'], density=m['density'], W=m['W'], H=m['H'],
+                            rects=m['rects'], gutter=m['gutter'], degenerate=m['degenerate'],
+                            tri_src=np.asarray(tri_src, dtype=np.int64), meta=json.dumps(meta))
+
+
+def same_layout(m, lay, atol=1e-6):
+    """Decision 81: '' when the layout m built now equals the stored one (core._layout of an .ao.npz: the size, the
+    islands and their rectangles equal, the master UVs within atol px), else what differs."""
+    if (int(m['W']), int(m['H'])) != (int(lay['W']), int(lay['H'])):
+        return f"{m['W']} x {m['H']} px, stored {lay['W']} x {lay['H']}"
+    if not np.array_equal(np.asarray(m['island']), np.asarray(lay['island'])):
+        return 'other islands'
+    if not np.array_equal(np.asarray(m['rects']).reshape(-1, 4), np.asarray(lay['rects']).reshape(-1, 4)):
+        return 'other island rectangles'
+    d = float(np.abs(np.asarray(m['muv']) - np.asarray(lay['muv'])).max()) if len(m['muv']) else 0.0
+    if not d <= atol:
+        return f'master UVs differ by {d:.3g} px'
+    return ''
+
+
+class ChannelWriter:
+    """One image of a master (a material channel's component, decision 79; or the AO), written row by row from the
+    top as JPEG XL to a temporary name. map_mode 'write' (a new layout): the .ao.map from the rows' codes, and the
+    .ao.npz at commit; 'check' (a kept layout, decision 81): the codes compared with the stored .ao.map, the pixels
+    that differ counted in map_differs; None: the codes ignored. encode() closes the files, commit() puts them in
+    place, abort() removes the temporary ones (the old files stay)."""
+
+    def __init__(self, folder, stem, kind, W, H, threads=None, map_mode=None):
+        base = os.path.join(folder, stem)
+        lib = jxl()
+        self.image = base + f'.{kind}.jxl'
+        if not lib.available():
+            raise lib.JxlError(f'{self.image}: the JPEG XL library is not loaded ({lib.error()})')
+        self.map_path, self.npz = base + '.ao.map', base + '.ao.npz'
+        self.map_mode, self.map_differs, self.W, self.H = map_mode, 0, int(W), int(H)
+        self.stats = {}
+        self.img = lib.Writer(self.image + '.tmp', W, H, threads=threads or lib.THREADS)
+        self.map = None
+        self._rows = self._buf = None
+        try:
+            if map_mode == 'write':
+                self.map = map_writer(self.map_path + '.tmp', W, H, threads=threads)
+            elif map_mode == 'check':
+                mW, mH, self._rows = map_rows(self.map_path)
+                if (mW, mH) != (self.W, self.H):
+                    raise ValueError(f'{self.map_path}: {mW} x {mH} px, the master is {W} x {H}')
+                self._pos = 0
+        except BaseException:
+            self.img.abort()
+            raise
+
+    def write_rows(self, values, codes):
+        self.img.write(values)
+        if self.map is not None:
+            self.map.write(codes)
+        elif self._rows is not None:
+            n, k = codes.shape[0], 0
+            while k < n:
+                if self._buf is None or self._pos >= len(self._buf):
+                    self._buf, self._pos = next(self._rows), 0
+                take = min(n - k, len(self._buf) - self._pos)
+                self.map_differs += int((self._buf[self._pos:self._pos + take] != codes[k:k + take]).sum())
+                self._pos += take
+                k += take
+
+    def encode(self):
+        self.img.close()
+        self.stats = dict(format='jxl', **getattr(self.img, 'stats', {}))
+        if self.map is not None:
+            self.map.close()
+        if self._rows is not None:
+            self._rows.close()
+            self._rows = None
+
+    def commit(self, m=None, tri_src=None, meta=None):
+        if self.map_mode == 'write':
+            write_layout(self.npz + '.tmp', m, tri_src, meta)
+            os.replace(self.map_path + '.tmp', self.map_path)
+            os.replace(self.npz + '.tmp', self.npz)
+        os.replace(self.image + '.tmp', self.image)
+        self.stats['bytes'] = os.path.getsize(self.image)
+
+    def abort(self):
+        self.img.abort()
+        if self.map is not None:
+            self.map.abort()
+        if self._rows is not None:
+            self._rows.close()
+            self._rows = None
+        for p in (self.npz + '.tmp',):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
+def bake_paged_multi(m, tile, n, bake_tile, write_rows, threads=None):
+    """bake_paged for n images of one layout (a master's material channel components, decision 79): each tile baked
+    once into the n bands' views of it (bake_tile(i, rect, values [n], baked [n]), a generator), each image composed
+    and written by its own write_rows[c], without the corner rule (decision 57 is the AO's). Yields after each tile.
+    Returns the composition's counts of each image."""
+    W, H = m['W'], m['H']
+    tiles = tile_grid(W, H, tile)
+    ntx, nb = -(-W // tile), -(-H // tile)
+    bands = [Bands(W) for _ in range(n)]
+    rest = [dict() for _ in range(n)]
+    counts = [dict() for _ in range(n)]
+    kw = dict(threads=threads, layout=compose_layout(dict(m, corner_pairs=None)))
+    for kb in range(nb - 1, -1, -1):
+        yb0 = kb * tile
+        views = [b.add(kb, yb0, min(tile, H - yb0)) for b in bands]
+        for tx in range(ntx):
+            i = kb * ntx + tx
+            x0, y0, w, h = tiles[i]
+            yield from bake_tile(i, tiles[i], [v[1][:, x0:x0 + w] for v in views], [v[2][:, x0:x0 + w] for v in views])
+        del views
+        for c in range(n):
+            if kb + 1 in rest[c]:
+                compose_band(m, bands[c], kb + 1, write_rows[c], counts[c], None, ys1=rest[c].pop(kb + 1), **kw)
+                bands[c].trim(kb + 1, FILL)
+            bands[c].drop(kb + 2)
+            ys1 = compose_band(m, bands[c], kb, write_rows[c], counts[c], None, stop=yb0 if kb else None, **kw)
+            if ys1 > yb0:
+                rest[c][kb] = ys1
+                bands[c].trim(kb, ys1 + FILL - yb0)
+    return counts
 
 
 def read_image(path):
@@ -2564,7 +2726,7 @@ class _PagedView:
         return self.decode(self.base[key])
 
 
-def open_master(folder, stem, cache_bytes=PAGE_CACHE_BYTES, kind='ao', threads=None):
+def open_master(folder, stem, cache_bytes=PAGE_CACHE_BYTES, kind='ao', threads=None, map_page=None):
     """The master paged (decision 33), or None when a file is missing: the AO image (JPEG XL) and the map decoded once
     into two tiled scratch files in the bake folder (<stem>.ao.page and <stem>.ao.mappage) by the C++ DLL
     (ao_bake_copy.open_pages, apply-native-copy journal Session 4; threads: the bake's Threads setting,
@@ -2581,7 +2743,8 @@ def open_master(folder, stem, cache_bytes=PAGE_CACHE_BYTES, kind='ao', threads=N
         out = _layout(z)
     W, H = out['W'], out['H']
     base = os.path.join(folder, stem)
-    page_img, page_map = base + f'.{kind}.page', base + '.ao.mappage'
+    # map_page: the map's page file's ending, so several images of one master can be open at once (decision 82)
+    page_img, page_map = base + f'.{kind}.page', base + (map_page or '.ao.mappage')
     lib = jxl()
     if not lib.available():
         raise lib.JxlError(f'{image}: the JPEG XL library is not loaded ({lib.error()})')

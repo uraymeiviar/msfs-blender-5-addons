@@ -17,6 +17,18 @@ Per texture set (a material, as UV Auto Packing groups them), for all texture se
   band of target rows at a time, and the file is written row by row, so Apply needs no memory in proportion to a
   master.
 Apply writes files only: no datablock is added to the .blend and no material is changed.
+
+Material channels (decision 82): the albedo into the texture of the material's base colour slot, roughness and metal
+into the green and blue of its ORM texture (AO stays in red), the emissive into the texture of its emissive slot, each
+with its other channels and alpha byte for byte (Target ORM Texture: in place, a copy kept in the bake folder before
+the first write, an 8-bit file written 16-bit with its values kept); with Target Separate File, <material>.albedo.png
+and <material>.emissive.png in the output folder, and (decision 86) <material>.roughness.png and <material>.metal.png,
+single-channel 16-bit grey files (black where nothing was written yet). The copy, padding, per-object rule and bands
+are the AO's (no Soften); a channel whose mesh changed since its bake is applied anyway and reported (decision 85);
+faces without a master of the channel keep their pixels in it, listed as the AO's missing faces are.
+
+Fetch (decisions 93, 94; fetch_vertex_color): the other way, a master read at every face corner of the selected
+objects into the colour attribute the vertex colour sources read; the masters are only read.
 """
 
 import os
@@ -30,6 +42,8 @@ from . import ao_bake_core as core
 from . import ao_bake_store as store
 
 P_ORM = 'msfs_occlusion_metallic_roughness_texture'
+P_BASE = 'msfs_base_color_texture'
+P_EMIS = 'msfs_emissive_texture'
 RESOLUTIONS = [str(1 << n) for n in range(8, 14)]
 UNDER_TOLERANCE = 1e-3  # faces under 4 x: float32 UVs make equal densities differ by about 1e-7
 
@@ -198,6 +212,110 @@ class Target:
         return np.rint(np.clip(out, 0, 1) * 65535.0).astype(np.uint16)
 
 
+CH_SLOTS = {'albedo': (P_BASE, 'base colour'), 'emis': (P_EMIS, 'emissive'), 'rough': (P_ORM, 'ORM'),
+            'metal': (P_ORM, 'ORM')}
+CH_COLUMNS = {'albedo': (0, 1, 2), 'emis': (0, 1, 2), 'rough': (1,), 'metal': (2,)}
+CH_NEW = {'albedo': 65535, 'emis': 0, 'rough': 0, 'metal': 0}  # a new separate file where nothing is written
+CH_FILES = {'albedo': '.albedo.png', 'emis': '.emissive.png', 'rough': '.roughness.png', 'metal': '.metal.png'}
+CH_GREY = ('rough', 'metal')  # decision 86: their separate files are single-channel
+
+
+def channel_file_name(material, kind):
+    """Decisions 82, 86: <material>.albedo.png, .emissive.png, .roughness.png or .metal.png (the name made safe as the
+    AO's)."""
+    return ''.join(c if (c.isalnum() or c in '-_.') else '_' for c in material.name) + CH_FILES[kind]
+
+
+class ChannelTarget:
+    """Where Apply writes a material channel of one texture set (decision 82): the file, its size, its pixels before
+    (uint16, 16-bit scale) and the columns the channel's components go into. Target ORM Texture: the slot's texture
+    in place; Separate File: the channel's file in the output folder (roughness and metal: a grey file of their own,
+    decision 86)."""
+
+    def __init__(self, scene, material, settings, folder, kind):
+        self.material, self.channel = material, kind
+        self.warnings, self.backup = [], None
+        self.cols = CH_COLUMNS[kind]
+        self.kind = settings.target
+        self.layout = kind
+        threads = int(scene.fss_ao_bake.threads)
+        prop, slot = CH_SLOTS[kind]
+        if self.kind == 'ORM':
+            image = getattr(material, prop, None)
+            path = image_path(image) if isinstance(image, bpy.types.Image) else ''
+            if not path or not os.path.isfile(path):
+                raise ValueError(f'{material.name}: no texture file in the {slot} slot')
+            vals, bits, _ct = read_texture(path, threads=threads)
+            if vals.shape[2] < 3:
+                raise ValueError(f'{material.name}: the {slot} texture has {vals.shape[2]} channel(s), not RGB')
+            if bits == 8:
+                self.warnings.append(f'the {slot} file is 8-bit: written as 16-bit')
+            self.base = vals * np.uint16(257 if bits == 8 else 1)
+            backup_dir = os.path.join(folder, 'orm_backup' if prop == P_ORM else f'{kind}_backup')
+            self.backup = os.path.join(backup_dir, os.path.basename(path))
+            if not os.path.isfile(self.backup):
+                os.makedirs(backup_dir, exist_ok=True)
+                shutil.copy2(path, self.backup)
+        else:
+            grey = kind in CH_GREY  # decision 86: one channel, PNG colour type 0
+            if grey:
+                self.cols = (0,)
+            nch = 1 if grey else 3
+            path = os.path.join(output_folder(scene), channel_file_name(material, kind))
+            if os.path.isfile(path):
+                vals, bits, _ct = read_texture(path, threads=threads)
+                vals = vals * np.uint16(257 if bits == 8 else 1)
+                if vals.shape[2] < 3 and not grey:
+                    vals = np.repeat(vals[:, :, :1], 3, axis=2)
+                self.base = vals[:, :, :nch].copy() if vals.shape[2] != nch else vals
+            else:
+                if settings.resolution == 'ORM':
+                    size = orm_size(material)
+                    W, H = size if size is not None else (store.texture_size(material),) * 2
+                else:
+                    W = H = int(settings.resolution)
+                self.base = np.full((int(H), int(W), nch), CH_NEW[kind], np.uint16)
+        self.path = path
+        self.H, self.W = self.base.shape[:2]
+
+    def write_steps(self, Qs, written, threads):
+        """The file with the components Qs where written, every other pixel and channel as it was; a generator of
+        'write' steps. Returns the PNG writer's `by`."""
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        H, W, C = self.base.shape
+        tmp = self.path + '.tmp'
+        writer = core.png_writer(tmp, W, H, 16, C, threads=threads)
+        try:
+            for top in range(0, H, 256):  # rows from the top
+                yield 'write', top, H, os.path.basename(self.path)
+                r0, r1 = H - min(H, top + 256), H - top
+                vals = self.base[r0:r1].copy()
+                wr = written[r0:r1]
+                for q, col in zip(Qs, self.cols):
+                    vals[:, :, col] = np.where(wr, q[r0:r1], vals[:, :, col])
+                writer.write(vals[::-1])
+            writer.close()
+        except BaseException:
+            writer.abort()
+            raise
+        os.replace(tmp, self.path)
+        return writer.by
+
+
+def channel_problem(folder, stem, entry, kind, material, ev):
+    """Decision 82: why a master's channel is not applied to these faces ('' when it is): missing, or skipped for this
+    texture set (no Principled BSDF); 'mesh changed' when stale (decision 85: applied anyway, reported)."""
+    c = ((entry or {}).get('channels') or {}).get(kind)
+    _img, mp, npz = core.master_paths(folder, stem)
+    if not c or not all(os.path.isfile(p) for p in core.channel_paths(folder, stem, kind) + [mp, npz]):
+        return 'missing'
+    if material.name in (c.get('skipped') or ()):
+        return 'no Principled BSDF'
+    if c.get('mesh_hash') != core.mesh_hash(ev):
+        return 'mesh changed'
+    return ''
+
+
 def _set_tris(item, material, depsgraph):
     """The item's first user evaluated now, and the triangles (all of them) whose material is `material`."""
     obj = bpy.data.objects[item['object']]
@@ -242,6 +360,25 @@ def _finish(gen):
 def apply_set(context, material, objects=None, settings=None, band_rows=APPLY_BAND, kind='ao'):
     """Apply for one texture set in one go (apply_set_steps run to its end). Returns the report."""
     return _finish(apply_set_steps(context, material, objects, settings, band_rows, kind))
+
+
+def _chan_open(folder, stem, kind, threads):
+    """Decision 82: the master's images of a material channel, paged, all open at once (each with its own map page);
+    None when one is missing (those opened are closed)."""
+    out = []
+    try:
+        for comp in core.CHANNEL_KINDS[kind]:
+            m = core.open_master(folder, stem, kind=comp, threads=threads, map_page=f'.{comp}.mappage')
+            if m is None:
+                for o in out:
+                    o['close']()
+                return None
+            out.append(m)
+    except BaseException:
+        for o in out:
+            o['close']()
+        raise
+    return out
 
 
 def default_curvature_name(material):
@@ -290,7 +427,8 @@ def narrow_islands(pos_w, ev, tris, uvpx, W, H, width, threads=None):
             float(CURV_MIN_PX / dens[bad].min()))
 
 
-def apply_set_steps(context, material, objects=None, settings=None, band_rows=APPLY_BAND, kind='ao'):
+def apply_set_steps(context, material, objects=None, settings=None, band_rows=APPLY_BAND, kind='ao',
+                    ctx_cache=None):
     """Apply for one texture set; objects: the selected objects (per-object Apply, P47) or None for the whole set.
     settings: the material's fss_ao_apply or an object with the same attributes. A generator (decision 45): it yields
     (phase, done, total, name) between pieces of work (a master, a band of its copy, a strip of the file), so the
@@ -302,7 +440,12 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
     Paged (decision 33, Session 23): one master at a time is open, paged (ao_bake_core.open_master: decoded once into
     scratch files in the bake folder, deleted afterwards, read through a cache of tiles); the copy runs a band of
     band_rows target rows at a time (with a halo for the padding); the file is written row by row. Held for the whole
-    target: the AO (uint16) and three masks, 8 bytes per target pixel; nothing in proportion to a master."""
+    target: the AO (uint16) and three masks, 8 bytes per target pixel; nothing in proportion to a master.
+
+    kind 'albedo', 'rough', 'metal' or 'emis' (decision 82): a material channel into its target (ChannelTarget), its
+    components' masters open at once; faces without an up-to-date master of the channel keep their pixels.
+    ctx_cache: a dict shared by the channels of an Apply, so a master's copy_context is computed once per texture set
+    and target size."""
     t0 = time.time()
     why = core.native_copy().unavailable()  # apply-native-copy decision 6: the DLL and libjxl are required
     if why:
@@ -311,11 +454,14 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
     folder = store.bake_folder()
     settings = settings or material.fss_ao_apply
     curv = kind == 'curv'
+    chan = kind in core.CHANNEL_KINDS  # decision 82: a material channel
+    comps = core.CHANNEL_KINDS[kind] if chan else (kind,)
     if curv:
         settings = curvature_settings(settings, material)
     pad = int(scene.fss_ao_bake.curv_padding if curv else scene.fss_ao_bake.padding)
     # decision 46: the darker side of convex sharp edges brightened toward the edge (m; at least a texel), or None
-    soften_width = float(scene.fss_ao_bake.soften_width) if scene.fss_ao_bake.soften_edges and not curv else None
+    soften_width = (float(scene.fss_ao_bake.soften_width) if scene.fss_ao_bake.soften_edges and not curv and not chan
+                    else None)
     fill = core.CURV_FLAT if curv else 65535  # where no master is
     threads = int(scene.fss_ao_bake.threads)  # the C++ work's threads (ao_bake_copy.threads_of: 0 is Auto)
     row = store._state['sets'].get(material.name)
@@ -325,7 +471,8 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
     chosen = stems if objects is None else [s for s in store.items_for_objects(objects) if s in stems]
     if objects is not None and not chosen:
         return dict(material=material.name, error='no selected object in this texture set')
-    target = Target(scene, material, settings, objects is not None, folder)
+    target = (ChannelTarget(scene, material, settings, folder, kind) if chan
+              else Target(scene, material, settings, objects is not None, folder))
     W, H = target.W, target.H
     masters = store.read_index(folder).get('masters', {}) if folder else {}
     depsgraph = context.evaluated_depsgraph_get()
@@ -336,11 +483,12 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
                   png=None)
     copies = {}  # the copy's threads (apply-native-copy journal: C++)
     opens = {}  # who opened the masters (apply-native-copy journal, Session 4): 'C++ (n threads)'
-    pending = []  # padding (flat index, value, step), written once every face of the set is known
+    pending = []  # padding (flat index, values per component, step), written once every face of the set is known
     written = np.zeros((H, W), bool)
     cover = np.zeros((H, W), bool)
     pad_step = np.full((H, W), 1 << 30, np.int32)
-    Q = np.zeros((H, W), np.uint16)  # the AO where written
+    Qs = [np.zeros((H, W), np.uint16) for _c in comps]  # the AO (a channel's components) where written
+    Q = Qs[0]
     label_parts = []
     halo = pad + 2  # the padding grows `pad` px: a band copied with this halo equals the whole crop's copy
 
@@ -373,7 +521,17 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
         if w <= 0 or h <= 0:
             continue
         mine = stem in chosen
-        if mine:
+        if mine and chan:  # decision 82: without an up-to-date master of the channel the faces keep their pixels
+            report['faces'] += int(len(np.unique(ev['poly'][tri_ids])))
+            entry = masters.get(stem)
+            why = channel_problem(folder, stem, entry, kind, material, ev)
+            if why == 'mesh changed':  # decision 85: applied anyway, as the AO (decision 73)
+                report['mesh_changed'].append(item['name'])
+                why = ''
+            usable = not why
+            if why:
+                report['white'].append((item['name'], why, int(len(np.unique(ev['poly'][tri_ids])))))
+        elif mine:
             report['faces'] += int(len(np.unique(ev['poly'][tri_ids])))
             entry = masters.get(stem)
             # decision 73: a master whose mesh changed since its bake is applied anyway (reported); white only
@@ -398,13 +556,13 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
                 own, _cnt = core.raster_window(uvpx_all[tri_ids], ww, yb1 - yb, 1, wx0, yb, threads=threads)
                 inside = own >= 0
                 cover[yb:yb1, wx0:wx0 + ww] |= inside
-                if mine and not usable:
+                if mine and not usable and not chan:
                     Q[yb:yb1, wx0:wx0 + ww][inside] = fill
                     written[yb:yb1, wx0:wx0 + ww] |= inside
                 del own, _cnt
         if not mine or not usable:
             continue
-        if entry.get('surround_hash') != item['surround_hash'] and not curv:
+        if entry.get('surround_hash') != item['surround_hash'] and not curv and not chan:
             report['outdated'].append(item['name'])
         baked_w = (entry.get('curvature') or {}).get('width')
         if curv and baked_w is not None and baked_w != round(float(scene.fss_ao_bake.curv_width), 6):
@@ -412,11 +570,18 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
                                       f"the setting is {scene.fss_ao_bake.curv_width * 1000:g} mm (re-bake)")
         why = 'missing'
         try:
-            master = core.open_master(folder, stem, kind=kind, threads=int(scene.fss_ao_bake.threads))
+            if chan:  # decision 82: the channel's components open at once, each with its own map page
+                cmasters = _chan_open(folder, stem, kind, int(scene.fss_ao_bake.threads))
+                master = cmasters[0] if cmasters else None
+            else:
+                master = core.open_master(folder, stem, kind=kind, threads=int(scene.fss_ao_bake.threads))
+                cmasters = [master]
         except core.MasterUnreadable:  # replaced by one the C++ code does not read since Refresh (decision 6)
             master, why = None, core.REBAKE
         if master is None:  # the files went away since Refresh: white, as a missing master
             report['white'].append((item['name'], why, int(len(np.unique(ev['poly'][tri_ids])))))
+            if chan:  # a channel's faces keep their pixels
+                continue
             for yb, yb1, _h0, _h1 in bands(crop):
                 own, _cnt = core.raster_window(uvpx_all[tri_ids], w, yb1 - yb, 1, x0, yb, threads=threads)
                 Q[yb:yb1, x0:x0 + w][own >= 0] = fill
@@ -428,6 +593,8 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
             src = master['tri_src']
             if len(src) and int(src.max()) >= len(ev['tris']):  # decision 73: fewer triangles than baked
                 report['white'].append((item['name'], 'triangles changed', int(len(np.unique(ev['poly'][tri_ids])))))
+                if chan:  # a channel's faces keep their pixels
+                    continue
                 for yb, yb1, _h0, _h1 in bands(crop):
                     own, _cnt = core.raster_window(uvpx_all[tri_ids], w, yb1 - yb, 1, x0, yb, threads=threads)
                     Q[yb:yb1, x0:x0 + w][own >= 0] = fill
@@ -439,28 +606,39 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
             sel = in_set[src]
             uvpx = np.where(sel[:, None, None], uvpx, -1e6)
             tisl = np.zeros(len(tris), np.int64)
-            ctx = core.copy_context(pos_w, tris, uvpx, master, core.K_MIN, core.K_MAX)
+            ck = (material.name, stem, W, H)  # decision 82: one copy_context for a set's channels at this size
+            ctx = ctx_cache.get(ck) if ctx_cache is not None and chan else None
+            if ctx is None:
+                ctx = core.copy_context(pos_w, tris, uvpx, master, core.K_MIN, core.K_MAX)
+                if ctx_cache is not None and chan:
+                    ctx_cache[ck] = ctx
             sctx = (core.soften_context(pos_w, tris, uvpx, ctx, soften_width, use=sel, cn=cn_w[src])
                     if soften_width is not None else None)
             for yb, yb1, hy0, hy1 in bands(crop):
                 yield 'master', k + (yb - y0) / max(h, 1), len(stems), item['name']
-                out, info, owner_c, steps, count_c = core.copy_master(
-                    pos_w, tris, uvpx, tisl, master, (x0, hy0, w, hy1 - hy0), core.K_MIN, pad, outside_mode='tri',
-                    kmax=core.K_MAX, surface_cos=core.SURFACE_COS, same_face=False, ctx=ctx, soften=sctx,
-                    threads=int(scene.fss_ao_bake.threads))
+                outs = []
+                for cm_ in cmasters:  # the AO's one master, or a channel's components (the same layout)
+                    out, info, owner_c, steps, count_c = core.copy_master(
+                        pos_w, tris, uvpx, tisl, cm_, (x0, hy0, w, hy1 - hy0), core.K_MIN, pad, outside_mode='tri',
+                        kmax=core.K_MAX, surface_cos=core.SURFACE_COS, same_face=False, ctx=ctx, soften=sctx,
+                        threads=int(scene.fss_ao_bake.threads))
+                    outs.append(out)
                 copies.setdefault(info['copy'], info['copy_threads'])
                 r = slice(yb - hy0, yb1 - hy0)
-                out, owner_c, steps = out[r], owner_c[r], steps[r]
+                outs, owner_c, steps = [o_[r] for o_ in outs], owner_c[r], steps[r]
+                out = outs[0]
                 report['stacked_px'] += int((count_c[r] > 1).sum())
                 report['softened_px'] += int(info.get('softened_px', 0))
                 inside = (owner_c >= 0) & (out >= 0)
-                Q[yb:yb1, x0:x0 + w][inside] = _quantize(out[inside])
+                for q_, o_ in zip(Qs, outs):
+                    q_[yb:yb1, x0:x0 + w][inside] = _quantize(o_[inside])
                 written[yb:yb1, x0:x0 + w] |= inside
                 padm = (owner_c < 0) & (steps > 0) & (steps <= pad) & (out >= 0)
                 jj, ii = np.nonzero(padm)
                 if len(jj):
-                    pending.append(((jj + yb) * W + ii + x0, _quantize(out[jj, ii]), steps[jj, ii].astype(np.int32)))
-                del out, owner_c, steps, count_c, padm
+                    pending.append(((jj + yb) * W + ii + x0, [_quantize(o_[jj, ii]) for o_ in outs],
+                                    steps[jj, ii].astype(np.int32)))
+                del out, outs, owner_c, steps, count_c, padm
             report['copied'].append(item['name'])
             # faces under 4 x: the master's density against each face's density at the target's size
             d = core.densities(pos_w, tris[sel], uvpx[sel])
@@ -474,15 +652,30 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
                     report['narrow'].append((item['name'],) + got)
             report.setdefault('page_loads', []).append([int(p.loads) for p in master.get('pages', ())])
         finally:
-            master['close']()
+            for cm_ in cmasters:
+                cm_['close']()
     # padding only where no face of the set lies (P47), the nearest island's first
-    flat_cover, flat_step, flat_q, flat_w = cover.ravel(), pad_step.ravel(), Q.ravel(), written.ravel()
-    for idx, val, st in pending:
+    flat_cover, flat_step, flat_w = cover.ravel(), pad_step.ravel(), written.ravel()
+    flat_qs = [q_.ravel() for q_ in Qs]
+    for idx, vals_, st in pending:
         take = ~flat_cover[idx] & (st < flat_step[idx])
-        flat_q[idx[take]] = val[take]
+        for fq, val in zip(flat_qs, vals_):
+            fq[idx[take]] = val[take]
         flat_step[idx[take]] = st[take]
         flat_w[idx[take]] = True
     del pending, cover, pad_step
+    if chan:  # decision 82: the components into their columns of the target, the rest as it was
+        report['png'] = yield from target.write_steps(Qs, written, threads)
+        for image in bpy.data.images:
+            if image.source == 'FILE' and image_path(image) == os.path.normpath(target.path) and not image.is_dirty:
+                image.reload()
+        report.update(written_px=int(written.sum()), seconds=round(time.time() - t0, 2), kind=kind)
+        if copies:
+            report['copy'] = ' and '.join(f"C++ ({v} thread{'s' if v != 1 else ''})"
+                                          for _k, v in sorted(copies.items()))
+        if opens:
+            report['open'] = ' and '.join(sorted(opens))
+        return report
 
     def labels():
         parts_src, parts_dst = [], []
@@ -547,10 +740,12 @@ def apply_steps(context, materials, objects=None):
     n = len(materials)
     s = context.scene.fss_ao_bake
     kinds = (['ao'] if s.apply_ao else []) + (['curv'] if s.apply_cm else [])  # decisions 54, 55
+    kinds += [g for g in core.CHANNEL_GROUPS if getattr(s, f'apply_{g}', False)]  # decision 82
     jobs = [(m, k) for m in materials for k in kinds]
     n = len(jobs)
+    ctx_cache = {}  # decision 82: a master's copy_context once for a texture set's channels
     for i, (material, kind) in enumerate(jobs):
-        gen = apply_set_steps(context, material, objects, kind=kind)
+        gen = apply_set_steps(context, material, objects, kind=kind, ctx_cache=ctx_cache)
         try:
             while True:
                 try:
@@ -573,10 +768,13 @@ def apply_steps(context, materials, objects=None):
 def report_lines(rep):
     if rep.get('error'):
         return [f"{rep['material']}: {rep['error']}"]
-    lines = [f"{rep['material']}: {os.path.basename(rep['path'])} {rep['size'][0]} x {rep['size'][1]}, "
+    chan = rep.get('kind') in core.CHANNEL_KINDS
+    what = f" {core.CHANNEL_NAMES[rep['kind']]}" if chan else ''
+    lines = [f"{rep['material']}{what}: {os.path.basename(rep['path'])} {rep['size'][0]} x {rep['size'][1]}, "
              f"{len(rep['copied'])} copied, {rep['written_px']} px, {rep['seconds']} s"]
     if rep['white']:
-        lines.append(f"  {'flat' if rep.get('kind') == 'curv' else 'white'} (no up-to-date master): "
+        word = 'kept' if chan else 'flat' if rep.get('kind') == 'curv' else 'white'
+        lines.append(f"  {word} (no up-to-date master): "
                      + ', '.join(f'{n} ({why})' for n, why, _f in rep['white']))
     if rep.get('mesh_changed'):
         lines.append('  mesh changed since its bake, applied anyway: ' + ', '.join(rep['mesh_changed']))
@@ -591,3 +789,213 @@ def report_lines(rep):
         lines.append(f"  sharp edges softened ({rep['soften_mm']:g} mm, at least a texel): {rep['softened_px']} px")
     lines += [f'  {w}' for w in rep['warnings']]
     return lines
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Fetch (decisions 93, 94): a master read at every face corner into the mesh's colour attribute (the masters only read)
+# ---------------------------------------------------------------------------------------------------------------------
+
+FETCH = {'ALBEDO': ('albedo',), 'ORM': ('ao', 'rough', 'metal'), 'EMIS': ('emis',)}
+FETCH_NAMES = {'ALBEDO': 'Albedo', 'ORM': 'ORM', 'EMIS': 'Emis'}
+FETCH_COLS = {'ao': (0,), 'rough': (1,), 'metal': (2,), 'albedo': (0, 1, 2), 'emis': (0, 1, 2)}
+FETCH_ATTR = 'FSS_Bake'  # decision 94: the second attribute added beside a mesh's only one
+FETCH_RADIUS = 4  # px: a corner whose four nearest texels are none of its triangle's looks this far for one
+
+
+def fetch_grade(item, group):
+    """The grade of a master's group for Fetch: the AO's (item['grade']) or a channel's (ch_grades)."""
+    if group == 'ao':
+        return item.get('grade', 'MISSING')
+    return (item.get('ch_grades') or {}).get(group, 'MISSING')
+
+
+def fetch_ready(item, what):
+    """Decision 93: the groups of `what` the master of this item has (a master not missing; a mesh change is said when
+    fetching)."""
+    return [g for g in FETCH[what] if fetch_grade(item, g) != 'MISSING']
+
+
+def corner_values(folder, stem, group):
+    """Decision 94: each master triangle's three corners' value of a group, (T, 3, C) linear 0..1 (albedo and
+    emissive decoded from sRGB, as Apply decodes them), NaN where none was found: bilinear at the corner's master
+    position over the four nearest texels that are the triangle's own baked ones (its face in the .ao.map, filled;
+    never a neighbour's island), renormalized; with none of them, the nearest own texel within FETCH_RADIUS px.
+    Returns (values, tri_src, fallbacks). The images are read whole."""
+    kinds = core.CHANNEL_KINDS.get(group, ('ao',))
+    m = core.load_master(folder, stem, kind=kinds[0])
+    if m is None:
+        return None, None, 0
+    imgs = [m['image']] + [core.read_image(core.master_paths(folder, stem, k)[0]) for k in kinds[1:]]
+    H, W = m['H'], m['W']
+    own = np.where(m['filled'], m['face_map'], -1)
+    muv = np.asarray(m['muv'], np.float64)
+    T = len(muv)
+    P = muv.reshape(-1, 2) - 0.5
+    t = np.repeat(np.arange(T), 3)
+    x0, y0 = np.floor(P[:, 0]).astype(np.int64), np.floor(P[:, 1]).astype(np.int64)
+    fx, fy = P[:, 0] - x0, P[:, 1] - y0
+    C = len(kinds)
+    acc = np.zeros((len(P), C))
+    wsum = np.zeros(len(P))
+    for dx in (0, 1):
+        for dy in (0, 1):
+            xi, yi = x0 + dx, y0 + dy
+            inside = (xi >= 0) & (xi < W) & (yi >= 0) & (yi < H)
+            xc, yc = np.clip(xi, 0, W - 1), np.clip(yi, 0, H - 1)
+            ok = inside & (own[yc, xc] == t)
+            w = (fx if dx else 1.0 - fx) * (fy if dy else 1.0 - fy) * ok
+            wsum += w
+            for c, img in enumerate(imgs):
+                acc[:, c] += w * img[yc, xc]
+    vals = np.full((len(P), C), np.nan)
+    good = wsum > 1e-12
+    vals[good] = acc[good] / wsum[good, None] / 65535.0
+    fallbacks = 0
+    for i in np.nonzero(~good)[0]:  # the nearest of the triangle's own texels
+        cx, cy = int(round(P[i, 0])), int(round(P[i, 1]))
+        xa, xb = max(0, cx - FETCH_RADIUS), min(W, cx + FETCH_RADIUS + 1)
+        ya, yb = max(0, cy - FETCH_RADIUS), min(H, cy + FETCH_RADIUS + 1)
+        yy, xx = np.nonzero(own[ya:yb, xa:xb] == t[i])
+        if not len(yy):
+            continue
+        k = int(np.argmin((xx + xa - P[i, 0]) ** 2 + (yy + ya - P[i, 1]) ** 2))
+        vals[i] = [img[yy[k] + ya, xx[k] + xa] / 65535.0 for img in imgs]
+        fallbacks += 1
+    if group in ('albedo', 'emis'):
+        vals = np.where(np.isnan(vals), vals, core.srgb_decode(np.nan_to_num(vals)))
+    return vals.reshape(T, 3, C), np.asarray(m['tri_src'], np.int64), fallbacks
+
+
+def _target_attribute(me, read):
+    """Decisions 91, 94: (attribute, added, why) the Fetch writes: the second colour attribute (read SECOND; beside an
+    only one, FSS_Bake added after it, white, corner, not active, not render) or the active one; None and why
+    without (a first attribute is never made)."""
+    ca = me.color_attributes
+    if read == 'ACTIVE':
+        a = ca.active_color
+        return (a, False, '') if a is not None else (None, False, 'no colour attribute')
+    if len(ca) == 0:
+        return None, False, 'no colour attribute'
+    if len(ca) >= 2:
+        return ca[1], False, ''
+    active, render = ca.active_color.name if ca.active_color else None, ca.default_color_name
+    a = ca.new(FETCH_ATTR, 'FLOAT_COLOR', 'CORNER')
+    name = a.name
+    a.data.foreach_set('color', np.ones(len(a.data) * 4, np.float32))
+    if active:
+        ca.active_color = ca[active]
+    if render:
+        ca.default_color_name = render
+    return ca[name], True, ''
+
+
+def _corner_float(obj, attr):
+    """Decision 94: a point-domain or byte attribute converted to a corner float colour attribute of the same name
+    (its values kept), by Blender's Convert Color Attribute on it made active for the call; the active and render
+    attributes as they were. Returns the attribute."""
+    me = obj.data
+    ca = me.color_attributes
+    name = attr.name
+    active, render = ca.active_color.name if ca.active_color else None, ca.default_color_name
+    ca.active_color = attr
+    with bpy.context.temp_override(object=obj, active_object=obj, selected_objects=[obj]):
+        bpy.ops.geometry.color_attribute_convert(domain='CORNER', data_type='FLOAT_COLOR')
+    if active and active in ca:
+        ca.active_color = ca[active]
+    if render and render in ca:
+        ca.default_color_name = render
+    return ca[name]
+
+
+def fetch_vertex_color(context, objects, what, read='SECOND'):
+    """Decisions 93, 94: for the selected mesh objects, the masters of `what` (ALBEDO, ORM: the AO in red, roughness in
+    green, metal in blue, EMIS) read at every face corner of the faces they cover and written into the colour
+    attribute `read` names; components without a master, and corners of faces without one, keep their values; alpha
+    1 where written. A shared mesh is written once. Returns the report: per object a line, and the skipped ones with
+    why. The masters are only read."""
+    folder = store.bake_folder()
+    items, by_object = store._state['items'], store._state['by_object']
+    dg = context.evaluated_depsgraph_get()
+    lines, done_meshes, written = [], {}, 0
+    for obj in sorted((o for o in objects if o.type == 'MESH'), key=lambda o: o.name):
+        stem = by_object.get(obj.name)
+        item = items.get(stem) if stem else None
+        if item is None:
+            lines.append(f'{obj.name}: no master')
+            continue
+        groups = fetch_ready(item, what)
+        if not groups:
+            lines.append(f'{obj.name}: no {FETCH_NAMES[what]} master')
+            continue
+        me = obj.data
+        if me.name in done_meshes:
+            lines.append(f'{obj.name}: its mesh {me.name} written with {done_meshes[me.name]}')
+            continue
+        stale = [g for g in groups if fetch_grade(item, g) == 'MESH']
+        groups = [g for g in groups if g not in stale]
+        notes = [f"{', '.join(store.core.CHANNEL_NAMES.get(g, 'AO') for g in stale)} skipped (mesh changed since "
+                 f"its bake)"] if stale else []
+        if not groups:
+            lines.append(f'{obj.name}: ' + '; '.join(notes))
+            continue
+        ev_me = obj.evaluated_get(dg).data
+        lv = np.empty(len(me.loops), np.int64)
+        me.loops.foreach_get('vertex_index', lv)
+        if len(ev_me.loops) != len(me.loops):
+            lines.append(f'{obj.name}: its modifiers change the mesh')
+            continue
+        ev_lv = np.empty(len(ev_me.loops), np.int64)
+        ev_me.loops.foreach_get('vertex_index', ev_lv)
+        if not np.array_equal(lv, ev_lv):
+            lines.append(f'{obj.name}: its modifiers change the mesh')
+            continue
+        ev = core.evaluated_triangles(obj, dg, [])
+        target, added, why = _target_attribute(me, read)
+        if target is None:
+            lines.append(f'{obj.name}: {why}')
+            continue
+        converted = target.domain != 'CORNER' or target.data_type != 'FLOAT_COLOR'
+        was = f'{target.data_type.lower()} {target.domain.lower()}'
+        if converted:
+            target = _corner_float(obj, target)
+            notes.append(f'{target.name} converted from {was} to float corner')
+        if added:
+            notes.append(f'{target.name} added as the second colour attribute')
+        cols = np.empty(len(me.loops) * 4, np.float32)
+        target.data.foreach_get('color', cols)
+        cols = cols.reshape(-1, 4)
+        got_any = np.zeros(len(me.loops), bool)
+        fb = 0
+        for g in groups:
+            vals, tri_src, fallbacks = corner_values(folder, stem, g)
+            if vals is None:
+                notes.append(f"{store.core.CHANNEL_NAMES.get(g, 'AO')} skipped (its master files are missing)")
+                continue
+            if len(tri_src) and int(tri_src.max()) >= len(ev['loops']):
+                notes.append(f"{store.core.CHANNEL_NAMES.get(g, 'AO')} skipped (fewer triangles than baked)")
+                continue
+            fb += fallbacks
+            loops = ev['loops'][tri_src].ravel()
+            v = vals.reshape(-1, vals.shape[2])
+            ok = ~np.isnan(v[:, 0])
+            n = len(me.loops)
+            cnt = np.bincount(loops[ok], minlength=n)
+            for c, col in enumerate(FETCH_COLS[g]):
+                s = np.bincount(loops[ok], weights=v[ok, c], minlength=n)
+                has = cnt > 0
+                cols[has, col] = s[has] / cnt[has]  # a corner of several triangles of one polygon: the mean
+            got_any |= cnt > 0
+        if not got_any.any():
+            lines.append(f'{obj.name}: nothing written' + (f" ({'; '.join(notes)})" if notes else ''))
+            continue
+        cols[got_any, 3] = 1.0
+        target.data.foreach_set('color', cols.ravel())
+        me.update()
+        corners = int(got_any.sum())
+        written += corners
+        done_meshes[me.name] = obj.name
+        names = ', '.join(store.core.CHANNEL_NAMES.get(g, 'AO') for g in groups)
+        lines.append(f'{obj.name}: {corners} corners of {target.name} ({names})'
+                     + (f', {fb} read from the nearest texel' if fb else '')
+                     + (f"; {'; '.join(notes)}" if notes else ''))
+    return dict(lines=lines, corners=written, meshes=sorted(done_meshes))

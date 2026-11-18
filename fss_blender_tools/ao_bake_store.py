@@ -32,6 +32,9 @@ decisions 12 to 18, 21 and 27; P32 to P35).
   snapshot of the current state (a copy of the open file written into the bake folder, unsaved changes included, the
   .blend untouched; removed after the bake); this module writes the snapshot and the job, starts it, reads its
   status.json and creates the `cancel` file.
+- Material channels (decisions 79 to 81): the entry's `channels` ({group: mesh_hash, baked_at, samples, object,
+  skipped}); a channel's grade is UP_TO_DATE, MESH (baked for another mesh) or MISSING, never stale from the material
+  or the surroundings; a bake bakes only the chosen channels (Missing and Stale: those not up to date).
 The hashes are computed by refresh(), never while a panel draws.
 """
 
@@ -599,7 +602,24 @@ def settings_dict(scene):
                 threads=core.native_copy().threads_of(s.threads),  # decision 5 of apply-native-copy: 0 is Auto
                 sample_split=s.sample_quality == 'SPLIT', curvature=bool(s.curvature),
                 curv_width=round(float(s.curv_width), 6), denoise=denoise_opts(scene),
-                baker=s.baker, optix_samples=int(s.optix_samples))  # OptiX baker decisions 22, 24
+                baker=s.baker, optix_samples=int(s.optix_samples),  # OptiX baker decisions 22, 24
+                channel_samples=int(s.channel_samples), vertex_color=vertex_color_sources(s),
+                vc_attribute=s.vc_attribute)  # decision 91
+
+
+VC_GROUPS = ('ao', 'albedo', 'rough', 'metal', 'emis')  # decisions 88, 95: the channels with a vertex colour source
+
+
+def vertex_color_sources(s):
+    """Decision 88: {group: 'OVERWRITE' or 'MULTIPLY'} of the ticked vertex colour sources (the runner uses one only
+    for a channel it bakes)."""
+    return {g: getattr(s, f'vc_{g}_mode') for g in VC_GROUPS if getattr(s, f'vc_{g}', False)}
+
+
+def vc_overwritten(entry):
+    """Rule item 4 of decision 88's hand-off: the AO is the vertex colour's alone (Overwrite): it does not depend on
+    the surroundings and has no denoise."""
+    return ((entry or {}).get('ao_source') or {}).get('mode') == 'OVERWRITE'
 
 
 def item_distance(obj, scene):
@@ -965,6 +985,7 @@ def refresh(context, relink=True, instances=None):
         item['grade'] = grade(item, masters.get(stem), folder)
         item['cm_grade'] = curv_grade(item, masters.get(stem), folder, width)
         item['dn_grade'] = dn_grade(item, masters.get(stem), folder, dn_want)
+        item['ch_grades'] = channel_grades(item, masters.get(stem), folder)
     _state.update(items=items, by_object=by_object, excluded=excluded, refreshed=time.time(), folder=folder,
                   relinked=relinked, sets=texture_set_rows(items, masters), curv_width=width,
                   dn_want=dn_want, motion_frames=len(mo['frames']), moving=int(mo['moving'].sum()),
@@ -977,7 +998,7 @@ def grade(item, entry, folder):
         return 'MISSING'
     if entry.get('mesh_hash') != item['mesh_hash']:
         return 'MESH'
-    if entry.get('surround_hash') != item['surround_hash']:
+    if entry.get('surround_hash') != item['surround_hash'] and not vc_overwritten(entry):  # decision 88
         return 'SURROUNDINGS'
     return 'UP_TO_DATE'
 
@@ -998,6 +1019,8 @@ def dn_grade(item, entry, folder, want):
     """Decision 56: the state of a master's denoise (DN_GRADES) against the options wanted (None: off)."""
     if item['grade'] in ('MISSING', 'MESH'):
         return 'NEEDS_AO'
+    if vc_overwritten(entry):  # decision 88: an AO from the vertex colour alone is not denoised
+        return 'UP_TO_DATE'
     have = ((entry or {}).get('denoise') or {}).get('settings')
     if have is not None:  # masters denoised before Follow Gradient and Bridge Seams were removed (both off)
         have = {k: v for k, v in have.items() if not (k in ('bridge', 'gradient') and v is False)}
@@ -1007,6 +1030,39 @@ def dn_grade(item, entry, folder, want):
     if have is not None and not os.path.isfile(core.image_paths(folder, item['key'], 'ao.raw')[0]):
         return 'NEEDS_AO'
     return 'STALE'
+
+
+def channel_grade(item, entry, folder, group):
+    """Decisions 79 and 80: a material channel's grade (UP_TO_DATE, MESH, MISSING): MISSING without its entry or a
+    file of it (an image, the layout's .ao.npz or .ao.map), MESH when the mesh it was baked from is not the item's; not
+    stale when the material or the surroundings change."""
+    c = ((entry or {}).get('channels') or {}).get(group)
+    if not c or not folder:
+        return 'MISSING'
+    _img, mp, npz = core.master_paths(folder, item['key'])
+    if not all(os.path.isfile(p) for p in core.channel_paths(folder, item['key'], group) + [mp, npz]):
+        return 'MISSING'
+    if c.get('mesh_hash') != item['mesh_hash']:
+        return 'MESH'
+    return 'UP_TO_DATE'
+
+
+def channel_grades(item, entry, folder):
+    """{group: grade} of the material channels the master's entry has (decision 79); the others are missing."""
+    have = ((entry or {}).get('channels') or {})
+    return {g: channel_grade(item, entry, folder, g) for g in core.CHANNEL_GROUPS if g in have}
+
+
+def channel_choice(stems, groups, selected):
+    """Decision 80: {stem: [groups]} a bake bakes of the chosen material channels: Selected, all of them; Missing and
+    Stale, those not up to date (a channel the master does not have is missing)."""
+    out = {}
+    for stem in stems:
+        have = _state['items'][stem].get('ch_grades') or {}
+        got = [g for g in core.CHANNEL_GROUPS if g in groups and (selected or have.get(g, 'MISSING') != 'UP_TO_DATE')]
+        if got:
+            out[stem] = got
+    return out
 
 
 def dn_counts():
@@ -1046,20 +1102,25 @@ def bake_choice(stems, want_ao, want_cm, selected, denoise=None):
     return what, needs_ao
 
 
-def bake_auto(stems, want_ao, want_cm, denoise=None):
+def bake_auto(stems, want_ao, want_cm, denoise=None, groups=(), channels=None):
     """The panel's Bake Selected: per master, its missing or stale parts as
     Missing and Stale bakes them (a stale denoise alone re-run from the raw bake, without rays); a master with
-    nothing out of date is baked in full (everything ticked). Returns bake_choice's pair."""
+    nothing out of date is baked in full (everything ticked). Returns bake_choice's pair. groups: the chosen material
+    channels (decision 80), their choice per master put into `channels` ({stem: [groups]}) the same way."""
     what, needs_ao, full = {}, [], []
+    channels = {} if channels is None else channels
     for stem in stems:
         w, n = bake_choice([stem], want_ao, want_cm, False, denoise)
-        if w or n:
+        c = channel_choice([stem], groups, False)
+        if w or n or c:
             what.update(w)
             needs_ao += n
+            channels.update(c)
         else:
             full.append(stem)
     w, n = bake_choice(full, want_ao, want_cm, True, denoise)
     what.update(w)
+    channels.update(channel_choice(full, groups, True))
     return what, needs_ao + n
 
 
@@ -1077,6 +1138,7 @@ def regrade():
         item['grade'] = grade(item, masters.get(stem), folder)
         item['cm_grade'] = curv_grade(item, masters.get(stem), folder, _state.get('curv_width', 0.0))
         item['dn_grade'] = dn_grade(item, masters.get(stem), folder, _state.get('dn_want'))
+        item['ch_grades'] = channel_grades(item, masters.get(stem), folder)
     _state['sets'] = texture_set_rows(_state['items'], masters)
 
 
@@ -1135,10 +1197,13 @@ def write_snapshot(folder):
     return path
 
 
-def make_job(context, stems, test_delay_s=0.0, tile_px=0, test_tile_delay_s=0.0, what=None, baker_window=False):
+def make_job(context, stems, test_delay_s=0.0, tile_px=0, test_tile_delay_s=0.0, what=None, baker_window=False,
+             channels=None, channel_objects=None):
     """The job file of a bake, and the snapshot of the current state the bake opens. what: {stem: (ao, cm, dn)}
     (decisions 55, 56), else the AO of each, with the curvature when CM is ticked. baker_window: FSS OptiX shows its
-    window although the second Blender runs in the background (OptiX baker decision 28)."""
+    window although the second Blender runs in the background (OptiX baker decision 28). channels: {stem: [groups]},
+    the material channels to bake (decision 79), from the copy channel_objects names ({stem: object name}, a shared
+    mesh's bake choice; else the master's object)."""
     scene = context.scene
     folder = bake_folder()
     os.makedirs(folder, exist_ok=True)
@@ -1155,6 +1220,9 @@ def make_job(context, stems, test_delay_s=0.0, tile_px=0, test_tile_delay_s=0.0,
                         ao_distance=item['ao_distance'], falloff=item.get('falloff', 0))
         ao, cm, dn = (what or {}).get(stem, (True, bool(scene.fss_ao_bake.curvature), False))
         job_item.update(ao=bool(ao), cm=bool(cm), dn=bool(dn))
+        if (channels or {}).get(stem):  # decision 79
+            job_item.update(channels=list(channels[stem]),
+                            channel_object=(channel_objects or {}).get(stem) or item['object'])
         if item.get('copies'):  # decision 47: a shared mesh's copies, each with its own surroundings
             job_item['combine'] = item['combine']
             job_item['copies'] = [dict(c, occluders=[dict(name=n, skip_slots=skip_slots(bpy.data.objects[n]),

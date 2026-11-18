@@ -1,6 +1,7 @@
-"""AO Bake panel (auto-bake journal, decision 29 and P46): bake masters in a second Blender, apply them to textures.
+"""Bake panel (auto-bake journal, decision 29 and P46; named Bake, decision 76): bake masters in a second Blender,
+apply them to textures. The current design: fss_blender_tools/README.md, Bake: Current Design.
 
-FSS MSFS Tools > AO Bake:
+FSS MSFS Tools > Bake, with its sub-panel Run (decision 75):
 - Bake: AO distance (scene, decision 16), Auto Distance (decision 51), Distance Falloff (decision 53), Curvature Map
   (decision 54), the baker (Auto, FSS OptiX or Cycles: OptiX baker journal decision 22) with FSS OptiX's samples
   (decision 24) and Cycles' samples and device; poses of moving parts and the occluders (scene defaults, decisions 34
@@ -10,14 +11,22 @@ FSS MSFS Tools > AO Bake:
   scene rule detected at the last Refresh as a tree with their parents, joined for several selected objects, with
   [+] and [-] per row (on a parent: its branch) and a button selecting the object, decisions 62, 63 and 66, with a
   Refresh button); the masters' counts (up to date,
-  surroundings changed, mesh changed, missing, excluded); Bake Missing and Stale, Bake Selected, Select Stale, Select
-  Missing; while a bake runs, object n of m with the share done (tiles and views), its name, tile, copy and pose, time
+  surroundings changed, mesh changed, missing, excluded); Select Missing, Select Stale and Missing and Stale (they
+  select; the bake runs from Run); while a bake runs, object n of m with the share done (tiles and views), its name, tile, copy and pose, time
   spent and left, and Cancel (no preview of the master being baked: the FSS OptiX window shows it, OptiX baker
   decision 30); the bake reads a snapshot of the current state (unsaved changes included); the report of the last
   bake.
-- Apply: padding; a row per texture set with its state (masters complete, or the number missing or stale; faces under
+- Texture Target (the Apply box before decision 75): padding; a row per texture set with its state (masters complete, or the number missing or stale; faces under
   4 x); for the active row: target (ORM slot texture or separate file) and the separate file's output folder,
-  name, resolution, layout, green and blue, sampling; the warnings; Apply, Apply All, Apply Selected.
+  name, resolution, layout, green and blue, sampling; the warnings (Apply runs from Run).
+- Run (decisions 75, 79, 82, 84, 85): one grid of ticks, a row each for AO, CM, Albedo, Roughness, Metal and Emissive
+  (the channels off by default), Bake Selected left and Apply right, an Apply tick alert while a selected master's
+  mesh changed since that bake (applied anyway, the warning line counts them); the Object box lists the channels the
+  master has with their grades, and a shared mesh with several copies selected shows Bake Copy while Albedo,
+  Roughness or Metal is ticked to bake (the emissive is combined over the copies, decision 87); under the grid, per
+  ticked Bake of AO, Albedo, Roughness and Metal, its vertex colour source and, when ticked, Overwrite or Multiply
+  (decisions 88, 89, 95; Emissive too), and once, while a source is ticked, which colour attribute they read
+  (decision 91); then Fetch Albedo, Fetch ORM and Fetch Emis (decision 93), greyed with the reason.
 The panel draws without writing: the hashes are computed by Refresh (and before a bake), index.json is read when a
 file opens and after a bake.
 """
@@ -105,6 +114,13 @@ def _get_curv_folder(self):
 
 def _set_curv_folder(self, value):
     self['curv_output_folder'] = '' if value == self.output_folder else value
+
+
+VC_MODES = [  # decision 89
+    ('OVERWRITE', 'Overwrite', "The master's channel becomes the vertex colour's value"),
+    ('MULTIPLY', 'Multiply', "The master's channel times the vertex colour's value (1.0 changes nothing); each bake "
+     "multiplies again. Without a master of the channel (or after a mesh change) the same as Overwrite"),
+]
 
 
 class FSS_AOBakeSettings(bpy.types.PropertyGroup):
@@ -200,8 +216,59 @@ class FSS_AOBakeSettings(bpy.types.PropertyGroup):
         name="Apply CM to Texture", default=False,
         description="Run writes the selected objects' curvature masters into their texture sets' curvature file "
         "(16-bit grey; flat grey where no curvature master is), after the bake when one is ticked")
+    # decisions 79 and 82: the material channels a bake bakes and Apply writes (AO alone by default)
+    bake_albedo: bpy.props.BoolProperty(name="Albedo", default=False,
+                                        description="Run bakes the selected objects' albedo from their material as it "
+                                        "is now (the colour before the MSFS AO multiply)")
+    bake_rough: bpy.props.BoolProperty(name="Roughness", default=False,
+                                       description="Run bakes the selected objects' roughness from their material")
+    bake_metal: bpy.props.BoolProperty(name="Metal", default=False,
+                                       description="Run bakes the selected objects' metal from their material")
+    bake_emis: bpy.props.BoolProperty(name="Emissive", default=False,
+                                      description="Run bakes the selected objects' emissive colour from their material")
+    # decisions 88 and 89: a channel baked from the mesh's active colour attribute instead (off by default)
+    vc_ao: bpy.props.BoolProperty(name="AO from Vertex Color Red", default=False,
+                                  description="Bake the AO from the red of a colour attribute of the mesh (Read), "
+                                  "not traced")
+    vc_albedo: bpy.props.BoolProperty(name="Albedo from Vertex Color", default=False,
+                                      description="Bake the albedo from a colour attribute of the mesh (Read), not "
+                                      "from the material")
+    vc_rough: bpy.props.BoolProperty(name="Roughness from Vertex Color Green", default=False,
+                                     description="Bake the roughness from the green of a colour attribute of the "
+                                     "mesh (Read), not from the material")
+    vc_attribute: bpy.props.EnumProperty(name="Read", default='SECOND', items=[  # decision 91
+        ('SECOND', 'Second Color Attribute', "The second attribute of the mesh's Color Attributes list, whatever "
+         "is active or render (the real vertex colours stay active and render). An object without one is skipped"),
+        ('ACTIVE', 'Active Attribute', "The mesh's active colour attribute (the one Vertex Paint paints)")])
+    vc_metal: bpy.props.BoolProperty(name="Metal from Vertex Color Blue", default=False,
+                                     description="Bake the metal from the blue of a colour attribute of the mesh "
+                                     "(Read), not from the material")
+    vc_emis: bpy.props.BoolProperty(name="Emissive from Vertex Color", default=False,  # decision 95
+                                    description="Bake the emissive colour from a colour attribute of the mesh (Read), "
+                                    "not from the material")
+    vc_emis_mode: bpy.props.EnumProperty(name="Mode", default='MULTIPLY', items=VC_MODES)
+    vc_ao_mode: bpy.props.EnumProperty(name="Mode", default='MULTIPLY', items=VC_MODES)
+    vc_albedo_mode: bpy.props.EnumProperty(name="Mode", default='MULTIPLY', items=VC_MODES)
+    vc_rough_mode: bpy.props.EnumProperty(name="Mode", default='MULTIPLY', items=VC_MODES)
+    vc_metal_mode: bpy.props.EnumProperty(name="Mode", default='MULTIPLY', items=VC_MODES)
+    apply_albedo: bpy.props.BoolProperty(name="Albedo", default=False,
+                                         description="Run writes the albedo masters into the base colour texture "
+                                         "(Separate File: <material>.albedo.png)")
+    apply_rough: bpy.props.BoolProperty(name="Roughness", default=False,
+                                        description="Run writes the roughness masters into the green of the ORM "
+                                        "texture (Separate File: <material>.roughness.png)")
+    apply_metal: bpy.props.BoolProperty(name="Metal", default=False,
+                                        description="Run writes the metal masters into the blue of the ORM texture "
+                                        "(Separate File: <material>.metal.png)")
+    apply_emis: bpy.props.BoolProperty(name="Emissive", default=False,
+                                       description="Run writes the emissive masters into the emissive texture "
+                                       "(Separate File: <material>.emissive.png)")
     samples: bpy.props.IntProperty(name="Samples", default=256, min=1, soft_max=1024,
                                    description="Cycles samples per master pixel")
+    channel_samples: bpy.props.IntProperty(name="Channel Samples", default=64, min=1, soft_max=256,
+                                           description="Cycles samples per master pixel of the material channels "
+                                           "(Albedo, Roughness, Metal, Emissive): each averages the material over "
+                                           "the pixel")
     baker: bpy.props.EnumProperty(name="Baker", items=BAKERS, default='AUTO',
                                   description="What bakes the AO masters. A master baked by the other baker is not "
                                   "stale; Bake Selected bakes it again")
@@ -354,6 +421,32 @@ def bake_instances(context):
             choice = bake_copy_choice(context, me)
             if choice:
                 out[me.name] = choice
+    return out
+
+
+def bake_groups(s):
+    """Decision 79: the material channels the bake toggles choose."""
+    return [g for g in store.core.CHANNEL_GROUPS if getattr(s, f'bake_{g}')]
+
+
+def apply_groups(s):
+    """Decision 82: the material channels the apply toggles choose."""
+    return [g for g in store.core.CHANNEL_GROUPS if getattr(s, f'apply_{g}')]
+
+
+def channel_copies(context, stems):
+    """Rule item 6 of decision 79's hand-off: {stem: object name}, the copy a shared mesh's material channels are baked
+    from: decision 77's choice from the selection (the drop-down, else the active object, else the first selected
+    copy by name), without a selected copy the first by name."""
+    out = {}
+    items = store._state['items']
+    for stem in stems:
+        item = items.get(stem)
+        if item is None or len(item['users']) < 2:
+            continue
+        me = bpy.data.meshes.get(item['mesh'])
+        choice = bake_copy_choice(context, me) if me is not None else None
+        out[stem] = choice if choice in item['users'] else min(item['users'])
     return out
 
 
@@ -758,16 +851,74 @@ def run_problems(context):
     """Decision 75: why Run cannot start, as short lines (empty: it can)."""
     s = context.scene.fss_ao_bake
     lines = []
-    if not (s.bake_ao or s.curvature or s.apply_ao or s.apply_cm):
+    if not (s.bake_ao or s.curvature or s.apply_ao or s.apply_cm or bake_groups(s) or apply_groups(s)):
         lines.append('Tick what to run')
     if not context.selected_objects:
         lines.append('Select the objects to run')
-    if (s.apply_ao or s.apply_cm) and context.selected_objects and store._state['refreshed'] is not None:
+    if ((s.apply_ao or s.apply_cm or apply_groups(s)) and context.selected_objects
+            and store._state['refreshed'] is not None):
         ticked, blocked = apply_check(context)
         if not ticked:
             lines.append("None of the selection's texture sets is ticked")
         lines += [f'{name}: {problem}' for name, problem in blocked]
     return lines
+
+
+_fetch_report = []  # the last Fetch's lines, drawn under its buttons
+
+
+def fetch_problems(context):
+    """Decision 93: {what: why its Fetch button is greyed ('' when it can run)}."""
+    out = {}
+    if store._state['refreshed'] is None:
+        return {w: 'press Refresh first' for w in apply_mod.FETCH}
+    if not context.selected_objects:
+        return {w: 'select the objects' for w in apply_mod.FETCH}
+    items = store._state['items']
+    stems = store.items_for_objects(context.selected_objects)
+    for w in apply_mod.FETCH:
+        has = any(apply_mod.fetch_ready(items[k], w) for k in stems if k in items)
+        out[w] = '' if has else f'no {apply_mod.FETCH_NAMES[w]} master in the selection'
+    return out
+
+
+class FSS_OT_AOFetchVertexColor(bpy.types.Operator):
+    bl_idname = 'fss.ao_fetch_vertex_color'
+    bl_label = 'Fetch'
+    bl_description = ("Read the selected objects' masters at every face corner into the colour attribute the vertex "
+                      "colour sources read (Read), to paint over and bake back. Replaces what is painted there")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    what: bpy.props.EnumProperty(items=[('ALBEDO', 'Albedo', 'The albedo master'),
+                                        ('ORM', 'ORM', 'Red the AO, green the roughness, blue the metal'),
+                                        ('EMIS', 'Emis', 'The emissive master')], options={'SKIP_SAVE'})
+
+    @classmethod
+    def description(cls, context, properties):
+        return {'ALBEDO': "Read the selected objects' albedo masters at every face corner into the colour attribute "
+                          "Read names",
+                'ORM': "Read the selected objects' AO, roughness and metal masters at every face corner into the red, "
+                       "green and blue of the colour attribute Read names (a channel without a master keeps its "
+                       "component)",
+                'EMIS': "Read the selected objects' emissive masters at every face corner into the colour attribute "
+                        "Read names"}.get(properties.what, cls.bl_description)
+
+    @classmethod
+    def poll(cls, context):
+        if not _available(cls):
+            return False
+        return context.mode == 'OBJECT' and store._state['refreshed'] is not None
+
+    def execute(self, context):
+        why = fetch_problems(context)[self.what]
+        if why:
+            self.report({'WARNING'}, f'Fetch {apply_mod.FETCH_NAMES[self.what]}: {why}')
+            return {'CANCELLED'}
+        rep = apply_mod.fetch_vertex_color(context, list(context.selected_objects), self.what,
+                                           context.scene.fss_ao_bake.vc_attribute)
+        _fetch_report[:] = [f"Fetch {apply_mod.FETCH_NAMES[self.what]}: {rep['corners']} corners"] + rep['lines']
+        self.report({'INFO'}, '; '.join(_fetch_report))
+        return {'FINISHED'} if rep['corners'] else {'CANCELLED'}
 
 
 class FSS_OT_AORun(bpy.types.Operator):
@@ -789,7 +940,8 @@ class FSS_OT_AORun(bpy.types.Operator):
 
     def execute(self, context):
         s = context.scene.fss_ao_bake
-        bake, apply = s.bake_ao or s.curvature, s.apply_ao or s.apply_cm
+        bake = s.bake_ao or s.curvature or bool(bake_groups(s))
+        apply = s.apply_ao or s.apply_cm or bool(apply_groups(s))
         if apply and store._state['refreshed'] is None:
             store.refresh(context)
             sync_state(context)
@@ -870,18 +1022,23 @@ class FSS_OT_AOBakeStart(bpy.types.Operator):
         sync_state(context)
         items = store._state['items']
         s = context.scene.fss_ao_bake
-        if not (s.bake_ao or s.curvature):
+        groups = bake_groups(s)  # decision 79: the material channels
+        if not (s.bake_ao or s.curvature or groups):
             self.report({'WARNING'}, 'AO Bake: tick AO, CM or both')
             return {'CANCELLED'}
         dn_opts = store.denoise_opts(context.scene)
+        channels = {}
         if self.scope == 'AUTO':
             what, needs_ao = store.bake_auto(store.items_for_objects(context.selected_objects), s.bake_ao,
-                                             s.curvature, dn_opts)
+                                             s.curvature, dn_opts, groups, channels)
         else:
             sel = self.scope == 'SELECTED'
             cands = (store.items_for_objects(context.selected_objects) if sel else
                      [st for st, it in sorted(items.items(), key=lambda kv: kv[1]['name'])])
             what, needs_ao = store.bake_choice(cands, s.bake_ao, s.curvature, sel, dn_opts)
+            channels = store.channel_choice(cands, groups, sel)  # decision 80
+        for stem in channels:  # a master whose material channels alone are baked
+            what.setdefault(stem, (False, False, False))
         stems = list(what)
         if needs_ao:
             self.report({'WARNING'}, f'AO Bake: {len(needs_ao)} object(s) need an AO bake before their curvature '
@@ -895,7 +1052,8 @@ class FSS_OT_AOBakeStart(bpy.types.Operator):
         # OptiX baker decision 28: Foreground with FSS OptiX shows its window, the second Blender in the background
         baker_window = visible and s.baker != 'CYCLES' and native.available()[0]
         job = store.make_job(context, stems, self.test_delay, self.tile, self.test_tile_delay, what=what,
-                             baker_window=baker_window)
+                             baker_window=baker_window, channels=channels,
+                             channel_objects=channel_copies(context, channels))
         proc = store.start_bake(job, hidden=not visible or baker_window)
         st = _state(context)
         st.running, st.n_done, st.n_total, st.current, st.report = True, 0, len(stems), '', ''
@@ -954,7 +1112,7 @@ class FSS_OT_AOBakeSelect(bpy.types.Operator):
             s = context.scene.fss_ao_bake
             what, _needs = store.bake_choice(list(items), s.bake_ao, s.curvature, False,
                                              store.denoise_opts(context.scene))
-            stems = set(what)
+            stems = set(what) | set(store.channel_choice(list(items), bake_groups(s), False))
         else:
             grades = {'STALE': ('MESH', 'SURROUNDINGS'), 'MISSING': ('MISSING',)}[self.which]
             stems = {st for st, it in items.items() if it['grade'] in grades}
@@ -1976,6 +2134,10 @@ def _draw_object(layout, context):
         row = box.row(align=True)
         row.label(text=f'Shared mesh, {len(copies)} copies:', icon='LINKED')
         row.prop(obj.data.fss_ao_shared, 'combine', text='')
+        # decision 87: albedo, roughness and metal from one copy (the emissive is combined over the copies)
+        if store.shared_combine(obj.data, scene) != 'ONE' and set(bake_groups(scene.fss_ao_bake)) - {'emis'}:
+            if len(selected_copies(context, obj.data)) > 1:  # the copy the material channels are baked from
+                box.prop(obj.data.fss_ao_shared, 'bake_copy', text='Bake Copy')
         if store.shared_combine(obj.data, scene) == 'ONE':  # decision 77
             names = selected_copies(context, obj.data)
             if len(names) > 1:  # several copies selected: which one Bake Selected bakes
@@ -1991,6 +2153,10 @@ def _draw_object(layout, context):
                 choice = bake_copy_choice(context, obj.data, names)
                 if choice and choice != shown:
                     box.label(text=f'Bake Selected bakes {choice}', icon='BLANK1')
+    item = store._state['items'].get(store._state['by_object'].get(obj.name))
+    for g, gr in ((item or {}).get('ch_grades') or {}).items():  # decision 79: the channels its master has
+        box.label(text=f'{store.core.CHANNEL_NAMES[g]}: {store.GRADE_TEXT[gr]}',
+                  icon='CHECKMARK' if gr == 'UP_TO_DATE' else 'ERROR')
     if scene.fss_ao_bake.auto_distance:  # decision 51: shown only when it is the object's own, under Max Distance
         first = sorted(copies, key=lambda u: u.name)[0] if len(copies) > 1 else obj
         d = store.item_distance(first, scene)
@@ -2113,19 +2279,47 @@ class FSS_PT_AORun(bpy.types.Panel):
         ticked = apply_check(context)[0] if st.refreshed else []
         sets = f"{len(ticked)} set{'s' if len(ticked) != 1 else ''}"
         items = store._state['items']  # decision 73: masters whose mesh changed since the bake (last Refresh)
-        changed = sum(1 for k in store.items_for_objects(context.selected_objects)
-                      if (items.get(k) or {}).get('grade') == 'MESH')
+        sel_items = [(k, items.get(k) or {}) for k in store.items_for_objects(context.selected_objects)]
+        ch_changed = {g: {k for k, it in sel_items if (it.get('ch_grades') or {}).get(g) == 'MESH'}
+                      for g in store.core.CHANNEL_GROUPS}  # decision 85: a channel's mesh changed since its bake
+        ao_changed = {k for k, it in sel_items if it.get('grade') == 'MESH'}
+        # decision 84: one grid, a row per AO, CM and material channel, Bake Selected left and Apply right
         grid = layout.grid_flow(row_major=True, columns=2, even_columns=True, align=True)
-        grid.prop(s, 'bake_ao', text=f'AO Bake Selected ({n})')
-        cell = grid.row(align=True)
-        cell.alert = bool(changed) and s.apply_ao
-        cell.prop(s, 'apply_ao', text=f'Apply AO to Texture ({n} objs, {sets})')
-        grid.prop(s, 'curvature', text=f'CM Bake Selected ({n})')
-        cell = grid.row(align=True)
-        cell.alert = bool(changed) and s.apply_cm
-        cell.prop(s, 'apply_cm', text=f'Apply CM to Texture ({n} objs, {sets})')
-        if changed and (s.apply_ao or s.apply_cm):
-            layout.label(text=f'{changed} mesh changed since its bake: applied anyway', icon='ERROR')
+        rows = [('AO', 'bake_ao', 'apply_ao', ao_changed), ('CM', 'curvature', 'apply_cm', ao_changed)]
+        rows += [(store.core.CHANNEL_NAMES[g], f'bake_{g}', f'apply_{g}', ch_changed[g])
+                 for g in store.core.CHANNEL_GROUPS]
+        changed = set()
+        for name, bake_prop, apply_prop, stale in rows:
+            grid.prop(s, bake_prop, text=f'{name} Bake Selected ({n})')
+            cell = grid.row(align=True)
+            cell.alert = bool(stale) and getattr(s, apply_prop)
+            cell.prop(s, apply_prop, text=f'Apply {name} to Texture ({n} objs, {sets})')
+            if getattr(s, apply_prop):
+                changed |= stale
+        vc_on = False
+        for bake_prop, g in (('bake_ao', 'ao'), ('bake_albedo', 'albedo'), ('bake_rough', 'rough'),
+                             ('bake_metal', 'metal'), ('bake_emis', 'emis')):  # decisions 88, 95: the sources
+            if getattr(s, bake_prop):
+                row = layout.row(align=True)
+                row.prop(s, f'vc_{g}')
+                if getattr(s, f'vc_{g}'):
+                    row.prop(s, f'vc_{g}_mode', expand=True)
+                    vc_on = True
+        if vc_on:  # decision 91: which colour attribute the sources read, once
+            layout.row(align=True).prop(s, 'vc_attribute', expand=True)
+        fp = fetch_problems(context)  # decision 93: the masters into the vertex colour
+        row = layout.row(align=True)
+        for what in apply_mod.FETCH:
+            sub = row.row(align=True)
+            sub.enabled = not fp[what]
+            sub.operator('fss.ao_fetch_vertex_color', text=f'Fetch {apply_mod.FETCH_NAMES[what]}').what = what
+        whys = sorted({w for w in fp.values() if w})
+        if whys:
+            layout.label(text='Fetch: ' + '; '.join(whys), icon='INFO')
+        if _fetch_report:
+            _lines(layout.column(align=True), '\n'.join(_fetch_report), 'INFO')
+        if changed:  # decisions 73 and 85
+            layout.label(text=f'{len(changed)} mesh changed since its bake: applied anyway', icon='ERROR')
         problems = run_problems(context)
         row = layout.row()
         row.scale_y = 1.4
@@ -2243,6 +2437,7 @@ def _draw_bake(layout, context, s):
         row.prop(s, 'device', expand=True)
         if s.device == 'CPU':
             col.prop(s, 'threads')
+    col.prop(s, 'channel_samples')  # the material channels always bake with Cycles
     col.separator()
     col.prop(s, 'poses')
     col.prop(s, 'shared_combine')
@@ -2374,7 +2569,7 @@ CLASSES = (FSS_AOBakeSettings, FSS_AOMeshSettings, FSS_AOOccluderRef, FSS_AOObje
            FSS_AOBakeState, FSS_OT_AOBakeRefresh, FSS_OT_AOBakeStart, FSS_OT_AOBakeCancel, FSS_OT_AOBakeSelect,
            FSS_OT_AOCustomOccluders, FSS_OT_AODetect, FSS_OT_AOTreeSet, FSS_OT_AOTreeFold, FSS_OT_AOTreeSelect, FSS_OT_AOTreeHighlight,
            FSS_OT_AOTreeSelectAll, FSS_OT_AOTreeHighlightAll, FSS_OT_AOTreeToggle, FSS_OT_AOApply, FSS_OT_AOApplyCancel, FSS_UL_AOSets, FSS_UL_AOOccluders, FSS_UL_AODetected,
-           FSS_OT_AORun, FSS_OT_AOObjectStep, FSS_PT_AOBake, FSS_PT_AORun)
+           FSS_OT_AORun, FSS_OT_AOFetchVertexColor, FSS_OT_AOObjectStep, FSS_PT_AOBake, FSS_PT_AORun)
 
 
 def register():

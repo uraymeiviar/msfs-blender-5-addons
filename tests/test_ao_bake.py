@@ -63,6 +63,32 @@ Blender). Checked:
   panel's first line says why, the AO Bake operators refuse, a job fails with the reason in its log and status, Apply
   refuses.
 
+Last, in a scene of its own (tests/_work/ao_bake_channels), the material channels (decisions 79 to 83, Session 61's
+step 2; `-- only=test_material_channels` runs it alone): constant Principled values baked and applied into the slot
+textures in place and into separate files, every face pixel within 1/65535 after the sRGB step, an object without a
+master and the pixels beyond the padding byte for byte; a textured albedo measured against its source, the samples
+measured; a grey material put back leaves it up to date; AO alone with the material changed and after a repack keeps
+the channels' and the layout's files byte for byte; a mesh change makes every channel stale and an Albedo bake makes a
+new layout without the AO and curvature; the colour before the .Apply AO Group; a shared mesh's copy chosen by the
+drop-down, the active object and the first name; a material without a Principled BSDF skipped and reported. Decisions
+85 to 87 (Session 65's step 2): a mesh-changed albedo applied and reported; roughness and metal of Target File in their
+own grey 16-bit files, the AO's ORM-layout file of the same run as AO alone; a shared mesh's emissive by Average, Most
+Lit, Darkest and One Instance.
+
+Then, in a scene of its own (tests/_work/ao_bake_vc; `-- only=test_vertex_color_channels`), the vertex colour sources
+(decisions 88 to 92, Session 68's step 2, Session 70's step 2): Overwrite of the AO, roughness, metal and albedo
+from FLOAT_COLOR and BYTE_COLOR attributes of point and corner domain equal to the second attribute's values (linear),
+never the first's, the file's attributes unchanged; Active Attribute reading the active one; a grey painted at 0.5 in
+Vertex Paint giving 0.5 from both types; an object with one colour attribute skipped; Multiply by 1.0, 0.5 and twice
+0.5 on a traced, denoised AO; Multiply without a master and after a mesh edit as Overwrite; an Overwrite AO ignoring its surroundings, traced again when the
+source is unticked; a denoise-only run keeping the product; an albedo multiplied in linear; an object without a colour
+attribute skipped.
+
+Last, in a scene of its own (tests/_work/ao_bake_fetch; `-- only=test_vertex_color_fetch`), Fetch (decisions 93 to 95,
+Session 73's step 2): a vertex colour bake fetched back within one 8-bit step at every corner for ORM, Albedo and Emis;
+a traced AO fetched into red alone; FSS_Bake added beside an only attribute, nothing for none; a Mirror modifier
+skipped; the Emissive from Vertex Color's Overwrite and Multiply; undo where the background Blender has it.
+
 The baker (OptiX baker journal, decision 22): Cycles, or the one FSS_AO_BAKE_TEST_BAKER names (AUTO, OPTIX), with
 FSS OptiX at the suite's 16 samples.
 
@@ -3297,6 +3323,1147 @@ def test_unavailable():
           f"({md5['DLL']}, jxl.dll {md5['libjxl']}), all runs again)")
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# Material channels (decisions 79 to 83): the albedo, roughness, metal and emissive in the master, Apply into targets
+# ---------------------------------------------------------------------------------------------------------------------
+
+CH_WORK = REPO_ROOT / 'tests' / '_work' / 'ao_bake_channels'
+CH_BLEND = CH_WORK / 'channels.blend'
+CH_BASE, CH_ROUGH, CH_METAL, CH_EMIS, CH_GROUP_RGB = (0.6, 0.3, 0.1), 0.3, 1.0, (0.2, 0.5, 0.9), (0.8, 0.4, 0.2)
+CH_SAMPLE_COUNTS = (1, 4, 16, 64, 256)
+# decision 87: three copies of a shared mesh, their emissive colours (linear) of different luminances (Rec. 709 0.270,
+# 0.458, 0.251): Most Lit takes E2's, Darkest E3's; per component the highest would mix (0.9, 0.6, 0.9)
+CH_E_EMIS = {'E1': (0.9, 0.1, 0.1), 'E2': (0.1, 0.6, 0.1), 'E3': (0.2, 0.2, 0.9)}
+CH_E_BASE = {'E1': (0.7, 0.2, 0.2), 'E2': (0.2, 0.7, 0.2), 'E3': (0.2, 0.2, 0.7)}
+
+
+def ch_material(name, base=(0.5, 0.5, 0.5), rough=0.5, metal=0.0, emis=(0.0, 0.0, 0.0), tex=None, ao_group=False,
+                diffuse=False):
+    """A plain Principled material built here (not the MSFS material's tree); tex: an image read through the render
+    UV map (no UV Map node) into Base Color; ao_group: Base Color fed through a group named .Apply AO Group that
+    halves the colour; diffuse: a Diffuse BSDF on the output, no Principled BSDF."""
+    mat = bpy.data.materials.get(name) or bpy.data.materials.new(name)
+    mat.fss_uv_texture_size = str(SIZE)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    for n in list(nt.nodes):
+        nt.nodes.remove(n)
+    out = nt.nodes.new('ShaderNodeOutputMaterial')
+    if diffuse:
+        d = nt.nodes.new('ShaderNodeBsdfDiffuse')
+        d.inputs['Color'].default_value = (*base, 1.0)
+        nt.links.new(d.outputs[0], out.inputs['Surface'])
+        return mat
+    p = nt.nodes.new('ShaderNodeBsdfPrincipled')
+    nt.links.new(p.outputs[0], out.inputs['Surface'])
+    p.inputs['Base Color'].default_value = (*base, 1.0)
+    p.inputs['Roughness'].default_value = rough
+    p.inputs['Metallic'].default_value = metal
+    p.inputs['Emission Color'].default_value = (*emis, 1.0)
+    p.inputs['Emission Strength'].default_value = 3.0  # not baked: the emissive is the Emission Color's input
+    colour = None
+    if tex is not None:
+        t = nt.nodes.new('ShaderNodeTexImage')
+        t.image = tex
+        colour = t.outputs['Color']
+    if ao_group:
+        grp = bpy.data.node_groups.new('.Apply AO Group', 'ShaderNodeTree')
+        grp.interface.new_socket(name='Color', in_out='INPUT', socket_type='NodeSocketColor')
+        grp.interface.new_socket(name='Occlusion', in_out='INPUT', socket_type='NodeSocketFloat')
+        grp.interface.new_socket(name='Color', in_out='OUTPUT', socket_type='NodeSocketColor')
+        gi, go = grp.nodes.new('NodeGroupInput'), grp.nodes.new('NodeGroupOutput')
+        mul = grp.nodes.new('ShaderNodeVectorMath')
+        mul.operation = 'MULTIPLY'
+        mul.inputs[1].default_value = (0.5, 0.5, 0.5)
+        grp.links.new(gi.outputs[0], mul.inputs[0])
+        grp.links.new(mul.outputs[0], go.inputs[0])
+        g = nt.nodes.new('ShaderNodeGroup')
+        g.node_tree = grp
+        if colour is None:
+            rgb = nt.nodes.new('ShaderNodeRGB')
+            rgb.outputs[0].default_value = (*base, 1.0)
+            colour = rgb.outputs[0]
+        nt.links.new(colour, g.inputs[0])
+        colour = g.outputs[0]
+    if colour is not None:
+        nt.links.new(colour, p.inputs['Base Color'])
+    return mat
+
+
+def ch_plane(name, location, mat, uv=None, n=4, size=0.2):
+    """plane() with UVMap (the texture set's, active) covering uv=(u0, v0, u1, v1), and a second map TexUV with the
+    same coordinates as the render UV map (an Image Texture node without a UV Map node reads it)."""
+    obj = plane(name, location, mat, 0, size=size, n=n)
+    me = obj.data
+    u0, v0, u1, v1 = uv or (0.1, 0.1, 0.9, 0.9)
+    lay = me.uv_layers['UVMap']
+    for poly in me.polygons:
+        for li in poly.loop_indices:
+            x, y, _z = me.vertices[me.loops[li].vertex_index].co
+            lay.data[li].uv = (u0 + (x / size + 0.5) * (u1 - u0), v0 + (y / size + 0.5) * (v1 - v0))
+    tex = me.uv_layers.new(name='TexUV')
+    co = np.empty(len(me.loops) * 2, np.float32)
+    lay.data.foreach_get('uv', co)
+    tex.data.foreach_set('uv', co)
+    me.uv_layers.active = lay
+    tex.active_render = True
+    return obj
+
+
+def build_channel_scene():
+    for obj in list(bpy.data.objects):
+        bpy.data.objects.remove(obj)
+    if CH_WORK.exists():
+        shutil.rmtree(CH_WORK)
+    CH_WORK.mkdir(parents=True)
+    scene = bpy.context.scene
+    scene.frame_set(1)
+    s = scene.fss_ao_bake
+    s.distance, s.samples, s.threads, s.padding, s.curv_padding = 0.1, 16, 12, PAD, PAD
+    s.curv_width = 0.005
+    set_baker(s)
+    s.output_folder = str(CH_WORK / 'out')
+    rng = np.random.default_rng(79)
+    # the textures in CH_CONST's slots (Target ORM Texture writes them in place): base colour RGBA 16-bit, ORM RGB
+    # 16-bit, emissive RGB 8-bit
+    write_png(CH_WORK / 'base.png', rng.integers(0, 65536, (SIZE, SIZE, 4)))
+    write_png(CH_WORK / 'orm.png', rng.integers(0, 65536, (SIZE, SIZE, 3)))
+    write_png(CH_WORK / 'emis.png', rng.integers(0, 256, (SIZE, SIZE, 3)), bits=8)
+    # T1's base colour texture: 8-bit sRGB, noise blurred by a 3 x 3 box (some detail at every scale)
+    noise = rng.integers(40, 216, (SIZE + 2, SIZE + 2, 3)).astype(np.float64)
+    blur = sum(noise[dy:dy + SIZE, dx:dx + SIZE] for dy in range(3) for dx in range(3)) / 9.0
+    write_png(CH_WORK / 'albedo_src.png', np.rint(blur).astype(np.int64), bits=8)
+    const = ch_material('CH_CONST', CH_BASE, CH_ROUGH, CH_METAL, CH_EMIS)
+    for prop, f in ((ao_bake_apply.P_BASE, 'base.png'), (ao_bake_apply.P_ORM, 'orm.png'),
+                    (ao_bake_apply.P_EMIS, 'emis.png')):
+        setattr(const, prop, bpy.data.images.load(str(CH_WORK / f)))
+    const = ch_material('CH_CONST', CH_BASE, CH_ROUGH, CH_METAL, CH_EMIS)  # the tree again, as built here
+    ch_plane('K1', (0, 0, 0), const, (0.05, 0.05, 0.45, 0.45))
+    ch_plane('K2', (1, 0, 0), const, (0.55, 0.55, 0.95, 0.95))
+    src = bpy.data.images.load(str(CH_WORK / 'albedo_src.png'))
+    ch_plane('T1', (2, 0, 0), ch_material('CH_TEX', rough=0.7, metal=0.25, emis=(0.1, 0.0, 0.3), tex=src))
+    ch_plane('G1', (3, 0, 0), ch_material('CH_AOGRP', CH_GROUP_RGB, ao_group=True))
+    ch_plane('N1', (4, 0, 0), ch_material('CH_DIFF', (0.2, 0.9, 0.2), diffuse=True))
+    # a shared mesh with object-linked materials of different colours (rule item 6)
+    red, blue = ch_material('CH_RED', (1.0, 0.0, 0.0)), ch_material('CH_BLUE', (0.0, 0.0, 1.0))
+    s1 = ch_plane('S1', (5, 0, 0), red)
+    s2 = link(bpy.data.objects.new('S2', s1.data))
+    s2.location = (5.5, 0, 0)
+    for o, m in ((s1, red), (s2, blue)):
+        o.material_slots[0].link = 'OBJECT'
+        o.material_slots[0].material = m
+    # decision 87: a shared mesh of three copies, object-linked materials of their own base and emissive colours
+    e1 = ch_plane('E1', (7, 0, 0), ch_material('CH_E1', CH_E_BASE['E1'], emis=CH_E_EMIS['E1']))
+    for i, n in enumerate(('E1', 'E2', 'E3')):
+        o = e1 if n == 'E1' else link(bpy.data.objects.new(n, e1.data))
+        o.location = (7 + 0.5 * i, 0, 0)
+        o.material_slots[0].link = 'OBJECT'
+        o.material_slots[0].material = ch_material(f'CH_{n}', CH_E_BASE[n], emis=CH_E_EMIS[n])
+    bpy.ops.wm.save_as_mainfile(filepath=str(CH_BLEND))
+    return src
+
+
+def ch_set(s, prefix, groups):
+    for g in core.CHANNEL_GROUPS:
+        setattr(s, f'{prefix}_{g}', g in groups)
+
+
+def ch_bake(names, ao=False, cm=False, groups=(), active='first', samples=None, scope='SELECTED'):
+    """A bake of the selection through the operator (hidden, waited for); returns the job's status."""
+    s = bpy.context.scene.fss_ao_bake
+    s.bake_ao, s.curvature = ao, cm
+    ch_set(s, 'bake', groups)
+    select(names)
+    if active != 'first':
+        bpy.context.view_layer.objects.active = bpy.data.objects[active] if active else None
+    if samples:
+        os.environ['FSS_AO_BAKE_CHANNEL_SAMPLES'] = str(samples)
+    try:
+        assert bpy.ops.fss.ao_bake_start(scope=scope, hidden=True, wait=True) == {'FINISHED'}
+    finally:
+        os.environ.pop('FSS_AO_BAKE_CHANNEL_SAMPLES', None)
+    status = store.read_status(str(CH_WORK / 'channels.bake'))
+    assert status['state'] == 'done' and all(r['status'] == 'baked' for r in status['results']), status['results']
+    refresh()
+    return status
+
+
+def ch_item(name):
+    return store._state['items'][store._state['by_object'][name]]
+
+
+def ch_files(name, groups=core.CHANNEL_GROUPS):
+    stem = store._state['by_object'][name]
+    folder = str(CH_WORK / 'channels.bake')
+    return {os.path.basename(p): file_hash(p) for g in groups for p in core.channel_paths(folder, stem, g)
+            if os.path.isfile(p)}
+
+
+def ch_layout_files(name):
+    stem = store._state['by_object'][name]
+    _img, mp, npz = core.master_paths(str(CH_WORK / 'channels.bake'), stem)
+    return {os.path.basename(p): file_hash(p) for p in (mp, npz)}
+
+
+def ch_master(name, comp):
+    m = core.load_master(str(CH_WORK / 'channels.bake'), store._state['by_object'][name], kind=comp)
+    return m['image'][m['filled']].astype(np.int64)
+
+
+def q16(v):
+    return int(np.round(np.clip(v, 0.0, 1.0) * 65535.0))
+
+
+def ch_apply(material, groups, target='FILE', layout='ORM', objects=None, ao=False):
+    """Apply of these channels (the scene's apply toggles; ao: the AO too, first) for one texture set; its reports."""
+    s = bpy.context.scene.fss_ao_bake
+    keep = (s.apply_ao, s.apply_cm)
+    s.apply_ao, s.apply_cm = ao, False
+    ch_set(s, 'apply', groups)
+    mat = bpy.data.materials[material]
+    a = mat.fss_ao_apply
+    a.target, a.layout, a.resolution = target, layout, str(SIZE)
+    try:
+        reps = ao_bake_apply.apply(bpy.context, [mat], objects)
+    finally:
+        s.apply_ao, s.apply_cm = keep
+        ch_set(s, 'apply', ())
+    for r in reps:
+        assert not r.get('error'), r
+    return reps
+
+
+def ch_measure(out, ref, mask):
+    """The difference of a written albedo to the source (both 0..1 sRGB-encoded): mean, max, share within 1/255."""
+    d = np.abs(out[mask] - ref[mask])
+    return dict(mean=float(d.mean()), max=float(d.max()), within_1_255=float((d <= 1.0 / 255.0 + 1e-12).mean()),
+                px=int(mask.sum()))
+
+
+def ch_entry(name):
+    stem = store._state['by_object'][name]
+    return store.read_index(str(CH_WORK / 'channels.bake'), use_cache=False)['masters'].get(stem), stem
+
+
+def test_material_channels():
+    """Decisions 79 to 83 (Session 61's steps 2.1 to 2.9): the material channels baked into the master from Principled
+    materials built here, and Apply into their targets; decisions 85 to 87 (Session 65's steps 2.1 to 2.3): a
+    mesh-changed channel applied anyway, roughness and metal of Target File in their own grey files, a shared mesh's
+    emissive combined over its copies."""
+    t0 = time.time()
+    src = build_channel_scene()
+    s = bpy.context.scene.fss_ao_bake
+    folder = str(CH_WORK / 'channels.bake')
+    out_dir = CH_WORK / 'out'
+    ALL = list(core.CHANNEL_GROUPS)
+    found = {}
+    with rule_unrecorded():
+        refresh()
+        # FL1, steps 2.1, 2.6, 2.9: AO, curvature and the four channels of K1, T1, G1, N1 (K2 not: step 2.8)
+        status = ch_bake(['K1', 'T1', 'G1', 'N1'], ao=True, cm=True, groups=ALL)
+        for n in ('K1', 'T1', 'G1', 'N1'):
+            it = ch_item(n)
+            assert it['grade'] == 'UP_TO_DATE' and it['cm_grade'] == 'UP_TO_DATE', (n, it['grade'], it['cm_grade'])
+            assert it['ch_grades'] == {g: 'UP_TO_DATE' for g in ALL}, (n, it['ch_grades'])
+        assert ch_item('K2')['ch_grades'] == {} and ch_item('K2')['grade'] == 'MISSING'
+        # step 2.9: N1's material has no Principled BSDF: skipped, said in the log and the report
+        note = next(r for r in status['results'] if r['name'] == 'N1').get('note', '')
+        assert 'Albedo skipped for CH_DIFF' in note and 'Emissive skipped for CH_DIFF' in note, note
+        log_text = (CH_WORK / 'channels.bake' / 'bake.log').read_text(encoding='utf-8')
+        assert 'Albedo skipped for CH_DIFF (no Principled BSDF on the Material Output)' in log_text
+        entry_n, _ = ch_entry('N1')
+        assert all(entry_n['channels'][g]['skipped'] == ['CH_DIFF'] for g in ALL), entry_n['channels']
+        reps = ch_apply('CH_DIFF', ['albedo'])
+        assert reps[0]['white'] == [('N1', 'no Principled BSDF', 16)] and reps[0]['written_px'] == 0, reps[0]
+        lines = ao_bake_apply.report_lines(reps[0])
+        assert 'kept (no up-to-date master): N1 (no Principled BSDF)' in lines[1], lines
+        found['2.9'] = f"note \"{note.split(';')[0]}\", Apply: {lines[1].strip()}"
+        # step 2.6: the colour before the .Apply AO Group, not halved
+        want = [q16(core.srgb_encode(v)) for v in CH_GROUP_RGB]
+        half = [q16(core.srgb_encode(v * 0.5)) for v in CH_GROUP_RGB]
+        got = [ch_master('G1', k) for k in core.CHANNEL_KINDS['albedo']]
+        dev = max(int(np.abs(g - w).max()) for g, w in zip(got, want))
+        assert dev <= 1, (dev, [(int(g.min()), int(g.max())) for g in got], want)
+        found['2.6'] = f'G1 albedo {want} (halved would be {half}), max deviation {dev}'
+        # steps 2.1 and 2.8, Target ORM Texture: K1's faces get the values, K2 (no master) keeps its pixels
+        before = {f: read(CH_WORK / f)[0].astype(np.int64) for f in ('base.png', 'orm.png', 'emis.png')}
+        raw = {f: (CH_WORK / f).read_bytes() for f in ('base.png', 'orm.png', 'emis.png')}
+        reps = ch_apply('CH_CONST', ALL, target='ORM')
+        assert [r['white'] for r in reps] == [[('K2', 'missing', 16)]] * 4, [r['white'] for r in reps]
+        k1, k2 = faces_mask('K1'), faces_mask('K2')
+        grown = core.dilate_ids(np.where(k1, 0, -1), PAD + 1)[0] >= 0
+        after = {f: read(CH_WORK / f) for f in ('base.png', 'orm.png', 'emis.png')}
+        assert all(a[1] == 16 for a in after.values()), {f: a[1] for f, a in after.items()}
+        after = {f: a[0].astype(np.int64) for f, a in after.items()}
+        exp = dict(albedo=[q16(core.srgb_encode(v)) for v in CH_BASE], rough=[q16(CH_ROUGH)], metal=[q16(CH_METAL)],
+                   emis=[q16(core.srgb_encode(v)) for v in CH_EMIS])
+        devs = {}
+        for g, f, cols in (('albedo', 'base.png', (0, 1, 2)), ('rough', 'orm.png', (1,)), ('metal', 'orm.png', (2,)),
+                           ('emis', 'emis.png', (0, 1, 2))):
+            devs[g] = max(int(np.abs(after[f][:, :, c][k1] - e).max()) for c, e in zip(cols, exp[g]))
+        assert max(devs.values()) <= 1, devs
+        scale = {'base.png': 1, 'orm.png': 1, 'emis.png': 257}  # the 8-bit emissive written 16-bit, values kept
+        for f in before:
+            b = before[f] * scale[f]
+            assert np.array_equal(after[f][k2], b[k2]), f  # step 2.8: byte for byte
+            assert np.array_equal(after[f][~grown], b[~grown]), f
+        assert np.array_equal(after['base.png'][:, :, 3], before['base.png'][:, :, 3])  # alpha
+        assert np.array_equal(after['orm.png'][:, :, 0], before['orm.png'][:, :, 0])  # the AO's red
+        for d, f in (('albedo_backup', 'base.png'), ('orm_backup', 'orm.png'), ('emis_backup', 'emis.png')):
+            assert (CH_WORK / 'channels.bake' / d / f).read_bytes() == raw[f], (d, f)
+        found['2.1 in place'] = f'max deviation per channel {devs}; K2 and pixels beyond the padding byte for byte'
+        # step 2.1, Target Separate File: <material>.albedo.png, .emissive.png, and (decision 86, Session 65's step
+        # 2.2) .roughness.png and .metal.png, single-channel 16-bit grey; the AO's ORM-layout file of the same run
+        # has the green and blue AO alone gives it
+        orm_file = out_dir / 'CH_CONST_ao.png'
+        reps = ch_apply('CH_CONST', ALL, target='FILE', layout='ORM', ao=True)
+        assert [r['kind'] for r in reps] == ['ao'] + ALL, [r['kind'] for r in reps]
+        orm_with = read(orm_file)[0].astype(np.int64)
+        orm_file.unlink()
+        ch_apply('CH_CONST', [], target='FILE', layout='ORM', ao=True)
+        orm_alone = read(orm_file)[0].astype(np.int64)
+        assert np.array_equal(orm_with, orm_alone), 'the channels changed the ORM-layout file'
+        files, kinds = {}, {}
+        for g, n in (('albedo', 'CH_CONST.albedo.png'), ('emis', 'CH_CONST.emissive.png'),
+                     ('rough', 'CH_CONST.roughness.png'), ('metal', 'CH_CONST.metal.png')):
+            vals, bits, ct = read(out_dir / n)
+            files[g], kinds[g] = vals.astype(np.int64), (vals.shape[2], bits, ct)
+        assert kinds['rough'] == kinds['metal'] == (1, 16, 0), kinds  # grey, 16-bit, colour type 0
+        assert kinds['albedo'][0] == kinds['emis'][0] == 3, kinds
+        fdev = {g: max(int(np.abs(files[g][:, :, c][k1] - e).max()) for c, e in enumerate(exp[g])) for g in ALL}
+        assert max(fdev.values()) <= 1, fdev
+        assert (files['emis'][~grown] == 0).all() and (files['albedo'][~grown] == 65535).all()
+        assert (files['rough'][~grown] == 0).all() and (files['metal'][~grown] == 0).all()  # a new grey file: black
+        found['2.1 files'] = (f'max deviation per channel {fdev}; roughness and metal {kinds["rough"][0]} channel, '
+                              f'{kinds["rough"][1]}-bit, colour type {kinds["rough"][2]}, black beyond the padding; '
+                              f'the ORM-layout file of AO with the channels equal to AO alone '
+                              f'({orm_with.shape[1]} x {orm_with.shape[0]} x {orm_with.shape[2]})')
+        # Channels Greyscale does not matter for the channels' own files any more
+        before_r = file_hash(out_dir / 'CH_CONST.roughness.png')
+        ch_apply('CH_CONST', ['rough'], target='FILE', layout='GREY')
+        assert file_hash(out_dir / 'CH_CONST.roughness.png') == before_r
+        # the samples (rule item 2): T1's textured albedo at 1 ... 256 samples, each bake of Albedo alone; the other
+        # channels, the AO and the layout byte-identical meanwhile (FL1)
+        others = ch_files('T1', ('rough', 'metal', 'emis'))
+        keep = dict(ch_layout_files('T1'), ao=file_hash(core.master_paths(folder, store._state['by_object']['T1'])[0]))
+        by_n, files_n, out_n = {}, {}, {}
+        for n in CH_SAMPLE_COUNTS:
+            ch_bake(['T1'], groups=['albedo'], samples=n)
+            by_n[n] = np.stack([ch_master('T1', k) for k in core.CHANNEL_KINDS['albedo']])
+            files_n[n] = ch_files('T1', ('albedo',))
+            ch_apply('CH_TEX', ['albedo'])  # what the texture gets: Apply averages the master over each pixel
+            out_n[n] = read(out_dir / 'CH_TEX.albedo.png')[0][:, :, :3].astype(np.int64)
+            assert ch_files('T1', ('rough', 'metal', 'emis')) == others
+            assert dict(ch_layout_files('T1'), ao=file_hash(core.master_paths(
+                folder, store._state['by_object']['T1'])[0])) == keep
+        assert len({tuple(sorted(f.items())) for f in files_n.values()}) == len(CH_SAMPLE_COUNTS)  # overwritten
+        ref = by_n[CH_SAMPLE_COUNTS[-1]]
+        tmask = np.repeat(faces_mask('T1')[:, :, None], 3, axis=2)
+        table = {}
+        for i, n in enumerate(CH_SAMPLE_COUNTS[:-1]):
+            d_ref = np.abs(by_n[n] - ref)
+            d_next = np.abs(by_n[n] - by_n[CH_SAMPLE_COUNTS[i + 1]])
+            d_out = np.abs(out_n[n] - out_n[CH_SAMPLE_COUNTS[-1]])[tmask]
+            table[n] = dict(master_vs_256_max=int(d_ref.max()), master_vs_256_p999=float(np.percentile(d_ref, 99.9)),
+                            master_vs_256_within_1=round(float((d_ref <= 1).mean()), 4),
+                            master_vs_next_max=int(d_next.max()), texture_vs_256_max=int(d_out.max()),
+                            texture_vs_256_mean=round(float(d_out.mean()), 2),
+                            texture_vs_256_within_1=round(float((d_out <= 1).mean()), 4))
+        found['samples'] = table
+        # step 2.2's comparison also with the texture read Closest (no bilinear blend between its texels)
+        tnode = next(n for n in bpy.data.materials['CH_TEX'].node_tree.nodes if n.type == 'TEX_IMAGE')
+        tnode.interpolation = 'Closest'
+        ch_bake(['T1'], groups=['albedo'])
+        ch_apply('CH_TEX', ['albedo'])
+        srcv = read(CH_WORK / 'albedo_src.png')[0][:, :, :3].astype(np.float64) / 255.0
+        closest = ch_measure(read(out_dir / 'CH_TEX.albedo.png')[0][:, :, :3].astype(np.float64) / 65535.0, srcv,
+                             tmask)
+        tnode.interpolation = 'Linear'
+        ch_bake(['T1'], groups=['albedo'])  # back at the default samples, Linear
+        # step 2.2: a grey material put back (T1's material: the texture unlinked); Albedo up to date; Apply against
+        # the source texture
+        tex_mat = bpy.data.materials['CH_TEX']
+        p = tex_mat.node_tree.nodes['Principled BSDF']
+        for link_ in list(p.inputs['Base Color'].links):
+            tex_mat.node_tree.links.remove(link_)
+        p.inputs['Base Color'].default_value = (0.5, 0.5, 0.5, 1.0)
+        refresh()
+        assert ch_item('T1')['ch_grades']['albedo'] == 'UP_TO_DATE', ch_item('T1')['ch_grades']
+        srcv = read(CH_WORK / 'albedo_src.png')[0][:, :, :3].astype(np.float64) / 255.0
+        ch_apply('CH_TEX', ['albedo'])
+        outv = read(out_dir / 'CH_TEX.albedo.png')[0][:, :, :3].astype(np.float64) / 65535.0
+        m22 = ch_measure(outv, srcv, np.repeat(faces_mask('T1')[:, :, None], 3, axis=2))
+        found['2.2'] = m22
+        found['2.2 baked with Closest interpolation'] = closest
+        # step 2.5 (FL1): AO alone baked with the material changed: the channels' files byte-identical
+        chans = ch_files('T1')
+        e0, _ = ch_entry('T1')
+        ch_bake(['T1'], ao=True)
+        e1, _ = ch_entry('T1')
+        assert ch_files('T1') == chans and len(chans) == 8, 'a material channel changed'
+        assert e1['baked_at'] != e0['baked_at'] and e1['channels'] == e0['channels'], (e0['baked_at'], e1['baked_at'])
+        found['2.5'] = f'{len(chans)} channel files byte-identical, the AO baked again ({e1["baked_at"]})'
+        # step 2.3 (FL3): the texture set repacked (UVs moved and scaled, the density halved), AO alone baked: the
+        # layout kept
+        t1 = bpy.data.objects['T1']
+        lay = t1.data.uv_layers['UVMap']
+        uvs = np.empty(len(lay.data) * 2, np.float32)
+        lay.data.foreach_get('uv', uvs)
+        lay.data.foreach_set('uv', uvs * 0.5 + 0.203125)
+        t1.data.update()
+        refresh()
+        assert ch_item('T1')['grade'] == 'UP_TO_DATE', ch_item('T1')['grade']
+        layout0, alb0 = ch_layout_files('T1'), ch_files('T1', ('albedo',))
+        ch_bake(['T1'], ao=True)
+        e2, _ = ch_entry('T1')
+        assert ch_layout_files('T1') == layout0, 'the layout files changed'
+        assert ch_files('T1', ('albedo',)) == alb0 and ch_item('T1')['ch_grades']['albedo'] == 'UP_TO_DATE'
+        assert e2['density'] == e1['density'] and e2['baked_at'] != e1['baked_at'], (e2['density'], e1['density'])
+        ch_apply('CH_TEX', ['albedo'])
+        outv = read(out_dir / 'CH_TEX.albedo.png')[0][:, :, :3].astype(np.float64) / 65535.0
+        # the reference: the source's 2 x 2 block each written pixel covers (uv' = uv / 2 + 52 / 256)
+        box = srcv.reshape(SIZE // 2, 2, SIZE // 2, 2, 3).mean(axis=(1, 3))
+        refv = np.zeros_like(outv)
+        lo = 52
+        refv[lo:lo + SIZE // 2, lo:lo + SIZE // 2] = box
+        mask = faces_mask('T1')
+        m23 = ch_measure(outv, refv, np.repeat(mask[:, :, None], 3, axis=2))
+        found['2.3'] = dict(m23, density=e2['density'])
+        reps23 = ch_apply('CH_TEX', ['albedo'])  # the same Apply again (deterministic), for its written pixels
+        m23_px = reps23[0]['written_px']
+        # step 2.4: the mesh edited: every channel MESH; Albedo alone baked: a new layout, AO and curvature removed
+        t1.data.vertices[6].co.z += 0.001
+        t1.data.update()
+        refresh()
+        it = ch_item('T1')
+        assert it['grade'] == 'MESH' and it['ch_grades'] == {g: 'MESH' for g in ALL}, (it['grade'], it['ch_grades'])
+        # Session 65's step 2.1 (decision 85): Apply Albedo with the mesh changed: written from the master, reported
+        written23 = (CH_WORK / 'out' / 'CH_TEX.albedo.png').read_bytes()
+        reps = ch_apply('CH_TEX', ['albedo'])
+        lines = ao_bake_apply.report_lines(reps[0])
+        assert reps[0]['mesh_changed'] == ['T1'] and reps[0]['white'] == [], reps[0]
+        assert 'mesh changed since its bake, applied anyway: T1' in '\n'.join(lines), lines
+        out_mc = read(out_dir / 'CH_TEX.albedo.png')[0][:, :, :3].astype(np.int64)
+        (CH_WORK / 'out' / 'CH_TEX_23.albedo.png').write_bytes(written23)
+        out_23 = read(CH_WORK / 'out' / 'CH_TEX_23.albedo.png')[0][:, :, :3].astype(np.int64)
+        d_mc = np.abs(out_mc - out_23)[np.repeat(mask[:, :, None], 3, axis=2)]
+        assert reps[0]['written_px'] == m23_px and int(d_mc.max()) <= 257, (reps[0]['written_px'], m23_px,
+                                                                             int(d_mc.max()))
+        found['65 2.1'] = (f"{reps[0]['written_px']} px written (as before the edit), report "
+                           f"'{[x for x in lines if 'applied anyway' in x][0].strip()}', against the Apply before the "
+                           f"edit max {int(d_mc.max())}/65535, mean {float(d_mc.mean()):.3f}/65535")
+        stem_t1 = store._state['by_object']['T1']
+        ch_bake(['T1'], groups=['albedo'])
+        it = ch_item('T1')
+        assert it['grade'] == 'MISSING' and it['cm_grade'] == 'NEEDS_AO', (it['grade'], it['cm_grade'])
+        assert it['ch_grades'] == {'albedo': 'UP_TO_DATE'}, it['ch_grades']
+        assert not os.path.isfile(core.image_paths(folder, stem_t1)[0])
+        assert not os.path.isfile(core.image_paths(folder, stem_t1, 'curv')[0])
+        assert sorted(ch_files('T1')) == sorted(os.path.basename(p) for p in core.channel_paths(folder, stem_t1,
+                                                                                               'albedo'))
+        assert ch_layout_files('T1') != layout0
+        e3, _ = ch_entry('T1')
+        assert 'curvature' not in e3 and 'surround_hash' not in e3 and sorted(e3['channels']) == ['albedo'], e3
+        found['2.4'] = f"AO {it['grade']}, CM {it['cm_grade']}, channels {it['ch_grades']}"
+        # step 2.7: a shared mesh's albedo from the chosen copy (S1 red, S2 blue)
+        red, blue = q16(1.0), q16(0.0)
+        shared = {}
+        for case, active, picked, want in (('drop-down', 'S2', 'S1', ('S1', red)), ('active', 'S2', '', ('S2', blue)),
+                                           ('first by name', None, '', ('S1', red))):
+            bpy.data.meshes[bpy.data.objects['S1'].data.name].fss_ao_shared.bake_copy_name = picked
+            ch_bake(['S1', 'S2'], groups=['albedo'], active=active)
+            e, _ = ch_entry('S1')
+            r = ch_master('S1', 'albedo_r')
+            assert e['channels']['albedo']['object'] == want[0] and int(np.abs(r - want[1]).max()) <= 1, \
+                (case, e['channels']['albedo']['object'], int(r.min()), int(r.max()))
+            shared[case] = e['channels']['albedo']['object']
+        found['2.7'] = shared
+        # Session 65's step 2.3 (decision 87): E1, E2, E3 share a mesh; the emissive by each Copies setting, the
+        # albedo from the chosen copy (E1, the active one)
+        e_mesh = bpy.data.objects['E1'].data
+        enc = {n: [q16(core.srgb_encode(v)) for v in c] for n, c in CH_E_EMIS.items()}
+        mean = np.mean(np.array(list(CH_E_EMIS.values()), np.float32), axis=0)
+        want = dict(AVERAGE=[q16(core.srgb_encode(float(v))) for v in mean], LIGHTEST=enc['E2'], DARKEST=enc['E3'],
+                    ONE=enc['E1'])
+        emis_got = {}
+        try:
+            for mode in ('AVERAGE', 'LIGHTEST', 'DARKEST', 'ONE'):
+                e_mesh.fss_ao_shared.combine = mode
+                e_mesh.fss_ao_shared.bake_copy_name = ''
+                ch_bake(['E1', 'E2', 'E3'], groups=['albedo', 'emis'])
+                e, _ = ch_entry('E1')
+                got = [ch_master('E1', k) for k in core.CHANNEL_KINDS['emis']]
+                dev = max(int(np.abs(g - w).max()) for g, w in zip(got, want[mode]))
+                assert dev <= 1, (mode, dev, [(int(g.min()), int(g.max())) for g in got], want[mode])
+                ce = e['channels']['emis']
+                assert ce.get('combine') == mode, ce
+                assert ce['copies'] == (['E1'] if mode == 'ONE' else ['E1', 'E2', 'E3']), ce
+                alb = [ch_master('E1', k) for k in core.CHANNEL_KINDS['albedo']]
+                adev = max(int(np.abs(g - q16(core.srgb_encode(v))).max()) for g, v in zip(alb, CH_E_BASE['E1']))
+                assert adev <= 1 and e['channels']['albedo']['object'] == 'E1', (mode, adev, e['channels']['albedo'])
+                emis_got[mode] = f'{want[mode]} dev {dev} (albedo E1 dev {adev})'
+        finally:
+            e_mesh.fss_ao_shared.combine = 'DEFAULT'
+        found['65 2.3'] = emis_got
+        # FL2 (step 2.2): the material changes do not stale; a mesh change does (step 2.4)
+    s.bake_ao, s.curvature = True, False
+    ch_set(s, 'bake', ())
+    select([])
+    print(f'PASS: test_material_channels ({time.time() - t0:.1f} s; ' + '; '.join(f'{k}: {v}' for k, v in found.items())
+          + ')')
+    return found
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Decisions 88 to 90: channels from the mesh's active colour attribute (Session 68's step 2)
+# ---------------------------------------------------------------------------------------------------------------------
+
+VC_WORK = REPO_ROOT / 'tests' / '_work' / 'ao_bake_vc'
+VC_FOLDER = str(VC_WORK / 'vc.bake')
+VC_RENDER = (0.1, 0.9, 0.6)  # the first attribute's colour (active and render; the material reads it)
+VC_FLOAT = (0.8, 0.35, 0.15)  # the second attribute's colour, FLOAT_COLOR (stored linear)
+VC_BYTES = (204, 89, 38)  # the second attribute's bytes, BYTE_COLOR (stored sRGB-encoded)
+VC_GROUPS = ('ao', 'albedo', 'rough', 'metal', 'emis')
+
+
+def vc_colors(obj, active_type='FLOAT_COLOR', domain='POINT', value=None, active='RENDER'):
+    """The first attribute RENDER (FLOAT_COLOR, corners, VC_RENDER; render, and active unless active names PAINT) and
+    the second one PAINT of active_type and domain, one colour everywhere: value (RGB 0..1; for BYTE_COLOR the stored
+    byte / 255), else VC_FLOAT or VC_BYTES."""
+    me = obj.data
+    r = me.color_attributes.get('RENDER') or me.color_attributes.new('RENDER', 'FLOAT_COLOR', 'CORNER')
+    r.data.foreach_set('color', np.tile([*VC_RENDER, 1.0], len(r.data)).astype(np.float32))
+    a = me.color_attributes.get('PAINT') or me.color_attributes.new('PAINT', active_type, domain)
+    if value is None:
+        value = VC_FLOAT if active_type == 'FLOAT_COLOR' else tuple(b / 255.0 for b in VC_BYTES)
+    prop = 'color' if active_type == 'FLOAT_COLOR' else 'color_srgb'
+    a.data.foreach_set(prop, np.tile([*value, 1.0], len(a.data)).astype(np.float32))
+    assert [c.name for c in me.color_attributes][:2] == ['RENDER', 'PAINT'], [c.name for c in me.color_attributes]
+    me.color_attributes.active_color = me.color_attributes[active]
+    me.color_attributes.default_color_name = 'RENDER'
+    me.update()
+    return a
+
+
+def vc_attr_state(name):
+    """A mesh's colour attributes as the file holds them: (names, types, domains, values' hash), active, render."""
+    me = bpy.data.objects[name].data
+    rows = []
+    for a in me.color_attributes:
+        v = np.empty(len(a.data) * 4, np.float32)
+        a.data.foreach_get('color', v)
+        rows.append((a.name, a.data_type, a.domain, hashlib.sha256(v.tobytes()).hexdigest()[:16]))
+    return rows, me.color_attributes.active_color.name, me.color_attributes.default_color_name
+
+
+def vc_material(name, base=(0.5, 0.5, 0.5)):
+    """A Principled material whose Base Color reads the render colour attribute through a Color Attribute node named
+    RENDER (rule step 2.8), roughness 0.5, metal 0."""
+    mat = ch_material(name, base)
+    nt = mat.node_tree
+    node = nt.nodes.new('ShaderNodeVertexColor')
+    node.layer_name = 'RENDER'
+    nt.links.new(node.outputs['Color'], nt.nodes['Principled BSDF'].inputs['Base Color'])
+    return mat
+
+
+def vc_paint_grey(obj):
+    """Vertex Paint's Set Vertex Colors with the brush at 0.5 grey into the second attribute PAINT (made active for
+    the paint), RENDER active again afterwards."""
+    me = obj.data
+    me.color_attributes.active_color = me.color_attributes['PAINT']
+    view_layer = bpy.context.view_layer
+    for o in view_layer.objects:
+        o.select_set(o == obj)
+    view_layer.objects.active = obj
+    bpy.ops.object.mode_set(mode='VERTEX_PAINT')
+    vp = bpy.context.scene.tool_settings.vertex_paint
+    ups = getattr(vp, 'unified_paint_settings', None) or bpy.context.scene.tool_settings.unified_paint_settings
+    ups.use_unified_color = True
+    ups.color = (0.5, 0.5, 0.5)
+    assert bpy.ops.paint.vertex_color_set() == {'FINISHED'}
+    bpy.ops.object.mode_set(mode='OBJECT')
+    me.color_attributes.active_color = me.color_attributes['RENDER']
+
+
+def build_vc_scene():
+    for obj in list(bpy.data.objects):
+        bpy.data.objects.remove(obj)
+    if VC_WORK.exists():
+        shutil.rmtree(VC_WORK)
+    VC_WORK.mkdir(parents=True)
+    scene = bpy.context.scene
+    scene.frame_set(1)
+    s = scene.fss_ao_bake
+    s.distance, s.samples, s.threads, s.padding, s.curv_padding = 0.1, 16, 12, PAD, PAD
+    s.curv_width = 0.005
+    s.denoise, s.dn_method, s.dn_curv_mode, s.dn_strength = True, 'FILTER', 'OFF', 1.0
+    set_baker(s)
+    s.output_folder = str(VC_WORK / 'out')
+    # Session 70's step 2.4: one colour attribute (the MSFS exporter's new_object_handler gives a new mesh a white
+    # 'Color' once); Session 68's step 2.7: none (the test takes it away)
+    ch_plane('VX', (13, 0, 0), ch_material('VC_MAT_VX', (0.3, 0.6, 0.9)))
+    # step 2.1: the four kinds of second attribute (FLOAT_COLOR, BYTE_COLOR; point, corner), the first one (active
+    # and render) another colour, the material reading the first one
+    for i, (n, t, d) in enumerate((('VF_P', 'FLOAT_COLOR', 'POINT'), ('VF_C', 'FLOAT_COLOR', 'CORNER'),
+                                   ('VB_P', 'BYTE_COLOR', 'POINT'), ('VB_C', 'BYTE_COLOR', 'CORNER'))):
+        vc_colors(ch_plane(n, (i, 0, 0), vc_material(f'VC_MAT_{n}')), t, d)
+    # the 0.5-grey report: Vertex Paint at 0.5 into a FLOAT_COLOR and a BYTE_COLOR attribute
+    for i, (n, t) in enumerate((('VG_F', 'FLOAT_COLOR'), ('VG_B', 'BYTE_COLOR'))):
+        o = ch_plane(n, (4 + i, 0, 0), vc_material(f'VC_MAT_{n}'))
+        vc_colors(o, t, 'POINT', value=(1.0, 1.0, 1.0))
+        vc_paint_grey(o)
+    # steps 2.2, 2.4, 2.5: a traced, denoised AO under an occluder, its active attribute set per step
+    va = ch_plane('VA', (7, 0, 0), vc_material('VC_MAT_VA'))
+    vc_colors(va, 'FLOAT_COLOR', 'POINT', value=(1.0, 1.0, 1.0))
+    occ = plane('VA_OCC', (7.02, 0.03, 0.03), None, 0, size=0.12, n=2)
+    occ.rotation_euler = (0.0, 0.5, 0.0)
+    # step 2.3: no master yet; step 2.6: a material albedo then multiplied; step 2.7: no colour attribute
+    vc_colors(ch_plane('VN', (9, 0, 0), vc_material('VC_MAT_VN')), 'FLOAT_COLOR', 'POINT', value=(0.6, 0.4, 0.2))
+    va2 = ch_plane('VM', (11, 0, 0), ch_material('VC_MAT_VM', (0.6, 0.3, 0.1)))
+    vc_colors(va2, 'FLOAT_COLOR', 'CORNER', value=(0.5, 0.8, 0.25))
+    bpy.ops.wm.save_as_mainfile(filepath=str(VC_WORK / 'vc.blend'))
+
+
+def vc_set(sources):
+    """The vertex colour sources {group: mode} ticked, the others off."""
+    s = bpy.context.scene.fss_ao_bake
+    for g in VC_GROUPS:
+        setattr(s, f'vc_{g}', g in sources)
+        if g in sources:
+            setattr(s, f'vc_{g}_mode', sources[g])
+
+
+def vc_bake(names, ao=False, groups=(), sources=None, scope='SELECTED', expect='baked'):
+    """A bake through the operator (hidden, waited for) with these sources; returns the job's results by name."""
+    s = bpy.context.scene.fss_ao_bake
+    s.bake_ao, s.curvature = ao, False
+    ch_set(s, 'bake', groups)
+    vc_set(sources or {})
+    select(names)
+    try:
+        assert bpy.ops.fss.ao_bake_start(scope=scope, hidden=True, wait=True) == {'FINISHED'}
+    finally:
+        vc_set({})
+    status = store.read_status(VC_FOLDER)
+    res = {r['name']: r for r in status['results']}
+    assert status['state'] == 'done', status
+    if expect:
+        assert all(r['status'] == expect for r in res.values()), status['results']
+    refresh()
+    return res
+
+
+def vc_stem(name):
+    return store._state['by_object'][name]
+
+
+def vc_entry(name):
+    return store.read_index(VC_FOLDER, use_cache=False)['masters'].get(vc_stem(name))
+
+
+def vc_values(name, kind):
+    """The master's values of an image (kind 'ao' or a channel component) on its filled pixels."""
+    m = core.load_master(VC_FOLDER, vc_stem(name), kind=kind)
+    return m['image'][m['filled']].astype(np.int64)
+
+
+def vc_file(name, kind):
+    return core.image_paths(VC_FOLDER, vc_stem(name), kind)[0]
+
+
+def vc_expect(active_type, value=None):
+    """{image kind: the 16-bit value} of an Overwrite from an attribute of one colour (decision 92): its linear value
+    (a byte colour's byte decoded from sRGB, as the Color Attribute node gives it) in AO, roughness and metal; the
+    albedo that value sRGB-encoded."""
+    if active_type == 'FLOAT_COLOR':
+        lin = np.array(value or VC_FLOAT, np.float64)
+    else:
+        lin = core.srgb_decode(np.array(value or [b / 255.0 for b in VC_BYTES], np.float64))
+    data = lin
+    alb = core.srgb_encode(lin)
+    return dict(ao=q16(data[0]), rough=q16(data[1]), metal=q16(data[2]), albedo_r=q16(alb[0]), albedo_g=q16(alb[1]),
+                albedo_b=q16(alb[2]))
+
+
+def vc_dev(name, want):
+    """The largest difference of each image's filled pixels to its value."""
+    return {k: int(np.abs(vc_values(name, k) - v).max()) for k, v in want.items()}
+
+
+def test_vertex_color_channels():
+    """Decisions 88 to 92 (Session 68's steps 2.1 to 2.8, Session 70's 2.1 to 2.5): the AO, roughness, metal and albedo
+    baked from the mesh's second colour attribute (by default; never the first, active and render one, which stay so)
+    or its active one, the values linear for float and byte attributes, Overwrite and Multiply; the AO's grade without
+    surroundings, its product kept through a denoise-only run."""
+    t0 = time.time()
+    build_vc_scene()
+    s = bpy.context.scene.fss_ao_bake
+    found = {}
+    ALLVC = {g: 'OVERWRITE' for g in VC_GROUPS}
+    CH3 = ['albedo', 'rough', 'metal']
+    with rule_unrecorded():
+        refresh()
+        # FL1, step 2.1: Overwrite of all four from the four kinds of active attribute; the render one nowhere
+        names = ['VF_P', 'VF_C', 'VB_P', 'VB_C', 'VG_F', 'VG_B']
+        assert s.vc_attribute == 'SECOND'  # decision 91: the default
+        before = {n: vc_attr_state(n) for n in names}
+        res = vc_bake(names, ao=True, groups=CH3, sources=ALLVC)
+        after = {n: vc_attr_state(n) for n in names}
+        assert after == before, (before, after)  # nothing switched in the file (Session 70's FL1)
+        assert all(a[1] == 'RENDER' and a[2] == 'RENDER' for a in after.values()), after
+        devs = {}
+        for n in names[:4]:
+            t = 'FLOAT_COLOR' if n.startswith('VF') else 'BYTE_COLOR'
+            want = vc_expect(t)
+            devs[n] = max(vc_dev(n, want).values())
+            assert devs[n] <= 1, (n, vc_dev(n, want), want)
+            render = vc_expect('FLOAT_COLOR', VC_RENDER)
+            for k in want:  # the render attribute's value nowhere (every pixel far from it)
+                assert int(np.abs(vc_values(n, k) - render[k]).min()) > 1000, (n, k)
+            e = vc_entry(n)
+            assert e['ao_source'] == dict(vertex_color='PAINT', attribute='SECOND', mode='OVERWRITE',
+                                          attributes=['PAINT']), e['ao_source']
+            assert all(e['channels'][g]['source'] == dict(vertex_color='PAINT', attribute='SECOND', mode='OVERWRITE')
+                       for g in CH3)
+            assert res[n]['vertex_color']['type'] == t and res[n]['vertex_color']['read'] == 'SECOND', res[n]
+            assert not os.path.isfile(vc_file(n, 'ao.raw')) and e.get('denoise') is None
+            it = ch_item_vc(n)
+            assert it['grade'] == 'UP_TO_DATE' and it['dn_grade'] == 'UP_TO_DATE', (n, it['grade'], it['dn_grade'])
+        found['2.1'] = (f'SECOND: max deviation {devs} (in 1/65535), the first attribute more than 1000 away '
+                        f'everywhere; RENDER still active and render, the attributes\' names, types, domains and '
+                        f'values unchanged')
+        # Session 70's step 2.2: Active Attribute reads the active one (PAINT active: its values; RENDER: the first's)
+        s.vc_attribute = 'ACTIVE'
+        me_p = bpy.data.objects['VF_P'].data
+        try:
+            me_p.color_attributes.active_color = me_p.color_attributes['PAINT']
+            vc_bake(['VF_P'], ao=True, groups=CH3, sources=ALLVC)
+            d_paint = max(vc_dev('VF_P', vc_expect('FLOAT_COLOR')).values())
+            src_a = vc_entry('VF_P')['ao_source']
+            me_p.color_attributes.active_color = me_p.color_attributes['RENDER']
+            vc_bake(['VF_P'], ao=True, groups=CH3, sources=ALLVC)
+            d_render = max(vc_dev('VF_P', vc_expect('FLOAT_COLOR', VC_RENDER)).values())
+            src_r = vc_entry('VF_P')['ao_source']
+        finally:
+            s.vc_attribute = 'SECOND'
+        assert d_paint <= 1 and d_render <= 1, (d_paint, d_render)
+        assert (src_a['vertex_color'], src_a['attribute'], src_r['vertex_color'], src_r['attribute']) == (
+            'PAINT', 'ACTIVE', 'RENDER', 'ACTIVE'), (src_a, src_r)
+        found['70 2.2'] = (f'ACTIVE: PAINT active, its values (deviation {d_paint}); RENDER active, the first '
+                           f'attribute\'s (deviation {d_render})')
+        vc_bake(['VF_P'], ao=True, groups=CH3, sources=ALLVC)  # back to the second attribute's values
+        # the 0.5-grey report: what Vertex Paint at 0.5 stores and what the master gets
+        grey = {}
+        for n in ('VG_F', 'VG_B'):
+            a = bpy.data.objects[n].data.color_attributes['PAINT']
+            stored = round(float(a.data[0].color[0]), 6), round(float(a.data[0].color_srgb[0]), 6)
+            ao = vc_values(n, 'ao')
+            alb = vc_values(n, 'albedo_r')
+            rough, metal = vc_values(n, 'rough'), vc_values(n, 'metal')
+            grey[n] = dict(type=a.data_type, color=stored[0], color_srgb=stored[1], ao=int(ao.min()),
+                           ao_max=int(ao.max()), rough=int(rough.max()), metal=int(metal.max()), albedo=int(alb.min()))
+            assert ao.min() == ao.max() and rough.min() == rough.max() == ao.max() == metal.min() == metal.max(), n
+        # decision 92: 0.5 within 1/65535 from the float one; from the byte one within the byte step it is stored in
+        byte = round(grey['VG_B']['color_srgb'] * 255)
+        step = q16(float(core.srgb_decode(byte / 255.0))) - q16(float(core.srgb_decode((byte - 1) / 255.0)))
+        assert abs(grey['VG_F']['ao'] - 32768) <= 1, grey
+        assert abs(grey['VG_B']['ao'] - 32768) <= step, (grey, step)
+        found['0.5 grey'] = dict(grey, byte=byte, byte_step=step)
+        # FL1, step 2.8: Albedo baked again from the material: the render attribute's colour, its source dropped
+        vc_bake(['VF_C'], groups=['albedo'])
+        want = vc_expect('FLOAT_COLOR', VC_RENDER)
+        d28 = {k: int(np.abs(vc_values('VF_C', k) - want[k]).max()) for k in ('albedo_r', 'albedo_g', 'albedo_b')}
+        assert max(d28.values()) <= 1, d28
+        e = vc_entry('VF_C')
+        assert 'source' not in e['channels']['albedo'] and e['channels']['rough']['source']['mode'] == 'OVERWRITE'
+        found['2.8'] = f'albedo from the material: the render colour, deviation {max(d28.values())}, source dropped'
+        # step 2.2 (FL2): a traced, denoised AO; Multiply by 1.0 byte-identical, by 0.5 half, twice a quarter
+        va = bpy.data.objects['VA']
+        vc_bake(['VA'], ao=True)
+        e0 = vc_entry('VA')
+        assert e0.get('denoise') and 'ao_source' not in e0 and os.path.isfile(vc_file('VA', 'ao.raw')), e0.keys()
+        ao0, h0 = vc_values('VA', 'ao'), file_hash(vc_file('VA', 'ao'))
+        assert int(ao0.max()) - int(ao0.min()) > 3000, (int(ao0.min()), int(ao0.max()))  # the occluder shows
+        raw0 = file_hash(vc_file('VA', 'ao.raw'))
+        vc_bake(['VA'], ao=True, sources={'ao': 'MULTIPLY'})
+        assert file_hash(vc_file('VA', 'ao')) == h0, 'Multiply by 1.0 changed the AO image'
+        vc_colors(va, 'FLOAT_COLOR', 'POINT', value=(0.5, 0.5, 0.5))
+        vc_bake(['VA'], ao=True, sources={'ao': 'MULTIPLY'})
+        half = int(np.abs(vc_values('VA', 'ao') - ao0 / 2.0).max())
+        vc_bake(['VA'], ao=True, sources={'ao': 'MULTIPLY'})
+        ao_q = vc_values('VA', 'ao')
+        quarter = float(np.abs(ao_q - ao0 / 4.0).max())
+        assert half <= 1 and quarter <= 1, (half, quarter)
+        e1 = vc_entry('VA')
+        assert e1['ao_source'] == dict(vertex_color='PAINT', attribute='SECOND', mode='MULTIPLY',
+                                       attributes=['PAINT'] * 3), e1
+        assert e1['denoise'] == e0['denoise'] and file_hash(vc_file('VA', 'ao.raw')) == raw0
+        prod = core.load_master(VC_FOLDER, vc_stem('VA'), kind='ao_vc')
+        pv = prod['image'][prod['filled']].astype(np.int64)
+        assert int(np.abs(pv - 16384).max()) <= 1, (int(pv.min()), int(pv.max()))
+        it = ch_item_vc('VA')
+        assert it['grade'] == 'UP_TO_DATE' and it['dn_grade'] == 'UP_TO_DATE', (it['grade'], it['dn_grade'])
+        found['2.2'] = (f'x 1.0 byte-identical; x 0.5 max {half} from half; twice max {quarter:g} from a quarter '
+                        f'(in 1/65535); the product {int(pv.min())}..{int(pv.max())}, the raw bake and the denoise '
+                        f'kept')
+        # step 2.5 (FL4): a denoise-only run with another strength: the denoised raw bake times the kept product
+        s.dn_strength = 0.5
+        refresh()
+        assert ch_item_vc('VA')['dn_grade'] == 'STALE', ch_item_vc('VA')['dn_grade']
+        res = vc_bake(['VA'], ao=True, sources={'ao': 'MULTIPLY'}, scope='AUTO', expect='updated')
+        assert 'vertex colour product' in res['VA']['what'], res['VA']
+        got = vc_values('VA', 'ao')
+        assert file_hash(vc_file('VA', 'ao_vc')) and vc_entry('VA')['ao_source']['mode'] == 'MULTIPLY'
+        # the control: the same denoise of the same raw bake without the product (the entry as before the run, its
+        # product and source taken away)
+        index = store.read_index(VC_FOLDER, use_cache=False)
+        ent = index['masters'][vc_stem('VA')]
+        ent['denoise'] = e1['denoise']
+        ent.pop('ao_source')
+        store.write_index(VC_FOLDER, index)
+        product = (Path(vc_file('VA', 'ao_vc'))).read_bytes()
+        os.remove(vc_file('VA', 'ao_vc'))
+        refresh()
+        vc_bake(['VA'], ao=True, scope='AUTO', expect='updated')
+        den = vc_values('VA', 'ao')
+        want = np.round(den * (pv / 65535.0))
+        d25 = int(np.abs(got - want).max())
+        assert d25 <= 1 and int(np.abs(got - den).max()) > 1000, (d25, int(np.abs(got - den).max()))
+        found['2.5'] = (f'max {d25} from the denoise (strength 0.5) of the raw bake times the product; '
+                        f'{int(np.abs(got - den).max())} from that denoise alone')
+        # put the product back (the master as the multiply left it) for step 2.4
+        Path(vc_file('VA', 'ao_vc')).write_bytes(product)
+        # step 2.4 (FL3): Overwrite: no raw bake, no product, the surroundings ignored; unticked: traced again
+        vc_bake(['VA'], ao=True, sources={'ao': 'OVERWRITE'})
+        e2 = vc_entry('VA')
+        assert e2['ao_source']['mode'] == 'OVERWRITE' and e2.get('denoise') is None, e2
+        assert not os.path.isfile(vc_file('VA', 'ao_vc')) and not os.path.isfile(vc_file('VA', 'ao.raw'))
+        assert int(np.abs(vc_values('VA', 'ao') - q16(0.5)).max()) <= 1
+        sur0 = ch_item_vc('VA')['surround_hash']
+        s.distance = 0.12
+        refresh()
+        it = ch_item_vc('VA')
+        assert it['surround_hash'] != sur0 and it['grade'] == 'UP_TO_DATE' and it['dn_grade'] == 'UP_TO_DATE', it
+        assert ch_item_vc('VF_P')['grade'] == 'UP_TO_DATE'
+        vc_bake(['VA'], ao=True)
+        e3 = vc_entry('VA')
+        assert 'ao_source' not in e3 and not os.path.isfile(vc_file('VA', 'ao_vc')) and e3.get('denoise'), e3.keys()
+        ao3 = vc_values('VA', 'ao')
+        assert int(ao3.max()) - int(ao3.min()) > 3000 and ch_item_vc('VA')['grade'] == 'UP_TO_DATE'
+        s.distance = 0.1
+        found['2.4'] = ('Overwrite: grade UP_TO_DATE after the AO distance changed (the surround hash changed), '
+                        'denoise up to date; unticked: traced again (AO '
+                        f'{int(ao3.min())}..{int(ao3.max())}), ao_source and .ao_vc.jxl gone')
+        # step 2.3 (FL2): Multiply with no master, and after a mesh edit (a new layout): as Overwrite, reported
+        want = vc_expect('FLOAT_COLOR', (0.6, 0.4, 0.2))
+        res = vc_bake(['VN'], ao=True, groups=['rough'], sources={'ao': 'MULTIPLY', 'rough': 'MULTIPLY'})
+        note = res['VN'].get('note', '')
+        assert 'AO from Vertex Color Red: Multiply with no master of it, as Overwrite' in note, note
+        dn = vc_dev('VN', {k: want[k] for k in ('ao', 'rough')})
+        assert max(dn.values()) <= 1 and vc_entry('VN')['ao_source']['mode'] == 'OVERWRITE', dn
+        vn = bpy.data.objects['VN']
+        vn.data.vertices[6].co.z += 0.001
+        vn.data.update()
+        refresh()
+        assert ch_item_vc('VN')['grade'] == 'MESH'
+        layout0 = file_hash(core.master_paths(VC_FOLDER, vc_stem('VN'))[2])
+        res = vc_bake(['VN'], ao=True, groups=['rough'], sources={'ao': 'MULTIPLY', 'rough': 'MULTIPLY'})
+        note2 = res['VN'].get('note', '')
+        assert 'Multiply with a new layout (the mesh changed), as Overwrite' in note2, note2
+        dm = vc_dev('VN', {k: want[k] for k in ('ao', 'rough')})
+        assert max(dm.values()) <= 1 and file_hash(core.master_paths(VC_FOLDER, vc_stem('VN'))[2]) != layout0, dm
+        hm = {k: file_hash(vc_file('VN', k)) for k in ('ao', 'rough')}
+        vc_bake(['VN'], ao=True, groups=['rough'], sources={'ao': 'OVERWRITE', 'rough': 'OVERWRITE'})
+        assert {k: file_hash(vc_file('VN', k)) for k in ('ao', 'rough')} == hm, 'Overwrite differs from that Multiply'
+        found['2.3'] = (f'no master: deviation {max(dn.values())}, note "{note}"; after the mesh edit: deviation '
+                        f'{max(dm.values())}, a new layout, the AO and roughness images byte-identical to an '
+                        f'Overwrite, note "{note2}"')
+        # step 2.6: Albedo Multiply on a material albedo: the product in linear
+        vc_bake(['VM'], groups=['albedo'])
+        a_enc = [q16(core.srgb_encode(v)) for v in (0.6, 0.3, 0.1)]
+        b_enc = [q16(core.srgb_encode(v)) for v in (0.5, 0.8, 0.25)]
+        vc_bake(['VM'], groups=['albedo'], sources={'albedo': 'MULTIPLY'})
+        want26 = {k: q16(core.srgb_encode(core.srgb_decode(a / 65535.0) * core.srgb_decode(b / 65535.0)))
+                  for k, a, b in zip(core.CHANNEL_KINDS['albedo'], a_enc, b_enc)}
+        ideal = {k: q16(core.srgb_encode(x * y)) for k, x, y in zip(core.CHANNEL_KINDS['albedo'], (0.6, 0.3, 0.1),
+                                                                   (0.5, 0.8, 0.25))}
+        d26, i26 = vc_dev('VM', want26), vc_dev('VM', ideal)
+        assert max(d26.values()) <= 1 and max(i26.values()) <= 2, (d26, i26)
+        assert vc_entry('VM')['channels']['albedo']['source'] == dict(vertex_color='PAINT', attribute='SECOND',
+                                                                      mode='MULTIPLY')
+        found['2.6'] = f'max {max(d26.values())} from the linear product of the two masters, {max(i26.values())} ' \
+                       f'from (0.6, 0.3, 0.1) x (0.5, 0.8, 0.25) encoded'
+        # Session 70's step 2.4: one colour attribute (the exporter's white) under SECOND: skipped, reported, the
+        # master unchanged; Session 68's step 2.7: none, under ACTIVE: the same
+        vx = bpy.data.objects['VX'].data
+        added = [(a_.name, a_.data_type) for a_ in vx.color_attributes]  # the exporter's default white
+        assert len(added) == 1, added
+        vc_bake(['VX'], groups=['albedo'])
+        files = {k: file_hash(vc_file('VX', k)) for k in core.CHANNEL_KINDS['albedo']}
+        ent = vc_entry('VX')
+        reasons = {}
+        for case in ('SECOND', 'ACTIVE'):
+            if case == 'ACTIVE':
+                for a_ in list(vx.color_attributes):
+                    vx.color_attributes.remove(a_)
+                bpy.context.view_layer.update()
+                assert len(vx.color_attributes) == 0, [a_.name for a_ in vx.color_attributes]
+            s.vc_attribute = case
+            try:
+                res = vc_bake(['VX'], groups=['albedo'], sources={'albedo': 'OVERWRITE'}, expect='skipped')
+            finally:
+                s.vc_attribute = 'SECOND'
+            reason = res['VX'].get('reason', '')
+            why = 'no second colour attribute' if case == 'SECOND' else 'no colour attribute'
+            assert f'Albedo from Vertex Color skipped: VX: {why}' in reason, res['VX']
+            assert {k: file_hash(vc_file('VX', k)) for k in core.CHANNEL_KINDS['albedo']} == files
+            assert vc_entry('VX') == ent
+            log_text = (VC_WORK / 'vc.bake' / 'bake.log').read_text(encoding='utf-8')
+            assert f'Albedo from Vertex Color skipped (VX: {why})' in log_text
+            reasons[case] = reason
+        found['70 2.4'] = (f'SECOND with one attribute {added}: "{reasons["SECOND"]}"; ACTIVE with none (taken '
+                           f'away): "{reasons["ACTIVE"]}"; the albedo files and the entry unchanged')
+    s.bake_ao, s.curvature, s.denoise = True, False, False
+    ch_set(s, 'bake', ())
+    select([])
+    print(f'PASS: test_vertex_color_channels ({time.time() - t0:.1f} s; '
+          + '; '.join(f'{k}: {v}' for k, v in found.items()) + ')')
+    return found
+
+
+def ch_item_vc(name):
+    return store._state['items'][store._state['by_object'][name]]
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Decisions 93 to 95: Fetch the masters into the vertex colour, and the Emissive source (Session 73's step 2)
+# ---------------------------------------------------------------------------------------------------------------------
+
+FB_WORK = REPO_ROOT / 'tests' / '_work' / 'ao_bake_fetch'
+FB_FOLDER = str(FB_WORK / 'fetch.bake')
+
+
+def fb_attrs(obj, paint=None, first=True):
+    """RENDER first (active and render, FLOAT_COLOR corner, VC_RENDER) and PAINT second (FLOAT_COLOR corner) with paint:
+    an RGB triple everywhere or an (n_loops, 3) array; first=False: no RENDER (PAINT alone)."""
+    me = obj.data
+    if first:
+        r = me.color_attributes.new('RENDER', 'FLOAT_COLOR', 'CORNER')
+        r.data.foreach_set('color', np.tile([*VC_RENDER, 1.0], len(r.data)).astype(np.float32))
+    if paint is not None:
+        me.color_attributes.new('PAINT', 'FLOAT_COLOR', 'CORNER')
+        fb_paint(obj, paint)
+    if first:
+        me.color_attributes.active_color = me.color_attributes['RENDER']
+        me.color_attributes.default_color_name = 'RENDER'
+    me.update()
+
+
+def fb_paint(obj, paint, name='PAINT'):
+    a = obj.data.color_attributes[name]
+    n = len(a.data)
+    v = np.ones((n, 4), np.float32)
+    v[:, :3] = np.broadcast_to(np.asarray(paint, np.float32), (n, 3))
+    a.data.foreach_set('color', v.ravel())
+    obj.data.update()
+
+
+def fb_colors(obj, name='PAINT'):
+    a = obj.data.color_attributes[name]
+    v = np.empty(len(a.data) * 4, np.float32)
+    a.data.foreach_get('color', v)
+    return v.reshape(-1, 4).astype(np.float64)
+
+
+def build_fetch_scene():
+    for obj in list(bpy.data.objects):
+        bpy.data.objects.remove(obj)
+    if FB_WORK.exists():
+        shutil.rmtree(FB_WORK)
+    FB_WORK.mkdir(parents=True)
+    scene = bpy.context.scene
+    scene.frame_set(1)
+    s = scene.fss_ao_bake
+    s.distance, s.samples, s.threads, s.padding, s.curv_padding = 0.1, 16, 12, PAD, PAD
+    s.denoise = False
+    set_baker(s)
+    s.output_folder = str(FB_WORK / 'out')
+    rng = np.random.default_rng(93)
+    # step 2.1: per-corner random colours in the second attribute (2 x 2 quads: large faces against the texels)
+    fr = ch_plane('FR', (0, 0, 0), vc_material('FB_MAT_FR'), n=2)
+    fb_attrs(fr, rng.uniform(0.05, 0.95, (len(fr.data.loops), 3)))
+    # step 2.2: a traced AO under an occluder, the second attribute constant
+    ft = ch_plane('FT', (2, 0, 0), vc_material('FB_MAT_FT'), n=2)
+    fb_attrs(ft, (0.3, 0.6, 0.9))
+    occ = plane('FT_OCC', (2.02, 0.03, 0.03), None, 0, size=0.12, n=2)
+    occ.rotation_euler = (0.0, 0.5, 0.0)
+    # step 2.3: one colour attribute (RENDER alone), none (the exporter's white taken away in the test)
+    fb_attrs(ch_plane('F1', (4, 0, 0), vc_material('FB_MAT_F1'), n=2))
+    ch_plane('F0', (6, 0, 0), ch_material('FB_MAT_F0', (0.5, 0.5, 0.5)), n=2)
+    # step 2.4: a Mirror modifier
+    fm = ch_plane('FM', (8, 0, 0), vc_material('FB_MAT_FM'), n=2)
+    fb_attrs(fm, (0.2, 0.4, 0.6))
+    # step 2.6: a shared mesh of two copies (Average) and an object without a master, emissive from the vertex colour
+    fe = ch_plane('FE', (10, 0, 0), vc_material('FB_MAT_FE'), n=2)
+    fb_attrs(fe, (0.6, 0.3, 0.9))
+    link(bpy.data.objects.new('FE2', fe.data)).location = (10.5, 0, 0)
+    fb_attrs(ch_plane('FN', (12, 0, 0), vc_material('FB_MAT_FN'), n=2), (0.6, 0.3, 0.9))
+    bpy.ops.wm.save_as_mainfile(filepath=str(FB_WORK / 'fetch.blend'))
+    mod = fm.modifiers.new('Mirror', 'MIRROR')  # after the save: its master is baked from the plain mesh first
+    mod.show_viewport = mod.show_render = False
+
+
+def fb_bake(names, ao=False, groups=(), sources=None, scope='SELECTED', expect='baked'):
+    s = bpy.context.scene.fss_ao_bake
+    s.bake_ao, s.curvature = ao, False
+    ch_set(s, 'bake', groups)
+    vc_set(sources or {})
+    select(names)
+    try:
+        assert bpy.ops.fss.ao_bake_start(scope=scope, hidden=True, wait=True) == {'FINISHED'}
+    finally:
+        vc_set({})
+    status = store.read_status(FB_FOLDER)
+    res = {r['name']: r for r in status['results']}
+    assert status['state'] == 'done', status
+    if expect:
+        assert all(r['status'] == expect for r in res.values()), status['results']
+    refresh()
+    return res
+
+
+def fb_values(name, kind):
+    m = core.load_master(FB_FOLDER, store._state['by_object'][name], kind=kind)
+    return m['image'][m['filled']].astype(np.int64)
+
+
+def fb_fetch(names, what):
+    """Fetch through the operator for these objects; (the operator's result, its report lines)."""
+    from fss_blender_tools import ao_bake
+    select(names)
+    got = bpy.ops.fss.ao_fetch_vertex_color(what=what)
+    return got, list(ao_bake._fetch_report)
+
+
+def test_vertex_color_fetch():
+    """Decisions 93 to 95 (Session 73's steps 2.1 to 2.6): Fetch Albedo, ORM and Emis read the masters at every face
+    corner into the second colour attribute; the round trip from a vertex colour bake; only the channels with a master;
+    a second attribute added only beside a first; modifiers that change the mesh skipped; undo; the Emissive from
+    Vertex Color source."""
+    t0 = time.time()
+    build_fetch_scene()
+    s = bpy.context.scene.fss_ao_bake
+    found = {}
+    OVER = {g: 'OVERWRITE' for g in ('ao', 'albedo', 'rough', 'metal', 'emis')}
+    with rule_unrecorded():
+        refresh()
+        # step 2.1 (FL1): the round trip, each Fetch into a cleared attribute
+        fr = bpy.data.objects['FR']
+        painted = fb_colors(fr)[:, :3]
+        fb_bake(['FR'], ao=True, groups=['albedo', 'rough', 'metal', 'emis'], sources=OVER)
+        trip = {}
+        for what in ('ORM', 'ALBEDO', 'EMIS'):
+            fb_paint(fr, (0.0, 0.0, 0.0))
+            got, lines = fb_fetch(['FR'], what)
+            assert got == {'FINISHED'}, (what, lines)
+            back = fb_colors(fr)
+            d = np.abs(back[:, :3] - painted)
+            assert (back[:, 3] == 1.0).all() and d.max() <= 1.0 / 255.0, (what, float(d.max()), lines)
+            trip[what] = f'{float(d.max()) * 255:.3f}/255 at {len(back)} corners'
+        assert [a.name for a in fr.data.color_attributes] == ['RENDER', 'PAINT']
+        assert fr.data.color_attributes.active_color.name == 'RENDER' == fr.data.color_attributes.default_color_name
+        found['2.1'] = f'largest difference {trip}; RENDER still active and render; the report "{lines[1]}"'
+        # step 2.2 (FL2): a traced AO alone: red written, green and blue kept
+        ft = bpy.data.objects['FT']
+        fb_bake(['FT'], ao=True)
+        got, lines = fb_fetch(['FT'], 'ORM')
+        c = fb_colors(ft)
+        ao = fb_values('FT', 'ao') / 65535.0
+        assert got == {'FINISHED'} and (c[:, 1] == np.float32(0.6)).all() and (c[:, 2] == np.float32(0.9)).all(), c
+        assert c[:, 0].min() >= ao.min() - 1e-6 and c[:, 0].max() <= ao.max() + 1e-6, (c[:, 0], ao.min(), ao.max())
+        assert c[:, 0].max() - c[:, 0].min() > 0.05 and not np.any(np.isclose(c[:, 0], 0.3)), c[:, 0]
+        assert '(AO)' in lines[1], lines
+        found['2.2'] = (f'red {c[:, 0].min():.3f}..{c[:, 0].max():.3f} (the AO {ao.min():.3f}..{ao.max():.3f}), green '
+                        f'and blue 0.6 and 0.9 at every corner; "{lines[1]}"')
+        # step 2.3 (FL3): one attribute: FSS_Bake added after it; none: skipped, nothing added
+        f1, f0 = bpy.data.objects['F1'], bpy.data.objects['F0']
+        for a_ in list(f0.data.color_attributes):  # the exporter's default white
+            f0.data.color_attributes.remove(a_)
+        bpy.context.view_layer.update()
+        fb_bake(['F1', 'F0'], ao=True)
+        got, lines = fb_fetch(['F1', 'F0'], 'ORM')
+        ca1 = f1.data.color_attributes
+        assert [a.name for a in ca1] == ['RENDER', 'FSS_Bake'], [a.name for a in ca1]
+        assert ca1.active_color.name == 'RENDER' and ca1.default_color_name == 'RENDER'
+        assert ca1['FSS_Bake'].domain == 'CORNER' and ca1['FSS_Bake'].data_type == 'FLOAT_COLOR'
+        c1 = fb_colors(f1, 'FSS_Bake')
+        assert (c1[:, 1:] == 1.0).all(), c1  # white where no roughness and metal master is
+        assert len(f0.data.color_attributes) == 0 and 'F0: no colour attribute' in lines, lines
+        line1 = next(x for x in lines if x.startswith('F1:'))
+        assert 'FSS_Bake added as the second colour attribute' in line1, lines
+        found['2.3'] = f'"{line1}"; RENDER still active and render; "F0: no colour attribute", nothing added'
+        # step 2.4 (FL4): a Mirror modifier: skipped, its attributes unchanged
+        fm = bpy.data.objects['FM']
+        fb_bake(['FM'], ao=True)
+        fm.modifiers['Mirror'].show_viewport = True
+        bpy.context.view_layer.update()
+        before = vc_attr_state('FM')
+        got, lines = fb_fetch(['FM'], 'ORM')
+        assert got == {'CANCELLED'} and 'FM: its modifiers change the mesh' in lines, (got, lines)
+        assert vc_attr_state('FM') == before
+        fm.modifiers['Mirror'].show_viewport = False
+        found['2.4'] = '"FM: its modifiers change the mesh", the attributes unchanged'
+        # step 2.6 (FL5): Emissive from Vertex Color, Overwrite and Multiply; a shared mesh not combined
+        bpy.data.objects['FE'].data.fss_ao_shared.combine = 'AVERAGE'
+        res = fb_bake(['FE', 'FE2'], groups=['emis'], sources={'emis': 'OVERWRITE'})
+        want = {k: q16(core.srgb_encode(v)) for k, v in zip(core.CHANNEL_KINDS['emis'], (0.6, 0.3, 0.9))}
+        d_over = max(int(np.abs(fb_values('FE', k) - v).max()) for k, v in want.items())
+        e = store.read_index(FB_FOLDER, use_cache=False)['masters'][store._state['by_object']['FE']]
+        ce = e['channels']['emis']
+        assert d_over <= 1 and ce['source'] == dict(vertex_color='PAINT', attribute='SECOND', mode='OVERWRITE'), ce
+        assert 'combine' not in ce and 'copies' not in ce, ce
+        h1 = {k: file_hash(core.image_paths(FB_FOLDER, store._state['by_object']['FE'], k)[0]) for k in want}
+        fb_paint(bpy.data.objects['FE'], (1.0, 1.0, 1.0))
+        fb_bake(['FE', 'FE2'], groups=['emis'], sources={'emis': 'MULTIPLY'})
+        assert {k: file_hash(core.image_paths(FB_FOLDER, store._state['by_object']['FE'], k)[0]) for k in want} == h1
+        before_half = {k: fb_values('FE', k) for k in want}
+        fb_paint(bpy.data.objects['FE'], (0.5, 0.5, 0.5))
+        fb_bake(['FE', 'FE2'], groups=['emis'], sources={'emis': 'MULTIPLY'})
+        d_half = max(int(np.abs(fb_values('FE', k) - np.round(core.srgb_encode(
+            core.srgb_decode(before_half[k] / 65535.0) * 0.5) * 65535.0)).max()) for k in want)
+        res = fb_bake(['FN'], groups=['emis'], sources={'emis': 'MULTIPLY'})
+        note = res['FN'].get('note', '')
+        assert 'Emissive from Vertex Color: Multiply with no master of it, as Overwrite' in note, note
+        d_none = max(int(np.abs(fb_values('FN', k) - v).max()) for k, v in want.items())
+        assert d_half <= 1 and d_none <= 1, (d_half, d_none)
+        found['2.6'] = (f'Overwrite deviation {d_over} (the shared mesh not combined: no combine in its entry); '
+                        f'Multiply by 1.0 byte-identical, by 0.5 max {d_half} from half in linear; with no master '
+                        f'deviation {d_none}, "{note}"')
+        # step 2.5: undo (the background Blender's undo, if it has one)
+        fr = bpy.data.objects['FR']
+        fb_paint(fr, (0.25, 0.5, 0.75))
+        prior = fb_colors(fr)
+        undo = ''
+        try:
+            bpy.ops.ed.undo_push(message='before Fetch')
+            got, lines = fb_fetch(['FR'], 'ALBEDO')
+            assert got == {'FINISHED'} and not np.allclose(fb_colors(fr), prior)
+            r_ = bpy.ops.ed.undo()
+            fr = bpy.data.objects['FR']
+            undo = (f'ed.undo {r_}: the attribute as before the Fetch' if np.allclose(fb_colors(fr), prior)
+                    else f'ed.undo {r_}: the attribute NOT as before the Fetch')
+        except RuntimeError as exc:
+            undo = f'not available in the background Blender ({str(exc).splitlines()[0][:120]})'
+        found['2.5'] = undo
+    s.bake_ao, s.curvature = True, False
+    ch_set(s, 'bake', ())
+    select([])
+    print(f'PASS: test_vertex_color_fetch ({time.time() - t0:.1f} s; '
+          + '; '.join(f'{k}: {v}' for k, v in found.items()) + ')')
+    return found
+
+
 if __name__ == '__main__' and '--' in sys.argv and any(a.startswith('only=') for a in sys.argv):
     # a quicker run of single tests that build their own scene: -- only=test_poses
     t0 = time.time()
@@ -3347,6 +4514,9 @@ elif __name__ == '__main__':
     test_object_preview()
     test_poses()  # last: it replaces the scene with the wheel's
     test_move_together()  # in the wheel's scene
+    test_material_channels()  # decisions 79 to 83, in a scene of its own
+    test_vertex_color_channels()  # decisions 88 to 90, in a scene of its own
+    test_vertex_color_fetch()  # decisions 93 to 95, in a scene of its own
     n_ref = REF.done(complete=True)
     print(f'PASS: reference values ({n_ref} cases equal to the values the Python code gave before decision 6)')
     n_rule = RULE.done(complete=True)
