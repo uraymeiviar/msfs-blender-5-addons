@@ -89,7 +89,7 @@ Based on Asobo's MSFS 2024 exporter 8.4.2 for Blender 5.2; FSS changes live in F
 | :--- | :--- | :--- | :--- |
 | Free, multi-valued tags per object (`fss_tags`), independent of collections; add, remove, select, rename, delete | implemented | W5 (as generic tags); tags-and-merge journal | TAG-001 to TAG-004, TAG-007 |
 | Tag switches: Don't Merge (merge), Keep (LOD) | implemented | tags-and-merge journal; LOD journal | TAG-005, TAG-006 |
-| Tag switches for a later AO auto-bake: Non-AO-Occluder, Skip-AO-Bake | implemented as settings; the bake is wish GEN-032 | tags-and-merge journal Session 13 | TAG-008, TAG-009 |
+| Tag switches for the AO bake: Non-AO-Occluder, Skip-AO-Bake | implemented; read by the bake's scene rule (2.9) | tags-and-merge journal Session 13; auto-bake journal | TAG-008, TAG-009 |
 | Tag attributes: Invisible and Animated (marks), Whole (loose pieces stay), No Texture; Stray counts with selection | implemented; Pack does not read No Texture yet | tags-and-merge journal Session 15 | TAG-012 to TAG-015, MRG-014 |
 | Functional roles with meaning (clickspot, screen, light mesh, emitter, debug mesh) inferred from materials and `panel.cfg` | wish (tags were built instead, without inference) | W5 | TAG-010 |
 | Conversion of the functional collections into tags or roles | wish | W5 | TAG-011 |
@@ -165,12 +165,32 @@ All need the project contract (what the MSFS project expects from a glTF), to co
 | Feature | Status | Source | Spec |
 | :--- | :--- | :--- | :--- |
 | Legend bake helper; decal text generator (glyph atlas) | wish | W15, W16 | GEN-030, GEN-031 |
-| Cockpit bake operator (AO, sky light, flood circuits) | wish | W18 | GEN-032 |
+| Cockpit bake operator (AO, sky light, flood circuits) | AO implemented as the Bake panel (2.9); sky light and flood circuits (received light) wish, decision 83 of the auto-bake journal | W18 | GEN-032 |
 | Dirt, grime and ice shell generator | wish | W19 | GEN-033 |
 | Sky portal placer | wish | W20 | GEN-034 |
 | Transparency sorting-risk check | wish | W22 | GEN-035 |
 | Registration mesh check; exterior light audit; wing-flex joint helper | wish | W24 to W26 | GEN-036 to GEN-038 |
 | Tools for passive (AI traffic) aircraft | wish (deferred until a passive E-Jet is planned) | wish-list | GEN-039 |
+
+### 2.9 Bake (FSS MSFS Tools)
+
+Added 20261118 (fss_blender_tools 0.107.0). Requirements are not written yet: the decisions are numbered in the
+auto-bake journal (`20261112.auto-bake-ao-curvature.md`, decisions 1 to 95); the current design is in
+[../../fss_blender_tools/README.md](../../fss_blender_tools/README.md#bake-current-design); the guide is
+[../user/bake.md](../user/bake.md); the bake folder is DAT-048.
+
+| Feature | Status | Source | Spec |
+| :--- | :--- | :--- | :--- |
+| Masters: per-mesh baked values in a layout of their own that survives UV changes, kept while the mesh is unchanged; Refresh grades them | implemented | auto-bake decisions 9 to 33, 81 | DAT-048 |
+| AO traced in a second Blender (Cycles) or by FSS OptiX on the GPU, in tiles and bands under a memory budget; movers in poses; occluders by scene rule, self only or a custom list, the Detected tree | implemented | auto-bake decisions 30 to 36, 47, 60 to 72; OptiX baker journal | |
+| Shared meshes: one master, copies combined (Average, Most Lit, Darkest) or One Instance from the selected copy | implemented | auto-bake decisions 47, 77, 87 | |
+| Curvature (CM) and the denoise (surface filter or OIDN) | implemented | auto-bake decisions 54 to 56; OptiX baker journal | |
+| Material channels Albedo, Roughness, Metal, Emissive baked from the material as it is; stale only after a mesh change | implemented | auto-bake decisions 79 to 87 | |
+| Vertex colour sources per channel (AO red, Roughness green, Metal blue, Albedo and Emissive RGB), Overwrite or Multiply, from the second colour attribute | implemented | auto-bake decisions 88 to 92, 95 | |
+| Fetch Albedo, Fetch ORM, Fetch Emis: masters into the vertex colour at face corners | implemented | auto-bake decisions 93, 94 | |
+| Apply into the texture sets (ORM, base colour and emissive slots in place, or separate 16-bit files), padding, Soften Sharp Edges, per object, applied anyway after a mesh change | implemented | auto-bake decisions 14 to 28, 46, 73, 78, 82, 85, 86 | |
+| The Run panel: one grid of Bake and Apply ticks per channel | implemented | auto-bake decisions 75, 76, 84 | |
+| Emissive from the light the object receives in the scene | planned | auto-bake decision 83 | |
 
 ## 3. Rejected
 

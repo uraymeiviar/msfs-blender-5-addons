@@ -15,6 +15,7 @@ It matches **FSS Blender Tools 0.36.9** and the FSS exporter based on Asobo expo
   | [fss-tools.md](fss-tools.md) | The two sidebar tabs: in **FSS MSFS Tools** the panels **Zones & Merge Tree**, **Tags**, **UV Auto Seam** and **UV Auto Packing** (with **Visibility Scoring**); in **FSS Tools** the panels **General**, **Empty Bounds**, **Heatmap** and **Checks** |
   | [materials.md](materials.md) | The **Materials** panel (**FSS MSFS Tools** sidebar tab): every material with its objects, zones and surface, the warnings never used and shared across zones, the transparent and emissive marks, a texture size estimate, Select Objects, and **By Texture Need** |
   | [lod.md](lod.md) | The panels **Object LOD**, **Viewport LOD** and **LOD Settings** (**FSS MSFS Tools** sidebar tab): automatic LODs, marks, viewport preview, the table of what MSFS does at your view, contributors, the settings per LOD, the LOD sphere, and exporting with LODs |
+  | [bake.md](bake.md) | The **Bake** panel and its sub-panel **Run** (**FSS MSFS Tools** sidebar tab): masters and Refresh, the bake settings, the Object box (shared meshes, poses, occluders, the Detected list), Texture Target, Run, the material channels, the vertex colour sources and Fetch |
   | [uv.md](uv.md) | The **UV Auto Seam** panel (**FSS MSFS Tools** sidebar tab: proposed and current seams, workflow, reports, limits) and the **Heatmap** panel (**FSS Tools** sidebar tab: distortion, texel density and visibility on the model, the distribution chart, the UV grid) |
   | [exporter.md](exporter.md) | The exporter: export target MSFS 2024 or MSFS 2020, one `.blend` for both simulators, materials, instancing, legacy normals |
   | [polygone.md](polygone.md) | The **Polygone** add-on (its own sidebar tab): mesh reduction of the selected objects with libPolygone, its settings, feature lines and locks, the results |
@@ -30,7 +31,7 @@ The cockpit and the exterior go through the same steps. They differ in their pro
 - **Check:** how you know the step is done.
 - **Redo when:** what makes the step worth doing again, and what that costs.
 
-The order follows what each step needs from the ones before it: packing needs the texture sets (step 2) and the densities (step 7); the LOD export needs the loose pieces you modelled (step 3). It is not a fixed sequence. Everything before texturing is cheap to change, and you will go back and forth: a new part, a moved zone or a changed mark means running the later steps again. Texturing is where changes start to cost: once a texture set is painted, changing its UVs, zone or material means baking again and carrying the painting over. Settle what feeds a texture set before you paint it.
+The order follows what each step needs from the ones before it: packing needs the texture sets (step 2) and the densities (step 7); the LOD export needs the loose pieces you modelled (step 3). It is not a fixed sequence. Everything before texturing is cheap to change, and you will go back and forth: a new part, a moved zone or a changed mark means running the later steps again. Texturing is where changes start to cost: once a texture set is painted, changing its UVs, zone or material means applying the bakes again and carrying the painting over. Settle what feeds a texture set before you paint it.
 
 Steps marked **in development** describe what the tool will do, and how to get the same result by hand until it exists.
 
@@ -213,7 +214,7 @@ So the topology you model decides what disappears together. A floor plate and it
 - The heatmap's **Density** mode shows each texture set near 1.0, except where you chose otherwise.
 - In the UV editor, no island lies outside the texture. Islands without UV area (lines, points) keep their old place; the report lists their objects.
 
-**Redo when:** zones, materials, sizes, density marks or visibility scores change. It's quick to repeat until texturing has started; after that, moving islands means baking again.
+**Redo when:** zones, materials, sizes, density marks or visibility scores change. It's quick to repeat until texturing has started; after that, moving islands means applying the bakes again and carrying the painting over.
 
 ### 9. Texturing
 
@@ -225,13 +226,20 @@ So the topology you model decides what disappears together. A floor plate and it
 
 For tiling patterns (brushed metal, fabric, grip), use tri-planar projection instead of UV projection: islands are packed at different densities, and a UV-projected pattern would change size from island to island.
 
-Bake ambient occlusion once the texture set's packing is final: a bake follows the UVs. Move moving parts away from their panels before baking, so no shadow is baked under a button that moves, and leave clickspots, collision meshes and decals out of the bake.
+Bake ambient occlusion, the curvature map and, where you need them, the material channels with the **Bake** panel (tab **FSS MSFS Tools**; see [bake.md](bake.md)):
+
+- A bake writes a **master** per mesh into the bake folder beside the `.blend`; **Apply** copies the masters into the texture set's textures, in the UVs the set has now. A master stays valid when the UVs change, so bake once the mesh is final, and apply again after each **Pack**.
+- In the **Run** sub-panel, tick what to bake and apply for the selected objects, and press **Run**.
+- Moving parts are baked in several poses and averaged ([Moving Parts](bake.md#moving-parts)); you do not move them away by hand.
+- Faces with decal, glass, windshield, invisible or occluder materials are left out by themselves. For other objects that must not darken their surroundings (helpers, clickspots, collision meshes), use a tag with **Non-AO-Occluder**, and **Skip-AO-Bake** for objects that need no bake of their own ([Tags](bake.md#tags)).
 
 If the **Bake** panel's first line reads **Not available:** with a reason, the add-on could not load its bake libraries (`fss_ao_copy.dll` or the JPEG XL library in its `lib` folder): the panel's buttons stay greyed and nothing is baked or applied until the add-on is installed again in full.
 
-Instanced parts (screws, identical knobs) share their texture and get generic AO in it; unique AO per copy needs a second UV map and gives up the instancing. See "AO Versus Instancing" in `baking.md`.
+Instanced parts (screws, identical knobs) share one mesh and one place in the texture, so they get one AO: the bake combines each copy's surroundings by the mesh's **Copies** setting (**Average** by default; see [Shared Meshes](bake.md#shared-meshes)). Unique AO per copy needs a second UV map and gives up the instancing. See "AO Versus Instancing" in `baking.md`.
 
-**Redo when:** the UVs of a textured set change: bakes are redone and the painting carried over. This step is why changes to the earlier steps get expensive.
+**Check:** after **Refresh**, the **Masters** box of the **Bake** panel shows nothing **Missing**, **Mesh changed** or **Surroundings changed** among the objects you apply, and **Run** reports no failed object or texture set.
+
+**Redo when:** a mesh changes: bake it again (**Refresh** shows **Mesh changed**). When the UVs of a set change, the masters stay: apply them again. Painting on a textured set is carried over by hand. This step is why changes to the earlier steps get expensive.
 
 ### 10. Export and Deploy
 
@@ -257,7 +265,7 @@ Some work has no step of its own, because it runs through several:
 ## Where to Find the Tools
 
 - **FSS MSFS Tools and FSS Tools:** in the 3D Viewport, press `N` to open the sidebar. FSS Blender Tools has two tabs there:
-  - **FSS MSFS Tools**, the panels from top to bottom: **Zones & Merge Tree**, **Materials** (with the section **By Texture Need**), **Tags**, **Object LOD**, **Viewport LOD**, **LOD Settings** (with the sections **Hints** and **Export Settings**), **UV Auto Seam** and **UV Auto Packing** (with the section **Visibility Scoring**). UV Auto Seam and UV Auto Packing are closed at first.
+  - **FSS MSFS Tools**, the panels from top to bottom: **Zones & Merge Tree**, **Materials** (with the section **By Texture Need**), **Tags**, **Object LOD**, **Viewport LOD**, **LOD Settings** (with the sections **Hints** and **Export Settings**), **UV Auto Seam**, **UV Auto Packing** (with the section **Visibility Scoring**) and **Bake** (with the sub-panel **Run**). UV Auto Seam and UV Auto Packing are closed at first.
   - **FSS Tools**, the panels from top to bottom: **General**, **Empty Bounds**, **Heatmap** and **Checks**, all closed at first.
   - The UV Editor's sidebar has an **FSS MSFS Tools** tab too, with **UV Auto Packing**.
   - When you open a `.blend`, **Zones & Merge Tree**, **Materials** (in Object Mode) and **Scan Names** fill their lists by themselves; press **Refresh** after later changes.
@@ -293,6 +301,7 @@ If your version is newer than 0.36.9, some labels or buttons may differ from thi
 | **LOD** | Level of detail. `_LOD00` is the full model; `_LOD01` to `_LOD06` are lighter versions MSFS shows when the model is small on screen. |
 | **Loose piece** | A connected piece of geometry inside one mesh. Pieces that only touch without sharing vertices count as separate. |
 | **Mark** | Something you put on an object to tell an automatic tool what it cannot work out itself: an override or a hint. Marks live in the `.blend`; MSFS never sees them. Three kinds: **LOD marks** in the [Object LOD](lod.md#object-lod) panel (from which LOD a part is left out or shown, or **Keep**); **UV marks** in [UV Auto Packing](fss-tools.md#uv-auto-packing) (the density factor, multiplied down the hierarchy, and how islands may turn) and [UV Auto Seam](fss-tools.md#uv-auto-seam) (**Skip Auto Seam**), which reach the objects below; and **tags**. |
+| **Master** | The baked data of one mesh (AO, curvature, material channels), kept in `<blend name>.bake` beside the `.blend`, in a layout of its own. It stays valid when the UVs change; **Apply** copies it into the texture set's textures. See [bake.md](bake.md). |
 | **Material class** | The kind of material (standard, emissive, decal, glass and so on), the last part of a material name `<SCENE>_<ZONE>_<CLASS>`. |
 | **Merge group** | An object named `@MERGE_<name>` whose subtree becomes one mesh at export. |
 | **Name prefix** | `@MERGE_`, `@NOMERGE_` (see [Zones & Merge Tree](fss-tools.md#zones--merge-tree)) and `@ZONE_` (step 2): a prefix in an object's name that the tools act on. The export removes `@MERGE_` and `@NOMERGE_` entirely, and the leading `@` of any other name: `@ZONE_FWD` becomes `ZONE_FWD`. |

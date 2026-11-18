@@ -326,6 +326,27 @@ requirements that use it. Properties that are registered (`bpy.props`) are saved
 - **Test:** `tests/test_uv_pack.py::test_report_order`,
   `tests/uv_prototype/test_autoseam_operators.py::test_shared_mesh_and_report`
 
+### DAT-048: The bake folder
+
+- **Status:** implemented
+- **Requirement:**
+  - Location and name: beside the `.blend`, `<blend name>.bake/`, written by the Bake panel's bake (a second Blender
+    on a snapshot of the file), read by Refresh, Apply and Fetch.
+  - `index.json`: one entry per master (key, object, mesh, combine and copies, `mesh_hash`, `surround_hash`, density,
+    size, triangles, islands, samples, the baker, `curvature`, `denoise`, `instance` for One Instance, `ao_source`
+    for an AO from the vertex colour, `channels` per material channel group with its `mesh_hash`, samples, the object
+    or copies, and its `source`), `status.json` while a job runs, `bake.log`.
+  - Per master (stem): the layout `<stem>.ao.npz` and the map of filled pixels and faces `<stem>.ao.map`; the images,
+    16-bit grey lossless JPEG XL (`<stem>.<kind>.jxl`; PNG when libjxl is missing): `ao`, `ao.raw` (before the
+    denoise), `ao_vc` (the product of vertex colour Multiplies), `curv`, `albedo_r`, `albedo_g`, `albedo_b`, `rough`,
+    `metal`, `emis_r`, `emis_g`, `emis_b`. Albedo and emissive are sRGB-encoded, the others linear.
+  - Every image of a master shares its layout; a new layout removes the images of the channels its bake did not bake.
+- **Used by:** the Bake panel (Refresh, Bake, Apply, Fetch)
+- **Decision:** auto-bake 9 to 33, 37, 54 to 56, 79 to 95
+- **Test:** `tests/test_ao_bake.py`
+- **Code:** `ao_bake_core.py` (`master_paths`, `image_paths`, `save_master`, `open_master`), `ao_bake_runner.py`
+  (`update_index`, the index entry)
+
 ## Export-Time Data
 
 ### DAT-038: Export copies

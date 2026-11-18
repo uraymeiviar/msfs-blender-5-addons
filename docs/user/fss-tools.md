@@ -13,6 +13,7 @@ FSS Blender Tools has two tabs in the 3D Viewport sidebar (`N`).
 - **Object LOD**, **Viewport LOD** and **LOD Settings**, their own page [lod.md](lod.md)
 - **UV Auto Seam**, closed at first: proposes UV seams (the full guide is on its own page, [uv.md](uv.md))
 - **UV Auto Packing**, closed at first: the UV marks and the packer per texture set, with the section **Visibility Scoring** inside
+- **Bake**, with its sub-panel **Run**: bakes AO, curvature and the material channels and applies them to the textures, its own page [bake.md](bake.md)
 
 **FSS Tools**, its panels from top to bottom, all closed at first:
 
@@ -21,7 +22,7 @@ FSS Blender Tools has two tabs in the 3D Viewport sidebar (`N`).
 - **Heatmap**
 - **Checks**
 
-This page describes all of them except Materials and the three LOD panels. Each panel and section opens and closes on its own; Blender remembers that in the `.blend`.
+This page describes all of them except Materials, the three LOD panels and Bake. Each panel and section opens and closes on its own; Blender remembers that in the `.blend`.
 
 The **UV Editor**'s sidebar (`N`) has an **FSS MSFS Tools** tab too, with the **UV Auto Packing** panel (without Visibility Scoring); it shows in the UV Editor only, not in the Image Editor's image view.
 
@@ -87,7 +88,7 @@ Transparent materials (MSFS alpha mode Blend) never share a mesh with opaque one
 
 ## Tags
 
-A tag is a free label you put on objects, for example `SCREEN` or `KEEP_LOD`. An object can have several tags. Tags replace extra collections for grouping, and toggles on each tag set how tagged objects are treated by the export, by the panels and by a later AO auto-bake. Tags are stored in the object's custom property `fss_tags` (separated by `;`), so you can also read them under **Object Properties > Custom Properties**.
+A tag is a free label you put on objects, for example `SCREEN` or `KEEP_LOD`. An object can have several tags. Tags replace extra collections for grouping, and toggles on each tag set how tagged objects are treated by the export, by the panels and by the [Bake](bake.md) panel. Tags are stored in the object's custom property `fss_tags` (separated by `;`), so you can also read them under **Object Properties > Custom Properties**.
 
 - **Top row:** type one or more tag names (separate several with `;` or `,`), then **+** adds them to the selected objects, **-** removes them.
 - **Active object box** (only while the active object is selected): the tags of the active object; **X** removes one from the active object only.
@@ -97,16 +98,16 @@ A tag is a free label you put on objects, for example `SCREEN` or `KEEP_LOD`. An
   - **Tag name:** select the visible objects with this tag (**Shift + click** adds to the selection). Hidden objects are counted but not selected. The name has a blue fill when at least one selected object has this tag.
   - **Don't Merge** (merge icon): objects with this tag, and everything below them, stay out of merge groups (see [Zones & Merge Tree](#zones--merge-tree)).
   - **Keep** (pin icon, pinned and blue when on): objects with this tag are never hidden for being small. The automatic LOD size rule leaves them, and the Auto objects above them, in every LOD, like the **Keep** mark (see [Object LOD](lod.md#object-lod)). They cost vertices in the far LODs. A **Hidden from** or **Visible from** mark on the object or a parent still wins.
-  - **Non-AO-Occluder** (ghost icon, blue when on): objects with this tag never darken other objects in the AO auto-bake. They can still get AO of their own.
-  - **Skip-AO-Bake** (render icon, crossed out and blue when on): objects with this tag get no AO in the AO auto-bake. They can still darken other objects.
-  - **Invisible** (eye icon, blue when on): marks objects that MSFS does not draw. They no longer count as **Stray**. Only a mark: the model and the export do not change.
+  - **Non-AO-Occluder** (ghost icon, blue when on): objects with this tag never darken other objects in the [bake](bake.md#tags). They still get a master of their own.
+  - **Skip-AO-Bake** (render icon, crossed out and blue when on): objects with this tag get no master in the [bake](bake.md#tags): no AO, curvature or material channels of their own. They can still darken other objects.
+  - **Invisible** (eye icon, blue when on): marks objects that MSFS does not draw. They no longer count as **Stray**. Only a mark: the model and the export do not change. The bake makes no master for them, and they darken nothing.
   - **Animated** (action icon, blue when on): marks parts Blender has no animation for, because the model XML animates them. They no longer count as **Stray**, nor do the direct children of a marked empty. Only a mark: the merge does not read it, so such a part inside a group needs **Don't Merge** as well.
   - **Whole** (cube icon, blue when on): the LOD export does not drop the small loose pieces of these objects one by one. The object still leaves by the size rule or a mark, all at once (see [How Nesting Affects the Size Rule](lod.md#how-nesting-affects-the-size-rule)).
-  - **No Texture** (texture icon, blue when on): for objects that need no texture, for example gauge screens. A material leaves [By Texture Need](materials.md#by-texture-need) at the next **Refresh** in **Materials** once every object using it, hidden ones too, has such a tag. The AO auto-bake skips these objects, but they can still darken others. **Pack** does not read it yet.
-  - **No Export** (export icon, blue when on): objects with this tag, and everything below them, are left out of every glTF export and out of merge groups, for example the probe lights of [Visibility Scoring](#visibility-scoring) and the empty above them. They stay in the `.blend` and in the viewport.
+  - **No Texture** (texture icon, blue when on): for objects that need no texture, for example gauge screens. A material leaves [By Texture Need](materials.md#by-texture-need) at the next **Refresh** in **Materials** once every object using it, hidden ones too, has such a tag. The bake makes no master for them, but they can still darken others. **Pack** does not read it yet.
+  - **No Export** (export icon, blue when on): objects with this tag, and everything below them, are left out of every glTF export and out of merge groups, for example the probe lights of [Visibility Scoring](#visibility-scoring) and the empty above them. They stay in the `.blend` and in the viewport. The bake makes no master for them, and they darken nothing.
   - **Delete** (bin): asks for confirmation, then removes the tag from every object in the file. The objects stay.
 
-The two AO toggles only record your choice for now: there is no AO auto-bake tool yet, so they change nothing in the model or the export. They apply to the objects that carry the tag, not to their children. With both on, the bake is meant to ignore the object completely, which suits collision meshes, clickspots, helpers and decals.
+The two AO toggles act in the [Bake](bake.md#tags) panel; they change nothing in the model or the export. They apply to the objects that carry the tag, not to their children. With both on, the bake ignores the object completely, which suits collision meshes, clickspots, helpers and decals.
 
 Tip: to tag a whole collection, right-click it in the Outliner, **Select Objects**, then press **+** on the tag row.
 

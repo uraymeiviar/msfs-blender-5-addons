@@ -15,18 +15,38 @@ install them into their own Blender.
 | `_addons_common` | Asobo | Shared helpers of the Asobo add-ons |
 | `lod_tools_msfs_2024`, `max_bridge_msfs_2024` | Asobo | Asobo tools, unchanged |
 | `wipermask_generator_msfs_2024` | Asobo | Asobo tool with one FSS change: the mask is baked into a float image and saved as 16-bit PNG (`# FSS:` in `wipermaskgen_utils.py`); keep it when taking a new Asobo release |
-| `fss_blender_tools` | FSS | FSS authoring tools in two sidebar tabs. FSS MSFS Tools: Zones & Merge Tree, Materials, Tags, Object LOD (LOD marks), Viewport LOD (preview), LOD Settings (the table at this view, Hints, Export Settings), UV Auto Seam, UV Auto Packing (UV marks, Pack and Check All per texture set, Visibility Scoring). FSS Tools: General (Add Parent, Origin to Bounding Box, Rename Meshes), Empty Bounds, Heatmap, Checks (Name Check, Fix Broken Bone Parents, Find Faces Without Area, Find Faces Without UV Area, Find Animations Not 0 to 100). UV Auto Packing also in the UV editor's sidebar; Zones & Merge Tree, Materials, Scan Names and LOD counts refresh when a file opens |
+| `fss_blender_tools` | FSS | FSS authoring tools in two sidebar tabs. FSS MSFS Tools: Zones & Merge Tree, Materials, Tags, Object LOD (LOD marks), Viewport LOD (preview), LOD Settings (the table at this view, Hints, Export Settings), UV Auto Seam, UV Auto Packing (UV marks, UV Align marks, Pack and Check All per texture set with the FSS packer in C++, Visibility Scoring), Bake (AO, curvature, albedo, roughness, metal and emissive baked into per-mesh masters from the scene, the material or the vertex colour, applied to the texture sets; Run, Fetch to vertex colour). FSS Tools: General (Add Parent, Origin to Bounding Box, Rename Meshes), Empty Bounds, Heatmap, Checks (Name Check, Fix Broken Bone Parents, Find Faces Without Area, Find Faces Without UV Area, Find Animations Not 0 to 100). UV Auto Packing also in the UV editor's sidebar; Zones & Merge Tree, Materials, Scan Names and LOD counts refresh when a file opens |
 | `tests` | FSS | Differential test harness ([tests/README.md](tests/README.md)) |
 | `tools` | FSS | `deploy.ps1` / `deploy.bat` |
 
 ## Working Model
 
 - **The maintainer decides.** Before a significant change (a new feature, a changed behaviour, a changed file or data format), propose it with the options and a recommendation, and wait for an answer. Small fixes follow an approved direction.
-- **Decisions are numbered in the task journal** (for the UV work: `docs/journal/20261019.automated-uv-unwrap.md`, decisions 1 to 123 so far, the index of those in force in Session 102, later ones in the sessions after it). Record only what the maintainer decided; an agent's own choices are proposals until answered.
+- **Decisions are numbered in the task journal** (for the UV work: `docs/journal/20261019.automated-uv-unwrap.md`, decisions 1 to 123 so far, the index of those in force in Session 102, later ones in the sessions after it). Record only what the maintainer decided; an agent's own choices are proposals until answered; for the bake: `docs/journal/20261112.auto-bake-ao-curvature.md`, decisions 1 to 95; for the FSS UV packer:
+  `docs/journal/20261116.native-uv-packer.md`). Where to start per area: [Where to Start](#where-to-start).
 - **Hand-offs:** moderate or large work is written as a hand-off in the journal (read first, steps, finish line, do-not list) and executed by another agent (Antigravity, a sub-agent), which appends its own session and commits by name without pushing.
 - **Review by re-running:** the reviewer re-runs the tests and measurements and inspects images before accepting a session; a claim that was not re-checked is reported as not verified. Findings go into a review session. Earlier agents' reports were wrong often enough (circular tests, criteria passed "with an explanation") that this is the rule, not an option.
 - **Finish lines are measurable;** a criterion that is not met is reported as NOT MET with its numbers.
 - **Release:** after review, raise the version, commit, push, deploy (below); the maintainer commits the deployed copies in the aircraft repositories.
+
+## Where to Start
+
+The current state of each area, for an agent continuing the work: read the entry point first, then the journal's
+latest session.
+
+| Area | Entry point | Journal (latest session first) |
+| :--- | :--- | :--- |
+| The exporter (MSFS 2024 and 2020, unified) | [docs/spec/exporter.md](docs/spec/exporter.md), [Upstream Policy](#upstream-policy-the-exporter) below | `20261002.msfs2024-blender5-exporter-conversion.md`; export speed `20261017.export-performance.md` |
+| Bake (AO, curvature, material channels, vertex colour sources, Fetch) | [fss_blender_tools/README.md, Bake: Current Design](fss_blender_tools/README.md#bake-current-design) | `20261112.auto-bake-ao-curvature.md`; FSS OptiX `20261114.optix-baker.md`; the C++ DLL `20261114.apply-native-copy.md`, `20261116.bake-post-native.md` |
+| UV: seams, packing marks, visibility | [docs/spec/uv.md](docs/spec/uv.md) | `20261019.automated-uv-unwrap.md` (Session 102 indexes the decisions in force) |
+| The FSS UV packer in C++ (turns, Scale to Fill, Object Priority, UV Align) | [native/uv_pack/README.md](native/uv_pack/README.md) | `20261116.native-uv-packer.md` |
+| LOD | [docs/spec/lod.md](docs/spec/lod.md) | `20261010.automated-lod-generation.md` |
+| Materials, texture sets, ORM levels | [docs/spec/materials.md](docs/spec/materials.md) | `20261028.material-management.md`, `20261114.orm-levels.md` |
+| Tags, merge groups, zones | [docs/spec/tags.md](docs/spec/tags.md), [docs/spec/merge-tree.md](docs/spec/merge-tree.md) | `20261014.fss-blender-tools-tags-and-merge.md` |
+| The artist guide | [docs/user/README.md](docs/user/README.md) | `20261021.artist-pipeline-guide.md` |
+
+Every journal and its status: [docs/journal/README.md](docs/journal/README.md). The feature inventory (what exists,
+what is a wish): [docs/spec/inventory.md](docs/spec/inventory.md).
 
 ## Maintainer Preferences
 
@@ -115,6 +135,8 @@ tools\deploy.bat -Addons fss_blender_tools
 | Markdown linter | `F:\new-fss-aircraft-ejet\tools\mdlint.exe <file>` | every changed `.md` passes with 0 errors before a commit |
 | MSFS Authoring Guide | `F:\new-fss-aircraft-ejet\doc\msfs-authoring\` (E1) | the MSFS rules the artist guide refers to (draw calls, LOD, materials, textures) |
 | MSFS SDK documentation | `F:\new-fss-aircraft-ejet\doc\msfs-sdk\` | SDK facts (texture sizes, LOD selection) |
+| Native DLLs of the add-on | `native/ao_copy/build.cmd` (`fss_ao_copy.dll`), `native/uv_pack/build.cmd` (`fss_uv_pack.dll`), into `fss_blender_tools/lib/` | required by Bake and UV Auto Packing; build only under the CPU rule of the maintainer's global instructions (`cpucap.exe 50`, at most 12 compiler threads) |
+| FSS OptiX baker | built in `F:\glider` (`src/modules/ao-baker`), copied into `fss_blender_tools/lib/ao_baker/` by `tools/update-ao-baker.ps1`, binaries in Git LFS | the optional GPU AO baker (OptiX baker journal) |
 | Production test scene | `G:\e-jets-e2\assets\visual\cockpit\COCKPIT.blend` (E2 cockpit, read-only) | real-data checks on copies in `tests/_work/` (git-ignored); how to rebuild them: Session 102 of the UV journal |
 
 ## Git
@@ -141,6 +163,18 @@ tools\deploy.bat -Addons fss_blender_tools
 - **Panels must not write data while drawing** (Blender refuses it): schedule the write after the draw (see `visibility.schedule_camera_sync`) or use an operator.
 - **Registered properties reach glTF extras:** Blender 5.2's exporter writes registered (system) properties as extras when Include Extras is on. `merge._strip_fss_extras` drops every `fss_` key from nodes, meshes, materials and the scene; name new properties `fss_...`. Their values stay readable through `id.bl_system_properties_get()` after the property is unregistered, which migrations use.
 - **Pack Islands margins:** with `scale=False`, `margin_method` ADD and FRACTION put the margin around each island, so the gap between two islands is twice the margin; concave margins are not exact (AABB is). UV triangles without area (needles) inflate the concave hull and push islands far out.
+- **The bake's second Blender** opens a snapshot of the artist's file and quits without saving: what it changes (a UV
+  map made active, a material rerouted) never reaches the artist's file, so nothing there needs reverting.
+- **Cycles bakes into the active UV map;** Image Texture nodes without a UV Map node read the render UV map. A bake
+  into another layout sets the target map active and leaves the render map alone.
+- **Colour attributes:** the active one (highlighted, painted by Vertex Paint) and the render one (camera icon, read by
+  a Color Attribute node without a name) can differ. The MSFS 2024 export writes the render one; the merge's
+  preparation and the MSFS 2020 export write the active one. A Color Attribute node gives linear values for byte and
+  float attributes alike.
+- **No undo in a background Blender:** `bpy.ops.ed.undo()` fails its poll there; undo is checked by hand.
+- **Locked reference values:** `tests/data/*reference*.json` were recorded from code that no longer exists and cannot
+  be recorded again. A deliberate change of behaviour runs those cases under the old rule (a module constant set in
+  the test, as for `PADDING_FOLD_COS`) and tests the new rule in a test of its own.
 - **Batch files:** on machines with `NoDefaultCurrentDirectoryInExePath` set, run `.bat` files by full path, or with
   `cmd /c "set NoDefaultCurrentDirectoryInExePath=&& ..."`.
 
