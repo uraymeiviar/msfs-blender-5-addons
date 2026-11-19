@@ -169,14 +169,29 @@ The texture sets and where Apply writes. It needs a Refresh first (**Refresh fir
 - **Target:**
   - **Separate File:** a file of its own in the output folder.
   - **ORM Texture:** the texture in the material's ORM slot, in place: the AO goes into its red channel, green and blue stay byte for byte. The box names the texture, and **8-bit file: written as 16-bit** when it is 8-bit (its values are kept). A copy of the file is kept in the bake folder before the first write.
-  - The **Target** also decides where the material channels go (see [Where Apply Writes](#where-apply-writes)).
+  - The **Target** also decides where **Roughness** and **Metal** go: the ORM texture's green and blue, or their own files in this output folder (see [Where Apply Writes](#where-apply-writes)). **Albedo** and **Emissive** have their own sections.
 - **With Separate File:**
   - **Output Folder:** empty, a folder `<blend name>_ao` beside the `.blend`.
   - **File:** default `<material>_ao.png`; clear it to go back to the default.
   - **Resolution:** the size of a new file: **ORM Texture Size** (when the material has an ORM texture) or 256 to 8192 pixels per side. An existing file keeps its own size, shown as **Resolution: 4096 x 4096 (the file's size)**.
   - **Channels:** **Greyscale** (the AO in red, green and blue) or **Red (ORM)** (the AO in red). With Red (ORM), **Green and Blue:** **White** (MSFS then uses the material's roughness and metallic factors) or **From ORM Texture** (the roughness and metallic of the ORM texture). At another size than the ORM texture, the box warns **Another size: roughness and metallic are resampled** and offers **Sampling**: **Automatic**, **Nearest** (hard metallic edges stay hard) or **Bicubic** (sharper).
-- **Padding** (default 8 px): the pixels written around each island. It applies to the AO and the material channels.
+- **Padding** (default 8 px): the pixels written around each island. It applies to the AO, the roughness and the metal.
 - **Soften Sharp Edges** and **Width:** Apply treats convex sharp edges (a lip, a rim; faces more than 30 degrees apart) as slightly rounded: the darker side brightens toward the brighter side at the edge. Inside corners keep their contact shadow. The AO only; the masters are not changed.
+
+### Albedo and Emissive
+
+Each section shows only while its **Apply** tick in **Run** is on (**Apply Albedo to Texture**, **Apply Emissive to Texture**), between AO and Curvature Map.
+
+- **Target:**
+  - **Separate File** (default): a file of its own.
+  - **Base Color Texture** (Albedo) or **Emissive Texture** (Emissive): the texture in the material's base colour or emissive slot, in place: red, green and blue are written, alpha stays. The box names the texture, and **8-bit file: written as 16-bit** when it is 8-bit. A copy of the file is kept in the bake folder before the first write.
+- **With Separate File:**
+  - **Output Folder:** empty, the AO's.
+  - **File:** default `<material>.albedo.png` or `<material>.emissive.png`; clear it to go back to the default.
+  - **Resolution:** the size of a new file, as the AO's. An existing file keeps its own size.
+- **Padding** (default 8 px): the pixels written around each island, for this channel.
+
+These settings are independent of the AO's: for example, the albedo can go into the base colour texture while the AO goes into a separate file.
 
 ### Curvature Map
 
@@ -186,7 +201,7 @@ The curvature is always written into a separate 16-bit grey file: 50 % grey wher
 - **File:** default `<material>_curvature.png`.
 - **Resolution** and **Padding:** as the AO's, for this file.
 
-A line with a warning icon under the box names what stops Apply for this set, for example **No texture in the ORM slot** or **Output folder cannot be made: …**.
+Lines with a warning icon under the box name what stops Apply for this set, one per problem of every ticked Apply channel: **No texture in the ORM slot** (AO, Roughness or Metal ticked with Target ORM Texture), **No texture in the base colour slot**, **No texture in the emissive slot**, or **Output folder cannot be made: …**. While one is there, **Run** does not start and names it.
 
 ## Run
 
@@ -226,17 +241,17 @@ How the channels behave:
 
 ### Where Apply Writes
 
-| Channel | Target ORM Texture (in place) | Target Separate File (output folder) |
-| :--- | :--- | :--- |
-| AO | red of the ORM slot's texture | `<material>_ao.png` (or its **File**) |
-| Albedo | the base colour slot's texture (red, green, blue) | `<material>.albedo.png` |
-| Roughness | green of the ORM slot's texture | `<material>.roughness.png` |
-| Metal | blue of the ORM slot's texture | `<material>.metal.png` |
-| Emissive | the emissive slot's texture (red, green, blue) | `<material>.emissive.png` |
-| Curvature | (always a separate file) | `<material>_curvature.png` (or its **File**) |
+| Channel | Set by | In place | Separate File |
+| :--- | :--- | :--- | :--- |
+| AO | Texture Target's AO | red of the ORM slot's texture | `<material>_ao.png` (or its **File**) in the AO's folder |
+| Roughness | Texture Target's AO | green of the ORM slot's texture | `<material>.roughness.png` in the AO's folder |
+| Metal | Texture Target's AO | blue of the ORM slot's texture | `<material>.metal.png` in the AO's folder |
+| Albedo | Texture Target's Albedo | the base colour slot's texture (red, green, blue) | `<material>.albedo.png` (or its **File**) in its folder |
+| Emissive | Texture Target's Emissive | the emissive slot's texture (red, green, blue) | `<material>.emissive.png` (or its **File**) in its folder |
+| Curvature | Texture Target's Curvature Map | (always a separate file) | `<material>_curvature.png` (or its **File**) in its folder |
 
-- **In place:** the texture's other channels and its alpha stay byte for byte. An 8-bit file is written as 16-bit with its values kept, and a copy is kept in the bake folder before the first write. Without a texture file in the slot, Apply reports the texture set as failed.
-- **Separate files** are 16-bit; roughness and metal are single-channel grey files. A new file takes the AO's **Resolution**; an existing one keeps its size. Where nothing is written yet, a new albedo file is white, a new emissive, roughness or metal file black.
+- **In place:** the texture's other channels and its alpha stay byte for byte. An 8-bit file is written as 16-bit with its values kept, and a copy is kept in the bake folder before the first write. Without a texture in the slot, the problem line names it and Run does not start.
+- **Separate files** are 16-bit; roughness and metal are single-channel grey files. A new file takes the **Resolution** of its section (roughness and metal: the AO's); an existing one keeps its size. Where nothing is written yet, a new albedo file is white, a new emissive, roughness or metal file black.
 
 ## Vertex Colour Sources
 

@@ -26,6 +26,9 @@ and <material>.emissive.png in the output folder, and (decision 86) <material>.r
 single-channel 16-bit grey files (black where nothing was written yet). The copy, padding, per-object rule and bands
 are the AO's (no Soften); a channel whose mesh changed since its bake is applied anyway and reported (decision 85);
 faces without a master of the channel keep their pixels in it, listed as the AO's missing faces are.
+Decision 96: albedo and emissive follow their own Target (in place in the base colour or emissive slot's texture, or a
+separate file), with their own output folder (empty: the AO's), file name, resolution and padding; roughness and metal
+follow the AO's Target, folder, resolution and padding.
 
 Fetch (decisions 93, 94; fetch_vertex_color): the other way, a master read at every face corner of the selected
 objects into the colour attribute the vertex colour sources read; the masters are only read.
@@ -57,9 +60,13 @@ def image_path(image):
     return os.path.normpath(bpy.path.abspath(image.filepath, library=image.library)) if image.filepath else ''
 
 
+OWN_FOLDERS = ('curv', 'albedo', 'emis')  # decisions 54, 96: the files with an Output Folder of their own
+
+
 def output_folder(scene, kind='ao'):
-    """Where Apply writes separate files: the AO's Output Folder; the curvature's own (empty: the AO's)."""
-    folder = scene.fss_ao_bake.get('curv_output_folder', '') if kind == 'curv' else ''
+    """Where Apply writes separate files: the AO's Output Folder (also roughness and metal's); the curvature's, the
+    albedo's and the emissive's own (empty: the AO's)."""
+    folder = scene.fss_ao_bake.get(f'{kind}_output_folder', '') if kind in OWN_FOLDERS else ''
     folder = folder or scene.fss_ao_bake.output_folder
     if not folder:
         stem = os.path.splitext(os.path.basename(bpy.data.filepath))[0] if bpy.data.filepath else 'untitled'
@@ -220,27 +227,53 @@ CH_FILES = {'albedo': '.albedo.png', 'emis': '.emissive.png', 'rough': '.roughne
 CH_GREY = ('rough', 'metal')  # decision 86: their separate files are single-channel
 
 
+CH_OWN = ('albedo', 'emis')  # decision 96: a Target, folder, file, resolution and padding of their own
+
+
 def channel_file_name(material, kind):
     """Decisions 82, 86: <material>.albedo.png, .emissive.png, .roughness.png or .metal.png (the name made safe as the
     AO's)."""
     return ''.join(c if (c.isalnum() or c in '-_.') else '_' for c in material.name) + CH_FILES[kind]
 
 
+def channel_name(material, kind, settings=None):
+    """Decision 96: the separate file's name of a channel: the albedo's and emissive's File (settings: the set's
+    fss_ao_apply unless given), else the default; roughness and metal always the default."""
+    a = settings if settings is not None else getattr(material, 'fss_ao_apply', None)
+    name = (getattr(a, f'{kind}_file_name', '') or '').strip() if kind in CH_OWN and a is not None else ''
+    name = name or channel_file_name(material, kind)
+    return name if name.lower().endswith('.png') else name + '.png'
+
+
+def channel_in_place(settings, kind):
+    """Decision 96: whether a channel is written in place: albedo and emissive by their own Target (SLOT), roughness
+    and metal by the AO's (ORM). Settings without the channel's own Target (a script's) follow the AO's."""
+    own = getattr(settings, f'{kind}_target', None) if kind in CH_OWN else None
+    return own == 'SLOT' if own is not None else settings.target == 'ORM'
+
+
+def channel_padding(scene, kind):
+    """Decision 96: the albedo's and emissive's own Padding, else the AO's."""
+    s = scene.fss_ao_bake
+    return int(getattr(s, f'{kind}_padding') if kind in CH_OWN else s.padding)
+
+
 class ChannelTarget:
     """Where Apply writes a material channel of one texture set (decision 82): the file, its size, its pixels before
-    (uint16, 16-bit scale) and the columns the channel's components go into. Target ORM Texture: the slot's texture
-    in place; Separate File: the channel's file in the output folder (roughness and metal: a grey file of their own,
-    decision 86)."""
+    (uint16, 16-bit scale) and the columns the channel's components go into. In place (channel_in_place): the slot's
+    texture; Separate File: the channel's file in the output folder (roughness and metal: a grey file of their own,
+    decision 86; albedo and emissive: their own folder, name and resolution, decision 96)."""
 
     def __init__(self, scene, material, settings, folder, kind):
         self.material, self.channel = material, kind
         self.warnings, self.backup = [], None
         self.cols = CH_COLUMNS[kind]
-        self.kind = settings.target
+        in_place = channel_in_place(settings, kind)
+        self.kind = ('SLOT' if kind in CH_OWN else 'ORM') if in_place else 'FILE'
         self.layout = kind
         threads = int(scene.fss_ao_bake.threads)
         prop, slot = CH_SLOTS[kind]
-        if self.kind == 'ORM':
+        if in_place:
             image = getattr(material, prop, None)
             path = image_path(image) if isinstance(image, bpy.types.Image) else ''
             if not path or not os.path.isfile(path):
@@ -261,7 +294,9 @@ class ChannelTarget:
             if grey:
                 self.cols = (0,)
             nch = 1 if grey else 3
-            path = os.path.join(output_folder(scene), channel_file_name(material, kind))
+            own = kind in CH_OWN
+            path = os.path.join(output_folder(scene, kind if own else 'ao'),
+                                channel_name(material, kind, settings if own else None))
             if os.path.isfile(path):
                 vals, bits, _ct = read_texture(path, threads=threads)
                 vals = vals * np.uint16(257 if bits == 8 else 1)
@@ -269,11 +304,12 @@ class ChannelTarget:
                     vals = np.repeat(vals[:, :, :1], 3, axis=2)
                 self.base = vals[:, :, :nch].copy() if vals.shape[2] != nch else vals
             else:
-                if settings.resolution == 'ORM':
+                res = (getattr(settings, f'{kind}_resolution', None) if own else None) or settings.resolution
+                if res == 'ORM':
                     size = orm_size(material)
                     W, H = size if size is not None else (store.texture_size(material),) * 2
                 else:
-                    W = H = int(settings.resolution)
+                    W = H = int(res)
                 self.base = np.full((int(H), int(W), nch), CH_NEW[kind], np.uint16)
         self.path = path
         self.H, self.W = self.base.shape[:2]
@@ -458,7 +494,9 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
     comps = core.CHANNEL_KINDS[kind] if chan else (kind,)
     if curv:
         settings = curvature_settings(settings, material)
-    pad = int(scene.fss_ao_bake.curv_padding if curv else scene.fss_ao_bake.padding)
+    # decision 96: the albedo and emissive with their own padding
+    pad = int(scene.fss_ao_bake.curv_padding) if curv else channel_padding(scene, kind) if chan else int(
+        scene.fss_ao_bake.padding)
     # decision 46: the darker side of convex sharp edges brightened toward the edge (m; at least a texel), or None
     soften_width = (float(scene.fss_ao_bake.soften_width) if scene.fss_ao_bake.soften_edges and not curv and not chan
                     else None)

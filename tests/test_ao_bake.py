@@ -3514,8 +3514,10 @@ def q16(v):
     return int(np.round(np.clip(v, 0.0, 1.0) * 65535.0))
 
 
-def ch_apply(material, groups, target='FILE', layout='ORM', objects=None, ao=False):
-    """Apply of these channels (the scene's apply toggles; ao: the AO too, first) for one texture set; its reports."""
+def ch_apply(material, groups, target='FILE', layout='ORM', objects=None, ao=False, own=True):
+    """Apply of these channels (the scene's apply toggles; ao: the AO too, first) for one texture set; its reports.
+    own: the albedo's and emissive's own Target (decision 96) set as the AO's (ORM: in place) at SIZE; False: as they
+    are."""
     s = bpy.context.scene.fss_ao_bake
     keep = (s.apply_ao, s.apply_cm)
     s.apply_ao, s.apply_cm = ao, False
@@ -3523,6 +3525,9 @@ def ch_apply(material, groups, target='FILE', layout='ORM', objects=None, ao=Fal
     mat = bpy.data.materials[material]
     a = mat.fss_ao_apply
     a.target, a.layout, a.resolution = target, layout, str(SIZE)
+    if own:
+        a.albedo_target = a.emis_target = 'SLOT' if target == 'ORM' else 'FILE'
+        a.albedo_resolution = a.emis_resolution = str(SIZE)
     try:
         reps = ao_bake_apply.apply(bpy.context, [mat], objects)
     finally:
@@ -3545,11 +3550,149 @@ def ch_entry(name):
     return store.read_index(str(CH_WORK / 'channels.bake'), use_cache=False)['masters'].get(stem), stem
 
 
+def ch_own_targets(exp, k1):
+    """Decisions 96 and 97 (Session 76's step 2), on CH_CONST (K1 baked with every channel, K2 without a master) and
+    CH_TEX (no texture in its base colour, emissive or ORM slot): Albedo and Emissive by their own Target, folder,
+    file, resolution and padding, independent of the AO's; the problem line per ticked Apply channel, Run refused."""
+    s = bpy.context.scene.fss_ao_bake
+    mat = bpy.data.materials['CH_CONST']
+    a = mat.fss_ao_apply
+    out_dir = CH_WORK / 'out'
+    base, orm = CH_WORK / 'base.png', CH_WORK / 'orm.png'
+    alb_file, ao_file = out_dir / 'CH_CONST.albedo.png', out_dir / 'CH_CONST_ao.png'
+    others = [out_dir / f'CH_CONST.{n}.png' for n in ('roughness', 'metal', 'emissive')] + [CH_WORK / 'emis.png']
+    found = {}
+    keep_s = {p: getattr(s, p) for p in ('apply_ao', 'apply_cm', 'emis_padding', 'albedo_padding')}
+
+    def run(groups, ao=False):
+        s.apply_ao, s.apply_cm = ao, False
+        ch_set(s, 'apply', groups)
+        try:
+            reps = ao_bake_apply.apply(bpy.context, [mat])
+        finally:
+            ch_set(s, 'apply', ())
+        for r in reps:
+            assert not r.get('error'), r
+        return {r['kind']: r for r in reps}
+
+    def dev_k1(vals, g):
+        return max(int(np.abs(vals[:, :, c][k1] - e).max()) for c, e in enumerate(exp[g]))
+    try:
+        # the defaults: Separate File, the AO's folder, <material>.albedo.png / .emissive.png, padding 8
+        fresh = bpy.data.materials.new('CH_DEFAULTS')
+        fa = fresh.fss_ao_apply
+        assert (fa.albedo_target, fa.emis_target) == ('FILE', 'FILE'), (fa.albedo_target, fa.emis_target)
+        assert (fa.albedo_file_name, fa.emis_file_name) == ('CH_DEFAULTS.albedo.png', 'CH_DEFAULTS.emissive.png')
+        bpy.data.materials.remove(fresh)
+        assert s.albedo_output_folder == s.emis_output_folder == s.output_folder
+        assert s.bl_rna.properties['albedo_padding'].default == s.bl_rna.properties['emis_padding'].default == 8
+        # (a) Albedo in place, the AO in a separate file
+        a.target, a.layout, a.resolution = 'FILE', 'GREY', str(SIZE)
+        a.albedo_target = 'SLOT'
+        h_orm, h_alb = file_hash(orm), file_hash(alb_file)
+        reps = run(['albedo'], ao=True)
+        assert sorted(reps) == ['albedo', 'ao'], sorted(reps)
+        assert os.path.normpath(reps['ao']['path']) == os.path.normpath(str(ao_file)), reps['ao']['path']
+        assert os.path.normpath(reps['albedo']['path']) == os.path.normpath(str(base)) and \
+            reps['albedo']['target'] == 'SLOT', (reps['albedo']['path'], reps['albedo']['target'])
+        da = dev_k1(read(base)[0].astype(np.int64), 'albedo')
+        assert da <= 1, da
+        assert file_hash(orm) == h_orm and file_hash(alb_file) == h_alb, 'the ORM texture or the albedo file changed'
+        found['76 (a)'] = (f"Albedo in place into base.png (max deviation {da}), AO into {ao_file.name}; orm.png and "
+                           f"{alb_file.name} byte-identical")
+        # (b) the other way round: the AO in place, the albedo in a separate file
+        a.target, a.albedo_target, a.albedo_resolution = 'ORM', 'FILE', str(SIZE)
+        h_base = file_hash(base)
+        alb_file.unlink()
+        reps = run(['albedo'], ao=True)
+        assert os.path.normpath(reps['ao']['path']) == os.path.normpath(str(orm)), reps['ao']['path']
+        assert os.path.normpath(reps['albedo']['path']) == os.path.normpath(str(alb_file)) and \
+            reps['albedo']['target'] == 'FILE', reps['albedo']['path']
+        db = dev_k1(read(alb_file)[0].astype(np.int64), 'albedo')
+        assert db <= 1 and file_hash(base) == h_base, (db, 'base.png changed')
+        found['76 (b)'] = (f"AO in place into orm.png, Albedo into a new {alb_file.name} (max deviation {db}); "
+                           f"base.png byte-identical")
+        # an Albedo-only Apply: the AO's files, the ORM texture and the other channels' files unchanged
+        h_ao = {p.name: file_hash(p) for p in [orm, ao_file] + others}
+        run(['albedo'])
+        assert {p.name: file_hash(p) for p in [orm, ao_file] + others} == h_ao, 'an Albedo-only Apply changed them'
+        found['76 albedo only'] = f'{len(h_ao)} files byte-identical ({", ".join(sorted(h_ao))})'
+        # (c) the emissive into a separate file in its own folder at its own resolution and padding
+        own = CH_WORK / 'emis_out'
+        s.emis_output_folder = str(own)
+        assert s.emis_output_folder == str(own) and s.output_folder == str(out_dir)
+        a.emis_target, a.emis_file_name, a.emis_resolution = 'FILE', 'own_emis', '512'
+        assert a.emis_file_name == 'own_emis'
+        widths = {}
+        for pad in (8, 2):
+            s.emis_padding = pad
+            target = own / 'own_emis.png'
+            if target.exists():
+                target.unlink()
+            reps = run(['emis'])
+            r = reps['emis']
+            assert os.path.normpath(r['path']) == os.path.normpath(str(target)) and r['size'] == [512, 512], r
+            vals = read(target)[0].astype(np.int64)
+            k1_512 = faces_mask('K1', 512, 512)
+            de = max(int(np.abs(vals[:, :, c][k1_512] - e).max()) for c, e in enumerate(exp['emis']))
+            assert de <= 1, de
+            beyond = core.dilate_ids(np.where(k1_512, 0, -1), 3)[0] < 0
+            widths[pad] = (r['written_px'], int((vals[beyond].max(axis=1) > 0).sum()), de)
+        assert widths[2][1] == 0 and widths[8][1] > 0 and widths[8][0] > widths[2][0], widths
+        assert file_hash(out_dir / 'CH_CONST.emissive.png') == h_ao['CH_CONST.emissive.png']  # the AO folder's
+        found['76 (c)'] = (f"emissive into emis_out/own_emis.png 512 x 512 (the AO's {SIZE}); padding 2: "
+                           f"{widths[2][0]} px written, none beyond 3 px of K1's faces; padding 8: {widths[8][0]} px, "
+                           f"{widths[8][1]} beyond; max deviation {widths[2][2]}")
+        s.emis_output_folder = str(out_dir)
+        assert s.get('emis_output_folder') == '', 'set to the AO folder: stored empty'
+        # (d) decision 97: a set without textures in its slots; the problem line per ticked channel, Run refused
+        tex = bpy.data.materials['CH_TEX']
+        t = tex.fss_ao_apply
+        assert getattr(tex, ao_bake_apply.P_BASE, None) is None and getattr(tex, ao_bake_apply.P_EMIS, None) is None
+        t.albedo_target, t.emis_target, t.target = 'SLOT', 'SLOT', 'ORM'
+        s.apply_ao, s.apply_cm = False, False
+        ch_set(s, 'apply', ['albedo'])
+        assert ao_bake.target_problems(bpy.context, tex) == ['No texture in the base colour slot']
+        ch_set(s, 'apply', ['albedo', 'rough', 'emis'])
+        got = ao_bake.target_problems(bpy.context, tex)
+        assert got == ['No texture in the ORM slot', 'No texture in the base colour slot',
+                       'No texture in the emissive slot'], got
+        ch_set(s, 'apply', ['albedo'])
+        keep_b = {p: getattr(s, p) for p in ['bake_ao', 'curvature'] + [f'bake_{g}' for g in core.CHANNEL_GROUPS]}
+        for p in keep_b:
+            setattr(s, p, False)
+        select(['T1'])
+        try:
+            lines = ao_bake.run_problems(bpy.context)
+            assert 'CH_TEX: No texture in the base colour slot' in lines, lines
+            refused = bpy.ops.fss.ao_run(hidden=True, wait=True)
+            assert refused == {'CANCELLED'}, refused
+            t.albedo_target = 'FILE'
+            assert not [x for x in ao_bake.run_problems(bpy.context) if x.startswith('CH_TEX')]
+        finally:
+            for p, v in keep_b.items():
+                setattr(s, p, v)
+            select([])
+        found['76 (d)'] = (f"CH_TEX: {got}; Run with Apply Albedo: '{lines[0]}', CANCELLED; with Separate File no "
+                           f"line")
+    finally:
+        for p, v in keep_s.items():
+            setattr(s, p, v)
+        ch_set(s, 'apply', ())
+        s.emis_output_folder = ''
+        a.emis_file_name = ''
+        for m in (a, bpy.data.materials['CH_TEX'].fss_ao_apply):
+            m.albedo_target = m.emis_target = 'FILE'
+            m.albedo_resolution = m.emis_resolution = str(SIZE)
+    return found
+
+
 def test_material_channels():
     """Decisions 79 to 83 (Session 61's steps 2.1 to 2.9): the material channels baked into the master from Principled
     materials built here, and Apply into their targets; decisions 85 to 87 (Session 65's steps 2.1 to 2.3): a
     mesh-changed channel applied anyway, roughness and metal of Target File in their own grey files, a shared mesh's
-    emissive combined over its copies."""
+    emissive combined over its copies; decisions 96 and 97 (Session 76's step 2, ch_own_targets): Albedo and Emissive
+    by their own Target, folder, file, resolution and padding, the problem line per ticked Apply channel."""
     t0 = time.time()
     src = build_channel_scene()
     s = bpy.context.scene.fss_ao_bake
@@ -3805,6 +3948,7 @@ def test_material_channels():
         finally:
             e_mesh.fss_ao_shared.combine = 'DEFAULT'
         found['65 2.3'] = emis_got
+        found.update(ch_own_targets(exp, k1))
         # FL2 (step 2.2): the material changes do not stale; a mesh change does (step 2.4)
     s.bake_ao, s.curvature = True, False
     ch_set(s, 'bake', ())

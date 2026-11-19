@@ -1243,6 +1243,88 @@ def test_ao_fetch_buttons():
           f"an AO master alone: '{seen['ORM only']}')")
 
 
+def test_ao_texture_target_sections():
+    """AO bake decisions 96 and 97: Texture Target draws an Albedo and an Emissive section, after AO and before
+    Curvature Map, each only while its Apply tick is on: Target expanded; Separate File (the default) with Output
+    Folder, File and Resolution; in place the slot's texture named (and the 8-bit note); Padding. The problem line
+    names a missing slot texture of a ticked channel."""
+    from fss_blender_tools import ao_bake, ao_bake_apply as apply_mod
+    s = bpy.context.scene.fss_ao_bake
+    keep = {p_: getattr(s, p_) for p_ in ('apply_ao', 'apply_cm', 'apply_albedo', 'apply_rough', 'apply_metal',
+                                          'apply_emis')}
+    added = [p_ for p_ in (apply_mod.P_BASE, apply_mod.P_EMIS) if not hasattr(bpy.types.Material, p_)]
+    for p_ in added:  # the exporter's slots, when it is not enabled here
+        setattr(bpy.types.Material, p_, bpy.props.PointerProperty(type=bpy.types.Image))
+    mat = bpy.data.materials.new('PANEL_TT_MAT')
+    st = SimpleNamespace(refreshed=True, sets=[SimpleNamespace(material=mat.name)], active_set=0)
+    image = bpy.data.images.new('PANEL_TT_BASE', 8, 8)  # 8-bit RGBA
+
+    def draw():
+        calls = []
+        ao_bake._draw_target(_Layout(calls), bpy.context, s, st)
+        props = [args[1] for name, args, kw in calls if name == 'prop']
+        labels = [kw.get('text') for name, _a, kw in calls if name == 'label']
+        expanded = [args[1] for name, args, kw in calls if name == 'prop' and kw.get('expand')]
+        return props, labels, expanded
+    seen = {}
+    try:
+        _select([], None)
+        a = mat.fss_ao_apply
+        assert (a.albedo_target, a.emis_target) == ('FILE', 'FILE'), (a.albedo_target, a.emis_target)
+        enum = a.bl_rna.properties['albedo_target'].enum_items
+        assert enum['SLOT'].name == 'Base Color Texture' and enum['FILE'].name == 'Separate File'
+        assert a.bl_rna.properties['emis_target'].enum_items['SLOT'].name == 'Emissive Texture'
+        tip = a.bl_rna.properties['target'].description
+        assert 'AO' in tip and 'roughness' in tip and 'metal' in tip, tip
+        for p_ in keep:
+            setattr(s, p_, False)
+        props, labels, _e = draw()
+        assert 'Albedo' not in labels and 'Emissive' not in labels and 'Curvature Map' in labels, labels
+        assert not [p_ for p_ in props if p_.startswith(('albedo_', 'emis_'))], props
+        s.apply_albedo = True
+        props, labels, expanded = draw()
+        assert labels.index('AO') < labels.index('Albedo') < labels.index('Curvature Map'), labels
+        assert 'Emissive' not in labels, labels
+        rows = [p_ for p_ in props if p_.startswith('albedo_')]
+        assert rows == ['albedo_target', 'albedo_output_folder', 'albedo_file_name', 'albedo_resolution',
+                        'albedo_padding'], rows
+        assert 'albedo_target' in expanded, expanded
+        seen['Separate File'] = rows
+        s.apply_emis = True
+        props, labels, _e = draw()
+        assert labels.index('Albedo') < labels.index('Emissive') < labels.index('Curvature Map'), labels
+        assert [p_ for p_ in props if p_.startswith('emis_')] == ['emis_target', 'emis_output_folder',
+                                                                 'emis_file_name', 'emis_resolution', 'emis_padding']
+        a.albedo_target = 'SLOT'
+        props, labels, _e = draw()
+        assert [p_ for p_ in props if p_.startswith('albedo_')] == ['albedo_target', 'albedo_padding'], props
+        assert 'No texture in the base colour slot' in labels, labels
+        setattr(mat, apply_mod.P_BASE, image)
+        props, labels, _e = draw()
+        assert 'Base colour texture: PANEL_TT_BASE' in labels and '8-bit file: written as 16-bit' in labels, labels
+        assert 'No texture in the base colour slot' not in labels, labels
+        seen['in place'] = ['albedo_target', 'albedo_padding', 'Base colour texture: PANEL_TT_BASE',
+                            '8-bit file: written as 16-bit']
+        a.emis_target = 'SLOT'
+        _p, labels, _e = draw()
+        assert 'No texture in the emissive slot' in labels, labels
+        seen['problem'] = 'No texture in the emissive slot'
+        s.apply_albedo = s.apply_emis = False
+        _p, labels, _e = draw()
+        assert 'Albedo' not in labels and 'Emissive' not in labels, labels
+        assert 'No texture in the emissive slot' not in labels, labels
+    finally:
+        for p_, v in keep.items():
+            setattr(s, p_, v)
+        bpy.data.materials.remove(mat)
+        bpy.data.images.remove(image)
+        for p_ in added:
+            delattr(bpy.types.Material, p_)
+    print(f"PASS: test_ao_texture_target_sections (none while their Apply ticks are off; Separate File rows "
+          f"{seen['Separate File']}; in place {seen['in place']}; Emissive after Albedo, both before Curvature Map; "
+          f"'{seen['problem']}' with Apply Emissive ticked, none unticked)")
+
+
 def main():
     test_layout()
     test_draw_all()
@@ -1258,6 +1340,7 @@ def main():
     test_ao_channel_toggles()  # AO bake decisions 79, 82, 84, 85 and 87
     test_ao_vertex_color_rows()  # AO bake decisions 88, 89, 91 and 95
     test_ao_fetch_buttons()  # AO bake decision 93
+    test_ao_texture_target_sections()  # AO bake decisions 96 and 97
     print("ALL TESTS PASSED")
 
 

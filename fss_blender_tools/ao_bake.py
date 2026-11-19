@@ -18,7 +18,10 @@ FSS MSFS Tools > Bake, with its sub-panel Run (decision 75):
   bake.
 - Texture Target (the Apply box before decision 75): padding; a row per texture set with its state (masters complete, or the number missing or stale; faces under
   4 x); for the active row: target (ORM slot texture or separate file) and the separate file's output folder,
-  name, resolution, layout, green and blue, sampling; the warnings (Apply runs from Run).
+  name, resolution, layout, green and blue, sampling (the AO's, also roughness and metal's); while Apply Albedo or
+  Apply Emissive is ticked, their own section (decision 96: in place in the base colour or emissive slot's texture,
+  or a separate file with its own folder, name, resolution) and padding; Curvature Map; the problems of every ticked
+  Apply channel's target (decision 97; Apply runs from Run).
 - Run (decisions 75, 79, 82, 84, 85): one grid of ticks, a row each for AO, CM, Albedo, Roughness, Metal and Emissive
   (the channels off by default), Bake Selected left and Apply right, an Apply tick alert while a selected master's
   mesh changed since that bake (applied anyway, the warning line counts them); the Object box lists the channels the
@@ -91,6 +94,22 @@ def _set_curv_resolution(self, value):
     self['curv_resolution'] = value
 
 
+def _get_albedo_resolution(self):
+    return _res_get(self, 'albedo_resolution')
+
+
+def _set_albedo_resolution(self, value):
+    self['albedo_resolution'] = value
+
+
+def _get_emis_resolution(self):
+    return _res_get(self, 'emis_resolution')
+
+
+def _set_emis_resolution(self, value):
+    self['emis_resolution'] = value
+
+
 def _redraw(sidebar_only=False):
     """The 3D views redrawn; sidebar_only: only their sidebar (the panel's progress while a bake or an Apply runs: a
     whole 3D view of a large scene takes long to draw, and Apply drew it after every 0.1 s of work)."""
@@ -114,6 +133,24 @@ def _get_curv_folder(self):
 
 def _set_curv_folder(self, value):
     self['curv_output_folder'] = '' if value == self.output_folder else value
+
+
+def _get_albedo_folder(self):
+    """Decision 96: the albedo's Output Folder, as the curvature's (stored empty, it follows the AO's)."""
+    return self.get('albedo_output_folder', '') or self.output_folder
+
+
+def _set_albedo_folder(self, value):
+    self['albedo_output_folder'] = '' if value == self.output_folder else value
+
+
+def _get_emis_folder(self):
+    """Decision 96: the emissive's Output Folder, as the curvature's (stored empty, it follows the AO's)."""
+    return self.get('emis_output_folder', '') or self.output_folder
+
+
+def _set_emis_folder(self, value):
+    self['emis_output_folder'] = '' if value == self.output_folder else value
 
 
 VC_MODES = [  # decision 89
@@ -252,17 +289,17 @@ class FSS_AOBakeSettings(bpy.types.PropertyGroup):
     vc_rough_mode: bpy.props.EnumProperty(name="Mode", default='MULTIPLY', items=VC_MODES)
     vc_metal_mode: bpy.props.EnumProperty(name="Mode", default='MULTIPLY', items=VC_MODES)
     apply_albedo: bpy.props.BoolProperty(name="Albedo", default=False,
-                                         description="Run writes the albedo masters into the base colour texture "
-                                         "(Separate File: <material>.albedo.png)")
+                                         description="Run writes the albedo masters where Texture Target's Albedo "
+                                         "says: the base colour texture, or <material>.albedo.png")
     apply_rough: bpy.props.BoolProperty(name="Roughness", default=False,
-                                        description="Run writes the roughness masters into the green of the ORM "
-                                        "texture (Separate File: <material>.roughness.png)")
+                                        description="Run writes the roughness masters where Texture Target's AO "
+                                        "says: the green of the ORM texture, or <material>.roughness.png")
     apply_metal: bpy.props.BoolProperty(name="Metal", default=False,
-                                        description="Run writes the metal masters into the blue of the ORM texture "
-                                        "(Separate File: <material>.metal.png)")
+                                        description="Run writes the metal masters where Texture Target's AO says: "
+                                        "the blue of the ORM texture, or <material>.metal.png")
     apply_emis: bpy.props.BoolProperty(name="Emissive", default=False,
-                                       description="Run writes the emissive masters into the emissive texture "
-                                       "(Separate File: <material>.emissive.png)")
+                                       description="Run writes the emissive masters where Texture Target's Emissive "
+                                       "says: the emissive texture, or <material>.emissive.png")
     samples: bpy.props.IntProperty(name="Samples", default=256, min=1, soft_max=1024,
                                    description="Cycles samples per master pixel")
     channel_samples: bpy.props.IntProperty(name="Channel Samples", default=64, min=1, soft_max=256,
@@ -286,10 +323,15 @@ class FSS_AOBakeSettings(bpy.types.PropertyGroup):
                                                "logical processors, at least 2; a number above this PC's logical "
                                                "processors uses them all")
     padding: bpy.props.IntProperty(name="Padding", default=8, min=0, max=64, subtype='PIXEL',
-                                   description="Pixels written around each island by Apply, in the AO")
+                                   description="Pixels written around each island by Apply, in the AO, the "
+                                   "roughness and the metal")
     curv_padding: bpy.props.IntProperty(name="Padding", default=8, min=0, max=64, subtype='PIXEL',
                                         description="Pixels written around each island by Apply, in the curvature "
                                         "map")
+    albedo_padding: bpy.props.IntProperty(name="Padding", default=8, min=0, max=64, subtype='PIXEL',
+                                          description="Pixels written around each island by Apply, in the albedo")
+    emis_padding: bpy.props.IntProperty(name="Padding", default=8, min=0, max=64, subtype='PIXEL',
+                                        description="Pixels written around each island by Apply, in the emissive")
     soften_edges: bpy.props.BoolProperty(
         name="Soften Sharp Edges", default=False,
         description="Apply treats convex sharp edges (a lip, a rim; faces more than 30 degrees apart) as slightly "
@@ -305,6 +347,12 @@ class FSS_AOBakeSettings(bpy.types.PropertyGroup):
     curv_output_folder: bpy.props.StringProperty(
         name="Output Folder", subtype='DIR_PATH', get=_get_curv_folder, set=_set_curv_folder,
         description="Where Apply writes the curvature files; cleared, it goes back to the AO's Output Folder")
+    albedo_output_folder: bpy.props.StringProperty(
+        name="Output Folder", subtype='DIR_PATH', get=_get_albedo_folder, set=_set_albedo_folder,
+        description="Where Apply writes the albedo files; cleared, it goes back to the AO's Output Folder")
+    emis_output_folder: bpy.props.StringProperty(
+        name="Output Folder", subtype='DIR_PATH', get=_get_emis_folder, set=_set_emis_folder,
+        description="Where Apply writes the emissive files; cleared, it goes back to the AO's Output Folder")
     poses: bpy.props.IntProperty(name="Default Poses", default=5, min=1, max=64,
                                  description="An object with something moving against it (it moves, or a part "
                                  "near it does) is baked in this many poses spread evenly over that animation and "
@@ -557,6 +605,27 @@ def _set_curv_file_name(self, value):
     self['curv_file_name'] = '' if value == apply_mod.default_curvature_name(self.id_data) else value
 
 
+def _get_albedo_file_name(self):
+    """Decision 96: the set's albedo file name, else <material>.albedo.png (stored empty, it follows a rename)."""
+    return self.get('albedo_file_name', '') or apply_mod.channel_file_name(self.id_data, 'albedo')
+
+
+def _set_albedo_file_name(self, value):
+    value = value.strip()
+    self['albedo_file_name'] = '' if value == apply_mod.channel_file_name(self.id_data, 'albedo') else value
+
+
+def _get_emis_file_name(self):
+    """Decision 96: the set's emissive file name, else <material>.emissive.png (stored empty, it follows a
+    rename)."""
+    return self.get('emis_file_name', '') or apply_mod.channel_file_name(self.id_data, 'emis')
+
+
+def _set_emis_file_name(self, value):
+    value = value.strip()
+    self['emis_file_name'] = '' if value == apply_mod.channel_file_name(self.id_data, 'emis') else value
+
+
 def _get_file_name(self):
     """The set's own name, else <material>_ao.png (shown in the box; stored empty, it follows a rename)."""
     return self.get('file_name', '') or apply_mod.default_file_name(self.id_data)
@@ -571,8 +640,31 @@ class FSS_AOApplySettings(bpy.types.PropertyGroup):
     use: bpy.props.BoolProperty(name="Apply", default=True,
                                 description="Apply Selected writes this texture set (unticked: it is left as it is)")
     target: bpy.props.EnumProperty(name="Target", default='FILE', items=[
-        ('FILE', 'Separate File', 'A file of its own in the output folder'),
-        ('ORM', 'ORM Texture', "The red channel of the texture in the material's ORM slot; green and blue stay")])
+        ('FILE', 'Separate File', 'A file of its own in the output folder (Roughness and Metal: '
+         '<material>.roughness.png and <material>.metal.png beside it)'),
+        ('ORM', 'ORM Texture', "The texture in the material's ORM slot: the AO into its red, Roughness into its "
+         "green, Metal into its blue; the channels not applied stay")],
+        description="Where Apply writes the AO, the roughness and the metal")
+    albedo_target: bpy.props.EnumProperty(name="Target", default='FILE', items=[  # decision 96
+        ('FILE', 'Separate File', 'A file of its own in its output folder'),
+        ('SLOT', 'Base Color Texture', "The texture in the material's base colour slot, in place: its red, green "
+         "and blue; alpha stays")], description="Where Apply writes the albedo")
+    emis_target: bpy.props.EnumProperty(name="Target", default='FILE', items=[  # decision 96
+        ('FILE', 'Separate File', 'A file of its own in its output folder'),
+        ('SLOT', 'Emissive Texture', "The texture in the material's emissive slot, in place: its red, green and "
+         "blue; alpha stays")], description="Where Apply writes the emissive")
+    albedo_file_name: bpy.props.StringProperty(name="File", get=_get_albedo_file_name, set=_set_albedo_file_name,
+                                               description="The albedo file's name in its output folder; cleared, "
+                                               "it goes back to <material>.albedo.png")
+    emis_file_name: bpy.props.StringProperty(name="File", get=_get_emis_file_name, set=_set_emis_file_name,
+                                             description="The emissive file's name in its output folder; cleared, "
+                                             "it goes back to <material>.emissive.png")
+    albedo_resolution: bpy.props.EnumProperty(name="Resolution", items=resolution_items, get=_get_albedo_resolution,
+                                              set=_set_albedo_resolution, description="A new albedo file's size (an "
+                                              "existing file keeps its own)")
+    emis_resolution: bpy.props.EnumProperty(name="Resolution", items=resolution_items, get=_get_emis_resolution,
+                                            set=_set_emis_resolution, description="A new emissive file's size (an "
+                                            "existing file keeps its own)")
     file_name: bpy.props.StringProperty(name="File", get=_get_file_name, set=_set_file_name,
                                         description="The file's name in the output folder; cleared, it goes back to "
                                         "<material>_ao.png")
@@ -1900,23 +1992,47 @@ def apply_material(context, st):
     return bpy.data.materials.get(name) if name else None
 
 
-def target_problem(context, material):
-    """Why Apply cannot write this texture set's ticked targets, or '' (the ORM texture's file, or an output folder)."""
+CH_TARGETS = {'albedo': ('Albedo', apply_mod.P_BASE, 'base colour', 'Base colour texture'),  # decision 96
+              'emis': ('Emissive', apply_mod.P_EMIS, 'emissive', 'Emissive texture')}
+
+
+def target_problems(context, material):
+    """Decision 97: why Apply cannot write this texture set's targets, per ticked Apply channel (the AO, Roughness
+    and Metal: the AO section's Target; Albedo and Emissive: their own; the curvature: its folder), each once."""
     a = material.fss_ao_apply
     s = context.scene.fss_ao_bake
-    if s.apply_ao and a.target == 'ORM':
+    out = []
+    orm_users = s.apply_ao or s.apply_rough or s.apply_metal
+    if orm_users and a.target == 'ORM':
         orm = apply_mod.orm_image(material)
+        path = apply_mod.image_path(orm) if orm is not None else ''
         if orm is None:
-            return 'No texture in the ORM slot'
-        path = apply_mod.image_path(orm)
-        if not path or not os.path.isfile(path):
-            return f'ORM texture file not found: {path or orm.name}'
-    for kind, on in (('ao', s.apply_ao and a.target == 'FILE'), ('curv', s.apply_cm)):
+            out.append('No texture in the ORM slot')
+        elif not path or not os.path.isfile(path):
+            out.append(f'ORM texture file not found: {path or orm.name}')
+    for g, (_title, prop, slot, label) in CH_TARGETS.items():
+        if getattr(s, f'apply_{g}') and getattr(a, f'{g}_target') == 'SLOT':
+            image = getattr(material, prop, None)
+            path = apply_mod.image_path(image) if isinstance(image, bpy.types.Image) else ''
+            if not isinstance(image, bpy.types.Image):
+                out.append(f'No texture in the {slot} slot')
+            elif not path or not os.path.isfile(path):
+                out.append(f'{label} file not found: {path or image.name}')
+    for kind, on in (('ao', orm_users and a.target == 'FILE'), ('curv', s.apply_cm),
+                     ('albedo', s.apply_albedo and a.albedo_target == 'FILE'),
+                     ('emis', s.apply_emis and a.emis_target == 'FILE')):
         if on:
             folder = apply_mod.output_folder(context.scene, kind)
-            if not (os.path.isdir(folder) or os.path.isdir(os.path.dirname(folder.rstrip('\\/')))):
-                return f'Output folder cannot be made: {folder}'
-    return ''
+            line = f'Output folder cannot be made: {folder}'
+            if (not (os.path.isdir(folder) or os.path.isdir(os.path.dirname(folder.rstrip('\\/'))))
+                    and line not in out):
+                out.append(line)
+    return out
+
+
+def target_problem(context, material):
+    """Why Apply cannot write this texture set's ticked targets, or '' (target_problems joined)."""
+    return '; '.join(target_problems(context, material))
 
 
 def _draw_size(layout, settings, prop, path):
@@ -2491,7 +2607,7 @@ def _draw_target(layout, context, s, st):
     sub = box.column(align=True)
     sub.label(text=f'Texture set: {material.name}', icon='MATERIAL')
     orm = apply_mod.orm_image(material)
-    problem = target_problem(context, material)
+    problems = target_problems(context, material)
     sub.label(text='AO')
     ind = sub.row()
     ind.separator(factor=2.0)
@@ -2526,6 +2642,9 @@ def _draw_target(layout, context, s, st):
     cell = row.row(align=True)
     cell.enabled = s.soften_edges
     cell.prop(s, 'soften_width', text='Width')
+    for g in CH_TARGETS:  # decision 96: while its Apply tick is on
+        if getattr(s, f'apply_{g}'):
+            _draw_channel_target(sub, context, s, a, material, g)
     sub.label(text='Curvature Map')  # decision 54
     ind = sub.row()
     ind.separator(factor=2.0)
@@ -2535,8 +2654,33 @@ def _draw_target(layout, context, s, st):
     _draw_size(col, a, 'curv_resolution', os.path.join(apply_mod.output_folder(context.scene, 'curv'),
                                                        apply_mod.curvature_name(material)))
     col.prop(s, 'curv_padding')
-    if problem:
+    for problem in problems:  # decision 97: every ticked Apply channel's
         sub.label(text=problem, icon='ERROR')
+
+
+def _draw_channel_target(sub, context, s, a, material, g):
+    """Decision 96: the Albedo or Emissive section, laid out as the AO's: Target, in place the slot's texture (and
+    the 8-bit note), Separate File its folder, file and resolution; Padding."""
+    title, prop, _slot, label = CH_TARGETS[g]
+    sub.label(text=title)
+    ind = sub.row()
+    ind.separator(factor=2.0)
+    col = ind.column(align=True)
+    row = col.row(align=True)
+    row.label(text='Target')
+    row.prop(a, f'{g}_target', expand=True)
+    if getattr(a, f'{g}_target') == 'SLOT':
+        image = getattr(material, prop, None)
+        if isinstance(image, bpy.types.Image):
+            col.label(text=f'{label}: {image.name}', icon='IMAGE_DATA')
+            if image.depth and image.depth < 48 and not image.is_float:  # decision 74, as the ORM texture's
+                col.label(text='8-bit file: written as 16-bit', icon='ERROR')
+    else:
+        col.prop(s, f'{g}_output_folder')
+        col.prop(a, f'{g}_file_name')
+        _draw_size(col, a, f'{g}_resolution', os.path.join(apply_mod.output_folder(context.scene, g),
+                                                           apply_mod.channel_name(material, g)))
+    col.prop(s, f'{g}_padding')
 
 
 @persistent
