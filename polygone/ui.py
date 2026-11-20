@@ -22,7 +22,25 @@ def library(context):
     return native.load(prefs.dll_path if prefs else '')
 
 
-_SWITCH_ITEMS = [(str(bit), name, f'Bit {bit}, default {"on" if on else "off"}') for bit, name, on in native.SWITCHES]
+# What the switches of libPolygone's iterations 5 and 6 buy and cost, as measured by its bench against the defaults
+# (libPolygone src/core/README.md section 4; "shape" is the distance to the input, "texture" the UV error).
+_TRADE_OFFS = {
+    16384: 'Better texture with locks at 25 and 10 %; worse shape at every target and texture without locks; slower',
+    32768: 'Better shape with locks at 50 and 25 %; much worse texture',
+    65536: 'Worse shape at every target and worse texture without locks at 25 and 10 %',
+    131072: 'Worse shape without locks and worse texture at 50 and 25 %; slower',
+    262144: 'Worse shape with locks at 50 and 25 %; texture unchanged',
+    524288: 'Gets closer to the target (fewer vertices); worse texture on some meshes where UV wrap seams turn',
+    1048576: 'Gets a little closer to the target when reduction stalls; on by default',
+    2097152: 'Better shape with locks at 10 %; worse shape and texture without locks; slower',
+    4194304: 'No triangle turned over in UV; worse shape and stops further above the target',
+    8388608: 'Better shape at every target; slightly worse texture with locks at 25 % and without locks at 10 %',
+    16777216: 'Better texture with locks at 50 and 25 %; worse texture and shape without locks at 10 %; more memory',
+    33554432: 'Reaches the target more often (fewer vertices); worse texture with locks at 10 % where it reduces more',
+}
+_SWITCH_ITEMS = [(str(bit), name, f'Bit {bit}, default {"on" if on else "off"}'
+                  + (f'. {_TRADE_OFFS[bit]}' if bit in _TRADE_OFFS else ''))
+                 for bit, name, on in native.SWITCHES]
 _SWITCH_DEFAULT = {str(bit) for bit, _name, on in native.SWITCHES if on}
 
 

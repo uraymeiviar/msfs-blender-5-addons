@@ -10,7 +10,7 @@ bl_info = {
     "description": "Mesh reduction of the selected objects with libPolygone: feature lines, locks, importance, "
                    "UVs, normals and colours kept",
     "blender": (5, 2, 0),
-    "version": (0, 1, 0),
+    "version": (0, 2, 0),
     "location": "3D View > Sidebar > Polygone",
     "category": "Mesh",
 }

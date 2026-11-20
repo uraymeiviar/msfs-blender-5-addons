@@ -48,6 +48,18 @@ SWITCHES = (
     (2048, 'Remember borders', False),
     (4096, 'Keep input values', False),
     (8192, 'Root area weights', False),
+    (16384, 'Restrain placement', False),
+    (32768, 'Subset values on wide wedges', False),
+    (65536, 'Split normalisation', False),
+    (131072, 'Constrain volume', False),
+    (262144, 'Region normals', False),
+    (524288, 'Stall stage', False),
+    (1048576, 'Relative quality floor', True),
+    (2097152, 'Min-max placement', False),
+    (4194304, 'Reject UV folds', False),
+    (8388608, 'Max-plane term', False),
+    (16777216, 'Sample gate', False),
+    (33554432, 'Edge flips at a stall', False),
 )
 
 
