@@ -17,6 +17,7 @@ The **Bake** panel (sidebar `N` > **FSS MSFS Tools** > **Bake**, with its sub-pa
 ## What Is Baked
 
 - **Baked:** every visible mesh object of `_LOD00` with faces and a UV map, and only its faces whose material is a texture set. An object hidden in the viewport or from rendering, or marked **Visible from** a later LOD in [Object LOD](lod.md#object-lod), gets no master.
+- **Local view does not matter:** a bake started in local view (numpad /) bakes, and darkens with, the same objects as outside it. To leave occluders out, use the object's **Custom** occluders.
 - **Left out by themselves:** faces with decal, glass, windshield, invisible or occluder materials. They get no AO and darken nothing.
 - **Left out by tags** (see [Tags](#tags)): objects with a tag that has **Skip-AO-Bake**, **No Texture**, **Invisible** or **No Export** on get no master.
 - After a **Refresh**, the **Excluded** count says how many visible meshes get no master. A bake's console report lists them with the reason: the tag, **no UV map**, **skip materials only**, or **no face with a texture set (material)**.
@@ -73,7 +74,7 @@ The **Bake** box holds the settings for the whole file. Changing a setting that 
   - A master baked by the other baker is not out of date.
 - **FSS OptiX Samples** (default 4096): rays per master pixel with FSS OptiX. Shown unless the baker is Cycles.
 - **Cycles Samples** (named **Samples** when the baker is Cycles; default 256), **Device** (**CPU** or **GPU**) and, with CPU, **Threads** (the CPU threads of the bake and of Apply; 0: half of this PC's logical processors). Shown unless the baker is FSS OptiX.
-- **Channel Samples** (default 64): samples per master pixel of the material channels, which always bake with Cycles.
+- **Channel Samples** (default 64): samples per master pixel of the material channels, which bake with Cycles. A Custom value or colour is written straight into the master and needs none.
 
 ### Poses, Shared Meshes and Occluders
 
@@ -174,7 +175,7 @@ The texture sets and where Apply writes. It needs a Refresh first (**Refresh fir
   - **Output Folder:** empty, a folder `<blend name>_ao` beside the `.blend`.
   - **File:** default `<material>_ao.png`; clear it to go back to the default.
   - **Resolution:** the size of a new file: **ORM Texture Size** (when the material has an ORM texture) or 256 to 8192 pixels per side. An existing file keeps its own size, shown as **Resolution: 4096 x 4096 (the file's size)**.
-  - **Channels:** **Greyscale** (the AO in red, green and blue) or **Red (ORM)** (the AO in red). With Red (ORM), **Green and Blue:** **White** (MSFS then uses the material's roughness and metallic factors) or **From ORM Texture** (the roughness and metallic of the ORM texture). At another size than the ORM texture, the box warns **Another size: roughness and metallic are resampled** and offers **Sampling**: **Automatic**, **Nearest** (hard metallic edges stay hard) or **Bicubic** (sharper).
+  - **Channels:** **Greyscale** (the AO in red, green and blue) or **Red (ORM)** (the AO in red). With Red (ORM), **Green and Blue:** **White** (MSFS then uses the material's roughness and metallic factors) **From ORM Texture** (the roughness and metallic of the ORM texture) or **Custom**, which shows **Roughness** (default 1.0) and **Metal** (default 0.0): MSFS multiplies the material's roughness and metallic factors by them, so 1.0 keeps a factor and 0.0 makes the set not metallic. They fill a new file only; an existing file keeps its green and blue. At another size than the ORM texture, the box warns **Another size: roughness and metallic are resampled** and offers **Sampling**: **Automatic**, **Nearest** (hard metallic edges stay hard) or **Bicubic** (sharper).
 - **Padding** (default 8 px): the pixels written around each island. It applies to the AO, the roughness and the metal.
 - **Soften Sharp Edges** and **Width:** Apply treats convex sharp edges (a lip, a rim; faces more than 30 degrees apart) as slightly rounded: the darker side brightens toward the brighter side at the edge. Inside corners keep their contact shadow. The AO only; the masters are not changed.
 
@@ -262,10 +263,12 @@ Under the grid, one row for each channel whose Bake tick is on:
 | Row | Reads |
 | :--- | :--- |
 | **AO from Vertex Color Red** | the red |
-| **Albedo from Vertex Color** | the colour (red, green, blue) |
-| **Roughness from Vertex Color Green** | the green |
-| **Metal from Vertex Color Blue** | the blue |
-| **Emissive from Vertex Color** | the colour (red, green, blue) |
+| **Albedo**: **Vertex Color** | the colour (red, green, blue) |
+| **Roughness**: **Vertex Color Green** | the green |
+| **Metal**: **Vertex Color Blue** | the blue |
+| **Emissive**: **Vertex Color** | the colour (red, green, blue) |
+
+**Albedo**, **Roughness**, **Metal** and **Emissive** have a drop-down instead of a tick: **Material** (default), **Vertex Color**, or **Custom** (see [Custom Values and Colours](#custom-values-and-colours)). AO keeps its tick.
 
 Ticked, a row offers:
 
@@ -286,6 +289,22 @@ Ticked, a row offers:
 - A new mesh gets a white `Color` attribute from the MSFS exporter. It is the first attribute, so **Second Color Attribute** never reads it.
 
 A shared mesh's attribute belongs to the mesh, so every copy gets the same values; a vertex colour emissive is not combined over the copies.
+
+## Custom Values and Colours
+
+**Custom** in the Albedo, Roughness, Metal or Emissive drop-down bakes one value or colour per object, the same on every face, without painting it into the vertex colour.
+
+- **Each object keeps its own,** saved in the `.blend` with the object. Changing the object's material does not change it.
+- **Setting it:** with Custom chosen, the Run panel shows the active object's **Albedo** (a colour, default white), **Roughness** (default 1.0), **Metal** (default 0.0) and **Emissive** (a colour, default black), each while its channel is Custom. To give several objects one value, set it on one and use Blender's right-click **Copy to Selected**.
+- **A colour bakes as the material's Base Color or Emission Color would:** pick it as you would there.
+- When the selected objects have different values, a line says so: each object bakes its own.
+- **Overwrite** (default): the master's channel becomes the value. **Multiply:** the master's channel times the value, as for a vertex colour source; colours are multiplied channel by channel, so a light grey darkens a baked albedo evenly and a tint colours it.
+- A shared mesh's Custom emissive is not combined over the copies: it is the colour of the copy its channels are baked from.
+- A shared mesh takes the value of the copy its channels are baked from (the **Copy** choice).
+- Changing a value does not make the master out of date: bake the object again.
+- **A Custom channel bakes fast:** the value is written straight into the master's pixels without Cycles, with the same result. Writing the images still takes its time on a large master.
+
+The **Roughness** and **Metal** sliders under **Green and Blue: Custom** in Texture Target are a separate setting: they fill a new ORM file, not the master.
 
 ## Fetch: Masters Into the Vertex Colour
 
@@ -336,5 +355,6 @@ Other toggles: objects whose tag has **No Texture** on get no master but still d
 - **A master follows the mesh, not the UVs.** A bake keeps the master's layout while the mesh is unchanged, so a larger texture does not give the master more detail. Apply's console report counts the faces whose master has less than 4 times their texture's detail.
 - **A changed mesh is applied anyway.** The result can be wrong where the mesh changed; bake those objects again.
 - **One master per shared mesh:** all copies show the same AO.
+- **Dark patches on an n-gon:** an n-gon that is not quite flat splits into thin tilted triangles that bake dark. [Find Bent N-gons](fss-tools.md#find-bent-n-gons) (tab **FSS Tools** > **Checks**) finds them; flatten those faces or cut them into quads and triangles, then bake again.
 - **The masters live only in the bake folder.** Deleting or moving `<blend name>.bake` loses them; renaming the `.blend` starts a new, empty bake folder.
 - **Apply writes into files on disk.** With **Target ORM Texture** it changes your texture files in place; the first version of each is kept in the bake folder.

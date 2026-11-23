@@ -69,6 +69,10 @@ a Color Attribute node, the same material on every slot; the values linear for e
 material. Multiply multiplies the master's current image of the channel in the kept layout (decision 81), onto 1.0
 where there is none. The AO's: Overwrite removes the raw bake and the product; Multiply of a traced AO keeps the
 product of its multiplies as <stem>.ao_vc.jxl, so a later denoise-only run gives the denoised raw bake times it.
+
+Custom values (decisions 99 and 100; settings['custom_value'], {group: OVERWRITE or MULTIPLY}, the item's
+custom_values {group: value}): the roughness, metal, albedo or emissive baked through the same path from an Emission
+shader of the object's own value or linear colour, Overwrite or Multiply as a vertex colour source.
 """
 import importlib.util
 import json
@@ -1576,6 +1580,67 @@ def bake_emit(obj, img, px, samples):
 
 VC = dict(SET.get('vertex_color') or {})  # decisions 88 to 90: {group: 'OVERWRITE' or 'MULTIPLY'}
 VC_ATTRIBUTE = SET.get('vc_attribute') or 'SECOND'  # decision 91: the second colour attribute, or the active one
+CV = dict(SET.get('custom_value') or {})  # decision 99: {group: 'OVERWRITE' or 'MULTIPLY'}, the object's own value
+CV_NAMES = {'rough': 'Roughness from Custom', 'metal': 'Metal from Custom', 'albedo': 'Albedo from Custom',
+            'emis': 'Emissive from Custom'}  # decision 100: the colours too
+
+
+# decision 101: a Custom group is written straight into the master; tests set FSS_AO_BAKE_CUSTOM_CYCLES to bake it
+# through Cycles as before (value_material), to compare the two
+CV_DIRECT = not os.environ.get('FSS_AO_BAKE_CUSTOM_CYCLES')
+
+
+class _MapBands:
+    """Decision 101: the stored map's filled pixels (the pixels Apply reads) of a kept layout, read from the top in the
+    order bake_paged_multi bakes its bands; only the rows of the current band are held."""
+
+    def __init__(self, path, W, H):
+        mW, mH, self.gen = core.map_rows(path)
+        if (mW, mH) != (W, H):
+            self.gen.close()
+            raise ValueError(f'{path}: map {mW} x {mH}, layout {W} x {H}')
+        self.W = W
+        self.buf = np.zeros((0, W), bool)  # rows lo..hi-1 (row 0 = bottom), bottom first
+        self.lo = self.hi = H
+
+    def window(self, x0, y0, w, h):
+        while self.lo > y0:
+            blk = next(self.gen)  # file order: the top first
+            self.buf = np.concatenate([core.code_filled(blk)[::-1], self.buf])
+            self.lo -= blk.shape[0]
+        if y0 + h < self.hi:
+            self.buf = self.buf[:y0 + h - self.lo]
+            self.hi = y0 + h
+        return self.buf[y0 - self.lo:y0 + h - self.lo, x0:x0 + w].copy()
+
+    def close(self):
+        self.gen.close()
+
+
+class _MapRows:
+    """Decision 101: a kept layout's stored map codes, read in file order (the top first) as many rows at a time as the
+    composition writes."""
+
+    def __init__(self, path, W, H):
+        mW, mH, self.gen = core.map_rows(path)
+        if (mW, mH) != (W, H):
+            self.gen.close()
+            raise ValueError(f'{path}: map {mW} x {mH}, layout {W} x {H}')
+        self.buf = np.zeros((0, W), np.int32)
+
+    def read(self, n):
+        while len(self.buf) < n:
+            self.buf = np.concatenate([self.buf, next(self.gen)])
+        out, self.buf = self.buf[:n], self.buf[n:]
+        return out
+
+    def close(self):
+        self.gen.close()
+
+
+def _cv_json(v):
+    """A Custom value for the index and the result: a float, or a colour's list of 3."""
+    return [float(c) for c in v] if isinstance(v, (list, tuple)) else float(v)
 VC_COMP = {'ao': 0, 'rough': 1, 'metal': 2, 'albedo': None, 'emis': None}  # the colour's component (None: RGB)
 VC_NAMES = {'ao': 'AO from Vertex Color Red', 'rough': 'Roughness from Vertex Color Green',
             'metal': 'Metal from Vertex Color Blue', 'albedo': 'Albedo from Vertex Color',
@@ -1626,6 +1691,26 @@ def vc_material(attr, group, image):
         sep = nt.nodes.new('ShaderNodeSeparateColor')
         nt.links.new(ca.outputs['Color'], sep.inputs[0])
         nt.links.new(sep.outputs[comp], em.inputs['Color'])
+    nt.links.new(em.outputs[0], out.inputs['Surface'])
+    tex = nt.nodes.new('ShaderNodeTexImage')
+    tex.image = image
+    nt.nodes.active = tex
+    return mat
+
+
+def value_material(value, group, image):
+    """Decisions 99 and 100: an Emission shader (strength 1) of one grey value or one linear colour (a list of 3),
+    with an Image Texture node of `image` active for the bake."""
+    mat = bpy.data.materials.new(f'FSS_CV_{group}')
+    mat.use_nodes = True
+    nt = mat.node_tree
+    for n in list(nt.nodes):
+        nt.nodes.remove(n)
+    out = nt.nodes.new('ShaderNodeOutputMaterial')
+    em = nt.nodes.new('ShaderNodeEmission')
+    em.inputs['Strength'].default_value = 1.0
+    rgb = [float(c) for c in value] if isinstance(value, (list, tuple)) else [float(value)] * 3
+    em.inputs['Color'].default_value = (*rgb, 1.0)
     nt.links.new(em.outputs[0], out.inputs['Surface'])
     tex = nt.nodes.new('ShaderNodeTexImage')
     tex.image = image
@@ -1697,8 +1782,9 @@ def channel_item(item, coll, ao=False):
     # decision 87: a shared mesh's emissive from each copy, combined as the AO's copies (not One Instance)
     combine = item.get('combine') if item.get('copies') else None
     emis_copies = []
-    # decision 95: a vertex colour emissive is the mesh's, the same for every copy: not combined
-    if 'emis' in groups and combine and combine != 'ONE' and 'emis' not in VC:
+    # decision 95: a vertex colour emissive is the mesh's, the same for every copy: not combined; decision 100: a
+    # Custom emissive is the copy's the channels come from, not combined either
+    if 'emis' in groups and combine and combine != 'ONE' and 'emis' not in VC and 'emis' not in CV:
         for c in item['copies']:
             o = bpy.data.objects.get(c['object'])
             if o is None or o.type != 'MESH':
@@ -1709,7 +1795,10 @@ def channel_item(item, coll, ao=False):
                 emis_copies.append(o)
         emis_copies = emis_copies or [src_obj]
     # decisions 88 to 91: the groups from the source colour attribute; without one they are skipped for this object
-    vc = {g: VC[g] for g in groups if g in VC and g in VC_COMP}
+    vc = {g: VC[g] for g in groups if g in VC and g in VC_COMP and g not in CV}
+    cv_vals = dict(item.get('custom_values') or {})
+    cv = {g: CV[g] for g in groups if g in CV and g in cv_vals}  # decision 99: the object's own value
+    dv = cv if CV_DIRECT else {}  # decision 101: the Custom groups written directly
     vc_attr, vc_type, vc_why = source_color(src_obj, dg) if vc else (None, None, '')
     vc_skipped = []
     if vc and vc_attr is None:
@@ -1730,7 +1819,8 @@ def channel_item(item, coll, ao=False):
     old_ch = (old or {}).get('channels') or {}
     old_src = (old or {}).get('ao_source') or {}
     mult, eff = {}, {}
-    for g, mode in vc.items():
+    for g, mode in list(vc.items()) + list(cv.items()):  # decision 99: a Custom value as a vertex colour source
+        src_name = CV_NAMES[g] if g in cv else VC_NAMES[g]
         paths = [core.image_paths(FOLDER, key, k)[0] for k in KINDS[g]]
         have = kept and all(os.path.isfile(p_) for p_ in paths) and (g == 'ao' or g in old_ch)
         if mode == 'MULTIPLY' and have:
@@ -1740,8 +1830,8 @@ def channel_item(item, coll, ao=False):
             eff[g] = 'OVERWRITE'
             if mode == 'MULTIPLY':
                 why = 'a new layout (the mesh changed)' if not kept and old else 'no master of it'
-                notes.append(f'{VC_NAMES[g]}: Multiply with {why}, as Overwrite')
-                log(f"  {item['name']}: {VC_NAMES[g]} Multiply with {why}: multiplied onto 1.0 (as Overwrite)")
+                notes.append(f'{src_name}: Multiply with {why}, as Overwrite')
+                log(f"  {item['name']}: {src_name} Multiply with {why}: multiplied onto 1.0 (as Overwrite)")
     # the AO's product of its multiplies since the last trace or Overwrite (rule item 4)
     ao_traced = 'ao' in mult and old_src.get('mode') != 'OVERWRITE'
     vc_prev = core.image_paths(FOLDER, key, 'ao_vc')[0]
@@ -1761,6 +1851,10 @@ def channel_item(item, coll, ao=False):
     # the components' images and writers: the first writes the map and the layout (a new layout) or compares its
     # codes with the stored map (a kept one)
     kinds = [(g, c, k) for g in groups for c, k in enumerate(KINDS[g])]
+    j_of = {}  # a group's first image
+    for j, (g, _c, _k) in enumerate(kinds):
+        j_of.setdefault(g, j)
+    map_bands, map_readers = None, []
     writers, mats_made, temps_img = [], [], []
     vc_writer = None
     group_mats, skipped = {}, {}
@@ -1796,24 +1890,60 @@ def channel_item(item, coll, ao=False):
                 vm = vc_material(vc_attr, g, holder)
                 mats_made.append(vm)
                 group_mats[g] = [vm] * max(1, len(slot_mats))
+            elif g in dv:  # decision 101: the object's own value written straight into the master, no Cycles
+                continue
+            elif g in cv:  # decision 99 (tests, FSS_AO_BAKE_CUSTOM_CYCLES): the value on every slot, through Cycles
+                vm = value_material(cv_vals[g], g, holder)
+                mats_made.append(vm)
+                group_mats[g] = [vm] * max(1, len(slot_mats))
             else:
                 group_mats[g] = routed(slot_mats, g)
         copy_mats = [(o, routed([s_.material for s_ in o.material_slots], 'emis')) for o in emis_copies]
+        cyc = [g for g in groups if g not in dv]  # decision 101: the groups Cycles bakes
         log(f"  {item['name']}: {', '.join(NAMES[g] for g in groups)} from {src_obj.name}, master {W} x "
             f"{H} px ({'its layout kept' if kept else 'a new layout'}), tile {tile} px, {n} tile(s), "
-            f"{CH_SAMPLES} samples")
+            + (f"{CH_SAMPLES} samples" if cyc else 'no Cycles'))
         if copy_mats:
             log(f"    Emissive from {len(copy_mats)} copies ({combine.lower()}): "
                 + ', '.join(o.name for o, _l in copy_mats))
         if vc:
             log(f"    from the colour attribute {vc_attr} ({vc_type}, {VC_ATTRIBUTE.lower()}): "
                 + ', '.join(f'{VC_NAMES[g]} ({eff[g].lower()})' for g in vc))
+        if cv:
+            log("    from the object's own value" + (', written directly: ' if dv else ': ')
+                + ', '.join(f'{CV_NAMES[g]} {cv_vals[g]} ({eff[g].lower()})' for g in cv))
         state.update(tile=0, n_tiles=n, size=[int(W), int(H)], tile_px=int(tile))
         write_status()
         core_tris = m['core_tris']
         cuv = m['muv'][core_tris]
-        times = dict(bake=0.0)
+        times = dict(bake=0.0, direct=0.0)
         done = [0]
+        # decision 101: a Custom group's 16-bit value per component, as the master keeps it (the colours sRGB-encoded,
+        # as a bake of the colour gives them); its pixels: those the core and the skirt cover, as Cycles fills them
+        cv_q = {}
+        for g in dv:
+            v = np.atleast_1d(np.asarray(cv_vals[g], dtype=np.float64))
+            enc = core.srgb_encode(v) if g in ('albedo', 'emis') else np.clip(v, 0.0, 1.0)
+            cv_q[g] = [int(q) for q in np.atleast_1d(core.quantize16(enc))]
+        n_threads = int(SET['threads'])
+        # decision 101: a kept layout's Custom pixels are the stored map's filled ones (the pixels Apply reads, whatever
+        # rasterized them); a new layout's those Cycles fills for another group of the bake, else the raster's
+        mpath = core.master_paths(FOLDER, key)[1]
+        if dv and kept and os.path.isfile(mpath):
+            map_bands = _MapBands(mpath, W, H)
+
+        def covered(csel, ssel, x0, y0, w, h, rect_ok):
+            """Decision 101: the pixels of a tile a bake fills: the core triangles' (pixel centres inside), then the
+            skirt's within the island rectangles where the core is not."""
+            cm = np.zeros((h, w), bool)
+            sm = np.zeros((h, w), bool)
+            if len(csel):
+                own, _c = core.raster_window(cuv[csel], w, h, 1, x0, y0, threads=n_threads)
+                cm = own >= 0
+            if len(ssel):
+                own, _c = core.raster_window(m['skirt_uv'][ssel], w, h, 1, x0, y0, threads=n_threads)
+                sm = (own >= 0) & ~cm & rect_ok
+            return cm, sm
 
         def set_image(img):
             for lst in list(group_mats.values()) + [l_ for _o, l_ in copy_mats]:
@@ -1830,24 +1960,40 @@ def channel_item(item, coll, ao=False):
             csel = core.tris_in_window(cuv, x0, y0, w, h)
             ssel = core.tris_in_window(m['skirt_uv'], x0, y0, w, h) if S else np.zeros(0, dtype=np.int64)
             if len(csel) or len(ssel):
-                img = new_float_image('FSS_CH_TILE', w, h)
-                px = np.empty(w * h * 4, dtype=np.float32)
+                rect_ok = core.rect_window(m['rects'], x0, y0, w, h) >= 0
+                img = px = None
                 objs = []
+                dm = None
+                td = time.time()
+                if dv and map_bands is not None:
+                    dm = map_bands.window(x0, y0, w, h)
+                elif dv and not cyc:
+                    dcm, dsm = covered(csel, ssel, x0, y0, w, h, rect_ok)
+                    dm = dcm | dsm
+                times['direct'] += time.time() - td
                 try:
-                    set_image(img)
-                    first = group_mats[groups[0]]
-                    if len(csel):
+                    if cyc:
+                        img = new_float_image('FSS_CH_TILE', w, h)
+                        px = np.empty(w * h * 4, dtype=np.float32)
+                        set_image(img)
+                    first = group_mats[cyc[0]] if cyc else None
+                    if cyc and len(csel):
                         me = channel_mesh('FSS_CH_CORE', src, core_tris[csel], None, (cuv[csel] - off) / wh, first)
                         objs.append(('core', temp_object(coll, 'FSS_CH_CORE', me)))
-                    if len(ssel):
+                    if cyc and len(ssel):
                         me = channel_mesh('FSS_CH_SKIRT', src, m['skirt_src'][ssel], Bs[ssel],
                                           (m['skirt_uv'][ssel] - off) / wh, first)
                         objs.append(('skirt', temp_object(coll, 'FSS_CH_SKIRT', me)))
                     for o in (o for _k, o in objs):
                         o.matrix_world = src_obj.matrix_world  # Object and Position coordinates as the original's
-                    rect_ok = core.rect_window(m['rects'], x0, y0, w, h) >= 0
-                    j = 0
-                    for g in groups:
+                    for g in cyc + list(dv):  # the Cycles groups first: their pixels serve a new layout's Custom ones
+                        j = j_of[g]
+                        if g in dv:  # decision 101: the value into the covered pixels
+                            for c in range(len(KINDS[g])):
+                                vals[j][dm] = cv_q[g][c]
+                                baked[j] |= dm
+                                j += 1
+                            continue
                         got = {}
                         if g == 'emis' and copy_mats:  # decision 87: each copy, combined per pixel
                             per = []
@@ -1884,10 +2030,13 @@ def channel_item(item, coll, ao=False):
                                 vals[j][sm] = core.quantize16(enc(B[:, :, c][sm]))
                             baked[j] |= cm | sm
                             j += 1
+                        if dv and dm is None:
+                            dm = cm | sm
                 finally:
                     _remove([o for _k, o in objs])
-                    set_image(holder)
-                    bpy.data.images.remove(img)
+                    if img is not None:
+                        set_image(holder)
+                        bpy.data.images.remove(img)
             yield done[0]
         # decision 89: Multiply: each row times the current image's (the albedo in linear), the product of the AO's
         # multiplies kept; pixels this bake does not fill keep their old value. The current images are read whole.
@@ -1897,6 +2046,22 @@ def channel_item(item, coll, ao=False):
         prev = lib.read_whole(vc_prev) if vc_prev else None
 
         def rows_of(j, g, c):
+            """Decision 101: a Custom group of a kept layout: its value on exactly the stored map's filled pixels (those
+            Apply reads; the bake's margins already in them), 0 elsewhere, with the stored codes, whatever the
+            composition of its pixels gave; then Overwrite or Multiply as for a baked group."""
+            inner = rows_base(j, g, c)
+            if g not in dv or map_bands is None:
+                return inner
+            rd = _MapRows(mpath, W, H)
+            map_readers.append(rd)
+            q = np.uint16(cv_q[g][c])
+
+            def rows(values, codes):
+                sc = rd.read(values.shape[0])
+                inner(np.where(core.code_filled(sc), q, np.uint16(0)).astype(np.uint16), sc)
+            return rows
+
+        def rows_base(j, g, c):
             w_ = writers[j]
             if g not in mult:
                 return w_.write_rows
@@ -1922,7 +2087,7 @@ def channel_item(item, coll, ao=False):
         counts = yield from core.bake_paged_multi(m, tile, len(kinds), bake_tile,
                                                   [rows_of(j, g, c) for j, (g, c, _k) in enumerate(kinds)],
                                                   threads=int(SET['threads']))
-        t_compose = time.time() - tp - times['bake']
+        t_compose = time.time() - tp - times['bake'] - times['direct']
         for w_ in writers + ([vc_writer] if vc_writer is not None else []):
             w_.encode()
         meta = dict(schema=core.SCHEMA, key=key, kind=item['kind'], name=item['name'], object=obj.name, mesh_hash=mh,
@@ -1943,6 +2108,10 @@ def channel_item(item, coll, ao=False):
             _remove_files(list(core.image_paths(FOLDER, key, 'ao.raw')) + list(core.image_paths(FOLDER, key, 'ao_vc')))
         finished = True
     finally:
+        if map_bands is not None:
+            map_bands.close()
+        for rd in map_readers:
+            rd.close()
         if not finished:
             for w_ in writers + ([vc_writer] if vc_writer is not None else []):
                 w_.abort()
@@ -1965,10 +2134,12 @@ def channel_item(item, coll, ao=False):
     for g in groups:
         if g == 'ao':
             continue
-        ch[g] = dict(mesh_hash=mh, baked_at=stamp, samples=int(CH_SAMPLES), object=src_obj.name,
+        ch[g] = dict(mesh_hash=mh, baked_at=stamp, samples=0 if g in dv else int(CH_SAMPLES), object=src_obj.name,
                      skipped=sorted(skipped.get(g, [])), map_differs_px=int(differs))
         if g in vc:  # rule item 5: the source; a bake from the material drops it (the entry written anew)
             ch[g]['source'] = dict(vertex_color=vc_attr, attribute=VC_ATTRIBUTE, mode=eff[g])
+        elif g in cv:  # decision 99
+            ch[g]['source'] = dict(custom=_cv_json(cv_vals[g]), mode=eff[g])
     if 'ao' in groups:  # rule item 4: the AO from the vertex colour
         attrs = (list(old_src.get('attributes') or ()) if 'ao' in mult else []) + [vc_attr]
         entry['ao_source'] = dict(vertex_color=vc_attr, attribute=VC_ATTRIBUTE,
@@ -1976,7 +2147,7 @@ def channel_item(item, coll, ao=False):
         if not ao_traced:
             entry['denoise'] = None
         entry.update(mesh_hash=mh, baked_at=stamp)
-    if 'emis' in groups and combine and 'emis' not in vc:  # decision 87: how a shared emissive was combined
+    if 'emis' in groups and combine and 'emis' not in vc and 'emis' not in cv:  # decision 87: how it was combined
         ch['emis'].update(combine=combine,
                           copies=[o.name for o, _l in copy_mats] if copy_mats else [src_obj.name])
     entry['channels'] = ch
@@ -1984,13 +2155,20 @@ def channel_item(item, coll, ao=False):
     for g, names in sorted(skipped.items()):
         notes.append(f"{NAMES[g]} skipped for {', '.join(names)} (no Principled BSDF on the Material "
                      f"Output)")
-    log(f"  {item['name']}: channels composed in {t_compose:.2f} s, baked in {times['bake']:.2f} s; layout "
-        f"{t_build:.2f} s; {len(kinds)} images")
+    log(f"  {item['name']}: channels composed in {t_compose:.2f} s, baked in {times['bake']:.2f} s"
+        + (f", Custom written in {times['direct']:.2f} s" if dv else '')
+        + f"; layout {t_build:.2f} s; {len(kinds)} images")
+    cyc = [g for g in groups if g not in dv]
     res = dict(status='baked', W=int(W), H=int(H), tile=int(tile), n_tiles=int(n), bake_s=round(times['bake'], 3),
-               total_s=round(time.time() - t0, 3), baker='Cycles', channels=groups, layout_kept=bool(kept),
-               map_differs_px=int(differs))
+               total_s=round(time.time() - t0, 3), baker='Cycles' if cyc else 'Custom value', channels=groups,
+               layout_kept=bool(kept), map_differs_px=int(differs))
+    if dv:  # decision 101
+        res['direct_s'] = round(times['direct'], 3)
     if vc or vc_skipped:
-        res['vertex_color'] = dict(attribute=vc_attr, type=vc_type, read=VC_ATTRIBUTE, modes=eff, skipped=vc_skipped)
+        res['vertex_color'] = dict(attribute=vc_attr, type=vc_type, read=VC_ATTRIBUTE,
+                                   modes={g: eff[g] for g in vc}, skipped=vc_skipped)
+    if cv:  # decision 99
+        res['custom_value'] = {g: dict(value=_cv_json(cv_vals[g]), mode=eff[g]) for g in cv}
     if notes:
         res['note'] = '; '.join(notes)
     return res

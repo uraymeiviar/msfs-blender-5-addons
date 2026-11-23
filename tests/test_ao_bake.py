@@ -82,7 +82,16 @@ never the first's, the file's attributes unchanged; Active Attribute reading the
 Vertex Paint giving 0.5 from both types; an object with one colour attribute skipped; Multiply by 1.0, 0.5 and twice
 0.5 on a traced, denoised AO; Multiply without a master and after a mesh edit as Overwrite; an Overwrite AO ignoring its surroundings, traced again when the
 source is unticked; a denoise-only run keeping the product; an albedo multiplied in linear; an object without a colour
-attribute skipped.
+attribute skipped. In the same scene (`-- only=test_custom_value_channels`), the Custom values and colours (decisions
+99, 100): each object's own roughness, metal, albedo and emissive by Overwrite, Multiply onto the master (colours in
+linear), Multiply without a master as Overwrite; decision 101: the value written straight into the master equal within
+1 on every pixel to Cycles' bake of it (FSS_AO_BAKE_CUSTOM_CYCLES), and a bake mixing the two.
+
+Soften at a concave corner with a flat or a 2 um thin triangle along it (`-- only=test_soften_thin_faces`, decision
+103): no fold at the flat one, the slopes left out over the thin one's step, every value between the faces'.
+
+In a scene of its own (`-- only=test_shown_without_view`), decision 102: the bake's visibility test ignores a 3D
+view's local view and equals Blender's visible_get without a 3D view over random collection and object hide states.
 
 Last, in a scene of its own (tests/_work/ao_bake_fetch; `-- only=test_vertex_color_fetch`), Fetch (decisions 93 to 95,
 Session 73's step 2): a vertex colour bake fetched back within one 8-bit step at every corner for ORM, Albedo and Emis;
@@ -930,6 +939,16 @@ def test_apply_separate():
     rep = apply_set('SET_ORM', file_name='orm_white.png', layout='ORM', green_blue='WHITE')
     w, _b, _ = read(rep['path'])
     assert (w[:, :, 1:] == 65535).all()
+    # decision 98: Custom fills a new file's green and blue with the two values; red as with White
+    rep = apply_set('SET_ORM', file_name='orm_custom.png', layout='ORM', green_blue='CUSTOM', orm_roughness=0.25,
+                    orm_metal=0.75)
+    cu, _b, _ = read(rep['path'])
+    assert (cu[:, :, 1] == 16384).all() and (cu[:, :, 2] == 49151).all(), (np.unique(cu[:, :, 1]), np.unique(cu[:, :, 2]))
+    assert np.array_equal(cu[:, :, 0], w[:, :, 0]), 'red differs from the White file'
+    rep = apply_set('SET_ORM', file_name='orm_custom_default.png', layout='ORM', green_blue='CUSTOM', orm_roughness=1.0,
+                    orm_metal=0.0)
+    cd, _b, _ = read(rep['path'])
+    assert (cd[:, :, 1] == 65535).all() and (cd[:, :, 2] == 0).all()
     orig16, _b, _ = read(str(WORK / 'orm16.png'))
     rep = apply_set('SET_ORM', file_name='orm_copy.png', layout='ORM', green_blue='COPY')
     c, _b, _ = read(rep['path'])
@@ -1215,6 +1234,73 @@ def wait_bake(poll=0.1, limit=300):
     proc.wait(timeout=60)
     ao_bake._poll_timer()  # the last step: the bake ended, finish_bake runs
     return seen
+
+
+def test_shown_without_view():
+    """Decision 102: the bake's visibility (store.shown) ignores a 3D view's local view; it equals Blender's visible_get
+    without a 3D view (as in this background Blender) in a scene of its own, over random states of a collection tree
+    (excluded, hidden in viewports, hidden in the view layer), the objects' own hide_viewport and hide_set, and an
+    object linked into two collections and the scene collection. The local view itself is not tested (no 3D view in
+    a background Blender); shown() reads no view."""
+    import random
+    t0 = time.time()
+    sc = bpy.data.scenes.new('FSS_SHOWN_TEST')
+    vl = sc.view_layers[0]
+    mesh = bpy.data.meshes.new('FSS_SHOWN_MESH')
+    colls, objs = {}, []
+    try:
+        def coll(name, parent):
+            c = bpy.data.collections.new(name)
+            parent.children.link(c)
+            colls[name] = c
+            return c
+        a = coll('FSS_SH_A', sc.collection)
+        b = coll('FSS_SH_B', a)
+        c = coll('FSS_SH_C', b)
+        d = coll('FSS_SH_D', sc.collection)
+        for k, homes in enumerate(([a], [b], [c], [d], [b, d], [sc.collection], [c, sc.collection])):
+            o = bpy.data.objects.new(f'FSS_SH_O{k}', mesh)
+            for h in homes:
+                h.objects.link(o)
+            objs.append(o)
+        vl.update()  # a new scene's layer collections exist after its first update
+
+        def lcs(lc):
+            yield lc
+            for ch in lc.children:
+                yield from lcs(ch)
+        rng = random.Random(102)
+        counts = dict(states=0, shown=0, hidden=0)
+        for _state in range(400):
+            for lc in list(lcs(vl.layer_collection))[1:]:
+                lc.exclude = rng.random() < 0.15
+                if not lc.exclude:
+                    lc.hide_viewport = rng.random() < 0.25
+            for cc in colls.values():
+                cc.hide_viewport = rng.random() < 0.15
+            for o in objs:
+                o.hide_viewport = rng.random() < 0.1
+                if o.name in vl.objects:
+                    o.hide_set(rng.random() < 0.15, view_layer=vl)
+            names = store.shown_names(vl)
+            for o in objs:
+                want = o.name in vl.objects and o.visible_get(view_layer=vl)
+                got = store.shown(o, vl, names)
+                tree = [(lc.name, lc.exclude, lc.hide_viewport, lc.collection.hide_viewport)
+                        for lc in lcs(vl.layer_collection)]
+                assert got == want, (o.name, got, want, tree, o.hide_viewport,
+                                     o.name in vl.objects and o.hide_get(view_layer=vl))
+                counts['shown' if got else 'hidden'] += 1
+            counts['states'] += 1
+    finally:
+        for o in objs:
+            bpy.data.objects.remove(o)
+        bpy.data.meshes.remove(mesh)
+        for cc in colls.values():
+            bpy.data.collections.remove(cc)
+        bpy.data.scenes.remove(sc)
+    print(f'PASS: test_shown_without_view ({time.time() - t0:.1f} s; {counts})')
+    return counts
 
 
 def test_custom_occluders():
@@ -2812,6 +2898,68 @@ def test_soften_edges():
           f"softened)")
 
 
+def test_soften_thin_faces():
+    """Decision 103: Soften at a concave corner whose floor has a flat or a thin triangle at the fold, on a master
+    built by hand (no bake). A wall (x 0, AO 0.4) over a smooth concave corner to a floor (z -10 mm, AO 0.6); the
+    corner line carries a middle vertex M, so the floor's fan has the triangle A-B-M along it: flat (M on the line, as
+    an n-gon's fan over corners in a line) or 2 um thin (M lifted). Flat: its edges are no folds (soften_context);
+    thin: the concave slopes need a step of SOFT_SLOPE_MIN_STEP of the width (the DLL), else the half difference
+    alone. Every softened value stays between the two faces' 0.4 and 0.6 (before: 0 and 1 where the step was 1 nm).
+    With the flat triangle's folds kept (core.SOFT_FLAT 0) the values are recorded, not tested: the flat triangle has
+    no pixels of its own in the master, so even the half difference reads none of its value."""
+    s = 0.01
+    width = 0.001
+    found = {}
+    for case, lift in (('flat', 0.0), ('thin', 2e-6)):
+        A, B, M = (0, 0, -s), (0, s, -s), (0, s / 2, -s + lift)
+        At, Bt, C, D = (0, 0, 0), (0, s, 0), (s, s, -s), (s, 0, -s)
+        pos = np.array([A, B, M, At, Bt, C, D], float)
+        iA, iB, iM, iAt, iBt, iC, iD = range(7)
+        # the wall (A' A M, A' M B, A' B B'), the floor (A D C, A C B) and the triangle along the corner (A B M)
+        tris = np.array([(iAt, iA, iM), (iAt, iM, iB), (iAt, iB, iBt), (iA, iD, iC), (iA, iC, iB), (iA, iB, iM)])
+
+        def uv_of(p):  # the wall and the floor unfolded across the corner line, 64 px per 10 mm
+            u = 80 + (p[0] / s * 64 if p[2] <= -s + 1e-5 and p[0] > 1e-9 else -(p[2] + s) / s * 64)
+            return (u, 16 + p[1] / s * 64)
+        uvpx = np.array([[uv_of(pos[i]) for i in t] for t in tris], float)
+        P = pos[tris]
+        fn = np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0])
+        fn /= np.maximum(np.linalg.norm(fn, axis=1, keepdims=True), 1e-30)
+        m = core.build_master(pos, tris, np.repeat(fn[:, None], 3, axis=1), 4 * 64 / s, gutter=core.GUTTER,
+                              order=core.ORDER, mirror_open=core.MIRROR_OPEN, fold_split=core.FOLD_SPLIT)
+        owner, _cnt = core.rasterize_ids(m['muv'], m['W'], m['H'])
+        img = np.zeros(owner.shape, np.uint16)
+        img[owner >= 0] = np.where(owner[owner >= 0] < 3, 0.4, 0.6) * 65535
+        master = dict(m, image=img, filled=owner >= 0, face_map=owner)
+        W, H = 224, 96
+        kw = dict(padding=4, outside_mode='tri', kmax=core.K_MAX, surface_cos=core.SURFACE_COS)
+        ctx = core.copy_context(pos, tris, uvpx, master, core.K_MIN, core.K_MAX)
+        base = core.copy_master(pos, tris, uvpx, np.zeros(len(tris), np.int64), master, (0, 0, W, H), core.K_MIN,
+                                ctx=ctx, **kw)[0]
+        for flat_rule in (True, False):
+            old = core.SOFT_FLAT
+            core.SOFT_FLAT = old if flat_rule else 0.0
+            try:
+                sc = core.soften_context(pos, tris, uvpx, ctx, width)
+            finally:
+                core.SOFT_FLAT = old
+            with_flat = sc is not None and bool((sc['E'][:, [0, 3]] == 5).any())
+            if case == 'flat' and flat_rule:
+                assert not with_flat, 'a fold at the flat triangle'
+            if case == 'thin':
+                assert with_flat, 'the thin triangle is no flat one'
+            got = base if sc is None else core.copy_master(pos, tris, uvpx, np.zeros(len(tris), np.int64), master,
+                                                           (0, 0, W, H), core.K_MIN, ctx=ctx, soften=sc, **kw)[0]
+            w = got >= 0
+            lo, hi = float(got[w].min()), float(got[w].max())
+            if case == 'thin' or flat_rule:  # the flat triangle's folds kept: recorded (it reads no pixels of its own)
+                assert lo >= 0.4 - 2e-3 and hi <= 0.6 + 2e-3, (case, flat_rule, lo, hi)
+            found[f"{case}{'' if flat_rule else ' (folds kept)'}"] = (sc['edges'] if sc else 0, round(lo, 3),
+                                                                      round(hi, 3))
+    print(f'PASS: test_soften_thin_faces (folds, softened min and max: {found})')
+    return found
+
+
 ALL_THREADS = os.cpu_count() or 2  # decision 6: the C++ parts at 1, 12 and all threads
 
 
@@ -4380,6 +4528,135 @@ def ch_item_vc(name):
     return store._state['items'][store._state['by_object'][name]]
 
 
+def test_custom_value_channels():
+    """Decision 99: roughness and metal baked from each object's own value (Custom): Overwrite gives the value at every
+    filled pixel, each object its own in one bake; Multiply onto the master's current value, as Overwrite without a
+    master (reported); the entry's source and the result carry the value; a bake from the material drops the source.
+    Decision 100: the albedo and emissive colours. Decision 101: the value written straight into the master gives
+    Cycles' images within 1 on every pixel; a bake mixing the two. In the vertex colour test's scene."""
+    t0 = time.time()
+    build_vc_scene()
+    s = bpy.context.scene.fss_ao_bake
+    RM = ['rough', 'metal']
+    obs = bpy.data.objects
+    found = {}
+
+    def dev(name, want):
+        return {k: int(np.abs(vc_values(name, k) - q16(v)).max()) for k, v in want.items()}
+
+    def cdev(name, g, lin):  # a colour channel's deviation from a linear colour, sRGB-encoded as the master keeps it
+        enc = core.srgb_encode(np.array(lin, np.float64))
+        return {f'{g}_{c}': int(np.abs(vc_values(name, f'{g}_{c}') - q16(enc[i])).max()) for i, c in enumerate('rgb')}
+    try:
+        with rule_unrecorded():
+            refresh()
+            vc_bake(['VM', 'VX'], groups=RM)  # from the material: roughness 0.5, metal 0.0
+            assert max(dev('VM', dict(rough=0.5, metal=0.0)).values()) <= 1, dev('VM', dict(rough=0.5, metal=0.0))
+            obs['VM'].fss_ao_bake.rough_value, obs['VM'].fss_ao_bake.metal_value = 0.3, 0.7
+            obs['VX'].fss_ao_bake.rough_value, obs['VX'].fss_ao_bake.metal_value = 0.8, 0.2
+            s.rough_source = s.metal_source = 'CUSTOM'
+            assert s.cv_rough_mode == 'OVERWRITE' and s.cv_metal_mode == 'OVERWRITE'
+            res = vc_bake(['VM', 'VX'], groups=RM)
+            d = {n: dev(n, w) for n, w in (('VM', dict(rough=0.3, metal=0.7)), ('VX', dict(rough=0.8, metal=0.2)))}
+            assert all(v <= 1 for dd in d.values() for v in dd.values()), d
+            assert vc_entry('VM')['channels']['rough']['source'] == dict(custom=0.3, mode='OVERWRITE')
+            assert vc_entry('VX')['channels']['metal']['source'] == dict(custom=0.2, mode='OVERWRITE')
+            assert res['VM']['custom_value'] == {'rough': dict(value=0.3, mode='OVERWRITE'),
+                                                 'metal': dict(value=0.7, mode='OVERWRITE')}, res['VM']
+            assert 'vertex_color' not in res['VM'], res['VM']
+            assert ch_item_vc('VM')['grade'] in ('MISSING', 'UP_TO_DATE')  # no AO baked here
+            found['overwrite'] = d
+            # decision 100: the albedo and the emissive from each object's own colour (linear, as Base Color gives
+            # it), sRGB-encoded in the master; VX's emissive the default black
+            obs['VM'].fss_ao_bake.albedo_value, obs['VM'].fss_ao_bake.emis_value = (0.2, 0.4, 0.8), (0.5, 0.25, 0.0)
+            obs['VX'].fss_ao_bake.albedo_value = (0.9, 0.1, 0.3)
+            s.albedo_source = s.emis_source = 'CUSTOM'
+            res = vc_bake(['VM', 'VX'], groups=['albedo', 'emis'])
+            dc = {n: dict(cdev(n, 'albedo', al), **cdev(n, 'emis', em))
+                  for n, al, em in (('VM', (0.2, 0.4, 0.8), (0.5, 0.25, 0.0)), ('VX', (0.9, 0.1, 0.3), (0, 0, 0)))}
+            assert all(v <= 1 for dd in dc.values() for v in dd.values()), dc
+            assert vc_entry('VM')['channels']['albedo']['source'] == dict(custom=[0.2, 0.4, 0.8], mode='OVERWRITE')
+            assert res['VX']['custom_value']['emis'] == dict(value=[0.0, 0.0, 0.0], mode='OVERWRITE'), res['VX']
+            # decision 101: written straight into the master, no Cycles: the same images, margins and all, as Cycles'
+            # bake of the value (the test switch FSS_AO_BAKE_CUSTOM_CYCLES), Cycles first, the direct write last
+            assert res['VM']['baker'] == 'Custom value' and 'direct_s' in res['VM'], res['VM']
+            assert vc_entry('VM')['channels']['albedo']['samples'] == 0, vc_entry('VM')['channels']['albedo']
+            all4 = ['albedo', 'rough', 'metal', 'emis']
+            kinds8 = ['albedo_r', 'albedo_g', 'albedo_b', 'rough', 'metal', 'emis_r', 'emis_g', 'emis_b']
+
+            def whole(n):
+                return {k: core.load_master(VC_FOLDER, vc_stem(n), kind=k)['image'].astype(np.int64) for k in kinds8}
+            os.environ['FSS_AO_BAKE_CUSTOM_CYCLES'] = '1'
+            try:
+                res_c = vc_bake(['VM', 'VX'], groups=all4)
+            finally:
+                os.environ.pop('FSS_AO_BAKE_CUSTOM_CYCLES', None)
+            assert all(res_c[n]['baker'] == 'Cycles' and 'direct_s' not in res_c[n] for n in ('VM', 'VX')), res_c
+            img_c = {n: whole(n) for n in ('VM', 'VX')}
+            res_d = vc_bake(['VM', 'VX'], groups=all4)
+            img_d = {n: whole(n) for n in ('VM', 'VX')}
+            vs = {n: {k: int(np.abs(img_d[n][k] - img_c[n][k]).max()) for k in kinds8} for n in ('VM', 'VX')}
+            n_px = {n: int(img_d[n]['rough'].size) for n in ('VM', 'VX')}
+            assert all(v <= 1 for dd in vs.values() for v in dd.values()), vs
+            # a kept layout: the value on exactly the stored map's filled pixels (VM's albedo has no 0 component)
+            mvm = core.load_master(VC_FOLDER, vc_stem('VM'), kind='albedo_r')
+            assert np.array_equal(mvm['image'] > 0, mvm['filled']), int(((mvm['image'] > 0) != mvm['filled']).sum())
+            found['vs cycles'] = vs
+            found['px'] = n_px
+            found['map differs'] = {n: (res_c[n].get('map_differs_px'), res_d[n].get('map_differs_px'))
+                                    for n in ('VM', 'VX')}
+            found['times'] = {n: (res_c[n]['bake_s'], res_d[n]['direct_s'], res_d[n]['bake_s']) for n in ('VM', 'VX')}
+            # Multiply in linear: VM's albedo (0.2, 0.4, 0.8) x (0.5, 1.0, 0.25)
+            obs['VM'].fss_ao_bake.albedo_value = (0.5, 1.0, 0.25)
+            s.cv_albedo_mode = 'MULTIPLY'
+            s.emis_source = 'MATERIAL'
+            vc_bake(['VM'], groups=['albedo'])
+            dca = cdev('VM', 'albedo', (0.1, 0.4, 0.2))
+            assert max(dca.values()) <= 2, dca
+            found['colours'] = dc
+            found['colour multiply'] = dca
+            s.albedo_source = 'MATERIAL'
+            # Multiply onto the current master: VM's roughness 0.3 x 0.5, its metal left as it is (Material off)
+            obs['VM'].fss_ao_bake.rough_value = 0.5
+            s.cv_rough_mode = 'MULTIPLY'
+            s.metal_source = 'MATERIAL'
+            vc_bake(['VM'], groups=['rough'])
+            dm = dev('VM', dict(rough=0.15, metal=0.7))
+            assert dm['rough'] <= 2 and dm['metal'] <= 1, dm
+            assert vc_entry('VM')['channels']['rough']['source'] == dict(custom=0.5, mode='MULTIPLY')
+            found['multiply'] = dm
+            # Multiply without a master of it: as Overwrite, reported
+            obs['VN'].fss_ao_bake.rough_value = 0.4
+            res = vc_bake(['VN'], groups=['rough'])
+            assert dev('VN', dict(rough=0.4))['rough'] <= 1, dev('VN', dict(rough=0.4))
+            assert 'Roughness from Custom: Multiply with no master of it, as Overwrite' in res['VN'].get('note', ''), \
+                res['VN']
+            assert vc_entry('VN')['channels']['rough']['source'] == dict(custom=0.4, mode='OVERWRITE')
+            # back to the material: its value, the source dropped
+            s.rough_source = 'MATERIAL'
+            vc_bake(['VM'], groups=['rough'])
+            assert dev('VM', dict(rough=0.5))['rough'] <= 1 and 'source' not in vc_entry('VM')['channels']['rough']
+            # decision 101, mixed: the albedo written directly, the roughness from the material through Cycles
+            s.albedo_source, s.cv_albedo_mode = 'CUSTOM', 'OVERWRITE'
+            res = vc_bake(['VM'], groups=['albedo', 'rough'])
+            mix = dict(cdev('VM', 'albedo', (0.5, 1.0, 0.25)), **dev('VM', dict(rough=0.5)))
+            assert max(mix.values()) <= 1, mix
+            assert res['VM']['baker'] == 'Cycles' and 'direct_s' in res['VM'], res['VM']
+            ch_vm = vc_entry('VM')['channels']
+            assert ch_vm['albedo']['samples'] == 0 and ch_vm['rough']['samples'] > 0, ch_vm
+            found['mixed'] = mix
+    finally:
+        s.rough_source = s.metal_source = s.albedo_source = s.emis_source = 'MATERIAL'
+        s.cv_rough_mode = s.cv_metal_mode = s.cv_albedo_mode = s.cv_emis_mode = 'OVERWRITE'
+    print(f"PASS: test_custom_value_channels ({time.time() - t0:.1f} s; Overwrite max deviation {found['overwrite']}, "
+          f"each object its own value in one bake; the colours {found['colours']}, Multiply in linear "
+          f"{found['colour multiply']}; Multiply 0.3 x 0.5 {found['multiply']}; Multiply without a master as "
+          f"Overwrite, reported; the material again drops the source; decision 101: written directly, against "
+          f"Cycles' bake of the value max {found['vs cycles']} on {found['px']} px, map differs (Cycles, direct) "
+          f"{found['map differs']}, times (Cycles bake s, direct s, Cycles s in the direct bake) {found['times']}; "
+          f"mixed direct and Cycles {found['mixed']})")
+
+
 # ---------------------------------------------------------------------------------------------------------------------
 # Decisions 93 to 95: Fetch the masters into the vertex colour, and the Emissive source (Session 73's step 2)
 # ---------------------------------------------------------------------------------------------------------------------
@@ -4631,9 +4908,11 @@ elif __name__ == '__main__':
     test_apply_ticked()
     test_resolution_choice()
     test_soften_edges()
+    test_soften_thin_faces()
     test_apply_steps()
     test_draw()
     test_panel_selection()
+    test_shown_without_view()
     test_custom_occluders()
     test_custom_add_ignore()
     test_detected()
@@ -4660,6 +4939,7 @@ elif __name__ == '__main__':
     test_move_together()  # in the wheel's scene
     test_material_channels()  # decisions 79 to 83, in a scene of its own
     test_vertex_color_channels()  # decisions 88 to 90, in a scene of its own
+    test_custom_value_channels()  # decision 99, in the vertex colour test's scene
     test_vertex_color_fetch()  # decisions 93 to 95, in a scene of its own
     n_ref = REF.done(complete=True)
     print(f'PASS: reference values ({n_ref} cases equal to the values the Python code gave before decision 6)')

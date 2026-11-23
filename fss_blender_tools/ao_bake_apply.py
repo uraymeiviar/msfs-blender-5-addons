@@ -187,6 +187,8 @@ class Target:
         else:
             self.H = self.W = int(settings.resolution)
         self.gb = settings.green_blue if self.layout == 'ORM' else 'AO'
+        self.gb_values = (float(getattr(settings, 'orm_roughness', 1.0)),  # decision 98: Custom
+                          float(getattr(settings, 'orm_metal', 0.0)))
         self.sampling = settings.sampling
         if self.gb == 'COPY' and self.orm is None:
             self.warnings.append('green and blue: no ORM texture to copy from, written white')
@@ -206,7 +208,10 @@ class Target:
             self.fresh = True
 
     def green_blue(self, labels):
-        """Green and blue of a new ORM-layout file: white, or the ORM texture's (resampled inside islands)."""
+        """Green and blue of a new ORM-layout file: white (None), the two Custom values (an array of 2, decision 98),
+        or the ORM texture's (resampled inside islands)."""
+        if self.layout == 'ORM' and self.gb == 'CUSTOM':
+            return np.rint(np.clip(np.array(self.gb_values), 0, 1) * 65535.0).astype(np.uint16)
         if self.layout != 'ORM' or self.gb != 'COPY':
             return None
         src = self.orm[0][:, :, 1:3]
@@ -743,7 +748,7 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
             else:
                 vals = np.full((r1 - r0, W, 3), fill, np.uint16)
                 if gb is not None:
-                    vals[:, :, 1:3] = gb[r0:r1]
+                    vals[:, :, 1:3] = gb if gb.ndim == 1 else gb[r0:r1]
             wr = written[r0:r1]
             vals[:, :, 0] = np.where(wr, Q[r0:r1], vals[:, :, 0])
             if target.kind != 'ORM' and target.layout == 'GREY':

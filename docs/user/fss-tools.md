@@ -296,6 +296,24 @@ A face whose model has area but whose UVs have none, or only part of it: one of 
 - **Fix:** re-unwrap those parts, for example with **Accept + Unwrap** in [UV Auto Seam](#uv-auto-seam) or Blender's **Unwrap**, then run the check again and pack.
 - It works in Object Mode. On the cockpit it takes about 3 seconds.
 
+### Find Bent N-gons
+
+Blender draws, bakes and exports every face as triangles. A flat n-gon splits into clean triangles, but one that is
+not quite flat and has corners in a line (a long straight edge with extra vertices along it) splits into slivers that
+tilt far away from the face. A bend of a fraction of a millimetre is enough. The slivers bake dark (black patches or
+streaks in the AO) and shade wrong in the viewport and in the simulator.
+
+**Find Bent N-gons** checks every mesh object of the view layer and selects the visible ones with such faces, the
+first one active; it also selects those faces in their meshes, so **Tab** into Edit Mode shows them. The message
+counts the faces and objects (hidden objects are counted, not selected); the system console lists each object's
+faces.
+
+- **Threshold:** a face of 5 corners or more counts when one of its triangles lies more than 30 degrees off the face,
+  or has no area. Quads are not checked.
+- **Fix:** make the face flat (for example scale its vertices to 0 along its normal), or cut it into quads and
+  triangles, then run the check again and bake those objects again.
+- It works in Object Mode. On the cockpit it takes under a second.
+
 ### Find Animations Not 0 to 100
 
 Every animation of the project runs from frame 0 to 100. This is a project rule that keeps the files consistent: MSFS itself plays any range from its start to its end, so an animation outside the rule still works in the simulator. **Find Animations Not 0 to 100** checks the local objects of the view layer: the active action, each NLA strip's placement and each strip's action. Muted strips count, because they can be unmuted.

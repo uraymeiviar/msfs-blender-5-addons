@@ -27,7 +27,7 @@ repository are in [../AGENTS.md](../AGENTS.md).
 | `visibility.py`, `visibility_core.py` | **UV Auto Packing > Visibility Scoring** | Probe-light visibility (UV decisions 124 to 130): included point, spot and area lights score each face by the brightness EEVEE shows (power, distance, cone, light threshold), shadows from cube maps rendered at each light, soft shadows from samples over the light's radius, the brightest of 2 to 10 animation steps; an island takes a weighted percentile of its faces, the most visible island is 1.0, every score is lifted by the Ambient (the floor Pack used to apply), and a darker touching island rises to its neighbour over the Step Limit (never lowered; UV decisions 133, 134); writes `<blend_name>.visibility`, Select Never Seen, Select Stale, report in Text Editor |
 | `ao_bake.py`, `ao_bake_store.py`, `ao_bake_apply.py`, `ao_bake_core.py`, `ao_bake_runner.py`, `ao_bake_copy.py`, `ao_bake_jxl.py`, `ao_bake_native.py` | **Bake** with **Run** | The bake of masters and their Apply into the texture sets (auto-bake journal, decisions 9 to 95): AO, curvature (CM) and the material channels Albedo, Roughness, Metal and Emissive, each from the scene (AO), the material or the vertex colour, stored per mesh in `<blend_name>.bake/` and copied into the textures by Apply. Start with [Bake: Current Design](#bake-current-design); the older sections below give the details of the options, FSS OptiX and the JPEG XL masters |
 | `uv_heatmap.py` | **Heatmap** (tab FSS Tools) | Viewport heatmap: Distortion (conformal singular-value ratio), Density (relative to material median and object range), and Visibility (from `<blend_name>.visibility`), RizomUV-style diverging colours, legend, and evaluated Mirror/Array support |
-| `checks.py`, `name_check.py` | **Checks** (tab FSS Tools) | **Scan Names** (lists object and bone names that break FSS naming rules and renames them in batch; `@MERGE_` / `@NOMERGE_` allowed), **Fix Broken Bone Parents**, **Find Faces Without Area** (selects mesh objects, and their faces, with a world-space face area of at most 1e-6 cm^2) and **Find Faces Without UV Area** (selects mesh objects, and their faces, with a triangle without UV area inside an island with UV area, per texture set at its size: the needles that push islands out in packing) and **Find Animations Not 0 to 100** (selects objects whose action or NLA strips break the project's frame rule, changes nothing) |
+| `checks.py`, `name_check.py` | **Checks** (tab FSS Tools) | **Scan Names** (lists object and bone names that break FSS naming rules and renames them in batch; `@MERGE_` / `@NOMERGE_` allowed), **Fix Broken Bone Parents**, **Find Faces Without Area** (selects mesh objects, and their faces, with a world-space face area of at most 1e-6 cm^2) and **Find Faces Without UV Area** (selects mesh objects, and their faces, with a triangle without UV area inside an island with UV area, per texture set at its size: the needles that push islands out in packing), **Find Bent N-gons** (selects mesh objects, and their faces, with an n-gon of 5 or more corners whose split has a triangle more than 30 degrees off the face or without area: slivers that bake dark and shade wrong; auto-bake decision 104) and **Find Animations Not 0 to 100** (selects objects whose action or NLA strips break the project's frame rule, changes nothing) |
 
 ## Tags
 
@@ -198,9 +198,9 @@ in whatever UV layout the set has then. Masters live in `<blend_name>.bake/` bes
 | :--- | :--- | :--- | :--- |
 | AO | the scene, traced (Cycles or FSS OptiX), poses and copies combined, denoised | `ao` (+ `ao.raw` before the denoise, `ao_vc` the vertex colour product) | ORM red / grey or ORM-layout file |
 | CM (curvature) | the geometry, in the AO's layout | `curv` | `<material>_curvature.png` (or the set's own name) in its output folder |
-| Albedo | the material (Base Color, before the MSFS `.Apply AO Group`) or the vertex colour | `albedo_r`, `albedo_g`, `albedo_b` (sRGB-encoded) | base colour slot / `<material>.albedo.png` |
-| Roughness, Metal | the material (Roughness, Metallic) or the vertex colour's green, blue | `rough`, `metal` (linear) | ORM green, blue / `<material>.roughness.png`, `.metal.png` (grey 16-bit) |
-| Emissive | the material (Emission Color, not its strength) or the vertex colour | `emis_r`, `emis_g`, `emis_b` (sRGB-encoded) | emissive slot / `<material>.emissive.png` |
+| Albedo | the material (Base Color, before the MSFS `.Apply AO Group`), the vertex colour or the object's Custom colour | `albedo_r`, `albedo_g`, `albedo_b` (sRGB-encoded) | base colour slot / `<material>.albedo.png` |
+| Roughness, Metal | the material (Roughness, Metallic), the vertex colour's green, blue, or the object's Custom value | `rough`, `metal` (linear) | ORM green, blue / `<material>.roughness.png`, `.metal.png` (grey 16-bit) |
+| Emissive | the material (Emission Color, not its strength), the vertex colour or the object's Custom colour | `emis_r`, `emis_g`, `emis_b` (sRGB-encoded) | emissive slot / `<material>.emissive.png` |
 
 Every channel shares the master's layout (`<stem>.ao.npz`, `<stem>.ao.map`). Decision 81: a bake keeps the layout
 while the mesh is unchanged (the mesh hash ignores UVs); a new layout (mesh changed or no master) removes the channels
@@ -231,6 +231,23 @@ blue, Albedo and Emissive from RGB), Overwrite or Multiply (Multiply edits the m
 without a master), the attribute read by name in the snapshot: the mesh's second colour attribute by default (Read),
 or the active one; values linear. The exporter writes one colour attribute per mesh (the render one; the merge and
 MSFS 2020 the active one), so the second is not exported while it is neither.
+
+**Custom values and colours** (decisions 99, 100): Albedo, Roughness, Metal and Emissive take Material, Vertex Color
+or Custom as one choice (`<g>_source`, kept in the `vc_<g>` and `cv_<g>` booleans). Custom bakes the object's own
+`fss_ao_bake.<g>_value` (a linear colour for Albedo and Emissive; the copy the channels come from, sent per job item as
+`custom_values`); Overwrite by default, Multiply as for a vertex colour source; a Custom emissive is not combined over
+a shared mesh's copies. Decision 101: a Custom channel is written straight into the master without Cycles. A kept
+layout: the value on exactly the stored map's filled pixels (the baked ones and their margins, what Apply reads), 0
+elsewhere, the stored codes kept (`_MapRows`); the map's filled pixels are not fed back as baked ones, which would grow
+the margin twice. A new layout: the pixels Cycles fills for another group of the bake, else the core's and the skirt's
+by `raster_window`, composed as a baked channel (the map is written from them). Samples 0 in the index, baker `Custom
+value` when no channel needed Cycles; `FSS_AO_BAKE_CUSTOM_CYCLES` (tests) bakes it through an Emission shader as
+before.
+
+**Visibility** (decision 102): the targets and occluders are the meshes the view layer shows, whatever a 3D view
+shows (`ao_bake_store.shown`: the collections' exclude and hide flags, the object's `hide_viewport` and `hide_get`),
+not `visible_get`, which follows the local view of the 3D view an operator runs in. A bake started in local view thus
+takes the same objects as the Refresh at file opening, which has no 3D view.
 
 **Required libraries:** `fss_ao_copy.dll` and libjxl (`lib/jxl/`); without them the panel says why and its operators
 refuse (apply-native-copy decision 6). FSS OptiX (`lib/ao_baker/`, Git LFS) is optional: Cycles bakes without it.
@@ -305,6 +322,10 @@ leave them out):
   edge, on the darker side only, toward the brighter side's value at the nearest point of the edge (both read from
   the master), by a smoothstep that is 1 at the edge and 0 at the width; near several edges the largest raise wins.
   The brighter side, concave corners and the masters are unchanged; the report counts the pixels raised.
+  Decision 103: an edge of a flat triangle (its far corner within `SOFT_FLAT`, 1 um, of the edge: an n-gon's fan
+  triangle over corners in a line) is no fold, its normal being no direction; a concave fold's slopes are read over a
+  step of at least `SOFT_SLOPE_MIN_STEP` (0.1) of the width, else left out (the DLL), where a thin face's step of
+  1 nm had made them, and the value, 0 or 1.
 
 ## AO Bake with FSS OptiX
 

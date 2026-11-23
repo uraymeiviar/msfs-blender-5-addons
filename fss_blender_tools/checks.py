@@ -8,6 +8,11 @@ the check selects the objects that have them, so the artist fixes the mesh.
 Faces without UV area: faces with a triangle that has 3D area but no UV area (uv_pack.UV_TRI_AREA_MIN_PX2) inside an
 island that has UV area. These needles push islands far out of the packed layout (decision 118); re-unwrapping the
 part fixes them. A second button, not part of Find Faces Without Area: the two need different fixes.
+Bent n-gons (auto-bake journal, decision 104): an n-gon (5 corners or more) that is not flat and has corners in a
+line splits, as Blender triangulates it, into slivers tilted far off the face (90 degrees and more where 0.01 mm of
+bend suffices; flat, the same n-gon splits cleanly). Such triangles bake black and shade wrong; the check selects the
+objects with an n-gon whose split has a triangle more than BENT_NGON_DEG off the face's normal, so the artist
+flattens the face or cuts it.
 Animation range: the project's rule is that every animation runs from frame 0 to 100. MSFS itself plays any range as
 start to end (dimensionless), so an offender still works there; the rule keeps the files consistent. The check lists
 the objects that break it under its button, a click on a row selects that object, and it changes nothing else: the
@@ -67,6 +72,51 @@ def faces_without_area(view_layer):
         if len(faces):
             found[obj] = faces
     return found
+
+
+BENT_NGON_DEG = 30.0  # decision 104: a triangle of an n-gon's split this far off the face's normal: a bent n-gon
+BENT_NGON_CORNERS = 5  # n-gons from this many corners
+
+
+def bent_ngons(view_layer):
+    """({object: indices of its bent n-gons}, number of such faces) over the view layer's local mesh objects (Object
+    Mode data): n-gons of BENT_NGON_CORNERS corners or more whose triangles, as Blender splits them, include one more
+    than BENT_NGON_DEG off the face's normal, or one without area (decision 104). A mesh shared by several objects is
+    read once; every user is listed."""
+    cos_max = np.cos(np.radians(BENT_NGON_DEG))
+    by_mesh = {}
+    for obj in view_layer.objects:
+        if obj.type == 'MESH' and obj.data is not None and not obj.library and not obj.data.library                 and len(obj.data.polygons):
+            by_mesh.setdefault(obj.data, []).append(obj)
+    found, count = {}, 0
+    for me, users in by_mesh.items():
+        tot = np.zeros(len(me.polygons), np.int64)
+        me.polygons.foreach_get('loop_total', tot)
+        if not (tot >= BENT_NGON_CORNERS).any():
+            continue
+        me.calc_loop_triangles()
+        nt = len(me.loop_triangles)
+        vt = np.zeros(nt * 3, np.int64)
+        me.loop_triangles.foreach_get('vertices', vt)
+        pi = np.zeros(nt, np.int64)
+        me.loop_triangles.foreach_get('polygon_index', pi)
+        keep = tot[pi] >= BENT_NGON_CORNERS
+        co = np.zeros(len(me.vertices) * 3)
+        me.vertices.foreach_get('co', co)
+        P = co.reshape(-1, 3)[vt.reshape(-1, 3)[keep]]
+        pn = np.zeros(len(me.polygons) * 3)
+        me.polygons.foreach_get('normal', pn)
+        c = np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0])
+        length = np.linalg.norm(c, axis=1)
+        with np.errstate(invalid='ignore', divide='ignore'):
+            cos = np.einsum('ij,ij->i', c, pn.reshape(-1, 3)[pi[keep]]) / length
+        bad = ~(cos >= cos_max)  # NaN, a triangle without area, counts
+        faces = np.unique(pi[keep][bad])
+        if len(faces):
+            count += len(faces)
+            for obj in sorted(users, key=lambda o: o.name):
+                found[obj] = faces
+    return found, count
 
 
 EVERY_SET = object()  # faces_without_uv_area: every texture set
@@ -209,6 +259,34 @@ class FSS_OT_FindFacesWithoutUvArea(bpy.types.Operator):
         else:
             self.report({'WARNING'}, f"{faces} face(s) with triangles without UV area{where} in {islands} island(s) "
                                      f"{_found_text(found, shown)} ({seconds:.1f} s)")
+        return {'FINISHED'}
+
+
+class FSS_OT_FindBentNgons(bpy.types.Operator):
+    bl_idname = "fss.find_bent_ngons"
+    bl_label = "Find Bent N-gons"
+    bl_description = (f"Select the mesh objects with n-gons ({BENT_NGON_CORNERS} corners or more) that are not flat: "
+                      f"Blender splits them into slivers more than {BENT_NGON_DEG:g} degrees off the face, which bake "
+                      "dark and shade wrong. Flatten the face or cut it into quads and triangles. In Edit Mode those "
+                      "faces are selected")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT'
+
+    def execute(self, context):
+        t0 = time.perf_counter()
+        found, faces = bent_ngons(context.view_layer)
+        shown = _select_found(context, found)
+        for obj, f in sorted(found.items(), key=lambda item: item[0].name):
+            print(f"FSS checks: {obj.name}: {len(f)} bent n-gon(s): faces {', '.join(str(i) for i in f[:10])}"
+                  + (" ..." if len(f) > 10 else ""))
+        seconds = time.perf_counter() - t0
+        if not found:
+            self.report({'INFO'}, f"No bent n-gons ({seconds:.1f} s)")
+        else:
+            self.report({'WARNING'}, f"{faces} bent n-gon(s) {_found_text(found, shown)} ({seconds:.1f} s)")
         return {'FINISHED'}
 
 
@@ -426,6 +504,7 @@ class FSS_PT_Checks(bpy.types.Panel):
         layout.operator(FSS_OT_FixBoneParents.bl_idname, icon='BONE_DATA')
         layout.operator(FSS_OT_FindFacesWithoutArea.bl_idname, icon='MESH_PLANE')
         layout.operator(FSS_OT_FindFacesWithoutUvArea.bl_idname, icon='UV')
+        layout.operator(FSS_OT_FindBentNgons.bl_idname, icon='MOD_TRIANGULATE')
         _draw_animations_off_range(layout, context)
 
 
@@ -433,6 +512,7 @@ CLASSES = (
     FSS_OT_FixBoneParents,
     FSS_OT_FindFacesWithoutArea,
     FSS_OT_FindFacesWithoutUvArea,
+    FSS_OT_FindBentNgons,
     FSS_AnimationOffRangeRow,
     FSS_OT_FindAnimationsOffRange,
     FSS_OT_AnimationOffRangeSelect,

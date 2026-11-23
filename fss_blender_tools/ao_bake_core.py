@@ -756,12 +756,16 @@ def _chunks(n, per):
 
 
 SOFT_SMOOTH_COS = math.cos(math.radians(1.0))  # corner normals this close across an edge: the edge is shaded smooth
+# decision 103: a triangle whose far corner lies this close to the edge (m) is flat (an n-gon's fan triangle over
+# corners in a line): its normal is not a direction, so its edges are no folds
+SOFT_FLAT = 1e-6
 
 
 def soften_context(pos, tris, uvpx, ctx, width, use=None, sharp_deg=None, max_samples=512, cn=None):
     """The folds for Apply's edge softening (auto-bake journal, decisions 46 and 58), computed once per master.
 
-    A fold: two faces (welded neighbours) whose normals differ by more than sharp_deg (the copy's surface angle). Only
+    A fold: two faces (welded neighbours) whose normals differ by more than sharp_deg (the copy's surface angle), each
+    with its far corner at least SOFT_FLAT off the edge (decision 103: a flat triangle has no normal). Only
     folds shaded smooth are softened (cn, the corner normals (T,3,3) in tris' order: the same normal on both sides at
     both ends); a hard-shaded edge (split normals, marked sharp) is left as baked. None: every fold counts as smooth.
     Convex: each face's far corner lies behind the other face (a lip, a rim); else concave (an inside corner). Per
@@ -789,6 +793,10 @@ def soften_context(pos, tris, uvpx, ctx, width, use=None, sharp_deg=None, max_sa
             continue  # shaded hard: left as baked
         a = pos[tris[t1, i1]]
         f1, f2 = pos[tris[t1, 3 - i1 - j1]], pos[tris[t2, 3 - i2 - j2]]
+        ab = pos[tris[t1, j1]] - a
+        ab = ab / max(float(np.linalg.norm(ab)), 1e-30)
+        if min(float(np.linalg.norm((f - a) - ((f - a) @ ab) * ab)) for f in (f1, f2)) < SOFT_FLAT:
+            continue  # decision 103: a flat triangle's edge
         convex.append(bool((f2 - a) @ tn[t1] < 0 and (f1 - a) @ tn[t2] < 0))
         rows.append((t1, i1, j1, t2, iy, jy))
     if not rows:

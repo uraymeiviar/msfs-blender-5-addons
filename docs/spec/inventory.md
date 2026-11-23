@@ -62,6 +62,7 @@ Based on Asobo's MSFS 2024 exporter 8.4.2 for Blender 5.2; FSS changes live in F
 | Layout corner for Pack, one scene setting in Advanced | implemented; default until the accurate corner is confirmed | UV 123 | UV-PCK-016 |
 | Find Faces Without UV Area (needles) | implemented | UV 118 | GEN-011 |
 | Find Animations Not 0 to 100 (reports the project rule's breaches, changes nothing) | implemented | maintainer, 20261104 | GEN-014 |
+| Find Bent N-gons (n-gons whose split has slivers that bake dark and shade wrong) | implemented | auto-bake 104 | GEN-015 |
 | Find Thin UV Faces: any UV triangle under 1 px wide on a 1K texture, size and width as settings, replacing Find Faces Without UV Area | wish (proposed 20261023) | UV journal Session 102, open item 1 | GEN-012 |
 | Stupidity check: one report with severity and fixes (duplicate vertices and faces, loose geometry, hierarchy, transforms, bloat, external add-on data) | wish (two rules built: bone parents, faces without area) | W28 | GEN-020 |
 | Texture and path check (missing images, absolute paths, `.png.xml`) | wish | W11 | GEN-021 |

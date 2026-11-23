@@ -942,6 +942,48 @@ def test_faces_without_area():
           "face 1 selected; the packer's report warns)")
 
 
+def test_bent_ngons():
+    """Decision 104: Find Bent N-gons. A rim face of 20 corners, 10 of them in a line on each long side (100 x 20 mm):
+    flat, Blender splits it cleanly (not found); one corner 0.2 mm off the plane, the split has slivers far off the
+    face (found, on both users of its mesh); a bent quad (one corner 5 mm up) is no n-gon (not found)."""
+    reset()
+
+    def rim(name, lift):
+        xs = np.linspace(0, 0.1, 10)
+        pts = [(x, 0, 0) for x in xs] + [(x, 0.02, 0) for x in xs[::-1]]
+        pts[13] = (pts[13][0], pts[13][1], lift)
+        me = bpy.data.meshes.new(name)
+        me.from_pydata(pts, [], [list(range(len(pts)))])
+        me.update()
+        obj = bpy.data.objects.new(name, me)
+        bpy.context.scene.collection.objects.link(obj)
+        return obj
+    flat = rim('RIM_FLAT', 0.0)
+    bent = rim('RIM_BENT', 0.0002)
+    twin = bpy.data.objects.new('RIM_BENT_TWIN', bent.data)
+    bpy.context.scene.collection.objects.link(twin)
+    me = bpy.data.meshes.new('QUAD_BENT')
+    me.from_pydata([(0, 0, 0), (0.1, 0, 0), (0.1, 0.1, 0.005), (0, 0.1, 0)], [], [(0, 1, 2, 3)])
+    quad = bpy.data.objects.new('QUAD_BENT', me)
+    bpy.context.scene.collection.objects.link(quad)
+    bpy.context.view_layer.update()  # the new objects join the view layer
+    found, faces = checks.bent_ngons(bpy.context.view_layer)
+    assert sorted(o.name for o in found) == ['RIM_BENT', 'RIM_BENT_TWIN'] and faces == 1, (found, faces)
+    assert found[bent].tolist() == [0]
+    flat.select_set(True)
+    assert bpy.ops.fss.find_bent_ngons() == {'FINISHED'}
+    assert sorted(o.name for o in bpy.context.selected_objects) == ['RIM_BENT', 'RIM_BENT_TWIN']
+    assert bent.data.polygons[0].select
+    # flattened again: none
+    bent.data.vertices[13].co.z = 0.0
+    bent.data.update()
+    assert checks.bent_ngons(bpy.context.view_layer) == ({}, 0)
+    for o in (flat, bent, twin, quad):
+        bpy.data.objects.remove(o)
+    print(f"PASS: test_bent_ngons (over {checks.BENT_NGON_DEG:g} degrees: the rim bent by 0.2 mm found on both "
+          "users and selected; flat, flattened again and a bent quad not found)")
+
+
 class _Layout:
     """Records what a panel draws (background Blender has no UI to draw into)."""
 
@@ -2328,6 +2370,7 @@ def main():
     test_check_all_and_keep()
     test_faces_without_area()
     test_faces_without_uv_area()
+    test_bent_ngons()
     test_square_size_migration()
     test_panel_rows()
     test_pack_all()

@@ -30,6 +30,9 @@ const double RASTER_EPS = 1e-9;  // rasterize_ids' eps
 const int64_t CELL = 8;          // px per side of a cell of the triangle bins
 const int64_t BIN_MARGIN = 3;    // px: a triangle is binned this far beyond its bounds (its box test reaches 1 px)
 const int64_t PX_CHUNK = 64;     // pixels taken by a thread at a time
+// Soften's concave slopes (auto-bake decision 103): read over a step of at least this share of the softening width,
+// else left out (the half difference alone); a thinner face's step made the slope, and the value, explode
+const double SOFT_SLOPE_MIN_STEP = 0.1;
 
 // numpy's float64 -> int64 cast on x86-64 (cvttsd2si): truncation, NaN and out-of-range values give INT64_MIN
 inline int64_t to_i64(double x) {
@@ -479,10 +482,14 @@ FSS_AO_COPY_API int32_t fss_ao_copy_soften(const fss_ao_master *master, const fs
                     add = (gain > add) ? gain : add;  // np.maximum.at (no NaN reaches it, both values >= 0)
                     if (cv) continue;
                     // concave: the slopes away from the edge, read half a width in (at most 0.9 of each face's
-                    // height over the edge)
+                    // height over the edge); decision 103: under SOFT_SLOPE_MIN_STEP of the width, no slopes
+                    const double pd = vmin(0.5 * W, 0.9 * vmin(sc.hX[e], sc.hY[e]));
+                    if (!(pd >= SOFT_SLOPE_MIN_STEP * W)) {
+                        cadd = cadd + 0.5 * delta * fade;
+                        continue;
+                    }
                     double ac[3];
                     for (int d = 0; d < 3; d++) ac[d] = a[d] + (bb[d] - a[d]) * u;
-                    const double pd = vmax(vmin(0.5 * W, 0.9 * vmin(sc.hX[e], sc.hY[e])), 1e-9);
                     double pr[2];
                     for (int side = 0; side < 2; side++) {
                         const int64_t t = side == 0 ? E[0] : E[3];

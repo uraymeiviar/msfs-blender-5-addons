@@ -279,6 +279,19 @@ Checks, the check wishes, and other wishes without an area of their own. Artist 
 - **Test:** `tests/test_animation_ranges.py`, `tests/test_panels.py::test_draw_all` (drawn)
 - **Code:** `checks.py` (`animations_off_range`, `FSS_OT_FindAnimationsOffRange`)
 
+### GEN-015: Find Bent N-gons
+
+- **Status:** implemented
+- **Requirement:** In Object Mode, checks every local mesh object of the view layer: a face of 5 corners or more
+  counts when one of its triangles, as Blender splits it, lies more than 30 degrees off the face's normal or has no
+  area (a not quite flat n-gon with corners in a line splits into such slivers; flat, it splits cleanly). Selects the
+  visible objects that have them (first active) and those faces; a mesh shared by several objects is read once and
+  every user listed; reports faces and objects (hidden objects counted, not selected); lists each object's faces on
+  the console.
+- **Decision:** auto-bake 104
+- **Test:** `tests/test_uv_pack.py::test_bent_ngons`, `tests/test_panels.py` (the button drawn)
+- **Code:** `checks.py` (`bent_ngons`, `FSS_OT_FindBentNgons`)
+
 ## Check Wishes
 
 ### GEN-020: Stupidity check

@@ -160,6 +160,32 @@ VC_MODES = [  # decision 89
 ]
 
 
+def _source_items(g, comp=None):
+    """Decisions 99 and 100: the source of the roughness, metal, albedo or emissive bake (one choice); comp: the
+    vertex colour's component (None: its colour)."""
+    vc_name = f'Vertex Color {comp}' if comp else 'Vertex Color'
+    vc_desc = (f"The {comp.lower()} of a colour attribute of the mesh (Read)" if comp else
+               "The colour of a colour attribute of the mesh (Read)")
+    what = 'value' if comp else 'colour'
+    return [('MATERIAL', 'Material', f"The {g} of the object's material", 0),
+            ('VERTEX_COLOR', vc_name, vc_desc, 1),
+            ('CUSTOM', 'Custom', f"The object's own {g} {what} (set on the active object below), the same on every "
+             "face", 2)]
+
+
+def _source_get(g):
+    def get(self):
+        return 2 if getattr(self, f'cv_{g}') else (1 if getattr(self, f'vc_{g}') else 0)
+    return get
+
+
+def _source_set(g):
+    def set_(self, value):
+        setattr(self, f'vc_{g}', value == 1)
+        setattr(self, f'cv_{g}', value == 2)
+    return set_
+
+
 class FSS_AOBakeSettings(bpy.types.PropertyGroup):
     distance: bpy.props.FloatProperty(name="AO Distance", default=0.25, min=0.001, soft_max=1.0, unit='LENGTH',
                                       precision=3, description="How far other geometry darkens a surface, one value "
@@ -288,6 +314,29 @@ class FSS_AOBakeSettings(bpy.types.PropertyGroup):
     vc_albedo_mode: bpy.props.EnumProperty(name="Mode", default='MULTIPLY', items=VC_MODES)
     vc_rough_mode: bpy.props.EnumProperty(name="Mode", default='MULTIPLY', items=VC_MODES)
     vc_metal_mode: bpy.props.EnumProperty(name="Mode", default='MULTIPLY', items=VC_MODES)
+    # decision 99: roughness and metal from the object's own value (Custom), one choice with Material and Vertex Color;
+    # the choice kept in vc_<g> and cv_<g>, so a file's ticked vertex colour source carries over
+    cv_rough: bpy.props.BoolProperty(name="Roughness from Custom Value", default=False)
+    cv_metal: bpy.props.BoolProperty(name="Metal from Custom Value", default=False)
+    rough_source: bpy.props.EnumProperty(name="Roughness", items=_source_items('roughness', 'Green'),
+                                         get=_source_get('rough'), set=_source_set('rough'),
+                                         description="Where the roughness bake takes its value from")
+    metal_source: bpy.props.EnumProperty(name="Metal", items=_source_items('metal', 'Blue'),
+                                         get=_source_get('metal'), set=_source_set('metal'),
+                                         description="Where the metal bake takes its value from")
+    cv_rough_mode: bpy.props.EnumProperty(name="Mode", default='OVERWRITE', items=VC_MODES)
+    cv_metal_mode: bpy.props.EnumProperty(name="Mode", default='OVERWRITE', items=VC_MODES)
+    # decision 100: the albedo and the emissive from the object's own colour too
+    cv_albedo: bpy.props.BoolProperty(name="Albedo from Custom Color", default=False)
+    cv_emis: bpy.props.BoolProperty(name="Emissive from Custom Color", default=False)
+    albedo_source: bpy.props.EnumProperty(name="Albedo", items=_source_items('albedo'),
+                                          get=_source_get('albedo'), set=_source_set('albedo'),
+                                          description="Where the albedo bake takes its colour from")
+    emis_source: bpy.props.EnumProperty(name="Emissive", items=_source_items('emissive colour'),
+                                        get=_source_get('emis'), set=_source_set('emis'),
+                                        description="Where the emissive bake takes its colour from")
+    cv_albedo_mode: bpy.props.EnumProperty(name="Mode", default='OVERWRITE', items=VC_MODES)
+    cv_emis_mode: bpy.props.EnumProperty(name="Mode", default='OVERWRITE', items=VC_MODES)
     apply_albedo: bpy.props.BoolProperty(name="Albedo", default=False,
                                          description="Run writes the albedo masters where Texture Target's Albedo "
                                          "says: the base colour texture, or <material>.albedo.png")
@@ -446,8 +495,9 @@ def _is_copy(self, obj):
 def selected_copies(context, mesh):
     """Decision 77: the names of the selected copies of this mesh that a bake bakes (sorted)."""
     scene, view_layer = context.scene, context.view_layer
+    names = store.shown_names(view_layer)
     return sorted(o.name for o in getattr(context, 'selected_objects', None) or ()
-                  if o.data is mesh and store.bakeable_copy(o, view_layer, scene))
+                  if o.data is mesh and store.bakeable_copy(o, view_layer, scene, names))
 
 
 def bake_copy_choice(context, mesh, names=None):
@@ -480,6 +530,26 @@ def bake_groups(s):
 def apply_groups(s):
     """Decision 82: the material channels the apply toggles choose."""
     return [g for g in store.core.CHANNEL_GROUPS if getattr(s, f'apply_{g}')]
+
+
+def _draw_custom_values(layout, context, groups):
+    """Decisions 99 and 100: the active object's values (Roughness, Metal) and colours (Albedo, Emissive) of the
+    Custom source, and a line when the selected meshes' values differ (each bakes its own)."""
+    obj = context.active_object
+    box = layout.column(align=True)
+    if obj is None or obj.type != 'MESH':
+        box.label(text='Custom: make a mesh active to set its value', icon='INFO')
+        return
+    o = obj.fss_ao_bake
+    box.label(text=f'Custom values of {obj.name}', icon='OBJECT_DATA')
+    for g in groups:
+        box.prop(o, f'{g}_value', slider=True)
+    meshes = [ob for ob in context.selected_objects if ob.type == 'MESH']
+    differ = [store.CHANNEL_NAMES_CV[g] for g in groups
+              if len({repr(store.custom_values(ob)[g]) for ob in meshes}) > 1]
+    if differ:
+        box.label(text=f"{' and '.join(differ)}: the selected objects' values differ, each bakes its own",
+                  icon='ERROR')
 
 
 def channel_copies(context, stems):
@@ -593,6 +663,20 @@ class FSS_AOObjectSettings(bpy.types.PropertyGroup):
     pick: bpy.props.PointerProperty(type=bpy.types.Object, name="Add", poll=_is_pickable, update=_pick_update,
                                     description="Pick an object (eyedropper or name) to add it to the list without "
                                     "changing the selection")
+    rough_value: bpy.props.FloatProperty(name="Roughness", default=1.0, min=0.0, max=1.0, subtype='FACTOR',
+                                         description="Decision 99: this object's roughness when Roughness bakes from "
+                                         "Custom (kept with the object, whatever its material)")
+    metal_value: bpy.props.FloatProperty(name="Metal", default=0.0, min=0.0, max=1.0, subtype='FACTOR',
+                                         description="Decision 99: this object's metal when Metal bakes from Custom "
+                                         "(kept with the object, whatever its material)")
+    albedo_value: bpy.props.FloatVectorProperty(name="Albedo", size=3, default=(1.0, 1.0, 1.0), min=0.0, max=1.0,
+                                                subtype='COLOR', description="Decision 100: this object's albedo "
+                                                "when Albedo bakes from Custom, as the material's Base Color would "
+                                                "give it (kept with the object, whatever its material)")
+    emis_value: bpy.props.FloatVectorProperty(name="Emissive", size=3, default=(0.0, 0.0, 0.0), min=0.0, max=1.0,
+                                              subtype='COLOR', description="Decision 100: this object's emissive "
+                                              "colour when Emissive bakes from Custom, as the material's Emission "
+                                              "Color would give it (kept with the object, whatever its material)")
 
 
 def _get_curv_file_name(self):
@@ -682,7 +766,15 @@ class FSS_AOApplySettings(bpy.types.PropertyGroup):
         ('ORM', 'Red (ORM)', 'The AO in red, as in an ORM texture; green and blue as chosen')])
     green_blue: bpy.props.EnumProperty(name="Green and Blue", default='WHITE', items=[
         ('WHITE', 'White', 'Empty: MSFS then uses the material\'s roughness and metallic factors'),
-        ('COPY', 'From ORM Texture', "Roughness and metallic taken from the texture in the material's ORM slot")])
+        ('COPY', 'From ORM Texture', "Roughness and metallic taken from the texture in the material's ORM slot"),
+        ('CUSTOM', 'Custom', 'Roughness and metallic set to the two values below (decision 98)')])
+    orm_roughness: bpy.props.FloatProperty(name="Roughness", default=1.0, min=0.0, max=1.0, subtype='FACTOR',
+                                           description="Green of a new ORM-layout file with Green and Blue Custom: "
+                                           "MSFS multiplies the material's roughness factor by it (1.0 keeps the "
+                                           "factor)")
+    orm_metal: bpy.props.FloatProperty(name="Metal", default=0.0, min=0.0, max=1.0, subtype='FACTOR',
+                                       description="Blue of a new ORM-layout file with Green and Blue Custom: MSFS "
+                                       "multiplies the material's metallic factor by it (0.0: not metallic)")
     sampling: bpy.props.EnumProperty(name="Sampling", default='AUTOMATIC', items=[
         ('AUTOMATIC', 'Automatic', 'The mean of the covered pixels when smaller, bilinear when larger'),
         ('NEAREST', 'Nearest', 'No in-between values: hard metallic edges stay hard'),
@@ -2412,17 +2504,29 @@ class FSS_PT_AORun(bpy.types.Panel):
             cell.prop(s, apply_prop, text=f'Apply {name} to Texture ({n} objs, {sets})')
             if getattr(s, apply_prop):
                 changed |= stale
-        vc_on = False
+        vc_on, cv_on = False, []
         for bake_prop, g in (('bake_ao', 'ao'), ('bake_albedo', 'albedo'), ('bake_rough', 'rough'),
                              ('bake_metal', 'metal'), ('bake_emis', 'emis')):  # decisions 88, 95: the sources
             if getattr(s, bake_prop):
                 row = layout.row(align=True)
+                if g in store.CV_GROUPS:  # decision 99: Material, Vertex Color or Custom
+                    row.prop(s, f'{g}_source')
+                    src = getattr(s, f'{g}_source')
+                    if src == 'VERTEX_COLOR':
+                        row.prop(s, f'vc_{g}_mode', expand=True)
+                        vc_on = True
+                    elif src == 'CUSTOM':
+                        row.prop(s, f'cv_{g}_mode', expand=True)
+                        cv_on.append(g)
+                    continue
                 row.prop(s, f'vc_{g}')
                 if getattr(s, f'vc_{g}'):
                     row.prop(s, f'vc_{g}_mode', expand=True)
                     vc_on = True
         if vc_on:  # decision 91: which colour attribute the sources read, once
             layout.row(align=True).prop(s, 'vc_attribute', expand=True)
+        if cv_on:  # decision 99: the active object's own values
+            _draw_custom_values(layout, context, cv_on)
         fp = fetch_problems(context)  # decision 93: the masters into the vertex colour
         row = layout.row(align=True)
         for what in apply_mod.FETCH:
@@ -2630,6 +2734,9 @@ def _draw_target(layout, context, s, st):
         row.prop(a, 'layout', expand=True)
         if a.layout == 'ORM':
             col.prop(a, 'green_blue')
+            if a.green_blue == 'CUSTOM':  # decision 98
+                col.prop(a, 'orm_roughness', slider=True)
+                col.prop(a, 'orm_metal', slider=True)
             if a.green_blue == 'COPY':
                 if orm is None:
                     col.label(text='No ORM texture: green and blue white', icon='ERROR')

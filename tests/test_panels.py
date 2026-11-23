@@ -176,6 +176,7 @@ def test_draw_all():
     bpy.types.FSS_PT_checks.draw(SimpleNamespace(layout=_Layout(checks_calls)), bpy.context)
     ops = [args[0] for name, args, _kwargs in checks_calls if name == 'operator']
     assert 'fss.find_faces_without_area' in ops and 'fss.find_faces_without_uv_area' in ops, ops
+    assert 'fss.find_bent_ngons' in ops, ops  # auto-bake decision 104
     assert 'fss.find_animations_off_range' in ops, ops
     materials_calls = []
     bpy.types.FSS_PT_materials.draw(SimpleNamespace(layout=_Layout(materials_calls)), bpy.context)
@@ -1145,30 +1146,33 @@ def test_ao_vertex_color_rows():
         calls = []
         bpy.types.FSS_PT_ao_run.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
         return [(args[1], bool(kw.get('expand'))) for name, args, kw in calls
-                if name == 'prop' and args[1].startswith('vc_')]
+                if name == 'prop' and (args[1].startswith(('vc_', 'cv_')) or args[1].endswith('_source'))]
     seen = {}
     try:
         for p_ in keep:
             setattr(s, p_, False)
         assert rows() == [], rows()
         s.bake_emis = True
-        assert rows() == [('vc_emis', False)], rows()  # decision 95: the Emissive source
+        assert rows() == [('emis_source', False)], rows()  # decisions 95, 100: the Emissive source
         s.bake_ao = s.bake_rough = True
-        assert rows() == [('vc_ao', False), ('vc_rough', False), ('vc_emis', False)], rows()
+        assert rows() == [('vc_ao', False), ('rough_source', False), ('emis_source', False)], rows()  # decision 99
         enum = s.bl_rna.properties['vc_attribute'].enum_items
         assert s.vc_attribute == 'SECOND' and enum['SECOND'].name == 'Second Color Attribute' and \
             enum['ACTIVE'].name == 'Active Attribute'
         s.vc_rough = True
-        assert rows() == [('vc_ao', False), ('vc_rough', False), ('vc_rough_mode', True), ('vc_emis', False),
-                          ('vc_attribute', True)], rows()
+        assert s.rough_source == 'VERTEX_COLOR'  # decision 99: a ticked vertex colour source carries over
+        assert rows() == [('vc_ao', False), ('rough_source', False), ('vc_rough_mode', True),
+                          ('emis_source', False), ('vc_attribute', True)], rows()
         s.bake_albedo = s.bake_metal = True
         got = rows()
-        assert got == [('vc_ao', False), ('vc_albedo', False), ('vc_rough', False), ('vc_rough_mode', True),
-                       ('vc_metal', False), ('vc_emis', False), ('vc_attribute', True)], got
+        assert got == [('vc_ao', False), ('albedo_source', False), ('rough_source', False), ('vc_rough_mode', True),
+                       ('metal_source', False), ('emis_source', False), ('vc_attribute', True)], got
         seen['all ticked'] = [n for n, _e in got]
         s.bake_rough = False  # its source stays ticked but its row goes with its Bake tick, and Read with it
-        assert rows() == [('vc_ao', False), ('vc_albedo', False), ('vc_metal', False), ('vc_emis', False)], rows()
+        assert rows() == [('vc_ao', False), ('albedo_source', False), ('metal_source', False),
+                          ('emis_source', False)], rows()
         s.vc_emis = True
+        assert s.emis_source == 'VERTEX_COLOR'  # decision 100: carried over
         assert ('vc_emis_mode', True) in rows() and ('vc_attribute', True) in rows(), rows()
         assert store.settings_dict(bpy.context.scene)['vertex_color'] == {'rough': 'MULTIPLY', 'emis': 'MULTIPLY'}
         s.vc_emis = False
@@ -1188,6 +1192,113 @@ def test_ao_vertex_color_rows():
     print(f"PASS: test_ao_vertex_color_rows (rows {seen['all ticked']}; the mode expanded only with its source "
           f"ticked, Read once while a drawn source is ticked; the Emissive row while Bake Emissive is ticked; the "
           f"job's settings carry the ticked sources and Read)")
+
+
+def test_ao_custom_value_rows():
+    """AO bake decision 99: Roughness and Metal take Material, Vertex Color or Custom as one choice (kept in vc_<g> and
+    cv_<g>); Custom draws its Overwrite / Multiply (Overwrite by default) and the active object's own value, with a
+    line when the selected meshes' values differ; the job's settings carry the Custom sources apart from the vertex
+    colour ones, and each job item the values of the object its channels come from."""
+    from fss_blender_tools import ao_bake_store as store
+    s = bpy.context.scene.fss_ao_bake
+    keep = {p_: getattr(s, p_) for p_ in ('bake_ao', 'bake_albedo', 'bake_rough', 'bake_metal', 'bake_emis')}
+    objs = []
+    for i, v in enumerate((0.25, 0.25)):
+        me = bpy.data.meshes.new(f'CV_TEST_MESH{i}')
+        me.from_pydata([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [], [(0, 1, 2)])
+        o = bpy.data.objects.new(f'CV_TEST{i}', me)
+        bpy.context.scene.collection.objects.link(o)
+        objs.append(o)
+    a, b = objs
+    a.fss_ao_bake.rough_value = b.fss_ao_bake.rough_value = 0.25
+
+    def draw():
+        calls = []
+        bpy.types.FSS_PT_ao_run.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
+        props = [(args[1], bool(kw.get('expand'))) for name, args, kw in calls if name == 'prop'
+                 and (args[1].startswith(('vc_', 'cv_')) or args[1].endswith(('_source', '_value')))]
+        labels = [kw.get('text', '') for name, _a, kw in calls if name == 'label']
+        return props, labels
+    found = {}
+    try:
+        for p_ in keep:
+            setattr(s, p_, False)
+        o_rna = a.fss_ao_bake.bl_rna.properties
+        assert (a.fss_ao_bake.rough_value, b.fss_ao_bake.metal_value) == (0.25, 0.0)
+        assert o_rna['rough_value'].default == 1.0 and o_rna['metal_value'].default == 0.0
+        assert s.rough_source == 'MATERIAL' and s.metal_source == 'MATERIAL'
+        assert s.cv_rough_mode == 'OVERWRITE' and s.cv_metal_mode == 'OVERWRITE'
+        enum = [e.name for e in s.bl_rna.properties['rough_source'].enum_items]
+        assert enum == ['Material', 'Vertex Color Green', 'Custom'], enum
+        assert [e.name for e in s.bl_rna.properties['metal_source'].enum_items] == ['Material', 'Vertex Color Blue',
+                                                                                     'Custom']
+        s.bake_rough = s.bake_metal = True
+        s.rough_source = 'CUSTOM'
+        assert s.cv_rough and not s.vc_rough
+        bpy.context.view_layer.objects.active = a
+        for o in bpy.context.view_layer.objects:
+            o.select_set(o in objs)
+        props, labels = draw()
+        assert props == [('rough_source', False), ('cv_rough_mode', True), ('metal_source', False),
+                         ('rough_value', False)], props
+        assert 'Custom values of CV_TEST0' in labels and not any('differ' in t for t in labels), labels
+        found['Custom'] = [n for n, _e in props]
+        b.fss_ao_bake.rough_value = 0.5
+        props, labels = draw()
+        assert any(t.startswith('Roughness: the selected objects') for t in labels), labels
+        found['differ'] = [t for t in labels if 'differ' in t]
+        s.metal_source = 'VERTEX_COLOR'
+        sd = store.settings_dict(bpy.context.scene)
+        assert sd['custom_value'] == {'rough': 'OVERWRITE'} and sd['vertex_color'] == {'metal': 'MULTIPLY'}, sd
+        s.metal_source, s.cv_metal_mode = 'CUSTOM', 'MULTIPLY'
+        props, _l = draw()
+        assert ('vc_attribute', True) not in props and ('metal_value', False) in props, props
+        sd = store.settings_dict(bpy.context.scene)
+        assert sd['custom_value'] == {'rough': 'OVERWRITE', 'metal': 'MULTIPLY'} and sd['vertex_color'] == {}, sd
+        s.vc_rough, s.cv_rough = True, True  # both stored: Custom wins, the vertex colour source not sent
+        assert s.rough_source == 'CUSTOM' and 'rough' not in store.vertex_color_sources(s)
+        s.rough_source = 'MATERIAL'
+        assert not s.vc_rough and not s.cv_rough
+        assert store.custom_values(b) == {'albedo': [1.0, 1.0, 1.0], 'rough': 0.5, 'metal': 0.0,
+                                          'emis': [0.0, 0.0, 0.0]}, store.custom_values(b)
+        # decision 100: Albedo and Emissive, a colour each (white and black by default), in the same rows
+        o_rna = a.fss_ao_bake.bl_rna.properties
+        assert tuple(o_rna['albedo_value'].default_array) == (1.0, 1.0, 1.0) and \
+            tuple(o_rna['emis_value'].default_array) == (0.0, 0.0, 0.0) and o_rna['albedo_value'].subtype == 'COLOR'
+        assert s.cv_albedo_mode == 'OVERWRITE' and s.cv_emis_mode == 'OVERWRITE'
+        assert [e.name for e in s.bl_rna.properties['albedo_source'].enum_items] == ['Material', 'Vertex Color',
+                                                                                      'Custom']
+        s.bake_rough = s.bake_metal = False
+        s.bake_albedo = s.bake_emis = True
+        s.albedo_source = s.emis_source = 'CUSTOM'
+        assert s.cv_albedo and s.cv_emis and not s.vc_albedo and not s.vc_emis
+        bpy.context.view_layer.objects.active = a
+        props, labels = draw()
+        assert props == [('albedo_source', False), ('cv_albedo_mode', True), ('emis_source', False),
+                         ('cv_emis_mode', True), ('albedo_value', False), ('emis_value', False)], props
+        assert not any('differ' in t for t in labels), labels
+        b.fss_ao_bake.albedo_value = (0.5, 0.2, 0.1)
+        _p, labels = draw()
+        assert any(t.startswith('Albedo: the selected objects') for t in labels), labels
+        found['colours'] = [n for n, _e in props]
+        sd = store.settings_dict(bpy.context.scene)
+        assert sd['custom_value'] == {'albedo': 'OVERWRITE', 'metal': 'MULTIPLY', 'emis': 'OVERWRITE'}, sd
+        assert store.custom_values(b)['albedo'] == [0.5, 0.2, 0.1]
+        bpy.context.view_layer.objects.active = None
+        _p, labels = draw()
+        assert 'Custom: make a mesh active to set its value' in labels, labels
+    finally:
+        for p_, v in keep.items():
+            setattr(s, p_, v)
+        s.rough_source = s.metal_source = s.albedo_source = s.emis_source = 'MATERIAL'
+        s.cv_rough_mode = s.cv_metal_mode = s.cv_albedo_mode = s.cv_emis_mode = 'OVERWRITE'
+        for o in objs:
+            me = o.data
+            bpy.data.objects.remove(o)
+            bpy.data.meshes.remove(me)
+    print(f"PASS: test_ao_custom_value_rows (rows {found['Custom']}, with colours {found['colours']}; "
+          f"{found['differ']}; Custom Overwrite by default, "
+          f"the vertex colour carried over, one choice; the job's settings and values)")
 
 
 def test_ao_fetch_buttons():
@@ -1339,6 +1450,7 @@ def main():
     test_ao_one_instance_box()  # AO bake decision 77
     test_ao_channel_toggles()  # AO bake decisions 79, 82, 84, 85 and 87
     test_ao_vertex_color_rows()  # AO bake decisions 88, 89, 91 and 95
+    test_ao_custom_value_rows()  # AO bake decision 99
     test_ao_fetch_buttons()  # AO bake decision 93
     test_ao_texture_target_sections()  # AO bake decisions 96 and 97
     print("ALL TESTS PASSED")

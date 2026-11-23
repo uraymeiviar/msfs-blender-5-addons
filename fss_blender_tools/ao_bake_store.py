@@ -382,10 +382,36 @@ def shared_instance(mesh, copies, entry=None, chosen=None):
     return by_name[min(by_name)], 'first'
 
 
-def bakeable_copy(obj, view_layer, scene):
-    """Whether this object is one of the copies Refresh bakes: a visible LOD0 mesh with faces and no exclusion."""
+def shown_names(view_layer):
+    """Decision 102: the names of the objects the view layer shows, whatever a 3D view shows (its local view, local
+    collections and object type filters): the object in a collection that is not excluded, nor hidden in viewports
+    (the monitor) or in the view layer (the eye) itself or by a parent collection. As Blender's visible_get without a 3D
+    view (the file opening's Refresh); with the object's own hide_viewport and hide_get, see shown()."""
+    names = set()
+
+    def walk(lc, hidden):  # as Blender's sync: the hiding inherited, the exclusion not (a child may be included)
+        hidden = hidden or lc.collection.hide_viewport or lc.hide_viewport
+        if not hidden and not lc.exclude:
+            names.update(o.name for o in lc.collection.objects)
+        for c in lc.children:
+            walk(c, hidden)
+    if view_layer.layer_collection is not None:  # None in a view layer never synced, which has no objects either
+        walk(view_layer.layer_collection, False)
+    return names
+
+
+def shown(obj, view_layer, names=None):
+    """Decision 102: is the object visible in the view layer, ignoring any 3D view's local view (shown_names)."""
+    if names is None:
+        names = shown_names(view_layer)
+    return obj.name in names and not obj.hide_viewport and not obj.hide_get(view_layer=view_layer)
+
+
+def bakeable_copy(obj, view_layer, scene, names=None):
+    """Whether this object is one of the copies Refresh bakes: a visible LOD0 mesh with faces and no exclusion
+    (visible: decision 102, a 3D view's local view does not count)."""
     return (obj.type == 'MESH' and obj.data is not None and len(obj.data.polygons) > 0
-            and obj.visible_get(view_layer=view_layer) and not obj.hide_render and in_lod0(obj)
+            and shown(obj, view_layer, names) and not obj.hide_render and in_lod0(obj)
             and not bake_exclusion(obj, scene))
 
 
@@ -475,8 +501,11 @@ def custom_occluders(obj, view_layer, scene_names=()):
 
 
 def _visible_meshes(view_layer):
+    """The visible LOD0 meshes, the bake's targets and occluders; decision 102: whatever a 3D view's local view shows,
+    so a bake started there takes the same objects as the file opening's Refresh."""
+    names = shown_names(view_layer)
     return [o for o in view_layer.objects if o.type == 'MESH' and o.data is not None and len(o.data.polygons)
-            and o.visible_get(view_layer=view_layer) and not o.hide_render and in_lod0(o)]
+            and shown(o, view_layer, names) and not o.hide_render and in_lod0(o)]
 
 
 def bake_exclusion(obj, scene):
@@ -604,7 +633,8 @@ def settings_dict(scene):
                 curv_width=round(float(s.curv_width), 6), denoise=denoise_opts(scene),
                 baker=s.baker, optix_samples=int(s.optix_samples),  # OptiX baker decisions 22, 24
                 channel_samples=int(s.channel_samples), vertex_color=vertex_color_sources(s),
-                vc_attribute=s.vc_attribute)  # decision 91
+                vc_attribute=s.vc_attribute,  # decision 91
+                custom_value=custom_value_sources(s))  # decision 99
 
 
 VC_GROUPS = ('ao', 'albedo', 'rough', 'metal', 'emis')  # decisions 88, 95: the channels with a vertex colour source
@@ -613,7 +643,29 @@ VC_GROUPS = ('ao', 'albedo', 'rough', 'metal', 'emis')  # decisions 88, 95: the 
 def vertex_color_sources(s):
     """Decision 88: {group: 'OVERWRITE' or 'MULTIPLY'} of the ticked vertex colour sources (the runner uses one only
     for a channel it bakes)."""
-    return {g: getattr(s, f'vc_{g}_mode') for g in VC_GROUPS if getattr(s, f'vc_{g}', False)}
+    return {g: getattr(s, f'vc_{g}_mode') for g in VC_GROUPS
+            if getattr(s, f'vc_{g}', False) and not getattr(s, f'cv_{g}', False)}
+
+
+# decisions 99 and 100: the channels with a Custom source (the object's own value or colour)
+CV_GROUPS = ('albedo', 'rough', 'metal', 'emis')
+CHANNEL_NAMES_CV = {'albedo': 'Albedo', 'rough': 'Roughness', 'metal': 'Metal', 'emis': 'Emissive'}
+CV_DEFAULTS = {'albedo': (1.0, 1.0, 1.0), 'rough': 1.0, 'metal': 0.0, 'emis': (0.0, 0.0, 0.0)}
+
+
+def custom_value_sources(s):
+    """Decision 99: {group: 'OVERWRITE' or 'MULTIPLY'} of the channels whose source is Custom."""
+    return {g: getattr(s, f'cv_{g}_mode') for g in CV_GROUPS if getattr(s, f'cv_{g}', False)}
+
+
+def custom_values(obj):
+    """Decisions 99 and 100: {group: value} of an object's own Custom values (a colour: a list of 3, linear)."""
+    o = getattr(obj, 'fss_ao_bake', None)
+    out = {}
+    for g in CV_GROUPS:
+        v = getattr(o, f'{g}_value', CV_DEFAULTS[g])
+        out[g] = [round(float(c), 6) for c in v] if isinstance(CV_DEFAULTS[g], tuple) else round(float(v), 6)
+    return out
 
 
 def vc_overwritten(entry):
@@ -1223,6 +1275,9 @@ def make_job(context, stems, test_delay_s=0.0, tile_px=0, test_tile_delay_s=0.0,
         if (channels or {}).get(stem):  # decision 79
             job_item.update(channels=list(channels[stem]),
                             channel_object=(channel_objects or {}).get(stem) or item['object'])
+            src = bpy.data.objects.get(job_item['channel_object']) or bpy.data.objects.get(item['object'])
+            if src is not None:  # decision 99: the Custom values of the object the channels come from
+                job_item['custom_values'] = custom_values(src)
         if item.get('copies'):  # decision 47: a shared mesh's copies, each with its own surroundings
             job_item['combine'] = item['combine']
             job_item['copies'] = [dict(c, occluders=[dict(name=n, skip_slots=skip_slots(bpy.data.objects[n]),
