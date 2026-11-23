@@ -93,8 +93,13 @@ def existing_size(path):
     return (int(info[0]), int(info[1])) if info is not None else None
 
 
+def safe_name(material):
+    return ''.join(c if (c.isalnum() or c in '-_.') else '_' for c in material.name)
+
+
 def default_file_name(material):
-    return ''.join(c if (c.isalnum() or c in '-_.') else '_' for c in material.name) + '_ao.png'
+    """Decision 111: <material>_COMP_RGB16.png (before it, <material>_ao.png)."""
+    return safe_name(material) + '_COMP_RGB16.png'
 
 
 def file_name(material, settings):
@@ -228,7 +233,14 @@ CH_SLOTS = {'albedo': (P_BASE, 'base colour'), 'emis': (P_EMIS, 'emissive'), 'ro
             'metal': (P_ORM, 'ORM')}
 CH_COLUMNS = {'albedo': (0, 1, 2), 'emis': (0, 1, 2), 'rough': (1,), 'metal': (2,)}
 CH_NEW = {'albedo': 65535, 'emis': 0, 'rough': 0, 'metal': 0}  # a new separate file where nothing is written
-CH_FILES = {'albedo': '.albedo.png', 'emis': '.emissive.png', 'rough': '.roughness.png', 'metal': '.metal.png'}
+CH_FILES = {'albedo': '_ALBD_RGB16.png', 'emis': '.emissive.png', 'rough': '.roughness.png', 'metal': '.metal.png'}
+ALBEDO_RGBA_FILE = '_ALBD_RGBA16.png'  # decision 111: the albedo's file with Alpha on
+
+
+def albedo_alpha(material, settings=None):
+    """Decision 111: whether the texture set's albedo has an alpha channel (its Albedo's Alpha switch)."""
+    a = settings if settings is not None else getattr(material, 'fss_ao_apply', None)
+    return bool(getattr(a, 'albedo_alpha', False))
 CH_GREY = ('rough', 'metal')  # decision 86: their separate files are single-channel
 
 
@@ -236,9 +248,11 @@ CH_OWN = ('albedo', 'emis')  # decision 96: a Target, folder, file, resolution a
 
 
 def channel_file_name(material, kind):
-    """Decisions 82, 86: <material>.albedo.png, .emissive.png, .roughness.png or .metal.png (the name made safe as the
-    AO's)."""
-    return ''.join(c if (c.isalnum() or c in '-_.') else '_' for c in material.name) + CH_FILES[kind]
+    """Decisions 82, 86: <material>.emissive.png, .roughness.png or .metal.png (the name made safe as the AO's); decision
+    111: the albedo <material>_ALBD_RGB16.png, or _ALBD_RGBA16.png with Alpha on."""
+    if kind == 'albedo' and albedo_alpha(material):
+        return safe_name(material) + ALBEDO_RGBA_FILE
+    return safe_name(material) + CH_FILES[kind]
 
 
 def channel_name(material, kind, settings=None):
@@ -273,6 +287,8 @@ class ChannelTarget:
         self.material, self.channel = material, kind
         self.warnings, self.backup = [], None
         self.cols = CH_COLUMNS[kind]
+        # decision 111: the albedo's alpha into the fourth column, with the set's Alpha on
+        self.alpha = kind == 'albedo' and albedo_alpha(material, settings)
         in_place = channel_in_place(settings, kind)
         self.kind = ('SLOT' if kind in CH_OWN else 'ORM') if in_place else 'FILE'
         self.layout = kind
@@ -288,6 +304,9 @@ class ChannelTarget:
                 raise ValueError(f'{material.name}: the {slot} texture has {vals.shape[2]} channel(s), not RGB')
             if bits == 8:
                 self.warnings.append(f'the {slot} file is 8-bit: written as 16-bit')
+            if self.alpha and vals.shape[2] < 4:  # the artist's texture keeps its format
+                self.warnings.append(f'the {slot} texture has no alpha channel: the alpha is not written')
+                self.alpha = False
             self.base = vals * np.uint16(257 if bits == 8 else 1)
             backup_dir = os.path.join(folder, 'orm_backup' if prop == P_ORM else f'{kind}_backup')
             self.backup = os.path.join(backup_dir, os.path.basename(path))
@@ -298,7 +317,7 @@ class ChannelTarget:
             grey = kind in CH_GREY  # decision 86: one channel, PNG colour type 0
             if grey:
                 self.cols = (0,)
-            nch = 1 if grey else 3
+            nch = 1 if grey else 4 if self.alpha else 3
             own = kind in CH_OWN
             path = os.path.join(output_folder(scene, kind if own else 'ao'),
                                 channel_name(material, kind, settings if own else None))
@@ -307,6 +326,8 @@ class ChannelTarget:
                 vals = vals * np.uint16(257 if bits == 8 else 1)
                 if vals.shape[2] < 3 and not grey:
                     vals = np.repeat(vals[:, :, :1], 3, axis=2)
+                if nch == 4 and vals.shape[2] == 3:  # decision 111: an RGB file given an opaque alpha
+                    vals = np.concatenate([vals, np.full(vals.shape[:2] + (1,), 65535, np.uint16)], axis=2)
                 self.base = vals[:, :, :nch].copy() if vals.shape[2] != nch else vals
             else:
                 res = (getattr(settings, f'{kind}_resolution', None) if own else None) or settings.resolution
@@ -316,10 +337,12 @@ class ChannelTarget:
                 else:
                     W = H = int(res)
                 self.base = np.full((int(H), int(W), nch), CH_NEW[kind], np.uint16)
+        if self.alpha:  # decision 111: a new file's alpha opaque where nothing is written
+            self.cols = CH_COLUMNS[kind] + (3,)
         self.path = path
         self.H, self.W = self.base.shape[:2]
 
-    def write_steps(self, Qs, written, threads):
+    def write_steps(self, Qs, written, threads, masks=None):
         """The file with the components Qs where written, every other pixel and channel as it was; a generator of
         'write' steps. Returns the PNG writer's `by`."""
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
@@ -332,8 +355,9 @@ class ChannelTarget:
                 r0, r1 = H - min(H, top + 256), H - top
                 vals = self.base[r0:r1].copy()
                 wr = written[r0:r1]
-                for q, col in zip(Qs, self.cols):
-                    vals[:, :, col] = np.where(wr, q[r0:r1], vals[:, :, col])
+                for i, (q, col) in enumerate(zip(Qs, self.cols)):  # decision 111: a component's own mask
+                    m_ = masks[i][r0:r1] if masks is not None and masks[i] is not None else wr
+                    vals[:, :, col] = np.where(m_, q[r0:r1], vals[:, :, col])
                 writer.write(vals[::-1])
             writer.close()
         except BaseException:
@@ -403,12 +427,16 @@ def apply_set(context, material, objects=None, settings=None, band_rows=APPLY_BA
     return _finish(apply_set_steps(context, material, objects, settings, band_rows, kind))
 
 
-def _chan_open(folder, stem, kind, threads):
+def _chan_open(folder, stem, kind, threads, extra=False):
     """Decision 82: the master's images of a material channel, paged, all open at once (each with its own map page);
-    None when one is missing (those opened are closed)."""
+    None when one is missing (those opened are closed). extra (decision 111): its optional components too, where the
+    master has them (the albedo's alpha), after the others."""
     out = []
     try:
-        for comp in core.CHANNEL_KINDS[kind]:
+        opt = core.CHANNEL_EXTRA.get(kind, ()) if extra else ()
+        for comp in core.CHANNEL_KINDS[kind] + opt:
+            if comp in opt and not os.path.isfile(core.image_paths(folder, stem, comp)[0]):
+                continue
             m = core.open_master(folder, stem, kind=comp, threads=threads, map_page=f'.{comp}.mappage')
             if m is None:
                 for o in out:
@@ -533,6 +561,10 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
     written = np.zeros((H, W), bool)
     cover = np.zeros((H, W), bool)
     pad_step = np.full((H, W), 1 << 30, np.int32)
+    alpha = chan and target.alpha  # decision 111: the albedo's alpha too, where a master has it
+    if alpha:
+        comps = comps + core.CHANNEL_EXTRA[kind]
+    written_a = np.zeros((H, W), bool) if alpha else None
     Qs = [np.zeros((H, W), np.uint16) for _c in comps]  # the AO (a channel's components) where written
     Q = Qs[0]
     label_parts = []
@@ -617,7 +649,7 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
         why = 'missing'
         try:
             if chan:  # decision 82: the channel's components open at once, each with its own map page
-                cmasters = _chan_open(folder, stem, kind, int(scene.fss_ao_bake.threads))
+                cmasters = _chan_open(folder, stem, kind, int(scene.fss_ao_bake.threads), extra=alpha)
                 master = cmasters[0] if cmasters else None
             else:
                 master = core.open_master(folder, stem, kind=kind, threads=int(scene.fss_ao_bake.threads))
@@ -695,6 +727,8 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
                 for q_, o_ in zip(Qs, outs):
                     q_[yb:yb1, x0:x0 + w][inside] = _quantize(o_[inside])
                 written[yb:yb1, x0:x0 + w] |= inside
+                if alpha and len(outs) == len(Qs):  # decision 111: this master has the alpha
+                    written_a[yb:yb1, x0:x0 + w] |= inside
                 padm = (owner_c < 0) & (steps > 0) & (steps <= pad) & (out >= 0)
                 jj, ii = np.nonzero(padm)
                 if len(jj):
@@ -719,15 +753,21 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
     # padding only where no face of the set lies (P47), the nearest island's first
     flat_cover, flat_step, flat_w = cover.ravel(), pad_step.ravel(), written.ravel()
     flat_qs = [q_.ravel() for q_ in Qs]
+    flat_wa = written_a.ravel() if alpha else None
     for idx, vals_, st in pending:
         take = ~flat_cover[idx] & (st < flat_step[idx])
         for fq, val in zip(flat_qs, vals_):
             fq[idx[take]] = val[take]
         flat_step[idx[take]] = st[take]
         flat_w[idx[take]] = True
+        if alpha:  # decision 111: the nearest island's alpha, or none where it has none
+            flat_wa[idx[take]] = len(vals_) == len(Qs)
     del pending, cover, pad_step
     if chan:  # decision 82: the components into their columns of the target, the rest as it was
-        report['png'] = yield from target.write_steps(Qs, written, threads)
+        masks = [None] * (len(Qs) - 1) + [written_a] if alpha else None
+        report['png'] = yield from target.write_steps(Qs, written, threads, masks)
+        if alpha:
+            report['alpha_px'] = int(written_a.sum())
         for image in bpy.data.images:
             if image.source == 'FILE' and image_path(image) == os.path.normpath(target.path) and not image.is_dirty:
                 image.reload()
@@ -803,7 +843,9 @@ def apply_steps(context, materials, objects=None):
     s = context.scene.fss_ao_bake
     kinds = (['ao'] if s.apply_ao else []) + (['curv'] if s.apply_cm else [])  # decisions 54, 55
     kinds += [g for g in core.CHANNEL_GROUPS if getattr(s, f'apply_{g}', False)]  # decision 82
-    jobs = [(m, k) for m in materials for k in kinds]
+    # decision 110: a set of skip materials (glass, decals) takes the material channels alone
+    jobs = [(m, k) for m in materials for k in kinds
+            if not (k in ('ao', 'curv') and (store._state['sets'].get(m.name) or {}).get('channels_only'))]
     n = len(jobs)
     ctx_cache = {}  # decision 82: a master's copy_context once for a texture set's channels
     for i, (material, kind) in enumerate(jobs):

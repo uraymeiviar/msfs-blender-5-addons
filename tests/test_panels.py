@@ -1216,7 +1216,7 @@ def test_ao_custom_value_rows():
         calls = []
         bpy.types.FSS_PT_ao_run.draw(SimpleNamespace(layout=_Layout(calls)), bpy.context)
         props = [(args[1], bool(kw.get('expand'))) for name, args, kw in calls if name == 'prop'
-                 and (args[1].startswith(('vc_', 'cv_')) or args[1].endswith(('_source', '_value')))]
+                 and (args[1].startswith(('vc_', 'cv_')) or args[1].endswith(('_source', '_value', '_alpha')))]
         labels = [kw.get('text', '') for name, _a, kw in calls if name == 'label']
         return props, labels
     found = {}
@@ -1259,7 +1259,7 @@ def test_ao_custom_value_rows():
         assert s.rough_source == 'CUSTOM' and 'rough' not in store.vertex_color_sources(s)
         s.rough_source = 'MATERIAL'
         assert not s.vc_rough and not s.cv_rough
-        assert store.custom_values(b) == {'albedo': [1.0, 1.0, 1.0], 'rough': 0.5, 'metal': 0.0,
+        assert store.custom_values(b) == {'albedo': [1.0, 1.0, 1.0, 1.0], 'rough': 0.5, 'metal': 0.0,
                                           'emis': [0.0, 0.0, 0.0]}, store.custom_values(b)
         # decision 100: Albedo and Emissive, a colour each (white and black by default), in the same rows
         o_rna = a.fss_ao_bake.bl_rna.properties
@@ -1275,7 +1275,8 @@ def test_ao_custom_value_rows():
         bpy.context.view_layer.objects.active = a
         props, labels = draw()
         assert props == [('albedo_source', False), ('cv_albedo_mode', True), ('emis_source', False),
-                         ('cv_emis_mode', True), ('albedo_value', False), ('emis_value', False)], props
+                         ('cv_emis_mode', True), ('albedo_value', False), ('albedo_alpha', False),
+                         ('emis_value', False)], props
         assert not any('differ' in t for t in labels), labels
         b.fss_ao_bake.albedo_value = (0.5, 0.2, 0.1)
         _p, labels = draw()
@@ -1283,7 +1284,7 @@ def test_ao_custom_value_rows():
         found['colours'] = [n for n, _e in props]
         sd = store.settings_dict(bpy.context.scene)
         assert sd['custom_value'] == {'albedo': 'OVERWRITE', 'metal': 'MULTIPLY', 'emis': 'OVERWRITE'}, sd
-        assert store.custom_values(b)['albedo'] == [0.5, 0.2, 0.1]
+        assert store.custom_values(b)['albedo'] == [0.5, 0.2, 0.1, 1.0]  # decision 111: the alpha last
         bpy.context.view_layer.objects.active = None
         _p, labels = draw()
         assert 'Custom: make a mesh active to set its value' in labels, labels
@@ -1397,7 +1398,7 @@ def test_ao_texture_target_sections():
         assert labels.index('AO') < labels.index('Albedo') < labels.index('Curvature Map'), labels
         assert 'Emissive' not in labels, labels
         rows = [p_ for p_ in props if p_.startswith('albedo_')]
-        assert rows == ['albedo_target', 'albedo_output_folder', 'albedo_file_name', 'albedo_resolution',
+        assert rows == ['albedo_target', 'albedo_alpha', 'albedo_output_folder', 'albedo_file_name', 'albedo_resolution',
                         'albedo_padding'], rows
         assert 'albedo_target' in expanded, expanded
         seen['Separate File'] = rows
@@ -1408,13 +1409,14 @@ def test_ao_texture_target_sections():
                                                                  'emis_file_name', 'emis_resolution', 'emis_padding']
         a.albedo_target = 'SLOT'
         props, labels, _e = draw()
-        assert [p_ for p_ in props if p_.startswith('albedo_')] == ['albedo_target', 'albedo_padding'], props
+        assert [p_ for p_ in props if p_.startswith('albedo_')] == ['albedo_target', 'albedo_alpha',
+                                                                    'albedo_padding'], props
         assert 'No texture in the base colour slot' in labels, labels
         setattr(mat, apply_mod.P_BASE, image)
         props, labels, _e = draw()
         assert 'Base colour texture: PANEL_TT_BASE' in labels and '8-bit file: written as 16-bit' in labels, labels
         assert 'No texture in the base colour slot' not in labels, labels
-        seen['in place'] = ['albedo_target', 'albedo_padding', 'Base colour texture: PANEL_TT_BASE',
+        seen['in place'] = ['albedo_target', 'albedo_alpha', 'albedo_padding', 'Base colour texture: PANEL_TT_BASE',
                             '8-bit file: written as 16-bit']
         a.emis_target = 'SLOT'
         _p, labels, _e = draw()

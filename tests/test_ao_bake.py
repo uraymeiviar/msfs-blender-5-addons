@@ -908,7 +908,7 @@ def test_apply_per_object():
     """FL5: only the selected objects' faces and padding change; no padding inside another object's face."""
     refresh()
     rng = np.random.default_rng(11)
-    path = OUT / 'SET_PO_ao.png'
+    path = OUT / 'SET_PO_COMP_RGB16.png'
     OUT.mkdir(parents=True, exist_ok=True)
     base = rng.integers(0, 65536, (SIZE, SIZE, 3))
     write_png(path, base)
@@ -1189,13 +1189,13 @@ def test_apply_ticked():
     fa = bpy.data.materials['SET_A'].fss_ao_apply
     raw = fa.get('file_name', '')
     fa['file_name'] = ''
-    assert fa.file_name == 'SET_A_ao.png', fa.file_name
+    assert fa.file_name == 'SET_A_COMP_RGB16.png', fa.file_name
     fa.file_name = 'own.png'
     assert fa.file_name == 'own.png' and fa['file_name'] == 'own.png'
-    fa.file_name = 'SET_A_ao.png'
+    fa.file_name = 'SET_A_COMP_RGB16.png'
     assert fa['file_name'] == ''
     fa.file_name = ''
-    assert fa.file_name == 'SET_A_ao.png' and fa['file_name'] == ''
+    assert fa.file_name == 'SET_A_COMP_RGB16.png' and fa['file_name'] == ''
     fa['file_name'] = raw
     items, rows = store._state['items'], store._state['sets']
     pick = [items[rows[n]['items'][0]]['users'][0] for n in ('SET_A', 'SET_B')]  # an object of each
@@ -1233,7 +1233,7 @@ def test_apply_ticked():
     assert refused == {'CANCELLED'} or 'SET_A: No texture in the ORM slot' in str(refused), refused
     a.target = old_target
     assert ao_bake.apply_check(ctx)[1] == []
-    print(f'PASS: test_apply_ticked (File shows SET_A_ao.png when empty; {sets[0]} unticked: not written, {sets[1:]} written; none ticked: refused; '
+    print(f'PASS: test_apply_ticked (File shows SET_A_COMP_RGB16.png when empty; {sets[0]} unticked: not written, {sets[1:]} written; none ticked: refused; '
           f'a ticked set without its ORM texture: {blocked[0][1]!r}, refused)')
 
 
@@ -3840,7 +3840,7 @@ def ch_own_targets(exp, k1):
     a = mat.fss_ao_apply
     out_dir = CH_WORK / 'out'
     base, orm = CH_WORK / 'base.png', CH_WORK / 'orm.png'
-    alb_file, ao_file = out_dir / 'CH_CONST.albedo.png', out_dir / 'CH_CONST_ao.png'
+    alb_file, ao_file = out_dir / 'CH_CONST_ALBD_RGB16.png', out_dir / 'CH_CONST_COMP_RGB16.png'
     others = [out_dir / f'CH_CONST.{n}.png' for n in ('roughness', 'metal', 'emissive')] + [CH_WORK / 'emis.png']
     found = {}
     keep_s = {p: getattr(s, p) for p in ('apply_ao', 'apply_cm', 'emis_padding', 'albedo_padding')}
@@ -3859,11 +3859,11 @@ def ch_own_targets(exp, k1):
     def dev_k1(vals, g):
         return max(int(np.abs(vals[:, :, c][k1] - e).max()) for c, e in enumerate(exp[g]))
     try:
-        # the defaults: Separate File, the AO's folder, <material>.albedo.png / .emissive.png, padding 8
+        # the defaults: Separate File, the AO's folder, <material>_ALBD_RGB16.png / .emissive.png, padding 8
         fresh = bpy.data.materials.new('CH_DEFAULTS')
         fa = fresh.fss_ao_apply
         assert (fa.albedo_target, fa.emis_target) == ('FILE', 'FILE'), (fa.albedo_target, fa.emis_target)
-        assert (fa.albedo_file_name, fa.emis_file_name) == ('CH_DEFAULTS.albedo.png', 'CH_DEFAULTS.emissive.png')
+        assert (fa.albedo_file_name, fa.emis_file_name) == ('CH_DEFAULTS_ALBD_RGB16.png', 'CH_DEFAULTS.emissive.png')
         bpy.data.materials.remove(fresh)
         assert s.albedo_output_folder == s.emis_output_folder == s.output_folder
         assert s.bl_rna.properties['albedo_padding'].default == s.bl_rna.properties['emis_padding'].default == 8
@@ -4036,10 +4036,10 @@ def test_material_channels():
         for d, f in (('albedo_backup', 'base.png'), ('orm_backup', 'orm.png'), ('emis_backup', 'emis.png')):
             assert (CH_WORK / 'channels.bake' / d / f).read_bytes() == raw[f], (d, f)
         found['2.1 in place'] = f'max deviation per channel {devs}; K2 and pixels beyond the padding byte for byte'
-        # step 2.1, Target Separate File: <material>.albedo.png, .emissive.png, and (decision 86, Session 65's step
+        # step 2.1, Target Separate File: <material>_ALBD_RGB16.png, .emissive.png, and (decision 86, Session 65's step
         # 2.2) .roughness.png and .metal.png, single-channel 16-bit grey; the AO's ORM-layout file of the same run
         # has the green and blue AO alone gives it
-        orm_file = out_dir / 'CH_CONST_ao.png'
+        orm_file = out_dir / 'CH_CONST_COMP_RGB16.png'
         reps = ch_apply('CH_CONST', ALL, target='FILE', layout='ORM', ao=True)
         assert [r['kind'] for r in reps] == ['ao'] + ALL, [r['kind'] for r in reps]
         orm_with = read(orm_file)[0].astype(np.int64)
@@ -4048,7 +4048,7 @@ def test_material_channels():
         orm_alone = read(orm_file)[0].astype(np.int64)
         assert np.array_equal(orm_with, orm_alone), 'the channels changed the ORM-layout file'
         files, kinds = {}, {}
-        for g, n in (('albedo', 'CH_CONST.albedo.png'), ('emis', 'CH_CONST.emissive.png'),
+        for g, n in (('albedo', 'CH_CONST_ALBD_RGB16.png'), ('emis', 'CH_CONST.emissive.png'),
                      ('rough', 'CH_CONST.roughness.png'), ('metal', 'CH_CONST.metal.png')):
             vals, bits, ct = read(out_dir / n)
             files[g], kinds[g] = vals.astype(np.int64), (vals.shape[2], bits, ct)
@@ -4076,7 +4076,7 @@ def test_material_channels():
             by_n[n] = np.stack([ch_master('T1', k) for k in core.CHANNEL_KINDS['albedo']])
             files_n[n] = ch_files('T1', ('albedo',))
             ch_apply('CH_TEX', ['albedo'])  # what the texture gets: Apply averages the master over each pixel
-            out_n[n] = read(out_dir / 'CH_TEX.albedo.png')[0][:, :, :3].astype(np.int64)
+            out_n[n] = read(out_dir / 'CH_TEX_ALBD_RGB16.png')[0][:, :, :3].astype(np.int64)
             assert ch_files('T1', ('rough', 'metal', 'emis')) == others
             assert dict(ch_layout_files('T1'), ao=file_hash(core.master_paths(
                 folder, store._state['by_object']['T1'])[0])) == keep
@@ -4100,7 +4100,7 @@ def test_material_channels():
         ch_bake(['T1'], groups=['albedo'])
         ch_apply('CH_TEX', ['albedo'])
         srcv = read(CH_WORK / 'albedo_src.png')[0][:, :, :3].astype(np.float64) / 255.0
-        closest = ch_measure(read(out_dir / 'CH_TEX.albedo.png')[0][:, :, :3].astype(np.float64) / 65535.0, srcv,
+        closest = ch_measure(read(out_dir / 'CH_TEX_ALBD_RGB16.png')[0][:, :, :3].astype(np.float64) / 65535.0, srcv,
                              tmask)
         tnode.interpolation = 'Linear'
         ch_bake(['T1'], groups=['albedo'])  # back at the default samples, Linear
@@ -4115,7 +4115,7 @@ def test_material_channels():
         assert ch_item('T1')['ch_grades']['albedo'] == 'UP_TO_DATE', ch_item('T1')['ch_grades']
         srcv = read(CH_WORK / 'albedo_src.png')[0][:, :, :3].astype(np.float64) / 255.0
         ch_apply('CH_TEX', ['albedo'])
-        outv = read(out_dir / 'CH_TEX.albedo.png')[0][:, :, :3].astype(np.float64) / 65535.0
+        outv = read(out_dir / 'CH_TEX_ALBD_RGB16.png')[0][:, :, :3].astype(np.float64) / 65535.0
         m22 = ch_measure(outv, srcv, np.repeat(faces_mask('T1')[:, :, None], 3, axis=2))
         found['2.2'] = m22
         found['2.2 baked with Closest interpolation'] = closest
@@ -4144,7 +4144,7 @@ def test_material_channels():
         assert ch_files('T1', ('albedo',)) == alb0 and ch_item('T1')['ch_grades']['albedo'] == 'UP_TO_DATE'
         assert e2['density'] == e1['density'] and e2['baked_at'] != e1['baked_at'], (e2['density'], e1['density'])
         ch_apply('CH_TEX', ['albedo'])
-        outv = read(out_dir / 'CH_TEX.albedo.png')[0][:, :, :3].astype(np.float64) / 65535.0
+        outv = read(out_dir / 'CH_TEX_ALBD_RGB16.png')[0][:, :, :3].astype(np.float64) / 65535.0
         # the reference: the source's 2 x 2 block each written pixel covers (uv' = uv / 2 + 52 / 256)
         box = srcv.reshape(SIZE // 2, 2, SIZE // 2, 2, 3).mean(axis=(1, 3))
         refv = np.zeros_like(outv)
@@ -4162,14 +4162,14 @@ def test_material_channels():
         it = ch_item('T1')
         assert it['grade'] == 'MESH' and it['ch_grades'] == {g: 'MESH' for g in ALL}, (it['grade'], it['ch_grades'])
         # Session 65's step 2.1 (decision 85): Apply Albedo with the mesh changed: written from the master, reported
-        written23 = (CH_WORK / 'out' / 'CH_TEX.albedo.png').read_bytes()
+        written23 = (CH_WORK / 'out' / 'CH_TEX_ALBD_RGB16.png').read_bytes()
         reps = ch_apply('CH_TEX', ['albedo'])
         lines = ao_bake_apply.report_lines(reps[0])
         assert reps[0]['mesh_changed'] == ['T1'] and reps[0]['white'] == [], reps[0]
         assert 'mesh changed since its bake, applied anyway: T1' in '\n'.join(lines), lines
-        out_mc = read(out_dir / 'CH_TEX.albedo.png')[0][:, :, :3].astype(np.int64)
-        (CH_WORK / 'out' / 'CH_TEX_23.albedo.png').write_bytes(written23)
-        out_23 = read(CH_WORK / 'out' / 'CH_TEX_23.albedo.png')[0][:, :, :3].astype(np.int64)
+        out_mc = read(out_dir / 'CH_TEX_ALBD_RGB16.png')[0][:, :, :3].astype(np.int64)
+        (CH_WORK / 'out' / 'CH_TEX_23_ALBD_RGB16.png').write_bytes(written23)
+        out_23 = read(CH_WORK / 'out' / 'CH_TEX_23_ALBD_RGB16.png')[0][:, :, :3].astype(np.int64)
         d_mc = np.abs(out_mc - out_23)[np.repeat(mask[:, :, None], 3, axis=2)]
         assert reps[0]['written_px'] == m23_px and int(d_mc.max()) <= 257, (reps[0]['written_px'], m23_px,
                                                                              int(d_mc.max()))
@@ -4661,6 +4661,86 @@ def ch_item_vc(name):
     return store._state['items'][store._state['by_object'][name]]
 
 
+def test_skip_sets_and_alpha():
+    """Decision 110: an object of glass only is a master of the material channels alone (not in the AO counts, no AO
+    bake or Apply for its set); an invisible material's object stays excluded. Decision 111: a Custom albedo's alpha
+    in the master (albedo_a), Apply with the set's Alpha on into <material>_ALBD_RGBA16.png (alpha where baked,
+    opaque elsewhere), off into <material>_ALBD_RGB16.png (RGB); a bake from the material removes the alpha."""
+    t0 = time.time()
+    build_vc_scene()
+    s = bpy.context.scene.fss_ao_bake
+    obs = bpy.data.objects
+    glass = ch_material('VC_MAT_GLASS', (0.5, 0.5, 0.5))
+    ch_plane('VGL', (15, 0, 0), glass)
+    ch_plane('VIN', (17, 0, 0), ch_material('VC_MAT_INVIS'))
+    found = {}
+    try:
+        with rule_unrecorded():
+            refresh()
+            it = ch_item_vc('VGL')
+            assert it['channels_only'] and it['sets'] == ['VC_MAT_GLASS'], it
+            assert store._state['excluded'].get('VIN') == 'skip materials only', store._state['excluded']
+            assert 'VGL' not in store._state['excluded']
+            n_ao = sum(1 for i_ in store._state['items'].values() if not i_.get('channels_only'))
+            assert sum(store.counts()[g] for g in store.GRADES) == n_ao, (store.counts(), n_ao)
+            row = store._state['sets']['VC_MAT_GLASS']
+            assert row['channels_only'] and row['MISSING'] == 0, row
+            assert store.bake_choice([vc_stem('VGL')], True, True, True)[0] == {}
+            # a Custom albedo with its alpha, written straight into the master
+            obs['VGL'].fss_ao_bake.albedo_value = (0.2, 0.5, 0.9)
+            obs['VGL'].fss_ao_bake.albedo_alpha = 0.4
+            s.albedo_source, s.cv_albedo_mode = 'CUSTOM', 'OVERWRITE'
+            res = vc_bake(['VGL'], ao=True, groups=['albedo'])
+            assert res['VGL']['baker'] == 'Custom value', res['VGL']
+            assert not os.path.isfile(core.image_paths(VC_FOLDER, vc_stem('VGL'))[0]), 'an AO master was baked'
+            ent = vc_entry('VGL')['channels']['albedo']
+            assert ent.get('alpha') and ent['source'] == dict(custom=[0.2, 0.5, 0.9, 0.4], mode='OVERWRITE'), ent
+            da = int(np.abs(vc_values('VGL', 'albedo_a') - q16(0.4)).max())
+            assert da <= 1, da
+            # Apply with Alpha on: RGBA, the alpha where baked, opaque elsewhere; the RGB the colour sRGB-encoded
+            a = glass.fss_ao_apply
+            a.albedo_target, a.albedo_alpha = 'FILE', True
+            assert a.albedo_file_name == 'VC_MAT_GLASS_ALBD_RGBA16.png', a.albedo_file_name
+            rep = ao_bake_apply.apply_set(bpy.context, glass, kind='albedo')
+            assert 'error' not in rep, rep
+            assert os.path.basename(rep['path']) == 'VC_MAT_GLASS_ALBD_RGBA16.png', rep['path']
+            v, bits, ct = read(rep['path'])
+            assert v.shape[2] == 4 and bits == 16 and ct == 6, (v.shape, bits, ct)
+            wa = v[:, :, 3] != 65535
+            assert wa.sum() == rep['alpha_px'] > 0, (int(wa.sum()), rep['alpha_px'])
+            dal = int(np.abs(v[:, :, 3][wa].astype(np.int64) - q16(0.4)).max())
+            enc = core.srgb_encode(np.array((0.2, 0.5, 0.9)))
+            drgb = max(int(np.abs(v[:, :, c][wa].astype(np.int64) - q16(enc[c])).max()) for c in range(3))
+            assert dal <= 1 and drgb <= 1, (dal, drgb)
+            found['rgba'] = (int(wa.sum()), dal, drgb)
+            # Alpha off: <material>_ALBD_RGB16.png, RGB
+            a.albedo_alpha = False
+            rep = ao_bake_apply.apply_set(bpy.context, glass, kind='albedo')
+            assert os.path.basename(rep['path']) == 'VC_MAT_GLASS_ALBD_RGB16.png', rep['path']
+            v3 = read(rep['path'])[0]
+            assert v3.shape[2] == 3 and 'alpha_px' not in rep, (v3.shape, rep)
+            assert np.array_equal(v3, v[:, :, :3]), 'the RGB differs from the RGBA file\'s'
+            # the AO's default name, and no AO or curvature Apply for the glass set
+            assert ao_bake_apply.default_file_name(glass) == 'VC_MAT_GLASS_COMP_RGB16.png'
+            s.apply_ao, s.apply_cm = True, True
+            for g in core.CHANNEL_GROUPS:
+                setattr(s, f'apply_{g}', False)
+            assert ao_bake_apply.apply(bpy.context, [glass]) == []
+            assert ao_bake.target_problems(bpy.context, glass) == [], ao_bake.target_problems(bpy.context, glass)
+            # from the material again: the alpha removed
+            s.albedo_source = 'MATERIAL'
+            vc_bake(['VGL'], groups=['albedo'])
+            assert not os.path.isfile(vc_file('VGL', 'albedo_a')) and not vc_entry('VGL')['channels']['albedo'].get(
+                'alpha'), vc_entry('VGL')['channels']['albedo']
+    finally:
+        s.albedo_source, s.cv_albedo_mode = 'MATERIAL', 'OVERWRITE'
+        s.apply_ao, s.apply_cm = False, False
+    print(f"PASS: test_skip_sets_and_alpha ({time.time() - t0:.1f} s; the glass object a master of the channels "
+          f"alone, no AO baked or applied, the invisible one excluded; the alpha 0.4 in the master within {da}; "
+          f"RGBA file: {found['rgba'][0]} px of alpha within {found['rgba'][1]}, RGB within {found['rgba'][2]}; "
+          f"RGB file the same colours; a material bake removes the alpha)")
+
+
 def test_custom_value_channels():
     """Decision 99: roughness and metal baked from each object's own value (Custom): Overwrite gives the value at every
     filled pixel, each object its own in one bake; Multiply onto the master's current value, as Overwrite without a
@@ -4708,7 +4788,8 @@ def test_custom_value_channels():
             dc = {n: dict(cdev(n, 'albedo', al), **cdev(n, 'emis', em))
                   for n, al, em in (('VM', (0.2, 0.4, 0.8), (0.5, 0.25, 0.0)), ('VX', (0.9, 0.1, 0.3), (0, 0, 0)))}
             assert all(v <= 1 for dd in dc.values() for v in dd.values()), dc
-            assert vc_entry('VM')['channels']['albedo']['source'] == dict(custom=[0.2, 0.4, 0.8], mode='OVERWRITE')
+            assert vc_entry('VM')['channels']['albedo']['source'] == dict(custom=[0.2, 0.4, 0.8, 1.0],
+                                                                          mode='OVERWRITE')  # decision 111: alpha
             assert res['VX']['custom_value']['emis'] == dict(value=[0.0, 0.0, 0.0], mode='OVERWRITE'), res['VX']
             # decision 101: written straight into the master, no Cycles: the same images, margins and all, as Cycles'
             # bake of the value (the test switch FSS_AO_BAKE_CUSTOM_CYCLES), Cycles first, the direct write last
@@ -5075,6 +5156,7 @@ elif __name__ == '__main__':
     test_material_channels()  # decisions 79 to 83, in a scene of its own
     test_vertex_color_channels()  # decisions 88 to 90, in a scene of its own
     test_custom_value_channels()  # decision 99, in the vertex colour test's scene
+    test_skip_sets_and_alpha()  # decisions 110 and 111, in the vertex colour test's scene built again
     test_vertex_color_fetch()  # decisions 93 to 95, in a scene of its own
     n_ref = REF.done(complete=True)
     print(f'PASS: reference values ({n_ref} cases equal to the values the Python code gave before decision 6)')

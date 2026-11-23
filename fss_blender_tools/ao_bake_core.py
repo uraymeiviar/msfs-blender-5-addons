@@ -2523,7 +2523,7 @@ def all_master_files(folder, stem):
     base = os.path.join(folder, stem)
     return [base + ext for ext in ('.ao.jxl', '.ao.png', '.ao.map', '.ao.npz', THUMB_EXT, '.curv.jxl', '.curv.png',
                                    '.ao.raw.jxl', '.ao.raw.png')] + [p for g in CHANNEL_GROUPS
-                                                                     for p in channel_paths(folder, stem, g)]
+                                                                     for p in channel_paths(folder, stem, g, True)]
 
 
 # Material channels (auto-bake decisions 79 to 83): a master's albedo, roughness, metal and emissive, baked from the
@@ -2533,15 +2533,19 @@ def all_master_files(folder, stem):
 CHANNEL_GROUPS = ('albedo', 'rough', 'metal', 'emis')
 CHANNEL_KINDS = {'albedo': ('albedo_r', 'albedo_g', 'albedo_b'), 'rough': ('rough',), 'metal': ('metal',),
                  'emis': ('emis_r', 'emis_g', 'emis_b')}
+# decision 111: a component a channel may have besides its own: the albedo's alpha (linear), baked from a Custom
+# albedo; a master without it keeps the texture's alpha in Apply
+CHANNEL_EXTRA = {'albedo': ('albedo_a',)}
 CHANNEL_SRGB = {'albedo': True, 'rough': False, 'metal': False, 'emis': True}
 CHANNEL_NAMES = {'albedo': 'Albedo', 'rough': 'Roughness', 'metal': 'Metal', 'emis': 'Emissive'}
 CHANNEL_SAMPLES = 64  # Cycles samples per master pixel of a material channel, for a job without the setting
 
 
-def channel_paths(folder, stem, group):
-    """The images of a material channel group (decision 79): <stem>.<kind>.jxl per component."""
+def channel_paths(folder, stem, group, extra=False):
+    """The images of a material channel group (decision 79): <stem>.<kind>.jxl per component; extra: with its optional
+    components (decision 111: the albedo's alpha)."""
     base = os.path.join(folder, stem)
-    return [base + f'.{k}.jxl' for k in CHANNEL_KINDS[group]]
+    return [base + f'.{k}.jxl' for k in CHANNEL_KINDS[group] + (CHANNEL_EXTRA.get(group, ()) if extra else ())]
 
 
 def srgb_encode(linear):

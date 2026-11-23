@@ -575,6 +575,8 @@ def _draw_custom_values(layout, context, groups):
     box.label(text=f'Custom values of {obj.name}', icon='OBJECT_DATA')
     for g in groups:
         box.prop(o, f'{g}_value', slider=True)
+        if g == 'albedo':  # decision 111
+            box.prop(o, 'albedo_alpha', slider=True)
     meshes = [ob for ob in context.selected_objects if ob.type == 'MESH']
     differ = [store.CHANNEL_NAMES_CV[g] for g in groups
               if len({repr(store.custom_values(ob)[g]) for ob in meshes}) > 1]
@@ -704,6 +706,10 @@ class FSS_AOObjectSettings(bpy.types.PropertyGroup):
                                                 subtype='COLOR', description="Decision 100: this object's albedo "
                                                 "when Albedo bakes from Custom, as the material's Base Color would "
                                                 "give it (kept with the object, whatever its material)")
+    albedo_alpha: bpy.props.FloatProperty(name="Alpha", default=1.0, min=0.0, max=1.0, subtype='FACTOR',
+                                          description="Decision 111: this object's albedo alpha when Albedo bakes "
+                                          "from Custom (1.0 opaque). Apply writes it only into a texture set whose "
+                                          "Albedo has Alpha on")
     emis_value: bpy.props.FloatVectorProperty(name="Emissive", size=3, default=(0.0, 0.0, 0.0), min=0.0, max=1.0,
                                               subtype='COLOR', description="Decision 100: this object's emissive "
                                               "colour when Emissive bakes from Custom, as the material's Emission "
@@ -721,7 +727,8 @@ def _set_curv_file_name(self, value):
 
 
 def _get_albedo_file_name(self):
-    """Decision 96: the set's albedo file name, else <material>.albedo.png (stored empty, it follows a rename)."""
+    """Decision 96: the set's albedo file name, else <material>_ALBD_RGB16.png or _ALBD_RGBA16.png (decision 111;
+    stored empty, it follows a rename and the Alpha switch)."""
     return self.get('albedo_file_name', '') or apply_mod.channel_file_name(self.id_data, 'albedo')
 
 
@@ -742,7 +749,8 @@ def _set_emis_file_name(self, value):
 
 
 def _get_file_name(self):
-    """The set's own name, else <material>_ao.png (shown in the box; stored empty, it follows a rename)."""
+    """The set's own name, else <material>_COMP_RGB16.png (decision 111; shown in the box; stored empty, it follows a
+    rename)."""
     return self.get('file_name', '') or apply_mod.default_file_name(self.id_data)
 
 
@@ -763,14 +771,20 @@ class FSS_AOApplySettings(bpy.types.PropertyGroup):
     albedo_target: bpy.props.EnumProperty(name="Target", default='FILE', items=[  # decision 96
         ('FILE', 'Separate File', 'A file of its own in its output folder'),
         ('SLOT', 'Base Color Texture', "The texture in the material's base colour slot, in place: its red, green "
-         "and blue; alpha stays")], description="Where Apply writes the albedo")
+         "and blue, and its alpha with Alpha on")], description="Where Apply writes the albedo")
+    albedo_alpha: bpy.props.BoolProperty(  # decision 111
+        name="Alpha", default=False,
+        description="This texture set's albedo has an alpha channel: Apply writes the albedo's alpha (a Custom "
+        "albedo's), a new file is RGBA (<material>_ALBD_RGBA16.png). Off: RGB (<material>_ALBD_RGB16.png), the "
+        "alpha of an existing texture stays")
     emis_target: bpy.props.EnumProperty(name="Target", default='FILE', items=[  # decision 96
         ('FILE', 'Separate File', 'A file of its own in its output folder'),
         ('SLOT', 'Emissive Texture', "The texture in the material's emissive slot, in place: its red, green and "
          "blue; alpha stays")], description="Where Apply writes the emissive")
     albedo_file_name: bpy.props.StringProperty(name="File", get=_get_albedo_file_name, set=_set_albedo_file_name,
                                                description="The albedo file's name in its output folder; cleared, "
-                                               "it goes back to <material>.albedo.png")
+                                               "it goes back to <material>_ALBD_RGB16.png, or _ALBD_RGBA16.png "
+                                               "with Alpha on")
     emis_file_name: bpy.props.StringProperty(name="File", get=_get_emis_file_name, set=_set_emis_file_name,
                                              description="The emissive file's name in its output folder; cleared, "
                                              "it goes back to <material>.emissive.png")
@@ -782,7 +796,7 @@ class FSS_AOApplySettings(bpy.types.PropertyGroup):
                                             "existing file keeps its own)")
     file_name: bpy.props.StringProperty(name="File", get=_get_file_name, set=_set_file_name,
                                         description="The file's name in the output folder; cleared, it goes back to "
-                                        "<material>_ao.png")
+                                        "<material>_COMP_RGB16.png")
     resolution: bpy.props.EnumProperty(name="Resolution", items=resolution_items, get=_get_resolution,
                                        set=_set_resolution, description="A new AO file's size (an existing file "
                                        "keeps its own)")
@@ -819,6 +833,7 @@ class FSS_AOSetRow(bpy.types.PropertyGroup):
     n_missing: bpy.props.IntProperty()
     n_stale: bpy.props.IntProperty()  # mesh or surroundings changed
     n_total: bpy.props.IntProperty()
+    chan_only: bpy.props.BoolProperty()  # decision 110
 
 
 class FSS_AOBakeState(bpy.types.PropertyGroup):
@@ -905,6 +920,9 @@ def sync_state(context):
             parts.append(f"{row['SURROUNDINGS']} stale")
         parts = [p for p in parts if p]
         r.state = ', '.join(parts) if parts else f"{len(row['items'])} complete"
+        r.chan_only = bool(row.get('channels_only'))
+        if r.chan_only:  # decision 110: a skip material's set, the material channels alone
+            r.state = f"{len(row['items'])} object{'s' if len(row['items']) != 1 else ''}, material channels only"
         r.warn = bool(parts)
         r.n_missing, r.n_stale, r.n_total = row['MISSING'], row['MESH'] + row['SURROUNDINGS'], len(row['items'])
     for i, r in enumerate(st.sets):
@@ -1330,7 +1348,7 @@ class FSS_OT_AOBakeSelect(bpy.types.Operator):
             stems = set(what) | set(store.channel_choice(list(items), bake_groups(s), False))
         else:
             grades = {'STALE': ('MESH', 'SURROUNDINGS'), 'MISSING': ('MISSING',)}[self.which]
-            stems = {st for st, it in items.items() if it['grade'] in grades}
+            stems = {st for st, it in items.items() if it['grade'] in grades and not it.get('channels_only')}
         if self.material:
             stems &= set(store._state['sets'].get(self.material, {}).get('items', ()))
         names = {n for st in stems for n in items[st]['users']}
@@ -2125,7 +2143,8 @@ def target_problems(context, material):
     a = material.fss_ao_apply
     s = context.scene.fss_ao_bake
     out = []
-    orm_users = s.apply_ao or s.apply_rough or s.apply_metal
+    no_ao = set_channels_only(material)  # decision 110: no AO or curvature applied to it
+    orm_users = (s.apply_ao and not no_ao) or s.apply_rough or s.apply_metal
     if orm_users and a.target == 'ORM':
         orm = apply_mod.orm_image(material)
         path = apply_mod.image_path(orm) if orm is not None else ''
@@ -2141,7 +2160,7 @@ def target_problems(context, material):
                 out.append(f'No texture in the {slot} slot')
             elif not path or not os.path.isfile(path):
                 out.append(f'{label} file not found: {path or image.name}')
-    for kind, on in (('ao', orm_users and a.target == 'FILE'), ('curv', s.apply_cm),
+    for kind, on in (('ao', orm_users and a.target == 'FILE'), ('curv', s.apply_cm and not no_ao),
                      ('albedo', s.apply_albedo and a.albedo_target == 'FILE'),
                      ('emis', s.apply_emis and a.emis_target == 'FILE')):
         if on:
@@ -2151,6 +2170,12 @@ def target_problems(context, material):
                     and line not in out):
                 out.append(line)
     return out
+
+
+def set_channels_only(material):
+    """Decision 110: a texture set of skip materials (glass, decals): the material channels alone."""
+    row = store._state['sets'].get(material.name)
+    return bool(row and row.get('channels_only'))
 
 
 def target_problem(context, material):
@@ -2194,6 +2219,9 @@ class FSS_UL_AOSets(bpy.types.UIList):
             row.prop(mat.fss_ao_apply, 'use', text='')
         split = row.split(factor=0.55, align=True)
         split.label(text=item.material, icon='MATERIAL')
+        if item.chan_only:  # decision 110: no AO grades
+            split.label(text=f'{item.n_total} channels only', icon='COLOR')
+            return
         if not (item.n_missing or item.n_stale):
             split.label(text=f'{item.n_total} complete', icon='CHECKMARK')
             return
@@ -2521,7 +2549,7 @@ class FSS_PT_AORun(bpy.types.Panel):
         sel_items = [(k, items.get(k) or {}) for k in store.items_for_objects(context.selected_objects)]
         ch_changed = {g: {k for k, it in sel_items if (it.get('ch_grades') or {}).get(g) == 'MESH'}
                       for g in store.core.CHANNEL_GROUPS}  # decision 85: a channel's mesh changed since its bake
-        ao_changed = {k for k, it in sel_items if it.get('grade') == 'MESH'}
+        ao_changed = {k for k, it in sel_items if it.get('grade') == 'MESH' and not it.get('channels_only')}
         # decision 84: one grid, a row per AO, CM and material channel, Bake Selected left and Apply right
         grid = layout.grid_flow(row_major=True, columns=2, even_columns=True, align=True)
         rows = [('AO', 'bake_ao', 'apply_ao', ao_changed), ('CM', 'curvature', 'apply_cm', ao_changed)]
@@ -2813,12 +2841,16 @@ def _draw_channel_target(sub, context, s, a, material, g):
     row = col.row(align=True)
     row.label(text='Target')
     row.prop(a, f'{g}_target', expand=True)
+    if g == 'albedo':  # decision 111: whether the set's albedo has an alpha channel
+        col.prop(a, 'albedo_alpha')
     if getattr(a, f'{g}_target') == 'SLOT':
         image = getattr(material, prop, None)
         if isinstance(image, bpy.types.Image):
             col.label(text=f'{label}: {image.name}', icon='IMAGE_DATA')
             if image.depth and image.depth < 48 and not image.is_float:  # decision 74, as the ORM texture's
                 col.label(text='8-bit file: written as 16-bit', icon='ERROR')
+            if g == 'albedo' and a.albedo_alpha and image.channels < 4:  # decision 111
+                col.label(text='The texture has no alpha channel: the alpha is not written', icon='ERROR')
     else:
         col.prop(s, f'{g}_output_folder')
         col.prop(a, f'{g}_file_name')

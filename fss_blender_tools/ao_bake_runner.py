@@ -1019,7 +1019,7 @@ def bake_item(item, coll):
         files.finish(m, tri_src, meta)
         finished = True
         if not kept:  # decision 81: a new layout; the material channels of the old one no longer fit
-            _remove_files([p for g in core.CHANNEL_GROUPS for p in core.channel_paths(FOLDER, item['key'], g)])
+            _remove_files([p for g in core.CHANNEL_GROUPS for p in core.channel_paths(FOLDER, item['key'], g, True)])
         _remove_files([os.path.join(FOLDER, item['key'] + core.THUMB_EXT)])  # decision 31: no thumbnail any more
         t_save = time.time() - ts
         if item.get('cm', SET.get('curvature')):  # decision 54: the curvature master in this layout, from geometry
@@ -1725,7 +1725,8 @@ def value_material(value, group, image):
     out = nt.nodes.new('ShaderNodeOutputMaterial')
     em = nt.nodes.new('ShaderNodeEmission')
     em.inputs['Strength'].default_value = 1.0
-    rgb = [float(c) for c in value] if isinstance(value, (list, tuple)) else [float(value)] * 3
+    # decision 111: a Custom albedo's alpha (its 4th value) is not part of the colour
+    rgb = [float(c) for c in value][:3] if isinstance(value, (list, tuple)) else [float(value)] * 3
     em.inputs['Color'].default_value = (*rgb, 1.0)
     nt.links.new(em.outputs[0], out.inputs['Surface'])
     tex = nt.nodes.new('ShaderNodeTexImage')
@@ -1827,6 +1828,9 @@ def channel_item(item, coll, ao=False):
         vc = {}
         if not groups:
             return dict(status='skipped', reason='; '.join(notes), vc_skipped=vc_skipped)
+    # decision 111: a Custom albedo with its alpha (4 values) writes the albedo's alpha too
+    kinds_of = {g: KINDS[g] + (core.CHANNEL_EXTRA.get(g, ()) if g in cv and len(np.atleast_1d(cv_vals[g])) == 4
+                               else ()) for g in groups}
     tb = time.time()
     m, kept, old = layout_for(item, mh, tri_src, pos, tris, cnm, D, uvpx)
     t_build = time.time() - tb
@@ -1841,7 +1845,9 @@ def channel_item(item, coll, ao=False):
         paths = [core.image_paths(FOLDER, key, k)[0] for k in KINDS[g]]
         have = kept and all(os.path.isfile(p_) for p_ in paths) and (g == 'ao' or g in old_ch)
         if mode == 'MULTIPLY' and have:
-            mult[g] = paths
+            # decision 111: an optional component (the albedo's alpha) without an image of it is written as it comes
+            mult[g] = paths + [p_ if os.path.isfile(p_) else None
+                               for p_ in (core.image_paths(FOLDER, key, k)[0] for k in kinds_of[g][len(paths):])]
             eff[g] = 'MULTIPLY'
         else:
             eff[g] = 'OVERWRITE'
@@ -1867,7 +1873,7 @@ def channel_item(item, coll, ao=False):
     n = len(tiles)
     # the components' images and writers: the first writes the map and the layout (a new layout) or compares its
     # codes with the stored map (a kept one)
-    kinds = [(g, c, k) for g in groups for c, k in enumerate(KINDS[g])]
+    kinds = [(g, c, k) for g in groups for c, k in enumerate(kinds_of[g])]
     j_of = {}  # a group's first image
     for j, (g, _c, _k) in enumerate(kinds):
         j_of.setdefault(g, j)
@@ -1941,7 +1947,9 @@ def channel_item(item, coll, ao=False):
         for g in dv:
             v = np.atleast_1d(np.asarray(cv_vals[g], dtype=np.float64))
             enc = core.srgb_encode(v) if g in ('albedo', 'emis') else np.clip(v, 0.0, 1.0)
-            cv_q[g] = [int(q) for q in np.atleast_1d(core.quantize16(enc))]
+            if g == 'albedo' and len(v) == 4:  # decision 111: the alpha linear
+                enc = np.concatenate([enc[:3], np.clip(v[3:], 0.0, 1.0)])
+            cv_q[g] = [int(q) for q in np.atleast_1d(core.quantize16(enc))][:len(kinds_of[g])]
         n_threads = int(SET['threads'])
         # decision 101: a kept layout's Custom pixels are the stored map's filled ones (the pixels Apply reads, whatever
         # rasterized them); a new layout's those Cycles fills for another group of the bake, else the raster's
@@ -2006,7 +2014,7 @@ def channel_item(item, coll, ao=False):
                     for g in cyc + list(dv):  # the Cycles groups first: their pixels serve a new layout's Custom ones
                         j = j_of[g]
                         if g in dv:  # decision 101: the value into the covered pixels
-                            for c in range(len(KINDS[g])):
+                            for c in range(len(kinds_of[g])):
                                 vals[j][dm] = cv_q[g][c]
                                 baked[j] |= dm
                                 j += 1
@@ -2040,10 +2048,12 @@ def channel_item(item, coll, ao=False):
                         # vertex colour's value as the node gives it, a byte colour's too)
                         srgb = g in ('albedo', 'emis')
                         enc = core.srgb_encode if srgb else (lambda v: np.clip(v, 0.0, 1.0))
-                        for c in range(len(KINDS[g])):
-                            if A is not None:
+                        for c in range(len(kinds_of[g])):
+                            if c == 3:  # decision 111: a Custom albedo's alpha, the object's value (no Cycles)
+                                vals[j][cm | sm] = core.quantize16(np.clip(float(cv_vals[g][3]), 0.0, 1.0))
+                            if c < 3 and A is not None:
                                 vals[j][cm] = core.quantize16(enc(A[:, :, c][cm]))
-                            if B is not None:
+                            if c < 3 and B is not None:
                                 vals[j][sm] = core.quantize16(enc(B[:, :, c][sm]))
                             baked[j] |= cm | sm
                             j += 1
@@ -2080,7 +2090,7 @@ def channel_item(item, coll, ao=False):
 
         def rows_base(j, g, c):
             w_ = writers[j]
-            if g not in mult:
+            if g not in mult or mult[g][c] is None:
                 return w_.write_rows
             cur = lib.read_whole(mult[g][c])
             at = [0]
@@ -2091,7 +2101,7 @@ def channel_item(item, coll, ao=False):
                 o_ = cur[y0:y0 + n_]
                 filled = core.code_filled(codes)
                 a_, b_ = o_.astype(np.float64) / 65535.0, values.astype(np.float64) / 65535.0
-                if g in ('albedo', 'emis'):  # the colours multiplied in linear
+                if g in ('albedo', 'emis') and c < 3:  # the colours multiplied in linear (an alpha as it is)
                     prod = core.srgb_encode(core.srgb_decode(a_) * core.srgb_decode(b_))
                 else:
                     prod = a_ * b_
@@ -2115,7 +2125,7 @@ def channel_item(item, coll, ao=False):
             _remove_files(list(core.image_paths(FOLDER, key)) + list(core.image_paths(FOLDER, key, 'curv'))
                           + list(core.image_paths(FOLDER, key, 'ao.raw')) + [os.path.join(FOLDER, key + core.THUMB_EXT)]
                           + list(core.image_paths(FOLDER, key, 'ao_vc'))
-                          + [p for g in core.CHANNEL_GROUPS for p in core.channel_paths(FOLDER, key, g)])
+                          + [p for g in core.CHANNEL_GROUPS for p in core.channel_paths(FOLDER, key, g, True)])
         raw = core.image_paths(FOLDER, key, 'ao.raw')[0]
         if ao_traced and not os.path.isfile(raw):  # the traced AO before the multiply: what a denoise starts from
             shutil.copy2(core.image_paths(FOLDER, key)[0], raw)
@@ -2123,6 +2133,10 @@ def channel_item(item, coll, ao=False):
             w_.commit(m, tri_src, meta)
         if vc_writer is not None:
             vc_writer.commit()
+        for g in groups:  # decision 111: an optional component this bake did not write no longer matches the
+            if eff.get(g) != 'MULTIPLY':  # others (a Multiply onto the colours keeps it)
+                _remove_files([core.image_paths(FOLDER, key, k)[0] for k in core.CHANNEL_EXTRA.get(g, ())
+                               if k not in kinds_of[g]])
         if 'ao' in groups and not ao_traced:  # an AO from the vertex colour alone: no raw bake, no product
             _remove_files(list(core.image_paths(FOLDER, key, 'ao.raw')) + list(core.image_paths(FOLDER, key, 'ao_vc')))
         finished = True
@@ -2159,6 +2173,8 @@ def channel_item(item, coll, ao=False):
             ch[g]['source'] = dict(vertex_color=vc_attr, attribute=VC_ATTRIBUTE, mode=eff[g])
         elif g in cv:  # decision 99
             ch[g]['source'] = dict(custom=_cv_json(cv_vals[g]), mode=eff[g])
+        if len(kinds_of[g]) > len(KINDS[g]) or (eff.get(g) == 'MULTIPLY' and (old_ch.get(g) or {}).get('alpha')):
+            ch[g]['alpha'] = True  # decision 111: the albedo's alpha
     if 'ao' in groups:  # rule item 4: the AO from the vertex colour
         attrs = (list(old_src.get('attributes') or ()) if 'ao' in mult else []) + [vc_attr]
         entry['ao_source'] = dict(vertex_color=vc_attr, attribute=VC_ATTRIBUTE,

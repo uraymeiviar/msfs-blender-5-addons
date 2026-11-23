@@ -149,6 +149,32 @@ def all_skip(obj):
     return bool(len(slots)) and all(is_skip_material(slot.material) for slot in slots)
 
 
+# decision 110: the skip classes that never carry a material channel (no texture of their own)
+NO_CHANNEL_CLASSES = ('INVIS', 'OCCLUDER')
+NO_CHANNEL_TYPES = ('msfs_invisible', 'msfs_environment_occluder')
+
+
+def is_channel_material(material):
+    """Decision 110: a skip material whose faces take the material channels (albedo, roughness, metal, emissive):
+    glass, windshield and decals; not invisible or occluder materials."""
+    if material is None or not is_skip_material(material):
+        return False
+    import re
+    base = re.sub(r'\.\d+$', '', material.name.upper())
+    if any(base == c or base.endswith('_' + c) for c in NO_CHANNEL_CLASSES):
+        return False
+    mtype = getattr(material, 'msfs_material_type', None)
+    if (mtype is None or mtype == 'NONE') and 'msfs_material_type' in material:
+        mtype = material['msfs_material_type']
+    return mtype not in NO_CHANNEL_TYPES
+
+
+def channels_only(obj):
+    """Decision 110: an object of skip materials only, with at least one that takes the material channels: a master of
+    the material channels alone (no AO, no curvature)."""
+    return all_skip(obj) and any(is_channel_material(slot.material) for slot in obj.material_slots)
+
+
 def in_lod0(obj):
     """In LOD0: no Visible-from mark above LOD0 on the object or a parent (Object LOD's marks)."""
     while obj is not None:
@@ -520,8 +546,11 @@ def bake_exclusion(obj, scene):
     if obj.data.uv_layers.active is None:
         return 'no UV map'
     if all_skip(obj):
-        return 'skip materials only'
+        return SKIP_ONLY
     return ''
+
+
+SKIP_ONLY = 'skip materials only'
 
 
 def is_occluder(obj, scene):
@@ -660,12 +689,14 @@ def custom_value_sources(s):
 
 
 def custom_values(obj):
-    """Decisions 99 and 100: {group: value} of an object's own Custom values (a colour: a list of 3, linear)."""
+    """Decisions 99 and 100: {group: value} of an object's own Custom values (a colour: a list of 3, linear; decision
+    111: the albedo a list of 4, its alpha last)."""
     o = getattr(obj, 'fss_ao_bake', None)
     out = {}
     for g in CV_GROUPS:
         v = getattr(o, f'{g}_value', CV_DEFAULTS[g])
         out[g] = [round(float(c), 6) for c in v] if isinstance(CV_DEFAULTS[g], tuple) else round(float(v), 6)
+    out['albedo'].append(round(float(getattr(o, 'albedo_alpha', 1.0)), 6))
     return out
 
 
@@ -854,9 +885,12 @@ def refresh(context, relink=True, instances=None):
     meshes = _visible_meshes(view_layer)
     excluded = {}
     baked = []
+    chan_only = []  # decision 110: skip materials only, the material channels alone (outside the scene rule)
     for obj in meshes:
         why = bake_exclusion(obj, scene)
-        if why:
+        if why == SKIP_ONLY and channels_only(obj):
+            chan_only.append(obj)
+        elif why:
             excluded[obj.name] = why
         else:
             baked.append(obj)
@@ -884,6 +918,11 @@ def refresh(context, relink=True, instances=None):
     users = {}
     for obj in baked:
         users.setdefault(obj.data, []).append(obj)
+    chan_names = {o.name for o in chan_only}
+    for obj in chan_only:
+        if obj.data not in users:  # a mesh also used by a baked object stays that object's
+            users.setdefault(obj.data, [])
+        users[obj.data].append(obj)
     # the scene rule of every baked object, then the motion of every (object, occluder) pair, each in one call into the
     # DLL (bake-post-native journal Session 5): each object at its master's AO distance (a shared mesh's first copy's)
     plan = {}  # name: (which, distance)
@@ -968,16 +1007,24 @@ def refresh(context, relink=True, instances=None):
         mats = sorted(set(int(m) for m in np.unique(ev['mat']).tolist()))
         # decision 30: only faces whose material is a texture set (a material, not a skip material) are baked
         set_mats = [m for m in mats if m < len(slots) and slots[m] is not None and m not in skip]
+        chan = all(o.name in chan_names for o in objs)  # decision 110: the material channels alone
+        if chan:
+            set_mats = [m for m in mats if m < len(slots) and is_channel_material(slots[m])]
+            skip = [i for i in skip if i not in set_mats]
         if not set_mats:
             for o in objs:
-                excluded[o.name] = 'no face with a texture set (material)'
+                excluded[o.name] = SKIP_ONLY if chan else 'no face with a texture set (material)'
             continue
         mh = geo_hash(first)
-        mover = moving(first) or unknown(first)
+        mover = False if chan else (moving(first) or unknown(first))
         dist = item_distance(first, scene)
         copies, combine = None, None
         one = None  # decision 77: One Instance's (copy, source, the copy the master was baked from)
-        if shared:
+        if chan:  # decision 110: no AO, so no surroundings (the scene rule does not see these objects)
+            key = dict(channels_only=True)
+            sur = _hash(key)
+            mode, occ, frames, pose_note, posed, against, rng = 'SCENE', [], None, '', [], [], None
+        elif shared:
             # decision 47: every copy baked in its own surroundings, its own poses; combined per master pixel
             combine = shared_combine(me, scene)
             copies, keys = [], []
@@ -1027,7 +1074,7 @@ def refresh(context, relink=True, instances=None):
                     skip_slots=skip, tex_size=tex, sets=sets, grade='MISSING', occluder_mode=mode, poses=frames,
                     pose_note=pose_note, posed=posed, copies=copies, combine=combine, ao_distance=dist,
                     falloff=falloff, falloff_curve=curve if falloff else None, against=against, pose_range=rng,
-                    master_layout=layout)
+                    master_layout=layout, channels_only=chan)
         if one:  # decision 77: the copy graded and baked, where it came from, the copy the master was baked from
             item.update(instance=one[0].name, instance_from=one[1], baked_from=one[2])
         items[stem] = item
@@ -1145,14 +1192,16 @@ def channel_choice(stems, groups, selected):
 def dn_counts():
     c = {g: 0 for g in DN_GRADES}
     for item in _state['items'].values():
-        c[item.get('dn_grade', 'UP_TO_DATE')] += 1
+        if not item.get('channels_only'):  # decision 110
+            c[item.get('dn_grade', 'UP_TO_DATE')] += 1
     return c
 
 
 def curv_counts():
     c = {g: 0 for g in CURV_GRADES}
     for item in _state['items'].values():
-        c[item.get('cm_grade', 'MISSING')] += 1
+        if not item.get('channels_only'):  # decision 110
+            c[item.get('cm_grade', 'MISSING')] += 1
     return c
 
 
@@ -1166,6 +1215,8 @@ def bake_choice(stems, want_ao, want_cm, selected, denoise=None):
     guide = denoise is not None and denoise.get('curv_mode', 'OFF') != 'OFF'
     for stem in stems:
         it = _state['items'][stem]
+        if it.get('channels_only'):  # decision 110: no AO, curvature or denoise
+            continue
         ao = want_ao and (selected or it['grade'] != 'UP_TO_DATE')
         dn = want_ao and not ao and it.get('dn_grade') == 'STALE'
         cm = want_cm and (ao or selected or it.get('cm_grade') != 'UP_TO_DATE')
@@ -1224,8 +1275,12 @@ def texture_set_rows(items, masters):
     rows = {}
     for stem, item in items.items():
         for name in item['sets']:
-            row = rows.setdefault(name, dict(items=[], MISSING=0, MESH=0, SURROUNDINGS=0, UP_TO_DATE=0))
+            row = rows.setdefault(name, dict(items=[], MISSING=0, MESH=0, SURROUNDINGS=0, UP_TO_DATE=0,
+                                             channels_only=True))
             row['items'].append(stem)
+            if item.get('channels_only'):  # decision 110: a set of the material channels alone has no AO grades
+                continue
+            row['channels_only'] = False
             row[item['grade']] += 1
     return rows
 
@@ -1233,6 +1288,8 @@ def texture_set_rows(items, masters):
 def counts():
     c = {g: 0 for g in GRADES}
     for item in _state['items'].values():
+        if item.get('channels_only'):  # decision 110: no AO
+            continue
         c[item['grade']] += 1
     c['EXCLUDED'] = len(_state['excluded'])
     return c
