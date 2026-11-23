@@ -38,6 +38,7 @@ decisions 12 to 18, 21 and 27; P32 to P35).
 The hashes are computed by refresh(), never while a panel draws.
 """
 
+import hashlib
 import json
 import os
 import subprocess
@@ -696,6 +697,12 @@ def falloff_steps(scene):
     return int(s.falloff_steps) if s.falloff else 0
 
 
+def falloff_curve(scene):
+    """Decision 105: the falloff's curve (core.FALLOFF_CURVES), 'LINEAR' when the falloff is off."""
+    s = scene.fss_ao_bake
+    return str(s.falloff_curve) if s.falloff and s.falloff_curve in core.FALLOFF_CODE else 'LINEAR'
+
+
 def _surround_settings(scene):
     s = settings_dict(scene)
     return dict(ao_distance=s['ao_distance'], **core.method_settings())
@@ -904,6 +911,7 @@ def refresh(context, relink=True, instances=None):
     split = scene.fss_ao_bake.sample_quality == 'SPLIT'
     samples = int(scene.fss_ao_bake.samples)
     falloff = falloff_steps(scene)
+    curve = falloff_curve(scene)
 
     def occluder_key(n):
         if n not in occ_key:
@@ -936,6 +944,8 @@ def refresh(context, relink=True, instances=None):
                    occluders=[occluder_key(n) for n in occ])
         if falloff:  # decision 53: a key only with falloff, so the hashes without it stay
             key['falloff'] = falloff
+            if curve != 'LINEAR':  # decision 105: a key only for another curve
+                key['falloff_curve'] = curve
         # decisions 34 and 35: keys only when not the 0.57 bake (one pose, the scene rule), so its hashes stay
         if mode != 'SCENE':
             key['occluder_mode'] = mode
@@ -989,6 +999,8 @@ def refresh(context, relink=True, instances=None):
             sur = dict(base, ao_distance=dist, shared=True, combine=combine, copies=keys, sample_split=split)
             if falloff:
                 sur['falloff'] = falloff
+                if curve != 'LINEAR':
+                    sur['falloff_curve'] = curve
             sur = _hash(sur)
             mode = 'COPIES'
             occ = sorted({n for c in copies for n in c['occluders']})
@@ -998,11 +1010,24 @@ def refresh(context, relink=True, instances=None):
             sur = _hash(key)
         sets = sorted({slots[m].name for m in set_mats})
         tex = {str(m): int(texture_size(slots[m])) for m in set_mats}  # faces of other indices are not baked
+        # decision 107: an Object UV master for an object whose baked faces are in one texture set; its key holds the
+        # UVs of those faces and the texture size, so a UV change makes it stale
+        layout = 'AUTO'
+        if scene.fss_ao_bake.master_layout == 'OBJECT_UV' and len(sets) == 1:
+            layout = 'OBJECT_UV'
+            sel_t = np.isin(ev['mat'], np.array(set_mats))
+            uvh = hashlib.sha1(np.ascontiguousarray(ev['uv'][uv][sel_t], np.float32).tobytes()).hexdigest()
+            lay_key = dict(master_layout=layout, uv_hash=uvh, uv_size=sorted(set(tex.values())))
+            if shared:
+                sur = _hash(dict(sur=sur, **lay_key))
+            else:
+                sur = _hash(dict(key, **lay_key))
         item = dict(key=stem, kind=kind, name=name, object=first.name, mesh=me.name, users=[o.name for o in objs],
                     uv=uv, mesh_hash=mh, surround_hash=sur, occluders=occ, mover=mover, frame=frame,
                     skip_slots=skip, tex_size=tex, sets=sets, grade='MISSING', occluder_mode=mode, poses=frames,
                     pose_note=pose_note, posed=posed, copies=copies, combine=combine, ao_distance=dist,
-                    falloff=falloff, against=against, pose_range=rng)
+                    falloff=falloff, falloff_curve=curve if falloff else None, against=against, pose_range=rng,
+                    master_layout=layout)
         if one:  # decision 77: the copy graded and baked, where it came from, the copy the master was baked from
             item.update(instance=one[0].name, instance_from=one[1], baked_from=one[2])
         items[stem] = item
@@ -1269,7 +1294,9 @@ def make_job(context, stems, test_delay_s=0.0, tile_px=0, test_tile_delay_s=0.0,
                         surround_hash=item['surround_hash'], mesh_hash=item['mesh_hash'], mover=item['mover'],
                         frame=item['frame'], occluder_mode=item.get('occluder_mode', 'SCENE'),
                         poses=item.get('poses'), pose_note=item.get('pose_note', ''),
-                        ao_distance=item['ao_distance'], falloff=item.get('falloff', 0))
+                        ao_distance=item['ao_distance'], falloff=item.get('falloff', 0),
+                        falloff_curve=item.get('falloff_curve') or 'LINEAR',
+                        master_layout=item.get('master_layout') or 'AUTO')
         ao, cm, dn = (what or {}).get(stem, (True, bool(scene.fss_ao_bake.curvature), False))
         job_item.update(ao=bool(ao), cm=bool(cm), dn=bool(dn))
         if (channels or {}).get(stem):  # decision 79

@@ -28,7 +28,7 @@
 extern "C" {
 #endif
 
-#define FSS_AO_COPY_VERSION 6
+#define FSS_AO_COPY_VERSION 8
 
 #define FSS_AO_COPY_OK 0
 #define FSS_AO_COPY_E_ARGS (-1)     /* a null pointer, a size or a level out of range */
@@ -73,6 +73,25 @@ FSS_AO_COPY_API int32_t fss_ao_copy_version(void);
 FSS_AO_COPY_API int32_t fss_ao_copy_inside(const fss_ao_master *master, const double *uvpx, int64_t n_px,
                                            const int64_t *px, const int64_t *owner, const int64_t *level,
                                            const int64_t *origin, int64_t threads, double *out, int64_t *clamped);
+
+/* fss_ao_copy_inside_blend (interface version 7, auto-bake decision 108): as fss_ao_copy_inside, but each sub-sample is
+ * read on the triangle covering it (the last that covers it, as rasterize_ids: any triangle, not only the owner) at its
+ * own barycentric point, and every covered sub-sample is averaged, so a pixel across several faces gets their mix in
+ * proportion to their area in it. Sub-samples no triangle covers are left out; none covered: the owner read at the
+ * pixel centre, as fss_ao_copy_inside. */
+FSS_AO_COPY_API int32_t fss_ao_copy_inside_blend(const fss_ao_master *master, const double *uvpx, int64_t n_px,
+                                                 const int64_t *px, const int64_t *owner, const int64_t *level,
+                                                 const int64_t *origin, int64_t threads, double *out,
+                                                 int64_t *clamped);
+
+/* fss_ao_copy_inside_filter (interface version 8, auto-bake decision 109): fss_ao_copy_inside_blend with an edge
+ * filter: 0 box (equal weights: fss_ao_copy_inside_blend), 1 adaptive: a pixel whose sub-samples lie on several faces
+ * weights each by (1 - s 2|dx|)(1 - s 2|dy|), dx, dy its offset from the pixel centre in pixels, s the largest angle
+ * between those faces' normals over 90 degrees (at most 1); a pixel on one face keeps equal weights. */
+FSS_AO_COPY_API int32_t fss_ao_copy_inside_filter(const fss_ao_master *master, const double *uvpx, int64_t n_px,
+                                                  const int64_t *px, const int64_t *owner, const int64_t *level,
+                                                  const int64_t *origin, int64_t threads, int64_t filter, double *out,
+                                                  int64_t *clamped);
 
 /* Padding pixels: for each pixel n at target pixel px[2n], px[2n+1], the L x L points (L = level[n]) of the pixel in
  * the UV triangle tri_uv[n] (3 x 2 target px), their barycentrics clamped onto it and renormalized, read on the

@@ -77,10 +77,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ao_native_reference import Reference  # noqa: E402  (decision 6: the Python code's values, recorded)
 
 REF = Reference('harness')
-INFO_SKIP = ('copy', 'copy_why', 'copy_threads', 'raster', 'dilate', 'soften', 'padding_at_folds')
+INFO_SKIP = ('copy', 'copy_why', 'copy_threads', 'raster', 'dilate', 'soften', 'padding_at_folds', 'blend', 'edge_filter')
 # the references were recorded before auto-bake decision 78: the padding hinged across every edge, also sharp folds
 # (test_fold_padding checks the rule of decision 78)
 core.PADDING_FOLD_COS = -2.0
+core.APPLY_BLEND = False  # and before auto-bake decision 108 (test_blend checks the blend)
 
 
 def copy_values(res):
@@ -430,6 +431,110 @@ def test_fold_padding():
     print(f"PASS: test_fold_padding (90 degree fold: {int(wall_pad.sum())} wall and {int(top_pad.sum())} top padding "
           f"px within {max(err_wall, err_top):.5f} of their own face, {info_n['padding_at_folds']} px at folds; the "
           f"old rule gave {took} wall padding px the top's AO; the 10 degree seam unchanged)")
+
+
+def test_blend():
+    """Auto-bake decision 108: a 90 degree fold (a dark wall, a light top) unwrapped as one island, the fold 0.3 px into
+    a texel row: with the blend each pixel of that row is the wall's and the top's AO in proportion to their area in it
+    (within one sub-sample row, 1/L); without it (the rule the references were recorded with) the top's alone, the face
+    at the pixel's centre. Pixels inside one face are the same either way."""
+    pos = np.array([(0, 0, 0), (0.01, 0, 0), (0.01, 0, 0.01), (0, 0, 0.01),  # wall (normal -y)
+                    (0.01, 0.01, 0.01), (0, 0.01, 0.01)], np.float64)  # top, folded 90 degrees at the wall's upper edge
+    tris = np.array([(0, 1, 2), (0, 2, 3), (3, 2, 4), (3, 4, 5)], np.int64)
+    P = pos[tris]
+    fn = np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0])
+    fn /= np.linalg.norm(fn, axis=1, keepdims=True)
+    m = core.build_master(pos, tris, np.repeat(fn[:, None], 3, axis=1), 6000.0, gutter=core.GUTTER, order=core.ORDER,
+                          mirror_open=core.MIRROR_OPEN, fold_split=core.FOLD_SPLIT)
+    owner, _cnt = core.rasterize_ids(m['muv'], m['W'], m['H'])
+    grown, _st = core.dilate_ids(owner, 2)
+    master = dict(m, image=np.where(np.isin(grown, (0, 1)), 20000, 60000).astype(np.uint16), filled=grown >= 0,
+                  face_map=grown)
+    dark, light = 20000 / 65535, 60000 / 65535
+    W = H = 64
+    uvpx = np.zeros((len(tris), 3, 2))
+    for t, (a, b, c) in enumerate(tris):
+        for k, v in enumerate((a, b, c)):
+            x, y, z = pos[v]
+            # one island: the wall below v = 25.3, the top above it
+            uvpx[t, k] = (10 + x * 1500, 10.3 + (z * 1500 if t < 2 else 15 + y * 1500))
+    tisl = np.zeros(len(tris), np.int64)
+    kw = dict(padding=4, outside_mode='tri', kmax=core.K_MAX, surface_cos=core.SURFACE_COS, threads=1)
+    new = core.copy_master(pos, tris, uvpx, tisl, master, (0, 0, W, H), core.K_MIN, blend=True, **kw)
+    old = core.copy_master(pos, tris, uvpx, tisl, master, (0, 0, W, H), core.K_MIN, blend=False, **kw)
+    cols = slice(12, 23)
+    frac_new = (light - new[0][25, cols]) / (light - dark)
+    frac_old = (light - old[0][25, cols]) / (light - dark)
+    levels = sorted(new[1]['k_levels'])
+    tol = 1.0 / min(levels) + 0.01
+    assert np.abs(frac_new - 0.3).max() <= tol, (frac_new, levels)
+    assert np.abs(frac_old).max() < 0.01, frac_old
+    assert new[1]['blend'] and not old[1]['blend']
+    rows = np.r_[13:23, 28:38]
+    d_in = float(np.abs(new[0][rows][:, cols] - old[0][rows][:, cols]).max())
+    assert d_in < 1e-6, d_in
+    print(f"PASS: test_blend (the fold row's wall share {frac_new.min():.3f} to {frac_new.max():.3f} for 0.3 with "
+          f"{levels} sub-samples per axis, {np.abs(frac_old).max():.3f} without the blend; inside pixels within {d_in:.1e})")
+
+
+def test_edge_filter():
+    """Auto-bake decision 109: a dark wall and a light top joined in one island, the fold 0.3 px into a texel row, at
+    fold angles of 0 (flat), 45 and 90 degrees. Edge Filter Box: the row's wall share the share of sub-sample rows on
+    the wall; Adaptive: those rows weighted by 1 - s 2|d| (s the angle over 90 degrees, d the row's offset from the
+    pixel centre), exactly as computed here; on the flat join (s 0) the same as Box. Pixels inside one face are the
+    same with either filter."""
+    res = []
+    for deg in (0.0, 45.0, 90.0):
+        a = math.radians(deg)
+        e = 0.01
+        top = np.array([0.0, math.sin(a), math.cos(a)]) * e  # the top continues the wall turned by deg
+        pos = np.array([(0, 0, 0), (e, 0, 0), (e, 0, e), (0, 0, e), (e, 0, e) + top, (0, 0, e) + top], np.float64)
+        tris = np.array([(0, 1, 2), (0, 2, 3), (3, 2, 4), (3, 4, 5)], np.int64)
+        P = pos[tris]
+        fn = np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0])
+        fn /= np.linalg.norm(fn, axis=1, keepdims=True)
+        m = core.build_master(pos, tris, np.repeat(fn[:, None], 3, axis=1), 6000.0, gutter=core.GUTTER,
+                              order=core.ORDER, mirror_open=core.MIRROR_OPEN, fold_split=core.FOLD_SPLIT)
+        owner, _cnt = core.rasterize_ids(m['muv'], m['W'], m['H'])
+        grown, _st = core.dilate_ids(owner, 2)
+        # each face's own value wherever its pixels are (the surface-aware read keeps the two apart)
+        master = dict(m, image=np.where(np.isin(grown, (0, 1)), 20000, 60000).astype(np.uint16), filled=grown >= 0,
+                      face_map=grown)
+        dark, light = 20000 / 65535, 60000 / 65535
+        W = H = 64
+        uvpx = np.zeros((len(tris), 3, 2))
+        for t, (va, vb, vc) in enumerate(tris):
+            for k, v in enumerate((va, vb, vc)):
+                d_top = np.linalg.norm(pos[v] - pos[3] - (pos[v][0] - pos[3][0]) * np.array([1.0, 0, 0])) if t >= 2 else 0
+                uvpx[t, k] = (10 + pos[v][0] * 1500, 10.3 + (pos[v][2] * 1500 if t < 2 else 15 + d_top * 1500))
+        kw = dict(padding=4, outside_mode='tri', kmax=9, surface_cos=0.99999, threads=1, blend=True)  # 9 x 9
+        tisl = np.zeros(len(tris), np.int64)
+        box = core.copy_master(pos, tris, uvpx, tisl, master, (0, 0, W, H), 9, edge_filter='BOX', **kw)
+        ada = core.copy_master(pos, tris, uvpx, tisl, master, (0, 0, W, H), 9, edge_filter='ADAPTIVE', **kw)
+        assert ada[1]['edge_filter'] == 'ADAPTIVE' and box[1]['edge_filter'] == 'BOX'
+        L = int(sorted(ada[1]['k_levels'])[0])
+        sub = (np.arange(L) + 0.5) / L
+        wall = sub < 0.3  # the sub-sample rows of row 25 on the wall
+        sh = min(1.0, deg / 90.0)
+        wy = 1.0 - sh * 2.0 * np.abs(sub - 0.5)
+        want_box = wall.sum() / L
+        want_ada = wy[wall].sum() / wy.sum()
+        cols = slice(12, 23)
+        f_box = (light - box[0][25, cols]) / (light - dark)
+        f_ada = (light - ada[0][25, cols]) / (light - dark)
+        assert len(ada[1]['k_levels']) == 1, ada[1]['k_levels']
+        if deg == 0.0:  # one flat island: the master's values blend across the join; Adaptive gives Box's weights
+            assert np.abs(f_ada - f_box).max() < 1e-12, (f_ada, f_box)
+            res.append('0 deg: adaptive = box')
+            continue
+        assert np.abs(f_box - want_box).max() < 1e-6, (deg, f_box, want_box, L)
+        assert np.abs(f_ada - want_ada).max() < 1e-6, (deg, f_ada, want_ada, L)
+        rows = np.r_[13:23, 28:38]
+        d_in = float(np.abs(box[0][rows][:, cols] - ada[0][rows][:, cols]).max())
+        assert d_in < 1e-12, (deg, d_in)
+        res.append(f'{deg:g} deg: box {want_box:.3f}, adaptive {want_ada:.3f}')
+    print(f"PASS: test_edge_filter (the fold row's wall share for 0.3 at {L} sub-samples per axis: {'; '.join(res)}; "
+          f"inside pixels the same)")
 
 
 def test_open(rng, folder):
@@ -1724,6 +1829,8 @@ if __name__ == '__main__':
         test_uv_islands(rng_of('uv_islands'))
         test_soften(rng_of('soften'), folder)
         test_fold_padding()  # auto-bake decision 78
+        test_blend()  # auto-bake decision 108
+        test_edge_filter()  # auto-bake decision 109
         if only == ['pixels']:  # a quicker run of the tests above: -- only=pixels
             print(f'PIXELS TESTS PASSED ({time.time() - t0:.1f} s)')
             sys.exit(0)

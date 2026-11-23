@@ -646,7 +646,8 @@ def bake_item(item, coll):
     dist = float(item.get('ao_distance', SET['ao_distance']))  # decision 51: Auto Distance gives small objects less
     BAKE['scene'].world.light_settings.distance = dist
     nf = int(item.get('falloff') or 0)  # decision 53: each view at dist x 1/n, 2/n ... 1, averaged: linear falloff
-    steps = [dist * (k + 1) / nf for k in range(nf)] if nf > 1 else None
+    curve = item.get('falloff_curve') or 'LINEAR'  # decision 105: the steps placed along the curve
+    steps = core.falloff_distances(dist, nf, curve) if nf > 1 else None
     dg = bpy.context.evaluated_depsgraph_get()
     uv_name = item['uv']
     ev = core.evaluated_triangles(obj, dg, [uv_name])
@@ -677,8 +678,8 @@ def bake_item(item, coll):
         return dict(status='skipped', reason='no face with UV area')
     tb = time.time()
     # decision 81: the master's layout is kept while its mesh is unchanged (its density, whatever the UVs are now)
-    m, kept, old_entry = layout_for(item, mh, tri_src, pos, tris, cnm, D)
-    if kept:
+    m, kept, old_entry = layout_for(item, mh, tri_src, pos, tris, cnm, D, uvpx)
+    if kept or m.get('object_uv'):
         D = m['density']
     m['corner_pairs'] = core.corner_pairs(m, pos, tris)  # decision 57
     t_build = time.time() - tb
@@ -703,7 +704,8 @@ def bake_item(item, coll):
     if dist != float(SET['ao_distance']):
         log(f"  {item['name']}: AO distance {dist * 1000:g} mm (auto, its longest box axis)")
     if steps:
-        log(f"  {item['name']}: falloff in {nf} steps, " + ', '.join(f'{d * 1000:.3g}' for d in steps) + ' mm')
+        log(f"  {item['name']}: falloff in {nf} steps" + ('' if curve == 'LINEAR' else f", curve {curve.title()}")
+            + ', ' + ', '.join(f'{d * 1000:.3g}' for d in steps) + ' mm')
     log(f"  {item['name']}: master {W} x {H} px ({W * H / 1e6:.1f} Mpx), tile {tile} px, {n} tile(s) in {nb} band(s); "
         f"budget {BUDGET / gb:.1f} GB" + (f", estimate {est / gb:.2f} GB" if est else ' (tile forced)')
         + ('' if fits else ', the smallest tile exceeds the budget'))
@@ -950,7 +952,8 @@ def bake_item(item, coll):
             try:
                 bk.job_info(_run['i'] + 1, len(ITEMS), item['name'])
                 ready = bk.load_master(pos, tris, cnm, m, dist, samples, views=nat['views'],
-                                       occluders=nat['occluders'], falloff=nf > 1, combine=nat['combine'],
+                                       occluders=nat['occluders'],
+                                       falloff=core.FALLOFF_CODE.get(curve, 1) if nf > 1 else 0, combine=nat['combine'],
                                        seed=core.SEEDS[0] + SEED_OFFSET)
             except Exception as exc:  # noqa: BLE001
                 raise NativeFailed('its scene') from exc
@@ -1008,6 +1011,8 @@ def bake_item(item, coll):
         counts['image_px'] = int(W * H)
         meta = dict(schema=core.SCHEMA, key=item['key'], kind=item['kind'], name=item['name'], object=obj.name,
                     mesh_hash=mh, ao_distance=dist, samples=int(samples), **core.method_settings())
+        if m.get('object_uv'):  # decision 107: Apply averages each texel's block of this master
+            meta['object_uv'] = m['object_uv']
         # decision 55: an AO bake without CM keeps the old curvature only when the layout is the same
         keep_curv = None if item.get('cm', SET.get('curvature')) else _same_layout_curvature(item['key'], m, tri_src, mh)
         ts = time.time()
@@ -1065,6 +1070,7 @@ def bake_item(item, coll):
                  poses=frames, n_poses=n_poses, pose_note=pose_note,
                  combine=item.get('combine'), copies=len(item['copies']) if item.get('copies') else None,
                  falloff=nf if nf > 1 else None,
+                 falloff_curve=curve if nf > 1 and curve != 'LINEAR' else None,
                  curvature=None if curv is None else dict(width=curv['width'], edges=curv['edges'],
                                                           seconds=curv['seconds'], baker=curv.get('baker', 'add-on')),
                  denoise=dn,
@@ -1151,13 +1157,23 @@ def kept_layout(key, mh, tri_src):
     return lay, old
 
 
-def layout_for(item, mh, tri_src, pos, tris, cnm, D):
+def layout_for(item, mh, tri_src, pos, tris, cnm, D, uvpx=None):
     """Decision 81: (m, kept, old entry). While the mesh is unchanged the master keeps its layout, whatever the
     texture set's UVs or size are now: built again at its stored density (the skirt is not stored) and used when it
     equals the stored one; otherwise (no master, the mesh changed, or it cannot be built again: said in the log) a new
-    layout at density D."""
+    layout at density D. Decision 107: an Object UV item's layout from uvpx (the texture set's pixels), kept when the
+    stored one is the same."""
     lay, old = kept_layout(item['key'], mh, tri_src)
+    if item.get('master_layout') == 'OBJECT_UV' and uvpx is not None:  # decision 107: the object's own UVs
+        m = core.object_uv_layout(pos, tris, cnm, uvpx, gutter=core.GUTTER)
+        if lay is not None and (lay.get('meta') or {}).get('object_uv') == m['object_uv'] and not core.same_layout(m, lay):
+            return m, True, old
+        log(f"  {item['name']}: Object UV layout, {m['n_islands']} UV islands at {core.OBJECT_UV_SCALE} x "
+            f"{core.OBJECT_UV_SCALE} px per texel")
+        return m, False, old
     kw = dict(gutter=core.GUTTER, order=core.ORDER, mirror_open=core.MIRROR_OPEN, fold_split=core.FOLD_SPLIT)
+    if lay is not None and (lay.get('meta') or {}).get('object_uv'):  # decision 107: back to Auto Unwrap
+        lay = None
     if lay is not None:
         m = core.build_master(pos, tris, cnm, float(lay['density']), **kw)
         why = core.same_layout(m, lay)
@@ -1767,7 +1783,8 @@ def channel_item(item, coll, ao=False):
     pos, cn = core.to_world(ev, shift)
     tris, cnm = ev['tris'][tri_src], cn[tri_src]
     size = np.array([float(sizes[str(int(m_))]) for m_ in ev['mat'][tri_src]])
-    D = core.master_density(pos, tris, ev['uv'][uv_name][tri_src] * size[:, None, None])
+    uvpx = ev['uv'][uv_name][tri_src] * size[:, None, None]
+    D = core.master_density(pos, tris, uvpx)
     if D <= 0:
         return dict(status='skipped', reason='no face with UV area')
     # rule item 6: a shared mesh's channels from one copy (the bake's choice); its mesh must be the master's
@@ -1811,7 +1828,7 @@ def channel_item(item, coll, ao=False):
         if not groups:
             return dict(status='skipped', reason='; '.join(notes), vc_skipped=vc_skipped)
     tb = time.time()
-    m, kept, old = layout_for(item, mh, tri_src, pos, tris, cnm, D)
+    m, kept, old = layout_for(item, mh, tri_src, pos, tris, cnm, D, uvpx)
     t_build = time.time() - tb
     W, H = m['W'], m['H']
     src = channel_source(src_obj, dg, tri_src)
@@ -2092,6 +2109,8 @@ def channel_item(item, coll, ao=False):
             w_.encode()
         meta = dict(schema=core.SCHEMA, key=key, kind=item['kind'], name=item['name'], object=obj.name, mesh_hash=mh,
                     **core.method_settings())
+        if m.get('object_uv'):  # decision 107
+            meta['object_uv'] = m['object_uv']
         if not kept:  # decision 81: a new layout; what was baked into the old one is removed
             _remove_files(list(core.image_paths(FOLDER, key)) + list(core.image_paths(FOLDER, key, 'curv'))
                           + list(core.image_paths(FOLDER, key, 'ao.raw')) + [os.path.join(FOLDER, key + core.THUMB_EXT)]

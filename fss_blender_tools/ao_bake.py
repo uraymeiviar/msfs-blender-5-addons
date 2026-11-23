@@ -207,8 +207,27 @@ class FSS_AOBakeSettings(bpy.types.PropertyGroup):
         "(linear). Each view is baked once per step and averaged, so the bake takes about as many times longer")
     falloff_steps: bpy.props.IntProperty(
         name="Steps", default=3, min=2, max=16,
-        description="Distances of the falloff: the AO distance times 1/n, 2/n ... 1. More steps make the falloff "
+        description="Distances of the falloff baked by Cycles (FSS OptiX follows the curve exactly): with Linear the "
+        "AO distance times 1/n, 2/n ... 1, other curves place them along the curve. More steps make the falloff "
         "smoother and the bake longer")
+    falloff_curve: bpy.props.EnumProperty(  # decision 105
+        name="Curve", default='LINEAR',
+        description="How an occluder's darkening fades from the surface (full) to the AO distance (none)",
+        items=[('LINEAR', "Linear", "Fades evenly: an occluder at half the distance darkens half"),
+               ('SHARP', "Sharp", "Fades fast, then slowly: contact shadows stay dark, farther occluders fade "
+                "quickly (half the distance: a quarter)"),
+               ('SMOOTH', "Smooth", "S-curve: full near the surface, a soft end at the distance (half the "
+                "distance: half)"),
+               ('ROOT', "Root", "Stays strong far out, then drops near the distance: darker AO (half the "
+                "distance: 0.71)")])
+    master_layout: bpy.props.EnumProperty(  # decision 107
+        name="Master Layout", default='AUTO',
+        description="How the master's islands are laid out",
+        items=[('AUTO', "Auto Unwrap", "The master's own unwrap at 4 x the texture's median texel density: a UV "
+                "change needs only Apply"),
+               ('OBJECT_UV', "Object UV", "The object's own UV map at 4 x 4 master pixels per texel; Apply averages "
+                "each texel's block. Objects whose baked faces use one texture set only (others stay on Auto "
+                "Unwrap). A UV or texture size change needs a re-bake")])
     bake_ao: bpy.props.BoolProperty(
         name="AO Bake Selected", default=True,
         description="Run bakes the AO masters of the selected objects (Baker); with CM also ticked, each object's "
@@ -390,6 +409,18 @@ class FSS_AOBakeSettings(bpy.types.PropertyGroup):
         name="Width", default=0.0003, min=0.0, soft_max=0.005, unit='LENGTH', precision=2,
         description="How far from the edge the darker side brightens; at least one texel of the texture, so a narrow "
         "width still hides the one-texel step")
+    edge_filter: bpy.props.EnumProperty(  # decision 109
+        name="Edge Filter", default='BOX',
+        description="How Apply weighs the samples of a texel that spans several faces",
+        items=[('BOX', "Box", "Every sample counts the same: each face by its share of the texel"),
+               ('ADAPTIVE', "Adaptive", "Samples near the texel's centre count more, the more so the sharper the "
+                "fold between the faces (none on a flat join, a full tent at 90 degrees or more): crisper edges at "
+                "folds, still without stairs")])
+    ao_strength: bpy.props.FloatProperty(  # decision 106
+        name="Strength", default=1.0, min=0.0, max=1.0, subtype='FACTOR',
+        description="How much of the AO's darkening Apply writes: 1.0 all of it, 0.5 half (black becomes 50% grey), "
+        "0.0 none (white). Every value moves toward white by the same share; the masters are not changed, so a new "
+        "value needs only Apply")
     output_folder: bpy.props.StringProperty(name="Output Folder", default='', subtype='DIR_PATH',
                                             description="Where Apply writes separate AO files. Empty: a folder "
                                             "<blend name>_ao beside the .blend")
@@ -2642,6 +2673,10 @@ def _draw_bake(layout, context, s):
     sub = row.row(align=True)
     sub.active = s.falloff
     sub.prop(s, 'falloff_steps')
+    row = col.row(align=True)  # decision 105
+    row.active = s.falloff
+    row.prop(s, 'falloff_curve')
+    col.prop(s, 'master_layout')  # decision 107
     col.separator()
     row = col.row(align=True)  # OptiX baker decisions 22, 24
     row.label(text='Baker')
@@ -2749,6 +2784,8 @@ def _draw_target(layout, context, s, st):
     cell = row.row(align=True)
     cell.enabled = s.soften_edges
     cell.prop(s, 'soften_width', text='Width')
+    col.prop(s, 'ao_strength', slider=True)  # decision 106
+    col.prop(s, 'edge_filter')  # decision 109
     for g in CH_TARGETS:  # decision 96: while its Apply tick is on
         if getattr(s, f'apply_{g}'):
             _draw_channel_target(sub, context, s, a, material, g)

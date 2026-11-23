@@ -8,7 +8,7 @@ The **Bake** panel (sidebar `N` > **FSS MSFS Tools** > **Bake**, with its sub-pa
 ## How It Works
 
 - **Bake and Apply are two steps.** A bake writes **masters**; **Apply** copies the masters into the textures of each texture set. **Run** (in the sub-panel) does either or both, for the selected objects.
-- **A master** is the baked data of one mesh, in a layout of its own: AO, and when you bake them, the curvature and the material channels. It does not depend on your UVs. When you move, scale or repack the UVs, or make the texture larger, the master stays valid: **Apply** copies it into the UVs the texture set has now. Only a change of the mesh itself makes a master out of date.
+- **A master** is the baked data of one mesh, in a layout of its own: AO, and when you bake them, the curvature and the material channels. It does not depend on your UVs. When you move, scale or repack the UVs, or make the texture larger, the master stays valid: **Apply** copies it into the UVs the texture set has now. Only a change of the mesh itself makes a master out of date. The exception is a master in the **Object UV** layout (see [Master Layout](#master-layout)), which follows the UVs it was baked in.
 - **The bake folder:** the masters are kept in `<blend name>.bake` beside the `.blend`, never inside it. So the `.blend` must be saved once: until then the panel says **Save the file once: the masters are kept beside it**. The masters are not committed to the aircraft repository; each artist bakes their own.
 - **The bake runs in a second Blender,** on a snapshot of the scene as it is now, unsaved changes included. Your Blender, its scene and the `.blend` on disk are not touched, and you can keep working while it bakes.
 - **Apply writes files only:** the texture files of the material, or separate files in an output folder. It adds nothing to the `.blend` and changes no material. A texture that Blender has open from such a file is reloaded, unless it has unsaved changes.
@@ -64,6 +64,22 @@ The **Bake** box holds the settings for the whole file. Changing a setting that 
 - **AO Distance** (default 250 mm): how far other geometry darkens a surface. Good values are about the gaps where large parts should still shade each other; in a cockpit, a few cm to 10 cm.
 - **Auto Distance** and **Factor:** small objects bake with a shorter distance, the factor times the longest side of the object's own box. The distance field is then named **Max Distance**: the most any object gets. A small part is then shaded by its own shape and what is close to it. The Object box shows the object's own distance when it is shorter (**AO distance 40 mm (Auto Distance)**). The copies of a shared mesh all use the first copy's distance.
 - **Distance Falloff** and **Steps:** an occluder darkens less the farther it is, from full at the surface to nothing at the AO distance. The bake takes about **Steps** times longer.
+- **Curve** (with Distance Falloff on; the names of Blender's proportional editing): how that darkening fades with distance. How much an occluder darkens at half the AO distance is given in brackets.
+  - **Linear** (default): it fades evenly (half).
+  - **Sharp:** contact shadows stay dark and farther occluders fade quickly (a quarter). The AO gets lighter where parts are far apart, not where they touch.
+  - **Smooth:** full close to the surface, a soft end at the distance (half).
+  - **Root:** it stays strong far out and drops only near the distance (0.71): a darker AO.
+  - Cycles builds the fade from the **Steps** (each a bake at a shorter distance), so more steps follow the curve more closely; FSS OptiX follows it exactly. A new curve makes the masters **Surroundings changed**.
+
+### Master Layout
+
+**Master Layout** sets how a master's pixels are laid out:
+
+- **Auto Unwrap** (default): the master has its own unwrap, at 4 times the texture's texel density. Change the UVs or the texture size as you like: Apply copies the master into the new UVs, no bake needed.
+- **Object UV:** the master is baked in the object's own UV map, 4 x 4 master pixels for each texture pixel, its UV islands packed tightly. Apply writes each texture pixel the mean of its 16 master pixels: what the rays hit inside that pixel, as if the texture had been baked directly. Use it where your UVs stretch or distort on purpose.
+  - It applies to objects whose baked faces all use one texture set; other objects keep Auto Unwrap.
+  - Moving the UVs or changing the texture size makes such a master **Surroundings changed**, and Apply warns until you bake again (it then copies the master face by face, as for Auto Unwrap).
+  - Switching between the two layouts makes the masters **Surroundings changed**.
 
 ### Baker and Samples
 
@@ -177,7 +193,12 @@ The texture sets and where Apply writes. It needs a Refresh first (**Refresh fir
   - **Resolution:** the size of a new file: **ORM Texture Size** (when the material has an ORM texture) or 256 to 8192 pixels per side. An existing file keeps its own size, shown as **Resolution: 4096 x 4096 (the file's size)**.
   - **Channels:** **Greyscale** (the AO in red, green and blue) or **Red (ORM)** (the AO in red). With Red (ORM), **Green and Blue:** **White** (MSFS then uses the material's roughness and metallic factors) **From ORM Texture** (the roughness and metallic of the ORM texture) or **Custom**, which shows **Roughness** (default 1.0) and **Metal** (default 0.0): MSFS multiplies the material's roughness and metallic factors by them, so 1.0 keeps a factor and 0.0 makes the set not metallic. They fill a new file only; an existing file keeps its green and blue. At another size than the ORM texture, the box warns **Another size: roughness and metallic are resampled** and offers **Sampling**: **Automatic**, **Nearest** (hard metallic edges stay hard) or **Bicubic** (sharper).
 - **Padding** (default 8 px): the pixels written around each island. It applies to the AO, the roughness and the metal.
+- **Strength** (default 1.0): how much of the AO's darkening Apply writes. 0.5 writes half of it (black becomes 50 % grey, 0.6 becomes 0.8), 0.0 writes white. Every value moves toward white by the same share, contact shadows too; to fade only the shading from farther parts, use the falloff's **Curve** in [Bake Settings](#ao-distance-and-falloff). The masters are not changed: a new strength needs only Apply, no bake.
 - **Soften Sharp Edges** and **Width:** Apply treats convex sharp edges (a lip, a rim; faces more than 30 degrees apart) as slightly rounded: the darker side brightens toward the brighter side at the edge. Inside corners keep their contact shadow. The AO only; the masters are not changed.
+- **Edge Filter:** a texture pixel that spans several faces (at a fold, a hole's rim, a bevel) gets the values of all of them blended, so an edge shows no stair steps. The filter decides how they are weighed, in every channel:
+  - **Box** (default): every part of the pixel counts the same, each face by its share of the pixel.
+  - **Adaptive:** the part near the pixel's centre counts more, the more so the sharper the fold between the faces: a sharp edge stays crisp, a nearly flat join blends evenly.
+  - Masters in the **Object UV** layout always average their 16 master pixels evenly. A new filter needs only Apply, no bake.
 
 ### Albedo and Emissive
 

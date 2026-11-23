@@ -642,6 +642,221 @@ def build_master(pos, tris, cn, density, gutter=2, order='fold', mirror_open=Fal
                 n_join_candidates=len(isl.join_order))
 
 
+OBJECT_UV_SCALE = 4  # decision 107: an Object UV master's pixels per texture pixel (each way)
+
+
+def object_uv_layout(pos, tris, cn, uvpx, gutter=2, scale=OBJECT_UV_SCALE):
+    """Decision 107: the master in the object's own UVs (uvpx: the texture set's pixels) at scale x scale master
+    pixels per texture pixel. Islands are the UV islands (triangles joined where an edge has the same UVs on both
+    sides), each moved by whole texels and shelf-packed with a margin of a texel (packed, so no empty space between
+    them): an island's master UV = uvpx * scale - its offset, the offset a multiple of scale, so each texel is a whole
+    block of master pixels. Each island border edge gets a skirt as build_master's (the 3D neighbour across the edge
+    unfolded, the face itself mirrored across a fold over FOLD_SPLIT or at an open edge). The layout dict of
+    build_master, with object_uv = dict(scale, offsets: per island [x, y] in master pixels)."""
+    isl = Islands(pos, tris)
+    T = len(tris)
+    uv = np.asarray(uvpx, np.float64) * float(scale)
+    muv = uv.copy()
+    parent = list(range(T))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def same_uv(t, u, a, b, ca, cb):
+        ru = [int(v) for v in isl.wt[u]]
+        if a not in ru or b not in ru:
+            return False
+        return (np.allclose(uv[u][ru.index(a)], uv[t][ca], rtol=0, atol=1e-4)
+                and np.allclose(uv[u][ru.index(b)], uv[t][cb], rtol=0, atol=1e-4))
+
+    for lst in isl.edges.values():
+        for k in range(len(lst)):
+            t, ti, tj = lst[k]
+            a, b = int(isl.wt[t, ti]), int(isl.wt[t, tj])
+            for j in range(k + 1, len(lst)):
+                u = lst[j][0]
+                if same_uv(t, u, a, b, ti, tj):
+                    parent[find(t)] = find(u)
+    roots = sorted({find(t) for t in range(T) if not isl.degenerate[t]})
+    rid = {r: i for i, r in enumerate(roots)}
+    island = np.array([rid[find(t)] if not isl.degenerate[t] else -1 for t in range(T)], dtype=np.int64)
+    n_isl = len(roots)
+    # each island's texel box with a margin of a texel, shelf-packed in texels
+    tb = np.zeros((n_isl, 4), dtype=np.int64)  # x0, y0, w, h in texels
+    for i in range(n_isl):
+        P = np.asarray(uvpx, np.float64)[island == i].reshape(-1, 2)
+        x0, y0 = np.floor(P.min(axis=0)).astype(np.int64) - 1
+        x1, y1 = np.ceil(P.max(axis=0)).astype(np.int64) + 1
+        tb[i] = (x0, y0, x1 - x0, y1 - y0)
+    total = int((tb[:, 2] * tb[:, 3]).sum()) if n_isl else 0
+    width = max(int(tb[:, 2].max()) if n_isl else 1, int(math.ceil(math.sqrt(max(total, 1)) * 1.15)))
+    x = y = shelf_h = 0
+    place = np.zeros((n_isl, 2), dtype=np.int64)
+    for i in sorted(range(n_isl), key=lambda i: (-tb[i, 3], -tb[i, 2], i)):
+        if x + tb[i, 2] > width:
+            x, y, shelf_h = 0, y + shelf_h, 0
+        place[i] = (x, y)
+        x += int(tb[i, 2])
+        shelf_h = max(shelf_h, int(tb[i, 3]))
+    offsets = (tb[:, :2] - place) * int(scale)  # master px: muv = uv * scale - offset
+    for i in range(n_isl):
+        muv[island == i] = uv[island == i] - offsets[i]
+    muv[island < 0] = 0.0  # degenerate triangles: no area, no island (as build_master)
+    rects = np.zeros((n_isl, 4), dtype=np.int64)
+    for i in range(n_isl):
+        rects[i] = (place[i, 0] * scale, place[i, 1] * scale, tb[i, 2] * scale, tb[i, 3] * scale)
+    W = int(max(1, (rects[:, 0] + rects[:, 2]).max() if n_isl else 1))
+    H = int(max(1, (rects[:, 1] + rects[:, 3]).max() if n_isl else 1))
+    P0 = pos[tris]
+    a3 = 0.5 * np.linalg.norm(np.cross(P0[:, 1] - P0[:, 0], P0[:, 2] - P0[:, 0]), axis=1)
+    a2 = np.abs(tri_areas_2d(muv))
+    dens_t = np.sqrt(np.where(a3 > 0, a2 / np.maximum(a3, 1e-30), 0.0))
+    ok = ~isl.degenerate & (dens_t > 0)
+    density = float(np.median(dens_t[ok])) if ok.any() else 0.0
+    skirt_pos, skirt_uv, skirt_n, skirt_isl, skirt_src = [], [], [], [], []
+    band = gutter + 1.0
+    n_border = n_mirrored = 0
+    for t in range(T):
+        i = island[t]
+        if i < 0:
+            continue
+        for ci, cj in ((0, 1), (1, 2), (2, 0)):
+            a, b = int(isl.wt[t, ci]), int(isl.wt[t, cj])
+            lst = isl.edges[(a, b) if a < b else (b, a)]
+            if any(u != t and island[u] == i and same_uv(t, u, a, b, ci, cj) for (u, _iu, _ju) in lst):
+                continue
+            n_border += 1
+            neigh = [(u, iu, ju) for (u, iu, ju) in lst if u != t and not isl.degenerate[u]]
+            mine = [e for e in lst if e[0] == t][0]
+            u = t
+            if neigh:
+                u, iu, ju = min(neigh, key=lambda e: (isl.fold(t, mine[1], mine[2], e[0], e[1], e[2]), e[0]))
+                if isl.fold(t, mine[1], mine[2], u, iu, ju) > FOLD_SPLIT:
+                    u = t
+            n_mirrored += u == t
+            a2_, b2_ = muv[t][ci], muv[t][cj]
+            d = b2_ - a2_
+            if np.linalg.norm(d) < 1e-9:
+                continue
+            c_own = muv[t][3 - ci - cj]
+            ru = [int(v) for v in isl.wt[u]]
+            ka, kb = ru.index(a), ru.index(b)
+            kc = 3 - ka - kb
+            P3 = pos[tris[u]]
+            dt = dens_t[t] if dens_t[t] > 0 else density
+            la = np.linalg.norm(P3[kc] - P3[ka]) * dt
+            lb = np.linalg.norm(P3[kc] - P3[kb]) * dt
+            c2 = _hinge_point(a2_, b2_, la, lb, c_own)
+            tri2 = np.zeros((3, 2))
+            tri2[ka], tri2[kb], tri2[kc] = a2_, b2_, c2
+            nrm = np.array([-d[1], d[0]]) / np.linalg.norm(d)
+            if _side(a2_, b2_, a2_ + nrm) * _side(a2_, b2_, c_own) > 0:
+                nrm = -nrm
+            quad = [a2_, b2_, b2_ + nrm * band, a2_ + nrm * band]
+            if tri_areas_2d(np.array(quad)[None, [0, 1, 2]])[0] < 0:
+                quad = quad[::-1]
+            poly = _clip([tri2[0], tri2[1], tri2[2]] if tri_areas_2d(tri2[None])[0] > 0
+                         else [tri2[0], tri2[2], tri2[1]], quad)
+            if len(poly) < 3:
+                continue
+            poly = np.array(poly)
+            bcs = barycentric(poly, tri2[0], tri2[1], tri2[2])
+            if bcs is None:
+                continue
+            p3 = bcs @ P3
+            nn = bcs @ cn[u]
+            nn /= np.linalg.norm(nn, axis=1, keepdims=True)
+            for k in range(1, len(poly) - 1):
+                idx = [0, k, k + 1]
+                if abs(tri_areas_2d(poly[None, idx])[0]) < 1e-9:
+                    continue
+                skirt_pos.append(p3[idx])
+                skirt_uv.append(poly[idx])
+                skirt_n.append(nn[idx])
+                skirt_isl.append(i)
+                skirt_src.append(u)
+    return dict(W=W, H=H, density=density, gutter=gutter, island=island, muv=muv, n_islands=n_isl, rects=rects,
+                degenerate=isl.degenerate, core_tris=np.nonzero(~isl.degenerate)[0],
+                skirt_pos=np.array(skirt_pos).reshape(-1, 3, 3), skirt_uv=np.array(skirt_uv).reshape(-1, 3, 2),
+                skirt_n=np.array(skirt_n).reshape(-1, 3, 3), skirt_island=np.array(skirt_isl, dtype=np.int64),
+                skirt_src=np.array(skirt_src, dtype=np.int64), n_border_edges=n_border,
+                n_border_without_neighbour=0, n_mirrored=n_mirrored, n_mirrored_fold=0, n_fold_inner_cut=0,
+                fold_split=FOLD_SPLIT, rejected=dict(overlap=0, nonmanifold=0), n_join_candidates=0,
+                object_uv=dict(scale=int(scale), offsets=offsets.tolist()))
+
+
+def object_uv_offsets(master):
+    """Decision 107: an Object UV master's offset per triangle (T, 2) in master pixels (master UV = texture pixels x
+    scale - offset), from its islands' offsets (0.117.0's masters: one offset for all)."""
+    ouv = master['meta']['object_uv']
+    isl = np.asarray(master['island'], np.int64)
+    if 'offsets' in ouv:
+        offs = np.asarray(ouv['offsets'], np.float64).reshape(-1, 2)
+        out = np.zeros((len(isl), 2))
+        ok = isl >= 0
+        out[ok] = offs[isl[ok]]
+        return out
+    return np.repeat(np.asarray(ouv['offset'], np.float64)[None], len(isl), axis=0)
+
+
+def object_uv_box(master, uvpx, X, Y, threads=None):
+    """Decision 107: the value of each texel (X, Y) of an Object UV master's texture as the mean of the master pixels
+    a core triangle covers in the texel's scale x scale block of each island that reaches it (uvpx: the master's
+    triangles in texture pixels now; each island's triangles are rasterized at those UVs times the scale less the
+    island's offset, so its block is found where the island is in the master). Returns (values, covered count);
+    values -1 where no pixel is covered."""
+    s = int(master['meta']['object_uv']['scale'])
+    offs = np.rint(object_uv_offsets(master)).astype(np.int64)
+    isl = np.asarray(master['island'], np.int64)
+    uvpx = np.asarray(uvpx, np.float64)
+    X = np.asarray(X, np.int64)
+    Y = np.asarray(Y, np.int64)
+    out = np.full(len(X), -1.0)
+    cnt = np.zeros(len(X), np.int64)
+    if not len(X):
+        return out, cnt
+    img = master['image']
+    Hm, Wm = master['H'], master['W']
+    acc = np.zeros(len(X))
+    rows = 32  # texel rows per raster window
+    for i in np.unique(isl[isl >= 0]):
+        tri = np.nonzero(isl == i)[0]
+        P = uvpx[tri].reshape(-1, 2)
+        if not len(P) or not np.isfinite(P).all() or P.min() < -1e5:
+            continue
+        bx0, by0 = np.floor(P.min(axis=0)).astype(np.int64)
+        bx1, by1 = np.ceil(P.max(axis=0)).astype(np.int64)
+        near = np.nonzero((X >= bx0) & (X <= bx1) & (Y >= by0) & (Y <= by1))[0]
+        if not len(near):
+            continue
+        ox, oy = int(offs[tri[0], 0]), int(offs[tri[0], 1])
+        muv = uvpx[tri] * s - offs[tri][:, None, :]
+        for ya in range(int(Y[near].min()), int(Y[near].max()) + 1, rows):
+            pick = near[(Y[near] >= ya) & (Y[near] < ya + rows)]
+            if not len(pick):
+                continue
+            Xp, Yp = X[pick], Y[pick]
+            x0, x1 = int(Xp.min()) * s - ox, (int(Xp.max()) + 1) * s - ox
+            y0, y1 = int(Yp.min()) * s - oy, (int(Yp.max()) + 1) * s - oy
+            own, _c = raster_window(muv, x1 - x0, y1 - y0, 1, x0, y0, threads=threads)
+            for j in range(s):
+                for k in range(s):
+                    mx = Xp * s - ox + k
+                    my = Yp * s - oy + j
+                    cov = own[my - y0, mx - x0] >= 0
+                    cov &= (mx >= 0) & (mx < Wm) & (my >= 0) & (my < Hm)
+                    if cov.any():
+                        acc[pick[cov]] += np.asarray(img[my[cov], mx[cov]], np.float64) / 65535.0
+                        cnt[pick[cov]] += 1
+            del own, _c
+    ok = cnt > 0
+    out[ok] = acc[ok] / cnt[ok]
+    return out, cnt
+
+
 def check_master(pos, tris, m):
     """Edge-length check (master px / density vs 3D), pixel overlaps of the core, gutter share."""
     core = m['core_tris']
@@ -1624,11 +1839,16 @@ def denoise_master_oidn(folder, stem, pos, tris, cn, opts, device='GPU', on_band
 
 
 def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode='tri', kmax=16, surface_cos=None,
-                same_face=False, ctx=None, chunk=COPY_CHUNK, soften=None, threads=None, fold_cos=None):
+                same_face=False, ctx=None, chunk=COPY_CHUNK, soften=None, threads=None, fold_cos=None, blend=None,
+                edge_filter='BOX'):
     """Returns (image (h,w) with -1 where nothing was written, info, owners (h,w), padding steps (h,w), stacked counts
     (h,w)). fold_cos (auto-bake decision 78): a padding pixel beyond an edge whose two faces' normals have a cosine
     under it (a sharp fold) continues its own face, not the neighbour hinged across (None: PADDING_FOLD_COS; -2: always
-    the neighbour, the rule before decision 78). ctx: copy_context (computed here when None); chunk: the sub-samples of a
+    the neighbour, the rule before decision 78). blend (decision 108; None: APPLY_BLEND): an inside pixel's sub-samples
+    each read on the face covering it and all averaged (at least BLEND_MIN_LEVEL per axis), else only the owner's;
+    edge_filter (decision 109, with the blend): 'BOX' equal weights, 'ADAPTIVE' a pixel across several faces weights its
+    sub-samples by a tent toward its centre, as sharp as the largest angle between those faces (90 degrees: full). ctx:
+    copy_context (computed here when None); chunk: the sub-samples of a
     block of inside pixels of one
     level (the result does not depend on it). master['image'], ['filled'] and ['face_map'] may be arrays or PagedArray
     views. soften: a soften_context, or None (decision 46: the darker side of convex sharp edges brightened toward the
@@ -1662,7 +1882,10 @@ def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode=
     sig, kt_raw, kt = ctx['sig'], ctx['kt_raw'], ctx['kt']
     n_cl_in = 0
     jj, ii = np.nonzero(owner_c >= 0)
+    blend = APPLY_BLEND if blend is None else bool(blend)
     lvl = kt[owner_c[jj, ii]]
+    if blend:  # decision 108
+        lvl = np.maximum(lvl, BLEND_MIN_LEVEL)
     capped_px = int((kt_raw[owner_c[jj, ii]] > kmax).sum())
     gx = np.zeros(len(jj), np.int64)
     gy = np.zeros(len(jj), np.int64)
@@ -1682,7 +1905,8 @@ def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode=
         gy[idx] = y0 + np.repeat(np.minimum.reduceat(jj[idx], starts), n_in)
     if len(jj):
         vals_in, n_cl_in = nat.inside(prep, tri_normal, surface_cos, surface_read, uvpx, x0 + ii, y0 + jj,
-                                      owner_c[jj, ii], lvl, gx, gy, threads)
+                                      owner_c[jj, ii], lvl, gx, gy, threads, blend=blend,
+                                      edge_filter=EDGE_FILTERS.get(edge_filter, 0))
         out[jj, ii] = vals_in
         del vals_in
     soft_cos = SURFACE_COS if surface_cos is None else surface_cos
@@ -1743,7 +1967,8 @@ def copy_master(pos, tris, uvpx, tisl, master, crop, k, padding=8, outside_mode=
                 inside_px=int(len(ii)), padding_px=int(len(pi)), clamped_inside_points=n_cl_in,
                 clamped_padding_points=n_cl_pad, padding_without_neighbour=n_no_nb, padding_at_folds=n_fold,
                 stacked_px=int((count_c > 1).sum()), softened_px=n_soft, copy='native',
-                copy_threads=nat.threads_of(threads))
+                copy_threads=nat.threads_of(threads), blend=blend,
+                edge_filter=edge_filter if blend else None)
     return out, info, owner_c, steps, count_c
 
 
@@ -1761,6 +1986,9 @@ FOLD_SPLIT = 30.0  # P18, degrees
 SURFACE_DEG = 30.0  # the copy's surface-aware read
 SURFACE_COS = math.cos(math.radians(SURFACE_DEG))
 PADDING_FOLD_COS = SURFACE_COS  # decision 78: padding beyond a sharper fold continues its own face (copy_master)
+APPLY_BLEND = True  # decision 108: an inside pixel across several faces averages each face's sub-samples (copy_master)
+BLEND_MIN_LEVEL = 4  # decision 108: at least 4 x 4 sub-samples per pixel when blending
+EDGE_FILTERS = {'BOX': 0, 'ADAPTIVE': 1}  # decision 109: the blend's weights over a pixel across several faces
 K_MIN = 2
 K_MAX = 16
 SEEDS = (11, 12)  # core and skirt bakes
@@ -1777,6 +2005,44 @@ def view_samples(samples, n, split):
     if not split or n <= 1:
         return int(samples)
     return max(SPLIT_MIN, -(-int(samples) // int(n)))
+
+
+# Decision 105: the falloff's curves, by the names of Blender's proportional editing; the code each has in FSS
+# OptiX's scene header (0 is no falloff). fac = 1 - t / distance; an occluder at t darkens by its weight w(fac)
+FALLOFF_CURVES = ('LINEAR', 'SHARP', 'SMOOTH', 'ROOT')
+FALLOFF_CODE = {'LINEAR': 1, 'SHARP': 2, 'SMOOTH': 3, 'ROOT': 4}
+
+
+def falloff_weight(curve, fac):
+    """Decision 105: how much an occluder darkens at fac = 1 - t / distance (1 at the surface, 0 at the distance)."""
+    f = np.clip(np.asarray(fac, dtype=np.float64), 0.0, 1.0)
+    if curve == 'SHARP':
+        return f * f
+    if curve == 'SMOOTH':
+        return f * f * (3.0 - 2.0 * f)
+    if curve == 'ROOT':
+        return np.sqrt(f)
+    return f
+
+
+def _falloff_fac(curve, u):
+    """The fac where falloff_weight(curve, fac) is u (0 to 1)."""
+    if curve == 'SHARP':
+        return math.sqrt(u)
+    if curve == 'SMOOTH':
+        return 0.5 - math.sin(math.asin(1.0 - 2.0 * u) / 3.0)
+    if curve == 'ROOT':
+        return u * u
+    return u
+
+
+def falloff_distances(distance, n, curve='LINEAR'):
+    """Decisions 53 and 105: the n distances of a falloff baked by Cycles, nearest first; the n bakes averaged give an
+    occluder at t the share of the distances beyond t, a staircase over the curve's weight. Linear: the distance times
+    1/n, 2/n ... 1, as before decision 105; another curve: where its weight is (n - 1)/n ... 1/n, 0."""
+    if curve not in FALLOFF_CODE or curve == 'LINEAR':
+        return [distance * (k + 1) / n for k in range(n)]
+    return [distance * (1.0 - _falloff_fac(curve, (n - 1 - k) / n)) for k in range(n)]
 
 
 def method_settings():

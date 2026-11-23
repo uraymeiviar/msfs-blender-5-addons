@@ -43,7 +43,7 @@ import numpy as np
 
 LIB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lib', 'ao_copy', 'windows-x64')
 DLL = 'fss_ao_copy.dll'
-VERSION = 6  # the interface this module expects (fss_ao_copy_version)
+VERSION = 8  # the interface this module expects (fss_ao_copy_version)
 CPUS = os.cpu_count() or 2  # the PC's logical processors
 THREADS = max(2, CPUS // 2)  # Threads 0, Auto (apply-native-copy decision 5): half the logical processors, at least 2
 MAX_LEVEL = 64  # sub-samples per pixel axis the DLL takes at most (copy_master's kmax is 16)
@@ -140,6 +140,10 @@ def load():
         p, i64 = c_void_p, c_int64
         sig = {
             'fss_ao_copy_inside': (c_int32, [POINTER(MasterStruct), p, i64, p, p, p, p, i64, p, POINTER(c_int64)]),
+            'fss_ao_copy_inside_blend': (c_int32, [POINTER(MasterStruct), p, i64, p, p, p, p, i64, p,
+                                                   POINTER(c_int64)]),
+            'fss_ao_copy_inside_filter': (c_int32, [POINTER(MasterStruct), p, i64, p, p, p, p, i64, i64, p,
+                                                    POINTER(c_int64)]),
             'fss_ao_copy_padding': (c_int32, [POINTER(MasterStruct), i64, p, p, p, p, i64, p, POINTER(c_int64)]),
             'fss_ao_copy_read': (c_int32, [POINTER(MasterStruct), i64, p, p, p, p]),
             'fss_ao_copy_raster': (c_int32, [p, i64, i64, i64, i64, i64, i64, p]),
@@ -426,8 +430,10 @@ def prepare(master, paged_types):
     return prep
 
 
-def inside(prep, tri_normal, surface_cos, surface, uvpx, X, Y, owner, level, gx, gy, threads):
-    """fss_ao_copy_inside: (values, clamped sub-samples) of the inside pixels."""
+def inside(prep, tri_normal, surface_cos, surface, uvpx, X, Y, owner, level, gx, gy, threads, blend=False,
+           edge_filter=0):
+    """fss_ao_copy_inside (blend: fss_ao_copy_inside_blend, auto-bake decision 108; with edge_filter 1, adaptive:
+    fss_ao_copy_inside_filter, decision 109): (values, clamped sub-samples) of the inside pixels."""
     dll = loaded()
     n = len(X)
     out = np.empty(n, np.float64)
@@ -440,8 +446,14 @@ def inside(prep, tri_normal, surface_cos, surface, uvpx, X, Y, owner, level, gx,
     own = np.ascontiguousarray(owner, np.int64)
     lvl = np.ascontiguousarray(level, np.int64)
     cl = c_int64(0)
-    _check(dll.fss_ao_copy_inside(ctypes.byref(s), _addr(uv), n, _addr(px), _addr(own), _addr(lvl), _addr(org),
-                                  threads_of(threads), _addr(out), ctypes.byref(cl)), 'inside')
+    if blend and edge_filter:
+        _check(dll.fss_ao_copy_inside_filter(ctypes.byref(s), _addr(uv), n, _addr(px), _addr(own), _addr(lvl),
+                                             _addr(org), threads_of(threads), int(edge_filter), _addr(out),
+                                             ctypes.byref(cl)), 'inside')
+    else:
+        fn = dll.fss_ao_copy_inside_blend if blend else dll.fss_ao_copy_inside
+        _check(fn(ctypes.byref(s), _addr(uv), n, _addr(px), _addr(own), _addr(lvl), _addr(org), threads_of(threads),
+                  _addr(out), ctypes.byref(cl)), 'inside')
     del tn
     return out, int(cl.value)
 

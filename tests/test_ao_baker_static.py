@@ -18,6 +18,8 @@ Step (c) (occluders, poses, copies, falloff):
    (h / d)^2 of its cosine-weighted hemisphere within the distance d; views move the plane (a mover's poses, a shared
    mesh's copies), posed occluders move with it; each combination (a copy's poses averaged; the copies averaged, the
    lightest, the darkest) against the combination of the views' (h / d)^2, within the bound;
+5b. the falloff's curves (add-on decision 105: Sharp, Smooth, Root): the same corner against the distance-limited mean
+   of 1 - w(1 - min(t / d, 1)), w by ao_bake_core.falloff_weight, integrated numerically, within the same bound;
 7. byte for byte: a master of n views equals the combination (in numpy) of its n single-view bakes, which share the
    combined bake's random numbers, per tile, A and B; and the master of views is equal at tile 512 and 2048.
 
@@ -128,6 +130,30 @@ def falloff_value(a):
     return mean, np.maximum(second - mean * mean, 0.0)
 
 
+_CURVE_TABLES = {}
+
+
+def curve_value(a, curve, core):
+    """falloff_value for a curve of decision 105: the mean and variance of 1 - w(1 - x) per ray, x = t / d = a / q for
+    a ray with q >= a (density (2 / pi) sqrt(1 - q^2)), 1 for the others; integrated over q by Gauss-Legendre (400
+    points) on a table of 8193 distances, interpolated."""
+    if curve not in _CURVE_TABLES:
+        grid = np.linspace(0.0, 1.0, 8193)
+        ag = np.maximum(grid, 1e-12)[:, None]
+        g, wg = np.polynomial.legendre.leggauss(400)
+        q = ag + (1.0 - ag) * (g[None, :] + 1.0) / 2.0
+        dq = wg[None, :] * (1.0 - ag) / 2.0
+        dens = (2.0 / math.pi) * np.sqrt(np.maximum(1.0 - q * q, 0.0))
+        light = 1.0 - core.falloff_weight(curve, 1.0 - np.minimum(ag / q, 1.0))
+        v = visibility(grid)
+        m1 = v + (dens * light * dq).sum(axis=1)
+        m2 = v + (dens * light * light * dq).sum(axis=1)
+        _CURVE_TABLES[curve] = (grid, m1, np.maximum(m2 - m1 * m1, 0.0))
+    grid, m1, var = _CURVE_TABLES[curve]
+    a = np.clip(np.asarray(a, dtype=np.float64), 0.0, 1.0)
+    return np.interp(a, grid, m1), np.interp(a, grid, var)
+
+
 def footprint_points(uv3, p3, cx, cy, k=9):
     """The 3D points of a k x k grid over the pixel (cx, cy) +- 0.5 through the triangle's barycentric map, or None
     when a corner of the pixel lies outside the triangle (then the jitter's mirror changes the footprint)."""
@@ -196,7 +222,8 @@ def baked_values(baked):
 
 def corner_check(core, m, pos, tris, baked, distance, samples, falloff=False):
     """Finish line 3, the plane meeting a wall: each core pixel whose footprint lies in its triangle and away from the
-    faces' far edges, against the footprint's mean visibility (falloff: the mean of min(t / d, 1), step (c))."""
+    faces' far edges, against the footprint's mean visibility (falloff: the mean of min(t / d, 1), step (c); a curve's
+    name: the mean of its 1 - w(1 - x), decision 105)."""
     L = 0.4
     ct = m['core_tris']
     cuv = m['muv'][ct]
@@ -217,7 +244,10 @@ def corner_check(core, m, pos, tris, baked, distance, samples, falloff=False):
             far = pts[:, 2] if on_floor else pts[:, 0]
             if np.any(np.abs(pts[:, 1]) > L / 2 - distance) or np.any(far > L - distance) or np.any(dist > distance * 1.5):
                 continue
-            if falloff:
+            if isinstance(falloff, str):
+                fm, fv = curve_value(dist / distance, falloff, core)
+                v, var = float(fm.mean()), float(fv.mean())
+            elif falloff:
                 fm, fv = falloff_value(dist / distance)
                 v, var = float(fm.mean()), float(fv.mean())
             else:
@@ -228,7 +258,9 @@ def corner_check(core, m, pos, tris, baked, distance, samples, falloff=False):
     errs, sig = np.array(errs), np.array(sig)
     z = np.abs(errs) / np.maximum(sig, 1.0 / samples)
     bound = 5.0
-    check('corner-falloff-analytic' if falloff else 'corner-analytic', len(errs) > 1000 and float(z.max()) <= bound, pixels=len(errs),
+    name = f'corner-falloff-{falloff.lower()}' if isinstance(falloff, str) else (
+        'corner-falloff-analytic' if falloff else 'corner-analytic')
+    check(name, len(errs) > 1000 and float(z.max()) <= bound, pixels=len(errs),
           max_abs_error=round(float(np.abs(errs).max()), 5), mean_error=f'{float(errs.mean()):.2e}',
           rms_error=round(float(np.sqrt((errs ** 2).mean())), 5), max_error_over_sigma=round(float(z.max()), 2),
           rms_error_over_sigma=round(float(np.sqrt((z ** 2).mean())), 3), bound_sigma=bound,
@@ -429,6 +461,10 @@ def main():
         bf = bm.bake_master(core, baker.ch, f'falloff-{os.getpid()}', pos, tris, cn, m, distance, args.samples, 512,
                             owners=True, falloff=True)
         corner_check(core, m, pos, tris, bf, distance, args.samples, falloff=True)
+        for curve in ('SHARP', 'SMOOTH', 'ROOT'):  # decision 105
+            bc = bm.bake_master(core, baker.ch, f'falloff-{curve.lower()}-{os.getpid()}', pos, tris, cn, m, distance,
+                                args.samples, 512, owners=True, falloff=core.FALLOFF_CODE[curve])
+            corner_check(core, m, pos, tris, bc, distance, args.samples, falloff=curve)
         views_check(core, baker.ch, args.samples)
     finally:
         baker.close()

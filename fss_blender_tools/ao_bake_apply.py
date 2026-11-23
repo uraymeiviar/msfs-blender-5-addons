@@ -506,6 +506,8 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
     soften_width = (float(scene.fss_ao_bake.soften_width) if scene.fss_ao_bake.soften_edges and not curv and not chan
                     else None)
     fill = core.CURV_FLAT if curv else 65535  # where no master is
+    # decision 106: the AO's darkening scaled toward white (1.0: as baked), after Soften
+    strength = 1.0 if curv or chan else float(scene.fss_ao_bake.ao_strength)
     threads = int(scene.fss_ao_bake.threads)  # the C++ work's threads (ao_bake_copy.threads_of: 0 is Auto)
     row = store._state['sets'].get(material.name)
     if row is None:
@@ -522,8 +524,9 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
     report = dict(material=material.name, path=target.path, size=[W, H], target=target.kind, layout=target.layout,
                   copied=[], white=[], outdated=[], mesh_changed=[], narrow=[], faces_under_4x=0, faces=0, stacked_px=0, softened_px=0,
                   soften_mm=None if soften_width is None else round(soften_width * 1000, 3), warnings=target.warnings,
+                  strength=None if strength == 1.0 else round(strength, 4),
                   backup=target.backup, per_object=objects is not None, band_rows=int(band_rows), copy=None, open=None,
-                  png=None)
+                  png=None, object_uv=[])
     copies = {}  # the copy's threads (apply-native-copy journal: C++)
     opens = {}  # who opened the masters (apply-native-copy journal, Session 4): 'C++ (n threads)'
     pending = []  # padding (flat index, values per component, step), written once every face of the set is known
@@ -657,6 +660,14 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
                     ctx_cache[ck] = ctx
             sctx = (core.soften_context(pos_w, tris, uvpx, ctx, soften_width, use=sel, cn=cn_w[src])
                     if soften_width is not None else None)
+            box = _object_uv_box_ok(master, uvpx, sel)  # decision 107
+            if box is not None:
+                report['warnings'].append(f"{item['name']}: {box}")
+                box = False
+            else:
+                box = bool((master.get('meta') or {}).get('object_uv'))
+                if box:
+                    report['object_uv'].append(item['name'])
             for yb, yb1, hy0, hy1 in bands(crop):
                 yield 'master', k + (yb - y0) / max(h, 1), len(stems), item['name']
                 outs = []
@@ -664,8 +675,16 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
                     out, info, owner_c, steps, count_c = core.copy_master(
                         pos_w, tris, uvpx, tisl, cm_, (x0, hy0, w, hy1 - hy0), core.K_MIN, pad, outside_mode='tri',
                         kmax=core.K_MAX, surface_cos=core.SURFACE_COS, same_face=False, ctx=ctx, soften=sctx,
-                        threads=int(scene.fss_ao_bake.threads))
+                        threads=int(scene.fss_ao_bake.threads), edge_filter=scene.fss_ao_bake.edge_filter)
                     outs.append(out)
+                if box:  # decision 107: each covered texel the mean of its block of master pixels (no Soften)
+                    jj, ii = np.nonzero(owner_c >= 0)
+                    for o_, cm_ in zip(outs, cmasters):
+                        v_, n_ = core.object_uv_box(cm_, uvpx, ii + x0, jj + hy0, threads=int(scene.fss_ao_bake.threads))
+                        got = n_ > 0
+                        o_[jj[got], ii[got]] = v_[got]
+                if strength != 1.0:  # decision 106: -1 (no value) stays
+                    outs = [np.where(o_ >= 0, 1.0 - strength * (1.0 - o_), o_) for o_ in outs]
                 copies.setdefault(info['copy'], info['copy_threads'])
                 r = slice(yb - hy0, yb1 - hy0)
                 outs, owner_c, steps = [o_[r] for o_ in outs], owner_c[r], steps[r]
@@ -808,6 +827,20 @@ def apply_steps(context, materials, objects=None):
     return reports
 
 
+def _object_uv_box_ok(master, uvpx, sel):
+    """Decision 107: None when the master is not an Object UV one or its UVs equal the object's now (Apply then
+    averages each texel's block), else why it is copied face by face instead."""
+    ouv = (master.get('meta') or {}).get('object_uv')
+    if not ouv:
+        return None
+    sel = np.asarray(sel, bool) & (np.asarray(master['island']) >= 0)  # degenerate triangles have no island
+    now = (np.asarray(uvpx, np.float64) * float(ouv['scale']) - core.object_uv_offsets(master)[:, None, :])[sel]
+    was = np.asarray(master['muv'], np.float64)[sel]
+    if now.shape != was.shape or (len(now) and float(np.abs(now - was).max()) > 1e-3):
+        return 'Object UV master baked for other UVs or another texture size: copied face by face (re-bake)'
+    return None
+
+
 def report_lines(rep):
     if rep.get('error'):
         return [f"{rep['material']}: {rep['error']}"]
@@ -828,6 +861,10 @@ def report_lines(rep):
                      f"area); {need * 1000:.2g} mm would reach {CURV_MIN_PX:g} px on all")
     if rep['faces_under_4x']:
         lines.append(f"  {rep['faces_under_4x']} of {rep['faces']} faces: master under 4 x their density")
+    if rep.get('object_uv'):  # decision 107
+        lines.append('  Object UV masters, each texel the mean of its master pixels: ' + ', '.join(rep['object_uv']))
+    if rep.get('strength') is not None:  # decision 106
+        lines.append(f"  strength {rep['strength']:g}: the darkening scaled toward white")
     if rep.get('soften_mm') is not None:
         lines.append(f"  sharp edges softened ({rep['soften_mm']:g} mm, at least a texel): {rep['softened_px']} px")
     lines += [f'  {w}' for w in rep['warnings']]

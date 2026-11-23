@@ -161,12 +161,13 @@ def recorded_padding(fn):
     also sharp folds): it runs with that rule; the rule of decision 78 is checked in test_ao_copy_native.py
     (test_fold_padding)."""
     def run(*args, **kwargs):
-        keep = core.PADDING_FOLD_COS
+        keep, keep_blend = core.PADDING_FOLD_COS, core.APPLY_BLEND
         core.PADDING_FOLD_COS = -2.0
+        core.APPLY_BLEND = False  # and before decision 108: only the owner's sub-samples
         try:
             return fn(*args, **kwargs)
         finally:
-            core.PADDING_FOLD_COS = keep
+            core.PADDING_FOLD_COS, core.APPLY_BLEND = keep, keep_blend
     run.__name__ = fn.__name__
     return run
 _RULE_CALLS = {}
@@ -936,6 +937,21 @@ def test_apply_separate():
     g, bits, ct = read(rep['path'])
     assert bits == 16 and ct == 2 and (g[:, :, 0] == g[:, :, 1]).all() and (g[:, :, 0] == g[:, :, 2]).all()
     assert g[:, :, 0].min() < 0.9 * 65535
+    # decision 106: Strength 0.5 moves every value half way to white (within the rounding), 0.0 writes white
+    sc = bpy.context.scene.fss_ao_bake
+    strength_err = {}
+    try:
+        for st in (0.5, 0.0):
+            sc.ao_strength = st
+            rep = apply_set('SET_A', file_name=f'grey_strength_{st:g}.png')
+            gs, _b, _ = read(rep['path'])
+            want = 65535.0 - st * (65535.0 - g[:, :, 0].astype(np.float64))
+            strength_err[st] = float(np.abs(gs[:, :, 0] - want).max())
+            assert strength_err[st] <= 1.0 and rep['strength'] == st, (st, strength_err[st], rep.get('strength'))
+            assert any(f'strength {st:g}' in x for x in ao_bake_apply.report_lines(rep)), ao_bake_apply.report_lines(rep)
+    finally:
+        sc.ao_strength = 1.0
+    assert apply_set('SET_A', file_name='grey_strength_1.png').get('strength') is None
     rep = apply_set('SET_ORM', file_name='orm_white.png', layout='ORM', green_blue='WHITE')
     w, _b, _ = read(rep['path'])
     assert (w[:, :, 1:] == 65535).all()
@@ -977,7 +993,8 @@ def test_apply_separate():
                 db = np.abs(v[:, :, 2][m] / 65535.0 - bv).max()
                 worst = max(worst, dg, db)
                 assert dg < 2e-5 and db < 2e-5, (res, method, name, dg, db)
-    print(f"PASS: test_apply_separate (greyscale R = G = B; ORM layout white; copied byte for byte at the same size; "
+    print(f"PASS: test_apply_separate (greyscale R = G = B; Strength 0.5 and 0 within {strength_err} of the scaled "
+          f"values; ORM layout white; copied byte for byte at the same size; "
           f"128 and 512 px with Automatic, Nearest and Bicubic warned and written {sizes}; G1 / G2 green and blue "
           f"within {worst:.1e} of their own value in every method and size)")
 
@@ -1972,15 +1989,131 @@ def test_falloff():
     entry = entry_of('O1')[0]
     after = float(master_image('O1')[1].mean())
     assert entry['falloff'] == 3 and grade_of('O1') == 'UP_TO_DATE', entry.get('falloff')
+    assert 'falloff_curve' not in entry or entry['falloff_curve'] is None, entry.get('falloff_curve')
     assert after > before + 0.02, (before, after)
-    s.falloff = False
+    # decision 105: the curve changes every master's key; Sharp lighter than Linear, Root darker. Its Refreshes came
+    # after the scene rule reference was recorded (rule_unrecorded)
+    means = {'LINEAR': after}
+    with rule_unrecorded():
+        for curve in ('SHARP', 'ROOT'):
+            s.falloff_curve = curve
+            refresh()
+            item = store._state['items'][store._state['by_object']['O1']]
+            assert item['falloff_curve'] == curve and grade_of('O1') == grade_of('A') == 'SURROUNDINGS', (
+                curve, item.get('falloff_curve'), grade_of('O1'), grade_of('A'))
+            select(['O1'])
+            assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
+            refresh()
+            assert grade_of('O1') == 'UP_TO_DATE' and entry_of('O1')[0].get('falloff_curve') == curve, (
+                curve, entry_of('O1')[0].get('falloff_curve'))
+            means[curve] = float(master_image('O1')[1].mean())
+    assert means['SHARP'] > means['LINEAR'] + 0.002 and means['ROOT'] < means['LINEAR'] - 0.002, means
+    s.falloff = False  # the curve (Root) without the falloff: the keys as without it
     refresh()
     assert grade_of('A') == 'UP_TO_DATE' and grade_of('O1') == 'SURROUNDINGS'
     select(['O1'])
     assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
     refresh()
     assert grade_of('O1') == 'UP_TO_DATE' and entry_of('O1')[0].get('falloff') is None
-    print(f'PASS: test_falloff (O1 without {before:.4f}, with 3 steps {after:.4f})')
+    assert entry_of('O1')[0].get('falloff_curve') is None
+    s.falloff_curve = 'LINEAR'
+    print(f'PASS: test_falloff (O1 without {before:.4f}, with 3 steps Linear {after:.4f}, Sharp '
+          f"{means['SHARP']:.4f}, Root {means['ROOT']:.4f})")
+
+
+def test_object_uv():
+    """Decision 107: Master Layout Object UV makes A "surroundings changed"; its master is baked in A's own UVs at
+    4 x 4 master pixels per texel (meta object_uv, scale 4, an offset of whole texels); Apply writes each texel inside
+    the island as the mean of its 16 master pixels (within the 16-bit rounding) and names A in the report. A moved UV
+    makes A stale and Apply copies face by face with a warning. Back to Auto Unwrap, A is baked in a new Auto layout.
+    Its Refreshes came after the scene rule reference was recorded (rule_unrecorded)."""
+    s = bpy.context.scene.fss_ao_bake
+    a = bpy.data.objects['A']
+    uvl = a.data.uv_layers.active
+    with rule_unrecorded():
+        refresh()
+        assert grade_of('A') == 'UP_TO_DATE', grade_of('A')
+        s.master_layout = 'OBJECT_UV'
+        try:
+            refresh()
+            item = store._state['items'][store._state['by_object']['A']]
+            assert item['master_layout'] == 'OBJECT_UV' and grade_of('A') == 'SURROUNDINGS', (
+                item.get('master_layout'), grade_of('A'))
+            select(['A'])
+            assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
+            refresh()
+            assert grade_of('A') == 'UP_TO_DATE', grade_of('A')
+            m, _v = master_image('A')
+            ouv = m['meta'].get('object_uv')
+            assert ouv and ouv['scale'] == 4 and all(float(o) % 4 == 0 for xy in ouv['offsets'] for o in xy), ouv
+            # packed: the master no larger than its islands' texel boxes (with their margin) at 4 x 4
+            assert m['W'] * m['H'] <= 1.2 * sum((r[2] * r[3]) for r in np.asarray(m['rects']).tolist()), (
+                m['W'], m['H'], m['rects'])
+            rep = apply_set('SET_A', objects=[a], file_name='object_uv.png')
+            assert rep['object_uv'] == ['A'] and not rep['warnings'], (rep['object_uv'], rep['warnings'])
+            assert any('Object UV' in x for x in ao_bake_apply.report_lines(rep))
+            g, _b, _ = read(rep['path'])
+            # the texels whose 3 x 3 neighbourhood is in A's faces: all 16 master pixels are A's, the plain mean
+            uv = np.zeros(len(uvl.data) * 2)
+            uvl.data.foreach_get('uv', uv)
+            ev = core.evaluated_triangles(a, bpy.context.evaluated_depsgraph_get(), [uvl.name])
+            uvpx = ev['uv'][uvl.name] * SIZE
+            own, _c = core.raster_window(uvpx, SIZE, SIZE, 1, 0, 0)
+            cov = own >= 0
+            inner = cov.copy()
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    inner &= np.roll(np.roll(cov, dy, 0), dx, 1)
+            Y, X = np.nonzero(inner)
+            img = m['image'].astype(np.float64)
+            assert len(ouv['offsets']) == 1, ouv  # A's plane is one UV island
+            ox, oy = int(ouv['offsets'][0][0]), int(ouv['offsets'][0][1])
+            want = np.zeros(len(X))
+            for j in range(4):
+                for i in range(4):
+                    want += img[Y * 4 - oy + j, X * 4 - ox + i]
+            want /= 16.0
+            got = g[:, :, 0].astype(np.float64)[Y, X]
+            err = float(np.abs(got - want).max())
+            assert len(X) > 100 and err <= 1.0, (len(X), err)
+            # a moved UV: stale, and Apply copies face by face
+            moved = uv.copy()
+            moved[0::2] += 0.5 / SIZE
+            uvl.data.foreach_set('uv', moved)
+            a.data.update()
+            refresh()
+            assert grade_of('A') == 'SURROUNDINGS', grade_of('A')
+            rep = apply_set('SET_A', objects=[a], file_name='object_uv_moved.png')
+            assert not rep['object_uv'] and any('other UVs' in w for w in rep['warnings']), rep['warnings']
+            uvl.data.foreach_set('uv', uv)
+            a.data.update()
+        finally:
+            s.master_layout = 'AUTO'
+        refresh()
+        assert grade_of('A') == 'SURROUNDINGS', grade_of('A')
+        select(['A'])
+        assert bpy.ops.fss.ao_bake_start(scope='SELECTED', hidden=True, wait=True) == {'FINISHED'}
+        refresh()
+        assert grade_of('A') == 'UP_TO_DATE' and not master_image('A')[0]['meta'].get('object_uv')
+    print(f'PASS: test_object_uv ({len(X)} inner texels within {err:g} of the mean of their 16 master pixels)')
+
+
+def test_falloff_distances():
+    """Decision 105: Cycles' falloff distances. Linear: the distance times 1/n ... 1, as decision 53 computed them (the
+    same floats); each curve: nearest first, the last at the distance, and the share of distances beyond t a staircase
+    over the curve's weight (at most 1/n above it) at 2001 points, for 2 to 16 steps."""
+    for n in range(2, 17):
+        assert core.falloff_distances(0.25, n) == [0.25 * (k + 1) / n for k in range(n)], n
+        for curve in core.FALLOFF_CURVES:
+            d = np.array(core.falloff_distances(0.25, n, curve))
+            assert np.all(np.diff(d) > 0) and abs(d[-1] - 0.25) < 1e-12, (curve, n, d)
+            t = np.linspace(0.0, 0.25, 2001)
+            share = (d[None, :] > t[:, None]).mean(axis=1)
+            w = core.falloff_weight(curve, 1.0 - t / 0.25)
+            assert np.all(share >= w - 1e-9) and np.all(share <= w + 1.0 / n + 1e-9), (curve, n)
+    w = {c: round(float(core.falloff_weight(c, 0.5)), 4) for c in core.FALLOFF_CURVES}
+    assert w == {'LINEAR': 0.5, 'SHARP': 0.25, 'SMOOTH': 0.5, 'ROOT': 0.7071}, w
+    print(f'PASS: test_falloff_distances (2 to 16 steps, 4 curves; weight at half the distance {w})')
 
 
 def test_curvature():
@@ -4921,6 +5054,8 @@ elif __name__ == '__main__':
     test_option_staleness()
     test_auto_distance()
     test_falloff()
+    test_falloff_distances()
+    test_object_uv()
     test_curvature()
     test_curvature_only()
     test_native_copy()

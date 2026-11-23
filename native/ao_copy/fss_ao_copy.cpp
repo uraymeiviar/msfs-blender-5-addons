@@ -575,9 +575,13 @@ FSS_AO_COPY_API int32_t fss_ao_copy_raster(const double *uvpx, int64_t n_tris, i
     return FSS_AO_COPY_OK;
 }
 
-FSS_AO_COPY_API int32_t fss_ao_copy_inside(const fss_ao_master *master, const double *uvpx, int64_t n_px,
-                                           const int64_t *px, const int64_t *owner, const int64_t *level,
-                                           const int64_t *origin, int64_t threads, double *out, int64_t *clamped) {
+// blend false: the owner's sub-samples only (the rule the references were recorded with); true (auto-bake decision
+// 108): each sub-sample read on the triangle covering it (the last, as rasterize_ids), all averaged; adaptive
+// (decision 109, with blend): a pixel whose sub-samples lie on several faces weights them by a tent toward its centre,
+// as sharp as the largest angle between those faces' normals (0 degrees: equal weights, 90 or more: a full tent)
+static int32_t copy_inside(const fss_ao_master *master, const double *uvpx, int64_t n_px, const int64_t *px,
+                           const int64_t *owner, const int64_t *level, const int64_t *origin, int64_t threads,
+                           double *out, int64_t *clamped, bool blend, bool adaptive = false) {
     if (!master_ok(master) || !uvpx || !clamped || n_px < 0 || threads < 1 || threads > 1024) return FSS_AO_COPY_E_ARGS;
     *clamped = 0;
     if (n_px == 0) return FSS_AO_COPY_OK;
@@ -603,22 +607,25 @@ FSS_AO_COPY_API int32_t fss_ao_copy_inside(const fss_ao_master *master, const do
         const int64_t S = FSS_AO_COPY_MAX_LEVEL * FSS_AO_COPY_MAX_LEVEL;
         std::vector<double> buf((size_t)(nthreads * (2 * S + FSS_AO_COPY_MAX_LEVEL)));
         std::vector<int64_t> cand((size_t)(nthreads * (most + 1)));
+        std::vector<int64_t> faces((size_t)(nthreads * S));
         std::vector<int64_t> counts((size_t)nthreads, 0);
         int32_t rc = parallel(n_px, nthreads, [&](int64_t b, int64_t e, int64_t tid) {
             double *wv = buf.data() + tid * (2 * S + FSS_AO_COPY_MAX_LEVEL);
             double *vw = wv + S;
             double *sub = vw + S;
             int64_t *cd = cand.data() + tid * (most + 1);
+            int64_t *fs = faces.data() + tid * S;
             int64_t n_cl = 0;
             for (int64_t n = b; n < e; n++) {
                 const int64_t X = px[2 * n], Y = px[2 * n + 1], t = owner[n], L = level[n];
                 const int64_t gx = origin[2 * n], gy = origin[2 * n + 1];
                 const double Ld = (double)L;
                 const Tri &own = tris[(size_t)t];
-                // the triangles after the owner that can cover a sample of this pixel
+                // the triangles after the owner that can cover a sample of this pixel (blend: every triangle that
+                // can), the last first
                 int64_t cb, ce, nc = 0;
                 bins.cell(X, Y, cb, ce);
-                for (int64_t i = ce - 1; i >= cb && bins.ids[(size_t)i] > t; i--) {
+                for (int64_t i = ce - 1; i >= cb && (blend || bins.ids[(size_t)i] > t); i--) {
                     const Tri &c = tris[(size_t)bins.ids[(size_t)i]];
                     if (X >= c.bx0 && X <= c.bx1 && Y >= c.by0 && Y <= c.by1) cd[nc++] = bins.ids[(size_t)i];
                 }
@@ -631,6 +638,29 @@ FSS_AO_COPY_API int32_t fss_ao_copy_inside(const fss_ao_master *master, const do
                     for (int64_t ax = 0; ax < L; ax++) {
                         const int64_t sa = ax0 + ax;
                         const double rx = (double)gx + ((double)sa + 0.5) / Ld;
+                        const int64_t s = ay * L + ax;
+                        if (blend) {
+                            int64_t f = -1;
+                            for (int64_t k = 0; k < nc; k++)
+                                if (covers(tris[(size_t)cd[k]], sa, sb, rx, ry, gx, gy, Ld)) {
+                                    f = cd[k];
+                                    break;
+                                }
+                            fs[s] = f;
+                            if (f < 0) {
+                                wv[s] = 0.0;
+                                vw[s] = 0.0;
+                                continue;
+                            }
+                            double b0, b1, b2;
+                            bary(tris[(size_t)f], (double)X + sub[ax], pyv, b0, b1, b2);
+                            bool c = false;
+                            double v = m.read(f, b0, b1, b2, true, c);
+                            n_cl += c ? 1 : 0;
+                            wv[s] = 1.0;
+                            vw[s] = v;
+                            continue;
+                        }
                         bool same = covers(own, sa, sb, rx, ry, gx, gy, Ld);
                         for (int64_t k = 0; same && k < nc; k++)
                             if (covers(tris[(size_t)cd[k]], sa, sb, rx, ry, gx, gy, Ld)) same = false;
@@ -639,12 +669,42 @@ FSS_AO_COPY_API int32_t fss_ao_copy_inside(const fss_ao_master *master, const do
                         bool c = false;
                         double v = m.read(t, b0, b1, b2, same, c);
                         n_cl += c ? 1 : 0;
-                        const int64_t s = ay * L + ax;
                         wv[s] = same ? 1.0 : 0.0;
                         vw[s] = same ? v * 1.0 : 0.0;
                     }
                 }
                 const int64_t LL = L * L;
+                if (blend && adaptive) {
+                    // decision 109: the sharpness from the faces the sub-samples lie on
+                    int64_t dist[8];
+                    int64_t nd = 0;  // the distinct faces, at most 8 (a pixel rarely spans more)
+                    for (int64_t q = 0; q < LL && nd < 8; q++) {
+                        if (fs[q] < 0) continue;
+                        bool seen = false;
+                        for (int64_t r = 0; r < nd; r++) seen = seen || dist[r] == fs[q];
+                        if (!seen) dist[nd++] = fs[q];
+                    }
+                    double mind = 1.0;
+                    for (int64_t a = 0; a < nd; a++)
+                        for (int64_t b2 = a + 1; b2 < nd; b2++) {
+                            const double *na = master->tri_normal + 3 * dist[a];
+                            const double *nb = master->tri_normal + 3 * dist[b2];
+                            mind = std::min(mind, na[0] * nb[0] + na[1] * nb[1] + na[2] * nb[2]);
+                        }
+                    if (nd > 1) {
+                        const double ang = std::acos(std::max(-1.0, std::min(1.0, mind)));
+                        const double sh = std::min(1.0, ang / (0.5 * 3.14159265358979323846));
+                        for (int64_t ay = 0; ay < L; ay++) {
+                            const double wy = 1.0 - sh * 2.0 * std::fabs(sub[ay] - 0.5);
+                            for (int64_t ax = 0; ax < L; ax++) {
+                                const double w = wy * (1.0 - sh * 2.0 * std::fabs(sub[ax] - 0.5));
+                                const int64_t q = ay * L + ax;
+                                vw[q] *= w;
+                                wv[q] *= w;
+                            }
+                        }
+                    }
+                }
                 double sw = np_sum(wv, LL);
                 if (sw > 0) {
                     out[n] = np_sum(vw, LL) / np_max(sw, 1e-30);
@@ -667,6 +727,27 @@ FSS_AO_COPY_API int32_t fss_ao_copy_inside(const fss_ao_master *master, const do
         return FSS_AO_COPY_E_INTERNAL;
     }
     return FSS_AO_COPY_OK;
+}
+
+FSS_AO_COPY_API int32_t fss_ao_copy_inside(const fss_ao_master *master, const double *uvpx, int64_t n_px,
+                                           const int64_t *px, const int64_t *owner, const int64_t *level,
+                                           const int64_t *origin, int64_t threads, double *out, int64_t *clamped) {
+    return copy_inside(master, uvpx, n_px, px, owner, level, origin, threads, out, clamped, false);
+}
+
+FSS_AO_COPY_API int32_t fss_ao_copy_inside_blend(const fss_ao_master *master, const double *uvpx, int64_t n_px,
+                                                 const int64_t *px, const int64_t *owner, const int64_t *level,
+                                                 const int64_t *origin, int64_t threads, double *out,
+                                                 int64_t *clamped) {
+    return copy_inside(master, uvpx, n_px, px, owner, level, origin, threads, out, clamped, true);
+}
+
+FSS_AO_COPY_API int32_t fss_ao_copy_inside_filter(const fss_ao_master *master, const double *uvpx, int64_t n_px,
+                                                  const int64_t *px, const int64_t *owner, const int64_t *level,
+                                                  const int64_t *origin, int64_t threads, int64_t filter, double *out,
+                                                  int64_t *clamped) {
+    if (filter < 0 || filter > 1) return FSS_AO_COPY_E_ARGS;
+    return copy_inside(master, uvpx, n_px, px, owner, level, origin, threads, out, clamped, true, filter == 1);
 }
 
 FSS_AO_COPY_API int32_t fss_ao_copy_padding(const fss_ao_master *master, int64_t n_px, const int64_t *px,

@@ -189,7 +189,7 @@ session first, then the sessions named here. The artist's view is in [the artist
 
 **What it does.** A master is the baked values of one mesh (or one shared mesh) in a layout of its own, at 4 x the
 median texel density of its texture sets, so it survives UV changes; Apply copies it into the texture set's textures
-in whatever UV layout the set has then. Masters live in `<blend_name>.bake/` beside the `.blend`, with `index.json`
+in whatever UV layout the set has then. The Object UV layout (decision 107) bakes it in the object's UVs instead. Masters live in `<blend_name>.bake/` beside the `.blend`, with `index.json`
 (one entry per master: hashes, grades' inputs, the baker, the channels).
 
 **Channels and their sources:**
@@ -326,6 +326,32 @@ leave them out):
   triangle over corners in a line) is no fold, its normal being no direction; a concave fold's slopes are read over a
   step of at least `SOFT_SLOPE_MIN_STEP` (0.1) of the width, else left out (the DLL), where a thin face's step of
   1 nm had made them, and the value, 0 or 1.
+- **Falloff Curve** (decision 105; scene setting `falloff_curve`, default Linear, used with Distance Falloff): Linear,
+  Sharp, Smooth or Root, the weights of Blender's proportional editing: an occluder at t darkens by w(1 - t / d),
+  `ao_bake_core.falloff_weight`. Cycles bakes the Steps' distances from `falloff_distances` (Linear: d x 1/n ... 1,
+  the same floats as decision 53; another curve: where the weight is (n - 1)/n ... 0, so the n bakes averaged are a
+  staircase at most 1/n over the curve); FSS OptiX takes the curve's code in the scene header's `falloff` (scene
+  version 2) and counts each hit 1 - w(1 - min(t / d, 1)). A curve other than Linear adds `falloff_curve` to the
+  surroundings key, so masters baked without it keep their hashes.
+- **Strength** (decision 106; scene setting `ao_strength`, default 1.0): Apply writes the AO as 1 - s (1 - v), after
+  Soften, inside and in the padding; curvature and the material channels are not scaled. The report says the
+  strength when it is not 1.
+- **Master Layout** (decision 107; scene setting `master_layout`, default `AUTO`): `OBJECT_UV` bakes an object whose
+  baked faces are in one texture set in its own UVs at `OBJECT_UV_SCALE` (4) master pixels per texture pixel each way
+  (`ao_bake_core.object_uv_layout`: UV islands by union-find over edges with equal UVs, shelf-packed in whole texels
+  with a one-texel margin, not turned; skirts as in `build_master`). The meta's `object_uv` holds the scale and each
+  island's offset (master UV = texture pixels x 4 - offset). The surroundings key adds `master_layout` with the SHA-1
+  of the set faces' UVs and the texture size, so a UV or size change grades the master Surroundings changed. Apply
+  (`_object_uv_box_ok`, `object_uv_box`) writes each covered texel the mean of its 4 x 4 master pixels, per island,
+  without Soften; when the UVs moved since the bake it copies face by face and warns.
+- **Blend at texels across faces** (decision 108; `ao_bake_core.APPLY_BLEND`, True): the C++ copy
+  (`fss_ao_copy_inside_blend`) reads each sub-sample from the triangle covering it, not from the texel's owner, at
+  least `BLEND_MIN_LEVEL` (4) sub-samples per axis. The locked references were recorded with the owner rule: their
+  tests set `APPLY_BLEND = False`.
+- **Edge Filter** (decision 109; scene setting `edge_filter`, `BOX` default or `ADAPTIVE`, every channel):
+  `fss_ao_copy_inside_filter`, only on texels whose sub-samples lie on two or more faces: with s = min(1, the
+  largest angle between their normals / 90 degrees), a sub-sample at (dx, dy) texels from the centre weighs
+  (1 - 2 s |dx|)(1 - 2 s |dy|). Object UV texels are not filtered.
 
 ## AO Bake with FSS OptiX
 

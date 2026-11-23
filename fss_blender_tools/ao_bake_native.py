@@ -66,7 +66,7 @@ NO_OFFSET = 0xFFFFFFFFFFFFFFFF
 
 # The scene block (AoBakeProtocol.h): the header, then the sections at offsets that are multiples of 8
 SCENE_MAGIC = 0x3143534F41535346  # "FSSAOSC1"
-SCENE_VERSION = 1
+SCENE_VERSION = 2  # decision 105: the falloff field holds the curve (0 off, core.FALLOFF_CODE)
 SCENE_HEADER_FMT = '<QIIf' + 'I' * 11 + 'Q' * 9 + 'II' + '112x'
 SCENE_HEADER_BYTES = 256
 NO_TRIANGLE = 0xFFFFFFFF
@@ -203,7 +203,7 @@ def scene_block(name, meshes, instances, views, core, skirt, distance, falloff=F
         at = (at + s.nbytes + 7) & ~7
     total = at
     header = struct.pack(SCENE_HEADER_FMT, SCENE_MAGIC, SCENE_VERSION, SCENE_HEADER_BYTES, float(distance),
-                         1 if falloff else 0, COMBINES[combine], int(seed) & 0xFFFFFFFF, len(meshes), v, t, len(instances),
+                         int(falloff), COMBINES[combine], int(seed) & 0xFFFFFFFF, len(meshes), v, t, len(instances),
                          len(views), len(view_inst), len(core), len(skirt), *offsets, total, int(width), int(height))
     block = make_block(name, total)
     block[:SCENE_HEADER_BYTES] = header
