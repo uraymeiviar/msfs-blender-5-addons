@@ -641,7 +641,26 @@ def msfs_get_detail_normal_tex_config(self, blend_mask_texture_index=-1):
 # endregion
 
 
+_original_export_execute = None
+
+
+def msfs_export_execute(self, context):
+    """The glTF export without the 3D viewport in the context. Started from a viewport (the multi-exporter's sidebar
+    button in the foreground), visible_get also applies that viewport's Object Types filter and local view: Visible
+    Objects then drops every empty an Empty filter hides, with the zones, merge groups and pivots it carries, and the
+    export hooks (merge, instancing) see the same. A file browser export is left as it is."""
+    if context.area is None or context.area.type != 'VIEW_3D':
+        return _original_export_execute(self, context)
+    with context.temp_override(area=None, region=None, space_data=None):
+        return _original_export_execute(self, bpy.context)
+
+
 def register():
+    global _original_export_execute
+    from io_scene_gltf2 import ExportGLTF2
+    if _original_export_execute is None:
+        _original_export_execute = ExportGLTF2.execute
+        ExportGLTF2.execute = msfs_export_execute
     global _original_get_texture_info
     from io_scene_gltf2_msfs_fss.io.com.msfs_material_utils import MSFS2024_MaterialUtils
     if _original_get_texture_info is None:
@@ -736,6 +755,11 @@ def register():
     GlTF2Exporter.finalize_images = msfs_finalize_images
 
 def unregister():
+    global _original_export_execute
+    if _original_export_execute is not None:
+        from io_scene_gltf2 import ExportGLTF2
+        ExportGLTF2.execute = _original_export_execute
+        _original_export_execute = None
     global _original_get_texture_info
     from io_scene_gltf2_msfs_fss.io.com.msfs_material_utils import MSFS2024_MaterialUtils
     if _original_get_texture_info is not None:

@@ -95,6 +95,15 @@ def is_root_marker(obj) -> bool:
     return logical_name(obj).startswith(ROOT_PREFIX)
 
 
+def visible_objects(context):
+    """The scene's visible objects as the export sees them. Run from a 3D viewport, visible_get also applies that
+    viewport's Object Types filter and local view, so an Empty filter would drop every empty; without a viewport in
+    the context it tests only the visibility the file stores."""
+    view_layer = context.view_layer
+    with context.temp_override(area=None, region=None, space_data=None):
+        return [obj for obj in context.scene.objects if obj.visible_get(view_layer=view_layer)]
+
+
 def nearest_zone(obj):
     """The nearest @ZONE_ empty at or above obj, or None outside every zone."""
     while obj is not None:
@@ -803,6 +812,22 @@ def _row_warns(item):
     return item.kind == 'UNZONED'
 
 
+def _set_expanded(items, before):
+    """Zones open, groups closed; a row with a warning below it always opens, so Refresh never hides a warning.
+    Otherwise a row keeps the state it had before the Refresh."""
+    for index, item in enumerate(items):
+        warns_below = False
+        for below in items[index + 1:]:
+            if below.depth <= item.depth:
+                break
+            if _row_warns(below):
+                warns_below = True
+                break
+        default = item.kind in {'ZONE', 'UNZONED'}
+        item.expanded = warns_below or before.get((item.kind, item.root), default)
+        item.has_expanded = True
+
+
 def _on_tree_active(settings, context):
     if 0 <= settings.active < len(settings.items):
         obj = context.scene.objects.get(settings.items[settings.active].root)
@@ -845,6 +870,10 @@ class FSS_MergeTreeItem(bpy.types.PropertyGroup):
     name_clash: bpy.props.StringProperty()
     picks: bpy.props.CollectionProperty(type=FSS_MergePick)
     uv_names: bpy.props.StringProperty()
+    # The disclosure triangle of a row with rows below it; Refresh keeps it by kind and object name. A row saved before
+    # the triangle existed reads True without anyone opening it: has_expanded tells Refresh to use the default there.
+    expanded: bpy.props.BoolProperty(default=True)
+    has_expanded: bpy.props.BoolProperty()
 
 
 class FSS_MergeSettings(bpy.types.PropertyGroup):
@@ -878,8 +907,7 @@ class FSS_OT_MergeRefresh(bpy.types.Operator):
     def execute(self, context):
         settings = context.scene.fss_merge
         skip_tags = set(tags.parse_tag_list(settings.skip_tags))
-        view_layer = context.view_layer
-        visible = [obj for obj in context.scene.objects if obj.visible_get(view_layer=view_layer)]
+        visible = visible_objects(context)
         visible_set = set(visible)
         groups = plan(context.scene, visible_set.__contains__, skip_tags)
         by_root = {group.root: group for group in groups}
@@ -893,6 +921,7 @@ class FSS_OT_MergeRefresh(bpy.types.Operator):
         children = {}
         for group in groups:
             children.setdefault(parent_group(group.root), []).append(group.root)
+        expanded = {(item.kind, item.root): item.expanded for item in settings.items if item.has_expanded}
         settings.items.clear()
 
         # The zone of each visible object (the nearest zone above it) and of each outermost group. A hidden zone with
@@ -993,6 +1022,7 @@ class FSS_OT_MergeRefresh(bpy.types.Operator):
             item.groups = len(zoned[None])
             for root in sorted(zoned[None], key=lambda obj: obj.name):
                 add(root, 1)
+        _set_expanded(settings.items, expanded)
         settings.zone_count = len(zones)
         settings.group_count = len(groups)
         settings.nomerge_count = sum(1 for item in settings.items if item.kind == 'NOMERGE')
@@ -1041,6 +1071,12 @@ class FSS_UL_MergeTree(bpy.types.UIList):
         row = layout.row(align=True)
         for _ in range(item.depth):
             row.label(icon='BLANK1')
+        items = data.items
+        if index + 1 < len(items) and items[index + 1].depth > item.depth:
+            row.prop(item, "expanded", text="", emboss=False,
+                     icon='DISCLOSURE_TRI_DOWN' if item.expanded else 'DISCLOSURE_TRI_RIGHT')
+        else:
+            row.label(icon='BLANK1')
         if item.kind == 'ZONE':
             row.label(text=f"{item.name} ({item.flag})" if item.flag else item.name,
                       icon='ERROR' if item.flag else 'SHADING_BBOX')
@@ -1059,6 +1095,21 @@ class FSS_UL_MergeTree(bpy.types.UIList):
             return
         row.label(text=item.name, icon='ERROR' if _row_warns(item) else 'MESH_DATA')
         row.label(text=f"{item.objects} obj  {item.material_count} mat  {item.kept} kept")
+
+    def filter_items(self, context, data, propname):
+        """A collapsed row hides its subtree; a name filter searches every row, collapsed or not."""
+        items = getattr(data, propname)
+        if self.filter_name:
+            return bpy.types.UI_UL_list.filter_items_by_name(self.filter_name, self.bitflag_filter_item, items,
+                                                             "name"), []
+        flags = [self.bitflag_filter_item] * len(items)
+        collapsed = None  # the depth of the collapsed row whose subtree is hidden
+        for index, item in enumerate(items):
+            if collapsed is not None and item.depth > collapsed:
+                flags[index] = 0
+                continue
+            collapsed = None if item.expanded else item.depth
+        return flags, []
 
 
 class FSS_OT_MergeSelect(bpy.types.Operator):
@@ -1089,7 +1140,7 @@ class FSS_OT_MergeSelect(bpy.types.Operator):
         view_layer = context.view_layer
         skip_tags = set(tags.parse_tag_list(context.scene.fss_merge.skip_tags))
         # Worked out from the scene as it is now, so a list older than the last edit cannot select the wrong objects
-        group = collect_group(root, lambda obj: obj.visible_get(view_layer=view_layer), skip_tags)
+        group = collect_group(root, set(visible_objects(context)).__contains__, skip_tags)
         objects = pick_objects(group, self.what, self.value, self.index)
         if not objects:
             self.report({'WARNING'}, "No visible object matches any more: press Refresh")
@@ -1129,7 +1180,7 @@ class FSS_OT_MergeSelectStray(bpy.types.Operator):
     def execute(self, context):
         scene, view_layer = context.scene, context.view_layer
         skip_tags = set(tags.parse_tag_list(scene.fss_merge.skip_tags))
-        visible = [obj for obj in scene.objects if obj.visible_get(view_layer=view_layer)]
+        visible = visible_objects(context)
         visible_set = set(visible)
         # Worked out from the scene as it is now, so a count older than the last edit cannot select the wrong objects
         objects = stray_objects(scene, visible, plan(scene, visible_set.__contains__, skip_tags), skip_tags)[self.below]

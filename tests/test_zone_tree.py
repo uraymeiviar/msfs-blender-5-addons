@@ -339,7 +339,10 @@ def test_draw_smoke():
         merge.FSS_UL_MergeTree.draw_item(None, bpy.context, _Layout(calls), settings, item, 0, settings, "active",
                                          index)
         texts.append([kwargs.get('text') for name, _args, kwargs in calls if name == 'label' and kwargs.get('text')])
-        props = [(args[0], args[1]) for name, args, _kwargs in calls if name == 'prop']
+        props = [(args[0], args[1]) for name, args, _kwargs in calls if name == 'prop' and args[1] != 'expanded']
+        arrow = [args[0] for name, args, _kwargs in calls if name == 'prop' and args[1] == 'expanded']
+        rows_below = index + 1 < len(settings.items) and settings.items[index + 1].depth > item.depth
+        assert arrow == ([item] if rows_below else []), (item.name, arrow)
         mark = [(item.zone, name) for name in (uv_marks.OWN_PROP, uv_marks.MIN_PROP, uv_marks.MAX_PROP)]
         assert props == (mark if item.kind == 'ZONE' else []), (item.name, props)
         assert item.kind != 'ZONE' or item.zone == o[item.name.lower()], item.name
@@ -835,8 +838,62 @@ def test_whole():
     print("PASS: test_whole")
 
 
+def shown_rows(name_filter=""):
+    """The rows the list shows: what FSS_UL_MergeTree.filter_items leaves visible."""
+    settings = bpy.context.scene.fss_merge
+    ui_list = SimpleNamespace(filter_name=name_filter, bitflag_filter_item=1 << 30)  # UIList.bitflag_filter_item
+    flags, order = merge.FSS_UL_MergeTree.filter_items(ui_list, bpy.context, settings, "items")
+    assert order == []
+    return [(item.kind, item.name) for item, flag in zip(settings.items, flags) if flag]
+
+
+def test_collapse():
+    # Zones open, groups closed: PANEL hides its SCREEN row and its nested KNOB group
+    build_scene()
+    bpy.ops.fss.merge_refresh()
+    settings = bpy.context.scene.fss_merge
+    state = {(item.kind, item.name): item.expanded for item in settings.items}
+    assert all(state[key] == (key[0] in {'ZONE', 'UNZONED'}) for key in state), state
+    shown = shown_rows()
+    assert ('GROUP', 'PANEL') in shown and ('NOMERGE', 'SCREEN') not in shown and ('GROUP', 'KNOB') not in shown, shown
+    assert ('GROUP', 'SHELF') in shown and ('GROUP', 'STRAY') in shown, shown
+    # A name filter searches collapsed rows too
+    assert shown_rows("*SCREEN*") == [('NOMERGE', 'SCREEN')], shown_rows("*SCREEN*")
+
+    # A row saved before the triangle existed reads open; Refresh gives it the default, not that stale state
+    panel = next(item for item in settings.items if item.name == 'PANEL')
+    panel.expanded, panel.has_expanded = True, False
+    bpy.ops.fss.merge_refresh()
+    assert not next(item for item in settings.items if item.name == 'PANEL').expanded
+
+    # Refresh keeps what the artist opened or closed: PANEL open, the FWD zone closed hides its whole subtree
+    by_name = {(item.kind, item.name): item for item in settings.items}
+    by_name[('GROUP', 'PANEL')].expanded = True
+    by_name[('ZONE', 'AFT')].expanded = False
+    bpy.ops.fss.merge_refresh()
+    shown = shown_rows()
+    assert ('NOMERGE', 'SCREEN') in shown and ('GROUP', 'KNOB') in shown, shown
+    assert ('ZONE', 'AFT') in shown and ('GROUP', 'SHELF') not in shown, shown
+
+    # A warning below a group always opens it at Refresh, even after the artist closed it
+    o = build_scene()
+    bpy.ops.fss.merge_refresh()
+    settings = bpy.context.scene.fss_merge  # build_scene loads a new scene
+    o['knob'].keyframe_insert("location", frame=1)
+    by_name = {(item.kind, item.name): item for item in settings.items}
+    by_name[('GROUP', 'PANEL')].expanded = False
+    bpy.ops.fss.merge_refresh()
+    by_name = {(item.kind, item.name): item for item in settings.items}
+    assert by_name[('GROUP', 'KNOB')].root_reason == "animated"
+    assert by_name[('GROUP', 'PANEL')].expanded and not by_name[('GROUP', 'SHELF')].expanded
+    shown = shown_rows()
+    assert ('GROUP', 'KNOB') in shown and ('NOMERGE', 'SCREEN') in shown, shown
+    print("PASS: test_collapse (zones open, groups closed unless a warning lies below, kept across Refresh)")
+
+
 def main():
     test_tree_rows()
+    test_collapse()
     test_zone_mark()
     test_nearest_zone()
     test_tags_panel()

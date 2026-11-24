@@ -124,11 +124,14 @@ with a `@NOMERGE_Button`) in seven LOD exports for both simulators, and cannot b
   and why objects were kept separate. Materials and the transparency split come from the faces, as in the export: a
   slot no face uses does not count, and faces without a material count as one. A group row shows a warning triangle
   exactly when the export would warn about the group (MRG-007). The list does not follow later changes until the next
-  Refresh.
+  Refresh. A row with rows below it collapses: zones start open, groups closed, a row with a warning row anywhere
+  below it opens at every Refresh, and otherwise Refresh keeps the state by kind and object name (a row saved before
+  collapsing existed gets the default). The name filter searches collapsed rows too. Visible is what the file stores,
+  never a 3D viewport's Object Types filter or local view.
 - **Data:** DAT-002
-- **Decision:** TM Session 4; TM S8.1 to S8.3; TM S9.5
-- **Test:** `tests/test_zone_tree.py::test_tree_rows`, `tests/test_zone_tree.py::test_draw_smoke`,
-  `tests/test_zone_tree.py::test_totals`
+- **Decision:** TM Session 4; TM S8.1 to S8.3; TM S9.5; TM S18.1 to S18.3
+- **Test:** `tests/test_zone_tree.py::test_tree_rows`, `tests/test_zone_tree.py::test_collapse`,
+  `tests/test_zone_tree.py::test_draw_smoke`, `tests/test_zone_tree.py::test_totals`
 - **Code:** `merge.py` (`FSS_OT_MergeRefresh`)
 
 ### MRG-011: New Merge Group

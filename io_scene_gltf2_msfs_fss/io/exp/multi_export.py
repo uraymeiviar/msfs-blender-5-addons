@@ -1482,7 +1482,14 @@ class MSFS2024_OT_MultiExportGLTF2(bpy.types.Operator):
         try:
             # Disable unecessary handlers during export
             with msfs_handlers.HandlersDisabled():
-                result = self._execute(context)
+                if context.area is not None and context.area.type == 'VIEW_3D':
+                    # Unified add-on: started from the sidebar, the context's selected_objects and visible_get also
+                    # apply that viewport's Object Types filter and local view, so an Empty filter left every empty
+                    # out of the duplicates; export as a background run does, without the viewport
+                    with context.temp_override(area=None, region=None, space_data=None):
+                        result = self._execute(bpy.context)
+                else:
+                    result = self._execute(context)
         except :
             MSFS2024_LOGGER.error(
                     message="An error occurred during export",
