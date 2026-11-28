@@ -33,6 +33,8 @@ _auto_state = {
     'last_window_matrix': None,
     'ratio_view_matrix': None,
     'ratio_window_matrix': None,
+    'ratio_shown': False,  # LOD Settings drew its table since the last redraw the ratio asked for
+    'ratio_seen': None,  # the view the timer saw last: (view matrix, window matrix)
 }
 
 
@@ -166,6 +168,32 @@ def _apply_plan_level(context, plan, level):
     _tag_view3d_redraw(context)
 
 
+def _tag_sidebars(context):
+    """Only the 3D views' sidebars: a redraw of a whole 3D view also repaints every open panel there."""
+    wm = getattr(context, 'window_manager', None)
+    if wm is not None:
+        for window in wm.windows:
+            for area in window.screen.areas:
+                if area.type == 'VIEW_3D':
+                    for region in area.regions:
+                        if region.type == 'UI':
+                            region.tag_redraw()
+
+
+def _tag_ratio(context):
+    """Auto's ratio moved: the 3D views (their Auto LOD text), and the sidebars only while LOD Settings shows it."""
+    wm = getattr(context, 'window_manager', None)
+    if wm is None:
+        return
+    shown, _auto_state['ratio_shown'] = _auto_state['ratio_shown'], False
+    for window in wm.windows:
+        for area in window.screen.areas:
+            if area.type == 'VIEW_3D':
+                for region in area.regions:
+                    if region.type == 'WINDOW' or (shown and region.type == 'UI'):
+                        region.tag_redraw()
+
+
 def _tag_view3d_redraw(context):
     wm = getattr(context, 'window_manager', None)
     if wm is not None:
@@ -231,7 +259,7 @@ def update_auto_viewport_lod(context=None, region_3d=None, force=False):
                                             plan['write_count'])
     _auto_state['last_ratio'] = ratio
     if not force and _auto_state['applied_level'] == level and scene.fss_viewport_lod == level:
-        _tag_view3d_redraw(ctx)  # the same LOD, but the panel's screen ratio and quota moved with the view
+        _tag_ratio(ctx)  # the same LOD, but the screen ratio and quota moved with the view
         return False
     scene.fss_viewport_lod = level
     _auto_state['applied_level'] = level
@@ -263,13 +291,33 @@ def update_view_ratio(context=None):
     center = (Vector(settings.sphere_box[:3]) + Vector(settings.sphere_box[3:])) / 2
     distance = (cam_pos * scene.unit_settings.scale_length - center).length
     _auto_state['last_ratio'] = lod_rules.screen_ratio(settings.lod_diameter, distance, fov_y)
-    _tag_view3d_redraw(ctx)
+    _tag_sidebars(ctx)  # only LOD Settings shows it; the 3D view itself does not
+    return True
+
+
+def watch_view_ratio(context=None):
+    """The timer's step: the ratio follows the view only while LOD Settings is open (its draw sets ratio_shown) and
+    only once the view stopped moving (the same view two steps running). A sidebar redraw while the view moves
+    repaints every open panel there, which made orbiting slow with a large panel open. True when it measured."""
+    if not _auto_state['ratio_shown']:
+        return False
+    ctx = context or bpy.context
+    r3d = _find_region_3d(ctx)
+    if r3d is None:
+        return False
+    view = (r3d.view_matrix.copy(), r3d.window_matrix.copy())
+    seen, _auto_state['ratio_seen'] = _auto_state['ratio_seen'], view
+    if seen is None or view[0] != seen[0] or view[1] != seen[1]:
+        return False  # moving, or the first look: wait
+    if not update_view_ratio(ctx):
+        return False
+    _auto_state['ratio_shown'] = False  # the redraw sets it again while LOD Settings stays open
     return True
 
 
 def _view_ratio_timer():
     try:
-        update_view_ratio()
+        watch_view_ratio()
     except Exception:
         pass
     return _AUTO_INTERVAL
@@ -961,6 +1009,7 @@ class FSS_PT_LodSettings(bpy.types.Panel):
         settings = context.scene.fss_lod_settings
         if settings.scanned:
             layout.label(text='Cached counts: Refresh after editing')
+        _auto_state['ratio_shown'] = True  # the timer follows the view only while this table is drawn
         _draw_view_quota(layout, context.scene, _auto_state['last_ratio'])
         if settings.scanned and settings.write_count < 7:
             layout.label(text=f'LOD{settings.write_count:02}: not written, no objects', icon='INFO')

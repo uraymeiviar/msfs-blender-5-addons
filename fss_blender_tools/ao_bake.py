@@ -921,7 +921,7 @@ def sync_state(context):
         parts = [p for p in parts if p]
         r.state = ', '.join(parts) if parts else f"{len(row['items'])} complete"
         r.chan_only = bool(row.get('channels_only'))
-        if r.chan_only:  # decision 110: a skip material's set, the material channels alone
+        if r.chan_only:  # decision 110: a set of Skip-AO-Bake objects (decision 112), the channels alone
             r.state = f"{len(row['items'])} object{'s' if len(row['items']) != 1 else ''}, material channels only"
         r.warn = bool(parts)
         r.n_missing, r.n_stale, r.n_total = row['MISSING'], row['MESH'] + row['SURROUNDINGS'], len(row['items'])
@@ -944,6 +944,26 @@ def ao_unavailable():
     """Apply-native-copy decision 6: why the AO Bake cannot run here (fss_ao_copy.dll or libjxl not loaded), on one
     line, or None."""
     return store.core.native_copy().unavailable()
+
+
+def drop_empty_scene_animation():
+    """Remove the scenes' empty animation data (no action, driver or NLA track: left behind when a scene's keys or
+    drivers were deleted). While a scene has animation data, Blender looks up every drawn setting of an add-on stored on
+    the scene among all the values add-ons store there, to ask whether it is animated: the Bake panel took 48 ms per
+    redraw instead of 4 on the E2 cockpit. It holds nothing, so nothing changes in the file but the speed. The names
+    of the scenes it was removed from."""
+    gone = []
+    for sc in bpy.data.scenes:
+        ad = sc.animation_data
+        if (ad is None or sc.library is not None or ad.action is not None or len(ad.drivers)
+                or len(ad.nla_tracks)):
+            continue
+        try:
+            sc.animation_data_clear()
+        except RuntimeError:  # a scene Blender does not let change (a library override)
+            continue
+        gone.append(sc.name)
+    return gone
 
 
 def _available(cls):
@@ -970,12 +990,15 @@ class FSS_OT_AOBakeRefresh(bpy.types.Operator):
 
     def execute(self, context):
         t = time.time()
+        gone = drop_empty_scene_animation()
         state = store.refresh(context)
         sync_state(context)
         read_index_on_open()
         msg = f"AO Bake: {len(state['items'])} masters checked in {time.time() - t:.1f} s"
         if state.get('relinked'):
             msg += f"; linked again: {', '.join(f'{a} -> {b}' for a, b in state['relinked'])}"
+        if gone:
+            msg += f"; the empty animation data of {', '.join(gone)} removed (it slowed the panels down)"
         self.report({'INFO'}, msg)
         return {'FINISHED'}
 
@@ -2173,7 +2196,7 @@ def target_problems(context, material):
 
 
 def set_channels_only(material):
-    """Decision 110: a texture set of skip materials (glass, decals): the material channels alone."""
+    """Decision 110: a texture set of objects with the Skip-AO-Bake tag only (decision 112): the material channels alone."""
     row = store._state['sets'].get(material.name)
     return bool(row and row.get('channels_only'))
 
@@ -2463,26 +2486,38 @@ def _draw_object(layout, context):
         row.operator('fss.ao_bake_custom_occluders', text='Clear', icon='X').action = 'CLEAR'
         _lines(box, 'Add Selected: the selected objects but the active one\n'
                     'Click an icon: Add (darkens it) or Ignore (never darkens it)', 'INFO')
+    # decision 115: the Detected tree in a section of its own, closed by default; closed, it is not computed
+    body = _section(box, 'fss_ao_detected', 'Detected Occluders')
+    if body is None:
+        return
     tree = detected_tree(context)  # decisions 62 and 63
     joined = len(tree_targets(context)) > 1
     if joined and o.occluders == 'CUSTOM':
-        box.label(text=f'The list above is {obj.name}\'s; the tree below is for the selected', icon='INFO')
+        body.label(text=f'The list above is {obj.name}\'s; the tree below is for the selected', icon='INFO')
     if not tree['targets']:  # decision 68: the scene rule alone, quick
-        box.operator('fss.ao_bake_detect', icon='VIEWZOOM')
+        body.operator('fss.ao_bake_detect', icon='VIEWZOOM')
     else:
         n = len(set().union(*tree['rules'].values()))
         what = f"for {len(tree['targets'])} selected" if joined else 'by the scene rule'
-        row = box.row(align=True)
+        row = body.row(align=True)
         row.label(text=f"Detected {what}: {n} object{'s' if n != 1 else ''}", icon='VIEWZOOM')
         # decision 72: refresh, view and sort in the list's right-click menu
         if tree['missing']:
-            box.label(text=f"{len(tree['missing'])} selected not found yet", icon='ERROR')
+            body.label(text=f"{len(tree['missing'])} selected not found yet", icon='ERROR')
         if n:
-            box.template_list('FSS_UL_AODetected', '', context.scene, 'objects',
-                              context.window_manager.fss_ao_bake_state, 'detected_index', rows=6)
+            body.template_list('FSS_UL_AODetected', '', context.scene, 'objects',
+                               context.window_manager.fss_ao_bake_state, 'detected_index', rows=6)
         else:  # no row to right-click
-            box.operator('fss.ao_bake_detect', icon='FILE_REFRESH')
+            body.operator('fss.ao_bake_detect', icon='FILE_REFRESH')
     # decision 66: no help lines under the tree and no line on who baked the master (OptiX baker decision 31's line)
+
+
+def _section(layout, idname, title, default_closed=True):
+    """Decision 115: a collapsible part of a box (Blender's layout panel, its open state kept per region): its body,
+    or None while it is closed (nothing in it is drawn or computed)."""
+    header, body = layout.panel(idname, default_closed=default_closed)
+    header.label(text=title)
+    return body
 
 
 def _lines(layout, text, icon='NONE'):
@@ -2687,6 +2722,12 @@ def _draw_bake(layout, context, s):
     box = layout.box()
     box.label(text='Bake', icon='RENDER_STILL')
     col = box.column(align=True)
+    col.prop(s, 'shared_combine')  # decision 115: these two outside Advanced
+    col.prop(s, 'occluders')
+    body = _section(box, 'fss_ao_bake_advanced', 'Advanced')
+    if body is None:
+        return
+    col = body.column(align=True)
     if not s.auto_distance:
         col.prop(s, 'distance')
     row = col.row(align=True)
@@ -2723,11 +2764,8 @@ def _draw_bake(layout, context, s):
     col.prop(s, 'channel_samples')  # the material channels always bake with Cycles
     col.separator()
     col.prop(s, 'poses')
-    col.prop(s, 'shared_combine')
     if s.poses > 1 or s.shared_combine != 'ONE':  # how the samples are spent over the views a master averages
         col.prop(s, 'sample_quality')
-    col.separator()
-    col.prop(s, 'occluders')
     col.separator()
     row = col.row(align=True)  # decision 56
     row.prop(s, 'denoise')
@@ -2755,16 +2793,22 @@ def _draw_bake(layout, context, s):
         col.prop(s, 'curv_width')
 
 
+def _target_block(layout, title):
+    """A titled, indented column of the Texture Target (AO, Albedo, Emissive, Curvature Map)."""
+    layout.label(text=title)
+    ind = layout.row()
+    ind.separator(factor=2.0)
+    return ind.column(align=True)
+
+
 def _draw_target(layout, context, s, st):
-    """Decision 75: the texture sets and where Apply writes (Run applies)."""
+    """Decision 75: the texture sets and where Apply writes (Run applies). Decision 115: per target its Target and,
+    for a Separate File, its folder and file; the rest under Advanced (closed by default); warnings always shown."""
     box = layout.box()
     box.label(text='Texture Target', icon='TEXTURE')
     if not st.refreshed:
         box.label(text='Refresh first', icon='INFO')
         return
-    sel = selected_sets(context)
-    if sel is not None:
-        box.label(text=f'Texture sets of the selection: {len(sel)} (none selected: all)', icon='RESTRICT_SELECT_OFF')
     box.template_list('FSS_UL_AOSets', '', st, 'sets', st, 'active_set', rows=4)
     material = apply_material(context, st)
     if material is None:
@@ -2775,31 +2819,47 @@ def _draw_target(layout, context, s, st):
     sub.label(text=f'Texture set: {material.name}', icon='MATERIAL')
     orm = apply_mod.orm_image(material)
     problems = target_problems(context, material)
-    sub.label(text='AO')
-    ind = sub.row()
-    ind.separator(factor=2.0)
-    col = ind.column(align=True)
+    col = _target_block(sub, 'AO')
     row = col.row(align=True)
     row.label(text='Target')
     row.prop(a, 'target', expand=True)
     if a.target == 'ORM':
-        if orm is not None:
-            col.label(text=f'ORM texture: {orm.name}', icon='IMAGE_DATA')
-            if orm.depth and orm.depth < 48 and not orm.is_float:  # decision 74
-                col.label(text='8-bit file: written as 16-bit', icon='ERROR')
+        if orm is not None and orm.depth and orm.depth < 48 and not orm.is_float:  # decision 74
+            col.label(text='8-bit file: written as 16-bit', icon='ERROR')
     else:
         col.prop(s, 'output_folder')  # the scene's folder, shown where it is used: with the file's name
         col.prop(a, 'file_name')
+    chans = [g for g in CH_TARGETS if getattr(s, f'apply_{g}')]  # decision 96: while its Apply tick is on
+    for g in chans:
+        _draw_channel_target(sub, context, s, a, material, g)
+    col = _target_block(sub, 'Curvature Map')  # decision 54: always a file of its own
+    col.prop(s, 'curv_output_folder')
+    col.prop(a, 'curv_file_name')
+    for problem in problems:  # decision 97: every ticked Apply channel's
+        sub.label(text=problem, icon='ERROR')
+    body = _section(box, 'fss_ao_target_advanced', 'Advanced')
+    if body is None:
+        return
+    adv = body.column(align=True)
+    col = _target_block(adv, 'AO')
+    if a.target == 'ORM':
+        if orm is not None:
+            col.label(text=f'ORM texture: {orm.name}', icon='IMAGE_DATA')
+    else:
         _draw_size(col, a, 'resolution', os.path.join(apply_mod.output_folder(context.scene),
                                                       apply_mod.file_name(material, a)))
         row = col.row(align=True)
         row.label(text='Channels')
         row.prop(a, 'layout', expand=True)
-        if a.layout == 'ORM':
-            col.prop(a, 'green_blue')
+        # decision 113: green and blue the roughness and metal Apply fill are not chosen here
+        g_fill, b_fill = apply_mod.ao_fills(context.scene, a)
+        if a.layout == 'ORM' and not (g_fill and b_fill):
+            col.prop(a, 'green_blue', text='Blue' if g_fill else 'Green' if b_fill else None)
             if a.green_blue == 'CUSTOM':  # decision 98
-                col.prop(a, 'orm_roughness', slider=True)
-                col.prop(a, 'orm_metal', slider=True)
+                if not g_fill:
+                    col.prop(a, 'orm_roughness', slider=True)
+                if not b_fill:
+                    col.prop(a, 'orm_metal', slider=True)
             if a.green_blue == 'COPY':
                 if orm is None:
                     col.label(text='No ORM texture: green and blue white', icon='ERROR')
@@ -2814,39 +2874,25 @@ def _draw_target(layout, context, s, st):
     cell.prop(s, 'soften_width', text='Width')
     col.prop(s, 'ao_strength', slider=True)  # decision 106
     col.prop(s, 'edge_filter')  # decision 109
-    for g in CH_TARGETS:  # decision 96: while its Apply tick is on
-        if getattr(s, f'apply_{g}'):
-            _draw_channel_target(sub, context, s, a, material, g)
-    sub.label(text='Curvature Map')  # decision 54
-    ind = sub.row()
-    ind.separator(factor=2.0)
-    col = ind.column(align=True)
-    col.prop(s, 'curv_output_folder')
-    col.prop(a, 'curv_file_name')
+    for g in chans:
+        _draw_channel_advanced(adv, context, s, a, material, g)
+    col = _target_block(adv, 'Curvature Map')
     _draw_size(col, a, 'curv_resolution', os.path.join(apply_mod.output_folder(context.scene, 'curv'),
                                                        apply_mod.curvature_name(material)))
     col.prop(s, 'curv_padding')
-    for problem in problems:  # decision 97: every ticked Apply channel's
-        sub.label(text=problem, icon='ERROR')
 
 
 def _draw_channel_target(sub, context, s, a, material, g):
-    """Decision 96: the Albedo or Emissive section, laid out as the AO's: Target, in place the slot's texture (and
-    the 8-bit note), Separate File its folder, file and resolution; Padding."""
+    """Decision 96: the Albedo or Emissive section, laid out as the AO's: Target; a Separate File its folder and
+    file; in place only the texture's warnings (decision 115: the rest under Advanced)."""
     title, prop, _slot, label = CH_TARGETS[g]
-    sub.label(text=title)
-    ind = sub.row()
-    ind.separator(factor=2.0)
-    col = ind.column(align=True)
+    col = _target_block(sub, title)
     row = col.row(align=True)
     row.label(text='Target')
     row.prop(a, f'{g}_target', expand=True)
-    if g == 'albedo':  # decision 111: whether the set's albedo has an alpha channel
-        col.prop(a, 'albedo_alpha')
     if getattr(a, f'{g}_target') == 'SLOT':
         image = getattr(material, prop, None)
         if isinstance(image, bpy.types.Image):
-            col.label(text=f'{label}: {image.name}', icon='IMAGE_DATA')
             if image.depth and image.depth < 48 and not image.is_float:  # decision 74, as the ORM texture's
                 col.label(text='8-bit file: written as 16-bit', icon='ERROR')
             if g == 'albedo' and a.albedo_alpha and image.channels < 4:  # decision 111
@@ -2854,6 +2900,20 @@ def _draw_channel_target(sub, context, s, a, material, g):
     else:
         col.prop(s, f'{g}_output_folder')
         col.prop(a, f'{g}_file_name')
+
+
+def _draw_channel_advanced(adv, context, s, a, material, g):
+    """Decision 115: the Albedo or Emissive rows under Advanced: the Alpha switch (decision 111), the slot's texture
+    or the new file's resolution, the padding."""
+    title, prop, _slot, label = CH_TARGETS[g]
+    col = _target_block(adv, title)
+    if g == 'albedo':  # decision 111: whether the set's albedo has an alpha channel
+        col.prop(a, 'albedo_alpha')
+    if getattr(a, f'{g}_target') == 'SLOT':
+        image = getattr(material, prop, None)
+        if isinstance(image, bpy.types.Image):
+            col.label(text=f'{label}: {image.name}', icon='IMAGE_DATA')
+    else:
         _draw_size(col, a, f'{g}_resolution', os.path.join(apply_mod.output_folder(context.scene, g),
                                                            apply_mod.channel_name(material, g)))
     col.prop(s, f'{g}_padding')
@@ -2868,6 +2928,12 @@ def _forget_highlight_objects(*_args):
 @persistent
 def _on_load_post(*_args):
     store._state.update(items={}, by_object={}, excluded={}, sets={}, refreshed=None, folder=None)
+    try:
+        gone = drop_empty_scene_animation()
+        if gone:
+            print(f"FSS Bake: the empty animation data of {', '.join(gone)} removed (it slowed the panels down)")
+    except (AttributeError, RuntimeError) as exc:
+        print(f'FSS Bake: the empty animation data could not be removed ({exc})')
     try:
         wm = bpy.context.window_manager
         st = wm.fss_ao_bake_state

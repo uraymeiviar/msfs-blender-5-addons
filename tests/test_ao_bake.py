@@ -218,6 +218,9 @@ def _checked_detect(context, objs):
 
 if __name__ == '__main__':  # this suite's own run (other suites import this module for its scene)
     store.refresh, store.detect_occluders = _checked_refresh, _checked_detect
+    # auto-bake decision 112: the bake reads the tags alone; the tests recorded before it (the scene rule reference,
+    # FL7's decal and glass faces) run under the material rule, test_skip_sets_and_alpha under the tags
+    store.MATERIAL_RULE = True
 WORK = REPO_ROOT / 'tests' / '_work' / 'ao_bake_suite'
 BLEND = WORK / 'suite.blend'
 FOLDER = WORK / 'suite.bake'
@@ -1031,6 +1034,8 @@ class _Layout:
             self.calls.append((name, args, kwargs))
             if name == 'operator':
                 return SimpleNamespace()
+            if name == 'panel':  # Blender's layout panel: header and body, drawn open
+                return _Layout(self.calls), _Layout(self.calls)
             if name in ('row', 'column', 'box', 'split', 'grid_flow'):
                 return _Layout(self.calls)
             return None
@@ -1178,6 +1183,61 @@ def test_apply_no_datablock():
     assert after == before, [k for k in before if before[k] != after[k]]
     print('PASS: test_apply_no_datablock (Apply All and Apply Selected: datablock counts, matrices, materials, images '
           'and material slots unchanged)')
+
+
+def test_empty_scene_animation():
+    """An empty animation data of a scene (no action, driver or NLA track) made every drawn add-on setting of the
+    scene slow: Refresh and a file opening remove it; a scene with a driver keeps its animation data."""
+    sc = bpy.context.scene
+    sc.animation_data_create()
+    with rule_unrecorded():  # added after the scene rule reference was recorded
+        assert bpy.ops.fss.ao_bake_refresh() == {'FINISHED'}
+    assert sc.animation_data is None, 'Refresh: the empty animation data removed'
+    sc.animation_data_create()
+    ao_bake._on_load_post()
+    assert sc.animation_data is None, 'a file opening: the empty animation data removed'
+    fc = sc.driver_add('audio_volume')
+    try:
+        assert ao_bake.drop_empty_scene_animation() == [] and sc.animation_data is not None, 'a driver: kept'
+    finally:
+        sc.driver_remove('audio_volume')
+        sc.animation_data_clear()
+    print('PASS: test_empty_scene_animation (removed by Refresh and a file opening; kept with a driver)')
+
+
+def test_apply_object_gone():
+    """An object renamed after the Refresh: Apply skips its master (reported), writes the others; an unexpected error
+    in one texture set is that set's report, the next set is applied (a Run is not stopped)."""
+    with rule_unrecorded():  # added after the scene rule reference was recorded
+        refresh()
+    obj = bpy.data.objects['B']
+    try:
+        obj.name = 'B_RENAMED'
+        rep = apply_set('SET_A', file_name='gone.png')
+        assert ('B', ao_bake_apply.GONE, 0) in rep['white'], rep['white']
+        assert 'A' in rep['copied'] and 'B' not in rep['copied'], rep['copied']
+        # an error inside one set (forced here): the other set still applied, through the panel's Apply
+        mats = [bpy.data.materials['SET_A'], bpy.data.materials['SET_B']]
+        keep = ao_bake_apply.channel_padding
+
+        def boom(scene, kind):
+            raise KeyError('forced')
+        s = bpy.context.scene.fss_ao_bake
+        keep_ticks = (s.apply_ao, s.apply_cm, s.apply_albedo)
+        s.apply_ao, s.apply_cm, s.apply_albedo = True, False, True  # the albedo of SET_A raises
+        ao_bake_apply.channel_padding = boom
+        try:
+            reps = ao_bake_apply.apply(bpy.context, mats)
+        finally:
+            ao_bake_apply.channel_padding = keep
+            s.apply_ao, s.apply_cm, s.apply_albedo = keep_ticks
+        errs = [r for r in reps if r.get('error')]
+        assert len(reps) == 4 and len(errs) == 2 and all('KeyError' in r['error'] for r in errs), reps
+        assert [r.get('kind') for r in reps if not r.get('error')] == ['ao', 'ao'], reps
+    finally:
+        obj.name = 'B'
+    print(f"PASS: test_apply_object_gone (B renamed after Refresh: skipped, reported '{ao_bake_apply.GONE}', A "
+          f"copied; a forced error in the albedo of both sets: their reports, both AO sets written)")
 
 
 def test_apply_ticked():
@@ -4036,17 +4096,47 @@ def test_material_channels():
         for d, f in (('albedo_backup', 'base.png'), ('orm_backup', 'orm.png'), ('emis_backup', 'emis.png')):
             assert (CH_WORK / 'channels.bake' / d / f).read_bytes() == raw[f], (d, f)
         found['2.1 in place'] = f'max deviation per channel {devs}; K2 and pixels beyond the padding byte for byte'
-        # step 2.1, Target Separate File: <material>_ALBD_RGB16.png, .emissive.png, and (decision 86, Session 65's step
-        # 2.2) .roughness.png and .metal.png, single-channel 16-bit grey; the AO's ORM-layout file of the same run
-        # has the green and blue AO alone gives it
+        # step 2.1, Target Separate File: <material>_ALBD_RGB16.png, .emissive.png; decision 113: with Channels Red
+        # (ORM) the roughness and metal into the AO file's green and blue (no files of their own), its red as AO alone
+        # gives it, green and blue white where no master is; one of them ticked: the other from Green and Blue
         orm_file = out_dir / 'CH_CONST_COMP_RGB16.png'
+        rm_files = [out_dir / 'CH_CONST.roughness.png', out_dir / 'CH_CONST.metal.png']
+        for f_ in rm_files:
+            if f_.exists():
+                f_.unlink()
         reps = ch_apply('CH_CONST', ALL, target='FILE', layout='ORM', ao=True)
         assert [r['kind'] for r in reps] == ['ao'] + ALL, [r['kind'] for r in reps]
+        assert [r['target'] for r in reps if r['kind'] in ('rough', 'metal')] == ['COMP', 'COMP'], reps
+        assert not any(f_.exists() for f_ in rm_files), 'roughness or metal written into a file of its own'
         orm_with = read(orm_file)[0].astype(np.int64)
         orm_file.unlink()
         ch_apply('CH_CONST', [], target='FILE', layout='ORM', ao=True)
         orm_alone = read(orm_file)[0].astype(np.int64)
-        assert np.array_equal(orm_with, orm_alone), 'the channels changed the ORM-layout file'
+        assert np.array_equal(orm_with[:, :, 0], orm_alone[:, :, 0]), 'the channels changed the AO'
+        assert (orm_alone[:, :, 1:3] == 65535).all()  # Green and Blue White, nothing else ticked
+        gb_dev = [int(np.abs(orm_with[:, :, c][k1] - exp[g][0]).max()) for c, g in ((1, 'rough'), (2, 'metal'))]
+        assert max(gb_dev) <= 1 and (orm_with[:, :, 1:3][~grown] == 65535).all(), gb_dev
+        ca = bpy.data.materials['CH_CONST'].fss_ao_apply
+        ca.green_blue, ca.orm_roughness, ca.orm_metal = 'CUSTOM', 0.3, 0.6
+        try:
+            orm_file.unlink()
+            ch_apply('CH_CONST', ['rough'], target='FILE', layout='ORM', ao=True)
+            one = read(orm_file)[0].astype(np.int64)
+            assert np.array_equal(one[:, :, 0], orm_alone[:, :, 0])
+            assert int(np.abs(one[:, :, 1][k1] - exp['rough'][0]).max()) <= 1 and (one[:, :, 1][~grown] == 65535).all()
+            assert (one[:, :, 2] == q16(ca.orm_metal)).all(), 'blue is not the Custom metal'
+            orm_file.unlink()
+            ch_apply('CH_CONST', ['metal'], target='FILE', layout='ORM', ao=True)
+            one_m = read(orm_file)[0].astype(np.int64)
+            assert int(np.abs(one_m[:, :, 2][k1] - exp['metal'][0]).max()) <= 1 and (one_m[:, :, 2][~grown] == 65535).all()
+            # the property's value (0.3 as a float32: 19661), not 0.3 (19660)
+            assert (one_m[:, :, 1] == q16(ca.orm_roughness)).all(), 'green is not the Custom roughness'
+        finally:
+            ca.green_blue = 'WHITE'
+        found['113 COMP'] = (f'roughness and metal in the AO file\'s green and blue within {gb_dev}, white beyond the '
+                             f'padding, no files of their own; one ticked: the other the Custom value')
+        # Greyscale (decision 86, Session 65's step 2.2): .roughness.png and .metal.png, single-channel 16-bit grey
+        ch_apply('CH_CONST', ['rough', 'metal'], target='FILE', layout='GREY')
         files, kinds = {}, {}
         for g, n in (('albedo', 'CH_CONST_ALBD_RGB16.png'), ('emis', 'CH_CONST.emissive.png'),
                      ('rough', 'CH_CONST.roughness.png'), ('metal', 'CH_CONST.metal.png')):
@@ -4060,8 +4150,7 @@ def test_material_channels():
         assert (files['rough'][~grown] == 0).all() and (files['metal'][~grown] == 0).all()  # a new grey file: black
         found['2.1 files'] = (f'max deviation per channel {fdev}; roughness and metal {kinds["rough"][0]} channel, '
                               f'{kinds["rough"][1]}-bit, colour type {kinds["rough"][2]}, black beyond the padding; '
-                              f'the ORM-layout file of AO with the channels equal to AO alone '
-                              f'({orm_with.shape[1]} x {orm_with.shape[0]} x {orm_with.shape[2]})')
+                              f'with Channels Greyscale')
         # Channels Greyscale does not matter for the channels' own files any more
         before_r = file_hash(out_dir / 'CH_CONST.roughness.png')
         ch_apply('CH_CONST', ['rough'], target='FILE', layout='GREY')
@@ -4662,25 +4751,59 @@ def ch_item_vc(name):
 
 
 def test_skip_sets_and_alpha():
-    """Decision 110: an object of glass only is a master of the material channels alone (not in the AO counts, no AO
-    bake or Apply for its set); an invisible material's object stays excluded. Decision 111: a Custom albedo's alpha
-    in the master (albedo_a), Apply with the set's Alpha on into <material>_ALBD_RGBA16.png (alpha where baked,
-    opaque elsewhere), off into <material>_ALBD_RGB16.png (RGB); a bake from the material removes the alpha."""
+    """Decision 112: the tags alone. An object with the Skip-AO-Bake tag is a master of the material channels alone
+    (decision 110: not in the AO counts, no AO bake or Apply for its set); a glass object without it gets its AO, an
+    invisible material's object is baked. A mixed object's glass faces join its master: under the material rule
+    before it, then the tags, its mesh key and its neighbour's surroundings key change, an object without skip
+    materials keeps both. Decision 111: a Custom albedo's alpha in the master (albedo_a), Apply with the set's Alpha
+    on into <material>_ALBD_RGBA16.png (alpha where baked, opaque elsewhere), off into <material>_ALBD_RGB16.png
+    (RGB); a bake from the material removes the alpha."""
     t0 = time.time()
     build_vc_scene()
-    s = bpy.context.scene.fss_ao_bake
+    scene = bpy.context.scene
+    s = scene.fss_ao_bake
     obs = bpy.data.objects
     glass = ch_material('VC_MAT_GLASS', (0.5, 0.5, 0.5))
-    ch_plane('VGL', (15, 0, 0), glass)
+    tags.set_tags(ch_plane('VGL', (15, 0, 0), glass), ['VSKIP'])
+    wind = ch_material('VC_MAT_WNDSHIELD', (0.5, 0.5, 0.5))  # skip materials without the tag: AO baked
+    ch_plane('VGA', (16, 0, 0), wind)
     ch_plane('VIN', (17, 0, 0), ch_material('VC_MAT_INVIS'))
+    mx = ch_plane('VMX', (19, 0, 0), ch_material('VC_MAT_MX'))  # a mixed object: two faces of glass
+    mx.data.materials.append(wind)
+    mx.data.polygons[0].material_index = mx.data.polygons[1].material_index = 1
+    ch_plane('VMN', (19, 0, 0.05), ch_material('VC_MAT_MN'))  # its neighbour, within the AO distance
+    keep_rule, keep_skip = store.MATERIAL_RULE, scene.fss_ao_skip_bake_tags
+    scene.fss_ao_skip_bake_tags = 'VSKIP'
     found = {}
     try:
         with rule_unrecorded():
+            # the material rule (before decision 112), then the tags: the keys that change
+            store.MATERIAL_RULE = True
             refresh()
+            items = store._state['items']
+            before = {k: (it['mesh_hash'], it['surround_hash']) for k, it in items.items()}
+            assert ch_item_vc('VMX')['sets'] == ['VC_MAT_MX'], ch_item_vc('VMX')
+            assert store._state['excluded'].get('VIN') == 'skip materials only', store._state['excluded']
+            assert 'VMX' in ch_item_vc('VMN')['occluders'], ch_item_vc('VMN')
+            store.MATERIAL_RULE = False
+            refresh()
+            items = store._state['items']
+            after = {k: (it['mesh_hash'], it['surround_hash']) for k, it in items.items()}
+            mx_it, mn_it, va_it = ch_item_vc('VMX'), ch_item_vc('VMN'), ch_item_vc('VA')
+            assert mx_it['sets'] == ['VC_MAT_MX', 'VC_MAT_WNDSHIELD'] and mx_it['skip_slots'] == [], mx_it
+            assert after[mx_it['key']][0] != before[mx_it['key']][0], 'the mixed object\'s mesh key is unchanged'
+            assert after[mn_it['key']][0] == before[mn_it['key']][0], 'the neighbour\'s mesh key changed'
+            assert after[mn_it['key']][1] != before[mn_it['key']][1], 'the neighbour\'s surroundings are unchanged'
+            assert after[va_it['key']] == before[va_it['key']], 'an object without skip materials changed'
+            same = sorted(k for k in before if k in after and before[k] == after[k])
+            found['keys'] = (len(same), len(before))
             it = ch_item_vc('VGL')
             assert it['channels_only'] and it['sets'] == ['VC_MAT_GLASS'], it
-            assert store._state['excluded'].get('VIN') == 'skip materials only', store._state['excluded']
-            assert 'VGL' not in store._state['excluded']
+            assert not ch_item_vc('VGA')['channels_only'] and not ch_item_vc('VIN')['channels_only']
+            assert not {'VGL', 'VGA', 'VIN', 'VMX', 'VMN'} & set(store._state['excluded']), store._state['excluded']
+            assert store.bake_choice([vc_stem('VGA')], True, True, True)[0], 'no AO bake for the untagged glass'
+            res = vc_bake(['VGA'], ao=True)
+            assert os.path.isfile(core.image_paths(VC_FOLDER, vc_stem('VGA'))[0]), res
             n_ao = sum(1 for i_ in store._state['items'].values() if not i_.get('channels_only'))
             assert sum(store.counts()[g] for g in store.GRADES) == n_ao, (store.counts(), n_ao)
             row = store._state['sets']['VC_MAT_GLASS']
@@ -4735,10 +4858,73 @@ def test_skip_sets_and_alpha():
     finally:
         s.albedo_source, s.cv_albedo_mode = 'MATERIAL', 'OVERWRITE'
         s.apply_ao, s.apply_cm = False, False
-    print(f"PASS: test_skip_sets_and_alpha ({time.time() - t0:.1f} s; the glass object a master of the channels "
-          f"alone, no AO baked or applied, the invisible one excluded; the alpha 0.4 in the master within {da}; "
+        store.MATERIAL_RULE, scene.fss_ao_skip_bake_tags = keep_rule, keep_skip
+    print(f"PASS: test_skip_sets_and_alpha ({time.time() - t0:.1f} s; tags alone: the Skip-AO-Bake glass a master of "
+          f"the channels alone, no AO baked or applied, the untagged glass AO baked, the invisible material baked; "
+          f"the mixed object's mesh key and its neighbour's surroundings key changed, {found['keys'][0]} of "
+          f"{found['keys'][1]} keys unchanged; the alpha 0.4 in the master within {da}; "
           f"RGBA file: {found['rgba'][0]} px of alpha within {found['rgba'][1]}, RGB within {found['rgba'][2]}; "
           f"RGB file the same colours; a material bake removes the alpha)")
+
+
+def test_cycles_output():
+    """A material with a second Material Output for Cycles (the FSS Coat preview's: Cycles renders it, not the All
+    one): its albedo, roughness and metal baked from the Material equal those of the same material without it; before
+    the fix they baked black (the Emission went into the output Cycles does not render)."""
+    t0 = time.time()
+    with rule_unrecorded():  # added after the scene rule reference was recorded
+        build_channel_scene()
+        plain = ch_material('CH_PLAIN_OUT', (0.6, 0.3, 0.1), rough=0.4, metal=0.7)
+        coat = ch_material('CH_COAT_OUT', (0.6, 0.3, 0.1), rough=0.4, metal=0.7)
+        nt = coat.node_tree
+        bsdf = nt.nodes.new('ShaderNodeBsdfPrincipled')
+        bsdf.inputs['Base Color'].default_value = (0.0, 0.0, 0.0, 1.0)
+        out = nt.nodes.new('ShaderNodeOutputMaterial')
+        out.target = 'CYCLES'
+        nt.links.new(bsdf.outputs[0], out.inputs['Surface'])
+        assert nt.get_output_node('CYCLES') == out, 'Cycles does not render the second output'
+        ch_plane('CO_PLAIN', (8, 0, 0), plain)
+        ch_plane('CO_COAT', (9, 0, 0), coat)
+        ch_bake(['CO_PLAIN', 'CO_COAT'], groups=['albedo', 'rough', 'metal'])
+        dev = {}
+        for comp in ('albedo_r', 'albedo_g', 'albedo_b', 'rough', 'metal'):
+            a_, b_ = ch_master('CO_PLAIN', comp), ch_master('CO_COAT', comp)
+            assert a_.mean() > 1000, (comp, a_.mean())
+            dev[comp] = abs(float(a_.mean()) - float(b_.mean()))
+        assert max(dev.values()) <= 1, dev
+    print(f"PASS: test_cycles_output ({time.time() - t0:.1f} s; with a Cycles-only output the channels' means equal "
+          f"the plain material's within {max(dev.values()):.2g} of 65535)")
+
+
+def test_layout_kept():
+    """Decision 114: a channel bake into a master whose stored layout cannot be built again (its master UVs moved by a
+    quarter pixel here, as an earlier version's or a rounding difference would) keeps that layout: the AO image and the
+    layout files stay, said in the log; before it, a new layout threw the AO and the other channels away."""
+    t0 = time.time()
+    with rule_unrecorded():  # added after the scene rule reference was recorded
+        build_channel_scene()
+        folder = str(CH_WORK / 'channels.bake')
+        ch_bake(['K1'], ao=True, groups=['albedo'])
+        stem = store._state['by_object']['K1']
+        img, mp, npz = core.master_paths(folder, stem)
+        with np.load(npz) as z:
+            data = {k: z[k] for k in z.files}
+        data['muv'] = data['muv'] + 0.25
+        np.savez(npz, **data)
+        keep = {p_: file_hash(p_) for p_ in (img, mp, npz) + tuple(core.channel_paths(folder, stem, 'albedo'))}
+        ch_bake(['K1'], groups=['rough'])
+        log_text = (CH_WORK / 'channels.bake' / 'bake.log').read_text(encoding='utf-8')
+        want = 'K1: its stored layout kept (built again it would differ: master UVs differ by 0.25 px)'
+        assert want in log_text, log_text[-2000:]
+        now = {p_: file_hash(p_) if os.path.isfile(p_) else None for p_ in keep}
+        assert now == keep, [os.path.basename(p_) for p_ in keep if now[p_] != keep[p_]]
+        assert os.path.isfile(core.channel_paths(folder, stem, 'rough')[0])
+        entry = store.read_index(folder, use_cache=False)['masters'][stem]
+        assert set(entry['channels']) >= {'albedo', 'rough'}, entry['channels'].keys()
+        it = store._state['items'][stem]
+        assert it['grade'] == 'UP_TO_DATE' and it['ch_grades'] == dict(albedo='UP_TO_DATE', rough='UP_TO_DATE'), it
+    print(f"PASS: test_layout_kept ({time.time() - t0:.1f} s; master UVs moved 0.25 px: a Roughness bake kept the "
+          f"stored layout, the AO, the map, the layout and the albedo byte for byte, both channels up to date)")
 
 
 def test_custom_value_channels():
@@ -5119,6 +5305,8 @@ elif __name__ == '__main__':
     test_apply_separate()
     test_rules_apply()
     test_apply_no_datablock()
+    test_apply_object_gone()
+    test_empty_scene_animation()
     test_apply_ticked()
     test_resolution_choice()
     test_soften_edges()
@@ -5154,6 +5342,8 @@ elif __name__ == '__main__':
     test_poses()  # last: it replaces the scene with the wheel's
     test_move_together()  # in the wheel's scene
     test_material_channels()  # decisions 79 to 83, in a scene of its own
+    test_layout_kept()  # decision 114, in the channel scene built again
+    test_cycles_output()  # a second Material Output for Cycles, in the channel scene built again
     test_vertex_color_channels()  # decisions 88 to 90, in a scene of its own
     test_custom_value_channels()  # decision 99, in the vertex colour test's scene
     test_skip_sets_and_alpha()  # decisions 110 and 111, in the vertex colour test's scene built again

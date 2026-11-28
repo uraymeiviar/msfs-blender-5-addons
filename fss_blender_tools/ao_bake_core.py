@@ -548,6 +548,27 @@ def build_master(pos, tris, cn, density, gutter=2, order='fold', mirror_open=Fal
         px, py, w, h, lo = place[i]
         off = np.array([px + gutter + 0.5, py + gutter + 0.5]) - lo
         muv[mem] = P + off
+    rect = np.array([place[i][:4] for i in range(n_isl)], dtype=np.int64)
+    return _finish_master(isl, island, muv, rect, W, H, pos, tris, cn, density, gutter, mirror_open, fold_split)
+
+
+def master_from_layout(pos, tris, cn, lay, gutter=2, mirror_open=False, fold_split=None):
+    """Auto-bake decision 114: the master of a stored layout (core._layout of its .ao.npz: islands, rectangles, master
+    UVs, size, density) with its skirt built again (the skirt is not stored), for a mesh whose hash is the master's.
+    No unwrap: the islands are the stored ones, whatever build_master would make of the mesh now."""
+    island = np.asarray(lay['island'], dtype=np.int64)
+    muv = np.asarray(lay['muv'], dtype=np.float64)
+    rect = np.asarray(lay['rects'], dtype=np.int64).reshape(-1, 4)
+    if len(island) != len(tris) or muv.shape != (len(tris), 3, 2):
+        raise ValueError(f'the stored layout has {len(island)} triangles, the mesh {len(tris)}')
+    return _finish_master(Islands(pos, tris), island, muv, rect, int(lay['W']), int(lay['H']), pos, tris, cn,
+                          float(lay['density']), gutter, mirror_open, fold_split)
+
+
+def _finish_master(isl, island, muv, rect, W, H, pos, tris, cn, density, gutter, mirror_open, fold_split):
+    """build_master's skirt and result for a placed layout (isl: its Islands, for the edges, corners and folds)."""
+    T = len(tris)
+    n_isl = len(rect)
     # border edges and the skirt
     skirt_pos, skirt_uv, skirt_n, skirt_isl, skirt_src = [], [], [], [], []
     band = gutter + 1.0
@@ -629,7 +650,6 @@ def build_master(pos, tris, cn, density, gutter=2, order='fold', mirror_open=Fal
                 skirt_isl.append(i)
                 skirt_src.append(u)
     core = ~isl.degenerate
-    rect = np.array([place[i][:4] for i in range(n_isl)], dtype=np.int64)
     return dict(W=int(W), H=int(H), density=float(density), gutter=gutter, island=island, muv=muv,
                 n_islands=n_isl, rects=rect, degenerate=isl.degenerate,
                 core_tris=np.nonzero(core)[0],
@@ -639,7 +659,7 @@ def build_master(pos, tris, cn, density, gutter=2, order='fold', mirror_open=Fal
                 n_border_edges=n_border, n_border_without_neighbour=n_no_neighbour, n_mirrored=n_mirrored,
                 n_mirrored_fold=n_mirrored_fold, n_fold_inner_cut=n_fold_inner, fold_split=fold_split,
                 rejected=isl.rejected,
-                n_join_candidates=len(isl.join_order))
+                n_join_candidates=len(getattr(isl, 'join_order', ())))
 
 
 OBJECT_UV_SCALE = 4  # decision 107: an Object UV master's pixels per texture pixel (each way)

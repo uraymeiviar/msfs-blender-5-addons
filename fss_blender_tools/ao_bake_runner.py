@@ -13,8 +13,8 @@ between objects, or between tiles, in which case the object keeps its old master
 without saving when done.
 
 Per master (P35, decisions 15 and 30; the prototype's step3_master.py): the target's evaluated triangles of a texture
-set (a material that is not a skip material), in world space moved so the target's bounds are centred at the origin;
-the occluders the job lists (evaluated, skip faces dropped, moved the same way), as temporary objects in a scene of
+set (a material: decision 112, any), in world space moved so the target's bounds are centred at the origin; the
+occluders the job lists (evaluated, moved the same way), as temporary objects in a scene of
 the bake's own that holds nothing else (decision 52). The master layout at 4 x the target's median density. The bake
 in tiles (decisions 31, 32): the master's pixel area is cut into square tiles whose size fits the memory budget
 (ao_bake_core.choose_tile); each tile is one Cycles bake of the core triangles that overlap it, then one of the
@@ -1182,7 +1182,17 @@ def layout_for(item, mh, tri_src, pos, tris, cnm, D, uvpx=None):
                 log(f"  {item['name']}: its layout kept ({float(lay['density']):.6g} px/m; the UVs now give "
                     f"{float(D):.6g})")
             return m, True, old
-        log(f"  {item['name']}: its layout could not be built again ({why}): a new layout")
+        # decision 114: the mesh is the master's, so its stored layout stays (built again it differs: an earlier
+        # version's islands, or rounding); the skirt is built again for the stored islands. A new layout here would
+        # throw away the master's AO and its other channels.
+        try:
+            m = core.master_from_layout(pos, tris, cnm, lay, gutter=core.GUTTER, mirror_open=core.MIRROR_OPEN,
+                                        fold_split=core.FOLD_SPLIT)
+        except ValueError as exc:
+            log(f"  {item['name']}: its layout could not be used ({exc}): a new layout")
+        else:
+            log(f"  {item['name']}: its stored layout kept (built again it would differ: {why})")
+            return m, True, old
     return core.build_master(pos, tris, cnm, D, **kw), False, old
 
 
@@ -1375,14 +1385,20 @@ def principled_of(material):
     nt = getattr(material, 'node_tree', None)
     if nt is None:
         return None, 'no node tree'
-    outs = [n for n in nt.nodes if n.type == 'OUTPUT_MATERIAL' and n.target in ('ALL', 'CYCLES')]
-    out = next((n for n in outs if n.is_active_output), outs[0] if outs else None)
-    if out is None:
+    outs = _cycles_outputs(nt)
+    if not outs:
         return None, 'no Material Output'
-    src = _through_reroutes(out.inputs['Surface'])
-    if src is None or src.node.type != 'BSDF_PRINCIPLED':
-        return None, 'no Principled BSDF on the Material Output'
-    return src.node, out
+    # the active output first; another output Cycles may use (a preview's, such as FSS Coat) when it has no Principled
+    for out in sorted(outs, key=lambda n: (not n.is_active_output, n.target != 'ALL')):
+        src = _through_reroutes(out.inputs['Surface'])
+        if src is not None and src.node.type == 'BSDF_PRINCIPLED':
+            return src.node, out
+    return None, 'no Principled BSDF on the Material Output'
+
+
+def _cycles_outputs(nt):
+    """The Material Output nodes Cycles may render (target All or Cycles)."""
+    return [n for n in nt.nodes if n.type == 'OUTPUT_MATERIAL' and n.target in ('ALL', 'CYCLES')]
 
 
 def _is_apply_ao(node):
@@ -1413,10 +1429,13 @@ def channel_material(material, group, image):
     else:
         v = sock.default_value
         em.inputs['Color'].default_value = (tuple(v)[:3] + (1.0,)) if hasattr(v, '__len__') else (v, v, v, 1.0)
-    for name in ('Surface', 'Volume'):
-        for link in list(out.inputs[name].links):
-            nt.links.remove(link)
-    nt.links.new(em.outputs[0], out.inputs['Surface'])
+    # every output Cycles may render gets the emission: Cycles takes a Cycles-only output over an All one (the FSS
+    # Coat preview's), which baked black before
+    for o in _cycles_outputs(nt):
+        for name in ('Surface', 'Volume'):
+            for link in list(o.inputs[name].links):
+                nt.links.remove(link)
+        nt.links.new(em.outputs[0], o.inputs['Surface'])
     tex = nt.nodes.new('ShaderNodeTexImage')
     tex.image = image
     nt.nodes.active = tex

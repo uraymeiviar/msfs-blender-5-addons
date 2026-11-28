@@ -195,6 +195,9 @@ class Target:
         self.gb_values = (float(getattr(settings, 'orm_roughness', 1.0)),  # decision 98: Custom
                           float(getattr(settings, 'orm_metal', 0.0)))
         self.sampling = settings.sampling
+        self.fills = ao_fills(scene, settings) if self.layout == 'ORM' else (False, False)  # decision 113
+        if all(self.fills):  # both filled by their Apply: no choice made
+            self.gb = 'WHITE'
         if self.gb == 'COPY' and self.orm is None:
             self.warnings.append('green and blue: no ORM texture to copy from, written white')
             self.gb = 'WHITE'
@@ -214,7 +217,18 @@ class Target:
 
     def green_blue(self, labels):
         """Green and blue of a new ORM-layout file: white (None), the two Custom values (an array of 2, decision 98),
-        or the ORM texture's (resampled inside islands)."""
+        or the ORM texture's (resampled inside islands); decision 113: a channel the roughness or metal Apply fills
+        white (its pixels without a master stay white)."""
+        gb = self._green_blue(labels)
+        if gb is None or not any(self.fills):
+            return gb
+        gb = gb.copy()
+        for c, filled in enumerate(self.fills):
+            if filled:
+                gb[..., c] = 65535
+        return gb
+
+    def _green_blue(self, labels):
         if self.layout == 'ORM' and self.gb == 'CUSTOM':
             return np.rint(np.clip(np.array(self.gb_values), 0, 1) * 65535.0).astype(np.uint16)
         if self.layout != 'ORM' or self.gb != 'COPY':
@@ -271,6 +285,20 @@ def channel_in_place(settings, kind):
     return own == 'SLOT' if own is not None else settings.target == 'ORM'
 
 
+def channel_into_ao(settings, kind):
+    """Decision 113: roughness and metal into the green and blue of the AO's Separate File when its Channels are Red
+    (ORM), instead of a grey file of their own."""
+    return (kind in ('rough', 'metal') and getattr(settings, 'target', None) == 'FILE'
+            and getattr(settings, 'layout', None) == 'ORM')
+
+
+def ao_fills(scene, settings):
+    """Decision 113: (green, blue) of the AO's Separate File that the roughness and metal Apply fill (ticked under
+    Run): the Green and Blue choice gives only the others."""
+    s = scene.fss_ao_bake
+    return tuple(bool(getattr(s, f'apply_{g}', False)) and channel_into_ao(settings, g) for g in ('rough', 'metal'))
+
+
 def channel_padding(scene, kind):
     """Decision 96: the albedo's and emissive's own Padding, else the AO's."""
     s = scene.fss_ao_bake
@@ -290,11 +318,27 @@ class ChannelTarget:
         # decision 111: the albedo's alpha into the fourth column, with the set's Alpha on
         self.alpha = kind == 'albedo' and albedo_alpha(material, settings)
         in_place = channel_in_place(settings, kind)
-        self.kind = ('SLOT' if kind in CH_OWN else 'ORM') if in_place else 'FILE'
+        into_ao = not in_place and channel_into_ao(settings, kind)  # decision 113
+        self.kind = ('SLOT' if kind in CH_OWN else 'ORM') if in_place else 'COMP' if into_ao else 'FILE'
         self.layout = kind
         threads = int(scene.fss_ao_bake.threads)
         prop, slot = CH_SLOTS[kind]
-        if in_place:
+        if into_ao:  # decision 113: the AO's Separate File (Red (ORM)), its green or blue; new: white
+            path = os.path.join(output_folder(scene), file_name(material, settings))
+            if os.path.isfile(path):
+                vals, bits, _ct = read_texture(path, threads=threads)
+                vals = vals * np.uint16(257 if bits == 8 else 1)
+                if vals.shape[2] < 3:
+                    vals = np.repeat(vals[:, :, :1], 3, axis=2)
+                self.base = vals
+            else:
+                if settings.resolution == 'ORM':
+                    size = orm_size(material)
+                    W, H = size if size is not None else (store.texture_size(material),) * 2
+                else:
+                    W = H = int(settings.resolution)
+                self.base = np.full((int(H), int(W), 3), 65535, np.uint16)
+        elif in_place:
             image = getattr(material, prop, None)
             path = image_path(image) if isinstance(image, bpy.types.Image) else ''
             if not path or not os.path.isfile(path):
@@ -381,9 +425,21 @@ def channel_problem(folder, stem, entry, kind, material, ev):
     return ''
 
 
+GONE = 'not found (renamed or deleted since the last Refresh)'
+
+
 def _set_tris(item, material, depsgraph):
-    """The item's first user evaluated now, and the triangles (all of them) whose material is `material`."""
-    obj = bpy.data.objects[item['object']]
+    """The item's first user evaluated now, and the triangles (all of them) whose material is `material`; another
+    user of its mesh when that one was renamed or deleted since the last Refresh; (None, None, None, None) when none
+    is left (the master is skipped and reported, not an error that stops the Apply)."""
+    obj = None
+    for name in [item['object']] + list(item.get('users') or ()):
+        o = bpy.data.objects.get(name)
+        if o is not None and o.type == 'MESH' and o.data is not None:
+            obj = o
+            break
+    if obj is None:
+        return None, None, None, None
     uv = obj.data.uv_layers.active.name if obj.data.uv_layers.active else item['uv']
     ev = core.evaluated_triangles(obj, depsgraph, [uv])
     slots = [slot.material for slot in obj.material_slots]
@@ -589,6 +645,10 @@ def apply_set_steps(context, material, objects=None, settings=None, band_rows=AP
         item = store._state['items'][stem]
         yield 'master', k, len(stems), item['name']
         obj, ev, uv, in_set = _set_tris(item, material, depsgraph)
+        if obj is None:  # gone since the last Refresh: its faces keep their pixels, reported
+            if stem in chosen:
+                report['white'].append((item['name'], GONE, 0))
+            continue
         if uv is None or not in_set.any():
             continue
         tri_ids = np.nonzero(in_set)[0]
@@ -843,7 +903,7 @@ def apply_steps(context, materials, objects=None):
     s = context.scene.fss_ao_bake
     kinds = (['ao'] if s.apply_ao else []) + (['curv'] if s.apply_cm else [])  # decisions 54, 55
     kinds += [g for g in core.CHANNEL_GROUPS if getattr(s, f'apply_{g}', False)]  # decision 82
-    # decision 110: a set of skip materials (glass, decals) takes the material channels alone
+    # decision 110: a set of Skip-AO-Bake objects only (decision 112) takes the material channels alone
     jobs = [(m, k) for m in materials for k in kinds
             if not (k in ('ao', 'curv') and (store._state['sets'].get(m.name) or {}).get('channels_only'))]
     n = len(jobs)
@@ -862,8 +922,9 @@ def apply_steps(context, materials, objects=None):
                 else:
                     frac, what = 0.9 + 0.1 * done / max(total, 1), f'Writing {name}'
                 yield i, n, material.name, frac, what
-        except (ValueError, OSError) as exc:
-            reports.append(dict(material=material.name, error=str(exc)))
+        except Exception as exc:  # the set's error is its report; the other sets are applied
+            reports.append(dict(material=material.name, error=f'{type(exc).__name__}: {exc}'
+                                if not isinstance(exc, (ValueError, OSError)) else str(exc)))
         finally:
             gen.close()  # on Cancel: the set's master and its .tmp file closed and removed now
     return reports

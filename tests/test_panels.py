@@ -137,6 +137,8 @@ class _Layout:
             if name == 'operator':
                 kwargs['_op'] = SimpleNamespace()  # panels set operator properties on it; kept for the checks
                 return kwargs['_op']
+            if name == 'panel':  # Blender's layout panel: header and body, drawn open
+                return _Layout(self.calls, self.alert), _Layout(self.calls, self.alert)
             if name in ('row', 'column', 'box', 'split', 'grid_flow', 'column_flow'):
                 return _Layout(self.calls, self.alert)
             return None
@@ -489,6 +491,21 @@ def test_viewport_lod_view_quota():
     _labels, bars, _marked = draw()
     quota = lod_rules.vertex_quota_at(ratios[1], settings.msfs_vertex_factor)
     assert bars[0][1] == lod.format_percent(100.0 * settings.vertex_estimates[0] / quota), bars
+    # The timer follows the view only while LOD Settings draws its table, and only once the view stopped moving
+    lod._auto_state.update(ratio_shown=False, ratio_seen=None)
+    still = view(5.0)
+    assert not lod.watch_view_ratio(still) and not lod.watch_view_ratio(still), 'LOD Settings closed: nothing measured'
+    lod._auto_state['ratio_shown'] = True
+    assert not lod.watch_view_ratio(view(6.0)), 'the first look waits'
+    assert not lod.watch_view_ratio(still), 'the view moved: it waits'
+    assert lod.watch_view_ratio(still), 'the view stopped: measured'
+    assert not lod._auto_state['ratio_shown'], 'measured once until the table is drawn again'
+    assert not lod.watch_view_ratio(still)
+    lod._auto_state['ratio_shown'] = True
+    assert not lod.watch_view_ratio(still), 'nothing moved since'
+    draw()
+    assert lod._auto_state['ratio_shown'], 'the table drawn: the timer follows the view again'
+    assert lod.update_view_ratio(view(30.0))
     scene.fss_viewport_lod = 1
     scene.fss_viewport_lod_auto = True
     assert not lod.update_view_ratio(view(9.0)), 'Auto keeps the ratio itself'
@@ -1398,8 +1415,17 @@ def test_ao_texture_target_sections():
         assert labels.index('AO') < labels.index('Albedo') < labels.index('Curvature Map'), labels
         assert 'Emissive' not in labels, labels
         rows = [p_ for p_ in props if p_.startswith('albedo_')]
-        assert rows == ['albedo_target', 'albedo_alpha', 'albedo_output_folder', 'albedo_file_name', 'albedo_resolution',
-                        'albedo_padding'], rows
+        # decision 115: Target, folder and file outside; Alpha, resolution and padding under Advanced (closed)
+        assert rows == ['albedo_target', 'albedo_output_folder', 'albedo_file_name', 'albedo_alpha',
+                        'albedo_resolution', 'albedo_padding'], rows
+        calls = []
+        ao_bake._draw_target(_Layout(calls), bpy.context, s, st)
+        cut = next(i for i, (name, args, _kw) in enumerate(calls) if name == 'panel'
+                   and args[0] == 'fss_ao_target_advanced')
+        outside = [args[1] for name, args, _kw in calls[:cut] if name == 'prop']
+        assert [p_ for p_ in outside if p_.startswith('albedo_')] == ['albedo_target', 'albedo_output_folder',
+                                                                     'albedo_file_name'], outside
+        assert not {'padding', 'soften_edges', 'ao_strength', 'edge_filter', 'curv_padding'} & set(outside), outside
         assert 'albedo_target' in expanded, expanded
         seen['Separate File'] = rows
         s.apply_emis = True

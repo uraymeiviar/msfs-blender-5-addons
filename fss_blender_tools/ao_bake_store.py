@@ -11,11 +11,13 @@ decisions 12 to 18, 21 and 27; P32 to P35).
   differs; surroundings changed when the hash of the object's world matrix, each occluder within the AO distance of its
   bounds (name, world matrix, geometry hash, tags) and the settings differs. A master missing for an object whose
   geometry hash matches exactly one orphaned master (its object or mesh gone) is linked to it again (a rename).
-- Rules (P35, decision 15): baked are the visible LOD0 mesh objects with faces and a UV map, without the Skip-AO-Bake,
-  No Texture, Invisible or No Export tags, and only their faces of a texture set: a material that is not a skip
-  material (uv_autoseam._is_skip_material); an object without such faces is excluded (decision 30).
-  Occluders are the visible LOD0 meshes without the Non-AO-Occluder, Invisible or No Export tags, without their skip
-  faces. Moving ones too (decision 59): Refresh steps through the frames of the file's animation once (motion()) and
+- Rules (P35, decision 15; decision 112: the tags alone, no rule of material classes): baked are the visible LOD0
+  mesh objects with faces and a UV map, without the Skip-AO-Bake, No Texture, Invisible or No Export tags, and their
+  faces with a material (a texture set); an object without such faces is excluded (decision 30). An object with the
+  Skip-AO-Bake tag alone gets a master of the material channels only (decision 110). Occluders are the visible LOD0
+  meshes without the Non-AO-Occluder, Invisible or No Export tags, all their faces. Before decision 112 decal, glass,
+  windshield, invisible and occluder materials (uv_autoseam._is_skip_material) were neither baked nor occluders
+  (MATERIAL_RULE, kept for the tests' recorded references). Moving ones too (decision 59): Refresh steps through the frames of the file's animation once (motion()) and
   compares every object's placement; an occluder rigid to the object (both static, or moving together) shades it as
   placed; one that moves against it (or the object against it) is placed at each of the object's poses, spread over
   their animation, and averaged (one pose: the current frame). Near means within the AO distance (decisions 15 and
@@ -135,18 +137,30 @@ def has_files(folder, stem):
 # Rules (P35)
 # ---------------------------------------------------------------------------------------------------------------------
 
+# Decision 112: the bake reads the tags alone. True: the rule before it, by material class (decal, glass, windshield,
+# invisible and occluder materials neither baked nor occluding), for the tests whose references were recorded with it
+MATERIAL_RULE = False
+
+
 def is_skip_material(material):
     from .uv_autoseam import _is_skip_material
     return _is_skip_material(material)
 
 
-def skip_slots(obj):
+def material_skip_slots(obj):
+    """The slots of the material rule before decision 112 (its skip materials), whatever rule is in force."""
     return [i for i, slot in enumerate(obj.material_slots) if is_skip_material(slot.material)]
 
 
+def skip_slots(obj):
+    """The slots whose faces are neither baked nor occluding: none since decision 112."""
+    return material_skip_slots(obj) if MATERIAL_RULE else []
+
+
 def all_skip(obj):
+    """An object of skip materials only, under the material rule (MATERIAL_RULE); never since decision 112."""
     slots = obj.material_slots
-    return bool(len(slots)) and all(is_skip_material(slot.material) for slot in slots)
+    return MATERIAL_RULE and bool(len(slots)) and all(is_skip_material(slot.material) for slot in slots)
 
 
 # decision 110: the skip classes that never carry a material channel (no texture of their own)
@@ -169,10 +183,13 @@ def is_channel_material(material):
     return mtype not in NO_CHANNEL_TYPES
 
 
-def channels_only(obj):
-    """Decision 110: an object of skip materials only, with at least one that takes the material channels: a master of
-    the material channels alone (no AO, no curvature)."""
-    return all_skip(obj) and any(is_channel_material(slot.material) for slot in obj.material_slots)
+def channels_only(obj, why):
+    """Decision 110: a master of the material channels alone (no AO, no curvature) for an object with this exclusion
+    (bake_exclusion): decision 112, the Skip-AO-Bake tag alone; under the material rule, an object of skip materials
+    only, with at least one that takes the material channels."""
+    if MATERIAL_RULE:
+        return why == SKIP_ONLY and any(is_channel_material(slot.material) for slot in obj.material_slots)
+    return why == SKIP_AO
 
 
 def in_lod0(obj):
@@ -537,20 +554,26 @@ def _visible_meshes(view_layer):
 
 def bake_exclusion(obj, scene):
     """Why a visible LOD0 mesh gets no master, or ''."""
+    skip_ao = False
     if not tags.is_ao_baked(obj, scene):
-        return 'Skip-AO-Bake or No Texture tag'
+        if MATERIAL_RULE or tags.needs_no_texture(obj, scene):
+            return 'Skip-AO-Bake or No Texture tag'
+        skip_ao = True  # decision 112: the material channels alone, if nothing below excludes it
     if tags.is_marked_invisible(obj, scene):
         return 'Invisible tag'
     if tags.is_no_export(obj, scene):
         return 'No Export tag'
     if obj.data.uv_layers.active is None:
         return 'no UV map'
+    if skip_ao:
+        return SKIP_AO
     if all_skip(obj):
         return SKIP_ONLY
     return ''
 
 
-SKIP_ONLY = 'skip materials only'
+SKIP_ONLY = 'skip materials only'  # the material rule (before decision 112)
+SKIP_AO = 'Skip-AO-Bake tag'  # decision 112: a master of the material channels alone (decision 110)
 
 
 def is_occluder(obj, scene):
@@ -885,10 +908,10 @@ def refresh(context, relink=True, instances=None):
     meshes = _visible_meshes(view_layer)
     excluded = {}
     baked = []
-    chan_only = []  # decision 110: skip materials only, the material channels alone (outside the scene rule)
+    chan_only = []  # decision 110: the material channels alone (outside the scene rule)
     for obj in meshes:
         why = bake_exclusion(obj, scene)
-        if why == SKIP_ONLY and channels_only(obj):
+        if why and channels_only(obj, why):
             chan_only.append(obj)
         elif why:
             excluded[obj.name] = why
@@ -956,6 +979,9 @@ def refresh(context, relink=True, instances=None):
         if n not in occ_key:
             o = obj_of(n)
             occ_key[n] = (n, core.matrix_key(o.matrix_world), geo_hash(o), sorted(tags.get_tags(o)))
+            if not MATERIAL_RULE and material_skip_slots(o):
+                # decision 112: faces the material rule left out now shade: the masters near it are stale
+                occ_key[n] += (True,)
         return occ_key[n]
 
     def surroundings(obj, mover, distance):
@@ -1005,17 +1031,25 @@ def refresh(context, relink=True, instances=None):
         slots = [slot.material for slot in first.material_slots]
         skip = skip_slots(first)
         mats = sorted(set(int(m) for m in np.unique(ev['mat']).tolist()))
-        # decision 30: only faces whose material is a texture set (a material, not a skip material) are baked
+        # decision 30: only faces with a material (a texture set) are baked; under the material rule, not a skip one
         set_mats = [m for m in mats if m < len(slots) and slots[m] is not None and m not in skip]
         chan = all(o.name in chan_names for o in objs)  # decision 110: the material channels alone
-        if chan:
+        if chan and MATERIAL_RULE:
             set_mats = [m for m in mats if m < len(slots) and is_channel_material(slots[m])]
             skip = [i for i in skip if i not in set_mats]
         if not set_mats:
             for o in objs:
-                excluded[o.name] = SKIP_ONLY if chan else 'no face with a texture set (material)'
+                excluded[o.name] = ((SKIP_ONLY if MATERIAL_RULE else SKIP_AO) if chan
+                                    else 'no face with a texture set (material)')
             continue
         mh = geo_hash(first)
+        if not MATERIAL_RULE:
+            # decision 112: faces the material rule left out of the master are in it now: the master's mesh changed
+            old = set(material_skip_slots(first))
+            old_mats = ([m for m in mats if m < len(slots) and is_channel_material(slots[m])] if chan
+                        else [m for m in set_mats if m not in old])
+            if old_mats != set_mats:
+                mh = _hash(dict(mesh=mh, all_faces=True))
         mover = False if chan else (moving(first) or unknown(first))
         dist = item_distance(first, scene)
         copies, combine = None, None
